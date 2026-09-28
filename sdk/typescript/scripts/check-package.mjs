@@ -235,6 +235,7 @@ const distFiles = new Set(
     "finding-retrieval",
     "finding-workflow",
     "findings-client",
+    "findings-errors",
     "finding-dedupe-groups",
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
