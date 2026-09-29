@@ -73,7 +73,10 @@ import {
   ScanTransportClosedError,
   ScanPermissionError,
 } from "./scan-execution.js";
-import { compositionCheckpointFromWorkbench } from "./deep-scan-checkpoint.js";
+import {
+  compositionCheckpointFromWorkbench,
+  type DeepScanCheckpointSummary,
+} from "./deep-scan-checkpoint.js";
 import {
   savedScanFromWorkbench,
   savedScansFromWorkbench,
@@ -1632,6 +1635,26 @@ export class CodexSecurity {
       const reportScanProgress = (update: ScanProgress): void =>
         progress.fromScan(update, tracker);
       progress.preflight(registered.scopeFileCount, tracker);
+      const restoreMergeAccounting = (
+        checkpoint: DeepScanCheckpointSummary | null,
+      ): void => {
+        if (
+          checkpoint?.mergeCostUnavailable ||
+          (typeof resumeThreadId !== "string" &&
+            checkpoint !== null &&
+            (checkpoint.mergedScanIds.length > 0 ||
+              checkpoint.passes.some((pass) => pass.completed)))
+        ) {
+          // Completed inputs are saved before merging. A missing optional
+          // session write does not prove that a previous merge was free.
+          passCosts.set("previous-merge", null);
+          if (options.maxCostUsd !== undefined)
+            throw new ScanCostTrackingError(
+              "The saved merge session is unavailable; its cost limit cannot be verified.",
+              scanDir,
+            );
+        }
+      };
       let sealedThreadId: string | null = null;
       if (sealed) {
         // Reconcile sealing before the ordinary completion transaction without rewriting artifacts.
@@ -1643,6 +1666,7 @@ export class CodexSecurity {
         const savedScan = savedScanFromWorkbench(saved);
         const checkpoint = compositionCheckpointFromWorkbench(saved);
         resumeThreadId = savedScan["continuationThreadId"];
+        restoreMergeAccounting(checkpoint);
         // Legacy cost already includes this origin session; do not restart its tracker.
         sealedThreadId =
           typeof resumeThreadId === "string"
@@ -1655,7 +1679,11 @@ export class CodexSecurity {
           checkpoint.mergedScanIds.length === 0 &&
           Array.isArray(savedScan["findings"]) &&
           savedScan["findings"].length === 0;
-        if (sealedThreadId === null && !emptyComposition)
+        if (
+          sealedThreadId === null &&
+          !emptyComposition &&
+          !passCosts.has("previous-merge")
+        )
           throw new CodexSecurityError(
             "The sealed scan has no saved execution session.",
           );
@@ -1675,7 +1703,8 @@ export class CodexSecurity {
         if (mode === "deep" && checkpoint == null) {
           completionCost = await historicalCost(sealedThreadId!);
         }
-        completionCost ??= savedScan.cost ?? null;
+        if (!passCosts.has("previous-merge"))
+          completionCost ??= savedScan.cost ?? null;
         if (
           typeof resumeThreadId !== "string" &&
           (emptyComposition || checkpoint?.legacy?.cost)
@@ -1693,7 +1722,6 @@ export class CodexSecurity {
       } else {
         if (
           mode === "deep" &&
-          options.maxCostUsd !== undefined &&
           (options.resumeScanId !== undefined ||
             options.registeredScan !== undefined)
         ) {
@@ -1703,7 +1731,9 @@ export class CodexSecurity {
             scanId,
           ]);
           const checkpoint = compositionCheckpointFromWorkbench(saved);
+          restoreMergeAccounting(checkpoint);
           if (
+            options.maxCostUsd !== undefined &&
             checkpoint?.legacy &&
             !checkpoint.legacy.cost &&
             (!checkpoint.legacy.originThreadId ||
@@ -2118,6 +2148,7 @@ export class CodexSecurity {
               const checkpoint = await runDeepScans({
                 scanId,
                 scanDir,
+                mergeCostUnavailable: passCosts.has("previous-merge"),
                 repository: repo,
                 pluginRoot: runtime.plugin.installedRoot,
                 settings,

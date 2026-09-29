@@ -18,7 +18,6 @@ import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import { ScanCostLimitExceededError } from "../src/errors.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   DEEP_SCAN_CHECKPOINT,
@@ -31,6 +30,7 @@ import {
   type SemanticScan,
 } from "../src/scan-semantics.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
+import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
 import {
@@ -548,6 +548,8 @@ test.each([
       ["larger", "unknown-merge"],
       ["absent", "unregistered-merge"],
       ["stale", "unregistered-merge"],
+      ["absent", "marked-merge"],
+      ["larger", "marked-merge"],
       ["larger", "unavailable"],
       ["larger", "parent-unavailable"],
       ["larger", "unknown-legacy"],
@@ -663,6 +665,7 @@ test.each([
       await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.terminalReason = terminalReason;
+    if (accounting === "marked-merge") checkpoint.mergeCostUnavailable = true;
     if (
       (saved === "absent" && accounting === "complete") ||
       accounting === "running-child" ||
@@ -1182,13 +1185,11 @@ test.each([true, false])(
         ...f.recipe.deepScan,
       });
       if (!savedMergeSession) {
-        await expect(pending).rejects.toBeInstanceOf(
-          ScanCostLimitExceededError,
-        );
+        await expect(pending).rejects.toBeInstanceOf(ScanCostTrackingError);
         const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
           "scan"
         ] as JsonObject;
-        expect(saved).toMatchObject({ progress: { status: "failed" } });
+        expect(saved).toMatchObject({ progress: { status: "running" } });
         expect(saved["cost"]).toBeUndefined();
         expect(turns).toBe(0);
         expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
@@ -1247,6 +1248,269 @@ test.each([true, false])(
 );
 
 test.each([
+  ["accepted", false, undefined],
+  ["accepted", true, undefined],
+  ["in-flight", false, undefined],
+  ["in-flight", true, undefined],
+  ["before-merge", true, undefined],
+  ["discovery", true, undefined],
+  ["in-flight", false, "unsealed"],
+  ["in-flight", true, "unsealed"],
+  ["in-flight", false, "sealed"],
+  ["in-flight", true, "sealed"],
+  ["accepted", false, "sealed"],
+  ["accepted", true, "sealed"],
+] as const)(
+  "resume keeps missing merge accounting unknown (%s, required cost: %p, interruption: %p)",
+  async (phase, requiredCost, interruption) => {
+    const cost = (input_tokens: number, output_tokens: number) =>
+      estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
+    const finding = semanticFinding({
+      identity: { anchor: "retained-review" },
+      locations: [{ path: "source.py", startLine: 1 }],
+    });
+    const priorMerge = phase === "accepted" || phase === "in-flight";
+    const f = await interruptedScan(
+      "deep",
+      false,
+      requiredCost && !interruption ? { maxCostUsd: 1 } : {},
+      true,
+      false,
+      phase === "discovery"
+        ? null
+        : {
+            cost: cost(100, 10),
+            findings: phase === "accepted" ? [finding] : [],
+          },
+    );
+    const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
+    const checkpoint: DeepScanCheckpoint =
+      phase === "discovery"
+        ? {
+            version: 2,
+            startedAt: "2000-01-01T00:00:00Z",
+            passes: [],
+            mergedScanIds: [],
+            aggregate: null,
+            noNewStreak: 0,
+            consecutiveErrors: 0,
+          }
+        : JSON.parse(await readFile(checkpointPath, "utf8"));
+    if (priorMerge) {
+      // Completion is durable before the first merge can start. Its optional
+      // session write can fail before either acceptance or a failure is saved.
+      checkpoint.passes[0]!.completed = true;
+      await appendFile(
+        f.sessionPath,
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { input_tokens: 1000, output_tokens: 100 },
+            },
+          },
+        }) + "\n",
+      );
+      await f.command([
+        "preserve-scan-results",
+        "--scan-id",
+        f.scanId,
+        "--cost-json",
+        JSON.stringify(cost(1100, 110)),
+      ]);
+    }
+    if (phase === "accepted") {
+      checkpoint.mergedScanIds = [f.childId!];
+      checkpoint.aggregate = {
+        scanId: f.scanId,
+        findings: [finding],
+        coverage: semanticCoverage({ completeness: "partial" }),
+      };
+      checkpoint.terminalReason = "saturated";
+      await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+    }
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    let before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    let savedCheckpoint = await readFile(checkpointPath);
+    const childFindings = f.childDir
+      ? await readFile(join(f.childDir, "findings.json"))
+      : null;
+    let starts = 0;
+    let turns = 0;
+    let mergeThreadId: string | undefined;
+    const abort = new AbortController();
+    const client = resumeClient(
+      f,
+      () => ({
+        resumeThread(threadId) {
+          expect(threadId).toBe(mergeThreadId!);
+          return {
+            id: threadId,
+            async runStreamed() {
+              throw new Error("The accepted merge needs no additional turn.");
+            },
+          };
+        },
+        startThread() {
+          starts++;
+          const thread = {
+            id: null as string | null,
+            async runStreamed() {
+              turns++;
+              thread.id = mergeThreadId = randomUUID();
+              await writeFile(
+                join(f.codexHome, "sessions", `rollout-${thread.id}.jsonl`),
+                [
+                  {
+                    type: "session_meta",
+                    payload: {
+                      id: thread.id,
+                      cwd: join(f.scanDir, "artifacts/deep-scan/merge"),
+                    },
+                  },
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: 10,
+                          cached_input_tokens: 2,
+                          output_tokens: 3,
+                        },
+                      },
+                    },
+                  },
+                ]
+                  .map((event) => JSON.stringify(event))
+                  .join("\n") + "\n",
+              );
+              async function* events() {
+                for await (const event of completedEvents(thread.id!)) {
+                  if (
+                    event.type === "item.completed" &&
+                    event.item.type === "agent_message"
+                  )
+                    yield {
+                      ...event,
+                      item: {
+                        ...event.item,
+                        text: JSON.stringify({
+                          scanId: f.scanId,
+                          findings: [],
+                        }),
+                      },
+                    };
+                  else yield event;
+                }
+              }
+              return { events: events() };
+            },
+          };
+          return thread;
+        },
+      }),
+      async (options, args, input) => {
+        if (
+          interruption &&
+          !abort.signal.aborted &&
+          args[0] === "prepare-scan-completion"
+        ) {
+          if (interruption === "sealed")
+            await runWorkbench(options, args, input);
+          abort.abort(
+            new ScanTransportClosedError("Synthetic completion interruption."),
+          );
+          throw abort.signal.reason;
+        }
+        return runWorkbench(options, args, input);
+      },
+    )({ codexOverrides: f.recipe.config });
+    try {
+      const options: ScanOptions = {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+      };
+      let pending = client.run(f.repository, {
+        ...options,
+        ...(interruption
+          ? { signal: abort.signal }
+          : requiredCost
+            ? { maxCostUsd: 1 }
+            : {}),
+      });
+      if (interruption) {
+        await expect(pending).rejects.toBeInstanceOf(ScanTransportClosedError);
+        before = await f.command(["get-scan", "--scan-id", f.scanId]);
+        expect(before["scan"]).toMatchObject({
+          continuationThreadId: mergeThreadId ?? null,
+        });
+        savedCheckpoint = await readFile(checkpointPath);
+        pending = client.run(f.repository, {
+          ...options,
+          ...(requiredCost ? { maxCostUsd: 1 } : {}),
+        });
+      }
+      if (requiredCost && priorMerge) {
+        await expect(pending).rejects.toBeInstanceOf(ScanCostTrackingError);
+        expect(starts).toBe(interruption ? 1 : 0);
+        expect(turns).toBe(interruption && phase === "in-flight" ? 1 : 0);
+        expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
+          before,
+        );
+        expect(await readFile(checkpointPath)).toEqual(savedCheckpoint);
+        if (phase === "accepted")
+          expect(
+            JSON.parse(await readFile(join(f.scanDir, "findings.json"), "utf8"))
+              .findings,
+          ).toHaveLength(1);
+      } else {
+        const result = await pending;
+        expect(turns).toBe(
+          phase === "accepted" || phase === "discovery" ? 0 : 1,
+        );
+        expect(result.manifest.scan.sealedAt).toBeString();
+        const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+          "scan"
+        ] as JsonObject;
+        expect(saved).toMatchObject({ progress: { status: "complete" } });
+        if (phase === "before-merge") {
+          expect(result.cost).toMatchObject({
+            inputTokens: 110,
+            outputTokens: 13,
+          });
+          expect(saved["cost"]).toMatchObject({
+            inputTokens: 110,
+            outputTokens: 13,
+          });
+        } else {
+          expect(result.cost).toBeNull();
+          expect(saved["cost"]).toBeUndefined();
+        }
+      }
+      if (childFindings !== null)
+        expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
+          childFindings,
+        );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
   [false, false],
   [true, false],
   [false, true],
@@ -1297,6 +1561,7 @@ test.each([
       noNewStreak: 0,
       consecutiveErrors: 0,
       terminalReason: "capped",
+      mergeFailures: 1,
       legacy: {
         discoveryRuns: 1,
         coverage,

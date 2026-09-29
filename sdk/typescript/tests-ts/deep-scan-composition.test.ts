@@ -624,28 +624,67 @@ describe("ordinary scan composition", () => {
     expect((await h.checkpoint()).mergeFailures).toBe(3);
   });
 
-  test("retries an invalid merge with the missing field diagnostic", async () => {
+  test.each([
+    ["missing field", "rationale"],
+    ["unexpected field", "cyber_policy"],
+    ["JSON syntax", "cyber_policy"],
+  ])(
+    "retries an invalid merge with the %s diagnostic",
+    async (kind, diagnostic) => {
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      h.setRun(async (options) =>
+        result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+      );
+      const merge = h.input.merge;
+      const prompts: string[] = [];
+      h.input.merge = async (prompt, signal) => {
+        prompts.push(prompt);
+        const output = await merge(prompt, signal);
+        if (prompts.length !== 1) return output;
+        if (kind === "JSON syntax") return JSON.parse("cyber_policy");
+        const invalid = structuredClone(output) as { findings: JsonObject[] };
+        if (kind === "unexpected field")
+          return { ...invalid, cyber_policy: false };
+        delete (invalid.findings[0]!["confidence"] as JsonObject)["rationale"];
+        return invalid;
+      };
+
+      await runDeepScans(h.input);
+
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain(diagnostic);
+      expect(h.calls).toHaveLength(1);
+      expect((await h.checkpoint()).mergeFailures).toBe(0);
+      expect(h.published.at(-1)!.findings).toHaveLength(1);
+    },
+  );
+
+  test("keeps a runtime refusal fatal after a merge validation error", async () => {
     const h = await harness({ maxDiscoveryRuns: 1 });
     h.setRun(async (options) =>
       result(options.resumeScanId!, options.outputDir!, "supported-issue"),
     );
     const merge = h.input.merge;
-    const prompts: string[] = [];
+    const refusal = new Error("Request blocked by cyberPolicy.");
+    let attempts = 0;
     h.input.merge = async (prompt, signal) => {
-      prompts.push(prompt);
-      const output = await merge(prompt, signal);
-      if (prompts.length !== 1) return output;
-      const invalid = structuredClone(output) as { findings: JsonObject[] };
-      delete (invalid.findings[0]!["confidence"] as JsonObject)["rationale"];
-      return invalid;
+      if (++attempts > 1) throw refusal;
+      return {
+        ...((await merge(prompt, signal)) as JsonObject),
+        cyber_policy: false,
+      };
     };
 
-    await runDeepScans(h.input);
+    await expect(runDeepScans(h.input)).rejects.toBe(refusal);
 
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("rationale");
-    expect((await h.checkpoint()).mergeFailures).toBe(0);
-    expect(h.published.at(-1)!.findings).toHaveLength(1);
+    expect(attempts).toBe(2);
+    expect(h.calls).toHaveLength(1);
+    expect(await h.checkpoint()).toMatchObject({
+      terminalReason: "failed",
+      mergeFailures: 1,
+      mergedScanIds: [],
+    });
+    expect(h.published).toEqual([]);
   });
 
   test("continues the already reserved final pass before applying the run cap", async () => {

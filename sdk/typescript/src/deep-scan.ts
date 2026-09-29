@@ -93,6 +93,7 @@ export interface DeepScanComposition {
     threadId: string,
     scanDirectory?: string,
   ): Promise<ScanCost | null>;
+  mergeCostUnavailable?: boolean;
 }
 
 function validatePassDirectories(state: DeepScanCheckpoint): void {
@@ -171,6 +172,7 @@ export async function terminalDeepScanError(
           null,
       );
     }
+    if (state.mergeCostUnavailable) costs.push(null);
     constituents = costs.filter((cost) => cost !== undefined);
   } catch {
     // Optional accounting must not replace the terminal rejection or a known total.
@@ -194,6 +196,7 @@ export async function runDeepScans(
   const state =
     (await loadDeepScanCheckpoint(scanDir)) ??
     newDeepScanCheckpoint(input.startedAt);
+  if (input.mergeCostUnavailable) state.mergeCostUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
@@ -428,10 +431,12 @@ export async function runDeepScans(
         }
         break;
       } catch (error) {
+        if (error instanceof SyntaxError) validationError = error;
         if (
           executionSignal.aborted ||
           error instanceof ScanPermissionError ||
-          isCodexCybersecurityPolicyRefusal(error)
+          (error !== validationError &&
+            isCodexCybersecurityPolicyRefusal(error))
         )
           throw error;
         const failures = (state.mergeFailures = (state.mergeFailures ?? 0) + 1);
