@@ -2528,8 +2528,6 @@ export class CodexSecurity {
         options.signal?.aborted !== true
       ) {
         try {
-          const budgetRecoveryWorkbench = activeScan.options;
-          const budgetRecoveryScanId = activeScan.id;
           const completion = await workbench(
             { ...activeScan.options, signal: undefined },
             [
@@ -2546,7 +2544,6 @@ export class CodexSecurity {
           runPostScan = null;
           const { result, warnings } = await loadPublishedScanResult(
             {
-              scanId: budgetRecoveryScanId,
               scanDir,
               pluginRoot: budgetRecovery.pluginRoot,
               expectation: budgetRecovery.expectation,
@@ -2554,11 +2551,6 @@ export class CodexSecurity {
                 this.#abortController.signal,
                 ...(options.signal === undefined ? [] : [options.signal]),
               ]),
-              workbench: (args) =>
-                workbench(
-                  { ...budgetRecoveryWorkbench, signal: undefined },
-                  args,
-                ),
             },
             {
               threadId: budgetRecovery.threadId,

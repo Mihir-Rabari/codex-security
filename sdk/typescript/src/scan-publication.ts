@@ -83,7 +83,10 @@ export async function publishScan(
 
 /** Load a result that the workbench has already completed, without completing it again. */
 export async function loadPublishedScanResult(
-  context: ScanPublicationContext,
+  context: Pick<
+    ScanPublicationContext,
+    "scanDir" | "pluginRoot" | "expectation" | "signal"
+  >,
   turn: CompletedScanTurn,
   completion: JsonObject,
 ): Promise<{
