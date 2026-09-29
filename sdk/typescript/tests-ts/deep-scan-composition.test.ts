@@ -2201,3 +2201,43 @@ test("caps an expired empty composition without requesting a model merge", async
   expect(result.aggregate?.coverage["completeness"]).toBe("partial");
   expect(h.published).toHaveLength(1);
 });
+
+test("persists a completed child while its sibling is running before the first merge", async () => {
+  const h = await harness({ workers: 2, maxDiscoveryRuns: 2 });
+  const sibling = Promise.withResolvers<void>();
+  const transport = new ScanTransportClosedError(
+    "Synthetic mid-batch transport loss.",
+  );
+  const workbench = h.input.workbench;
+  h.input.workbench = async (args, contents) => {
+    const reply = await workbench(args, contents);
+    if (args[0] === "save-scan-artifact") {
+      const state = JSON.parse(contents!) as DeepScanCheckpoint;
+      if (state.passes[0]?.completed && state.passes[1]?.scanId)
+        h.controller.abort(transport);
+    }
+    return reply;
+  };
+  h.setRun(async (options) => {
+    if (options.outputDir!.endsWith("pass-1")) {
+      await sibling.promise;
+      return result(options.resumeScanId!, options.outputDir!);
+    }
+    sibling.resolve();
+    await abortable(() => new Promise<never>(() => {}), options.signal);
+    throw new Error("Unreachable unfinished sibling.");
+  });
+  await expect(runDeepScans(h.input)).rejects.toBe(transport);
+  const state = await h.checkpoint();
+  expect(state.passes).toHaveLength(2);
+  expect(state.passes[0]?.completed).toBe(true);
+  expect(state.passes[1]?.completed).toBeUndefined();
+  expect(
+    [...h.records.values()].map((record) => record.progress.status),
+  ).toEqual(["complete", "running"]);
+  expect(state.aggregate).toBeNull();
+  expect(state.mergedScanIds).toEqual([]);
+  expect(state.terminalReason).toBeUndefined();
+  expect(h.mergeInputs).toEqual([]);
+  expect(h.metrics()).toEqual({ closed: 2, maximumActive: 2 });
+});

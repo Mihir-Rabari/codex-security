@@ -121,10 +121,7 @@ def collect_scan_usage(
             checkpoint.get("costUnavailable")
             or (
                 not scan["continuation_thread_id"]
-                and (
-                    checkpoint["mergedScanIds"]
-                    or any(item.get("completed") for item in checkpoint["passes"])
-                )
+                and (checkpoint["mergedScanIds"] or _merge_was_prepared(scan["scan_dir"]))
             )
         )
     ) or any(not child["continuation_thread_id"] for child in composition.children):
@@ -193,6 +190,15 @@ def collect_scan_usage(
     if warnings:
         result["warnings"] = sorted(warnings)
     return result
+
+
+def _merge_was_prepared(scan_dir: str) -> bool:
+    # The host persists this input before launch; a completed discovery is not a merge.
+    try:
+        (Path(scan_dir) / "artifacts/deep-scan/merge-inputs.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _scan_root_thread_ids(

@@ -1822,7 +1822,7 @@ export class CodexSecurity {
             "--scan-id",
             scanId,
           ]);
-          restorePriorScanCosts(
+          await restorePriorScanCosts(
             passCosts,
             compositionCheckpointFromWorkbench(saved),
             resumeThreadId,

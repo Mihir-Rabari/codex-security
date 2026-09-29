@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   prepareSemanticScanDraft,
@@ -86,20 +87,30 @@ export async function hasSealedScanArtifacts(
 }
 
 /** Missing continuation metadata does not establish zero prior work. */
-export function restorePriorScanCosts(
+export async function restorePriorScanCosts(
   costs: Map<string, Readonly<ScanCost> | null>,
   checkpoint: DeepScanCheckpointSummary | null,
   resumeThreadId: unknown,
   scanDir: string,
   maxCostUsd?: number,
-): void {
+): Promise<void> {
   if (checkpoint?.legacy) costs.set("legacy", checkpoint.legacy.cost ?? null);
   if (
     checkpoint?.costUnavailable ||
     (typeof resumeThreadId !== "string" &&
       checkpoint !== null &&
       (checkpoint.mergedScanIds.length > 0 ||
-        checkpoint.passes.some((pass) => pass.completed)))
+        // The host saves merge inputs before launching a merge. A completed
+        // discovery alone can still be waiting for the rest of its batch.
+        (await lstat(
+          join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+        ).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          },
+        ))))
   ) {
     costs.set("previous-work", null);
     if (maxCostUsd !== undefined)
@@ -174,7 +185,7 @@ export async function readSealedScanTurn(
       return null;
     return (await measure(threadId, scanDir)).cost;
   };
-  restorePriorScanCosts(
+  await restorePriorScanCosts(
     costs,
     checkpoint,
     resumeThreadId,

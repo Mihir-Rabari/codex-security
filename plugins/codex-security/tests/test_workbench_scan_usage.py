@@ -569,14 +569,22 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("prior_session_unavailable", "child_session_saved", "merge_session_saved"),
-    [(False, True, True), (True, True, True), (False, False, True), (False, True, False)],
+    ("prior_session_unavailable", "child_session_saved", "merge_state"),
+    [
+        (False, True, "saved"),
+        (True, True, "saved"),
+        (False, False, "saved"),
+        (False, True, "merged"),
+        (False, True, "prepared"),
+        (False, True, "not-started"),
+        (True, True, "not-started"),
+    ],
 )
 def test_completion_counts_ordinary_child_scans_and_descendants(
     tmp_path: Path,
     prior_session_unavailable: bool,
     child_session_saved: bool,
-    merge_session_saved: bool,
+    merge_state: str,
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     environment = fixture.environment
@@ -631,7 +639,7 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
     checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     document = json.loads(checkpoint.read_text())
     document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
-    if not merge_session_saved:
+    if merge_state != "saved":
         write_completed_contract(directory, child["scanId"], fixture.target, relative_path="app.py")
         run_workbench(
             fixture.state_dir,
@@ -641,7 +649,11 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
             environment=environment,
         )
         document["passes"][0]["completed"] = True
-        document["mergedScanIds"] = [child["scanId"]]
+        if merge_state == "merged":
+            document["mergedScanIds"] = [child["scanId"]]
+        elif merge_state == "prepared":
+            # Preparation is durable before launch; interrupted contents still record intent.
+            (checkpoint.parent / "merge-inputs.json").write_text("{")
         with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
             connection.execute(
                 "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
@@ -664,7 +676,11 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    incomplete = prior_session_unavailable or not child_session_saved or not merge_session_saved
+    incomplete = (
+        prior_session_unavailable
+        or not child_session_saved
+        or merge_state in {"merged", "prepared"}
+    )
     assert usage == {
         "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",

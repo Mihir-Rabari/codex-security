@@ -1003,6 +1003,8 @@ test.each([
   ["in-flight", false, undefined],
   ["in-flight", true, undefined],
   ["before-merge", true, undefined],
+  ["completed-before-merge", false, undefined],
+  ["completed-before-merge", true, undefined],
   ["discovery", true, undefined],
   ["in-flight", false, "unsealed"],
   ["in-flight", true, "unsealed"],
@@ -1046,6 +1048,65 @@ test.each([
             consecutiveErrors: 0,
           }
         : JSON.parse(await readFile(checkpointPath, "utf8"));
+    if (phase === "completed-before-merge") {
+      checkpoint.passes[0]!.completed = true;
+      const directory = "artifacts/deep-scan/passes/pass-2";
+      const siblingDir = join(f.scanDir, directory);
+      await mkdir(siblingDir, { recursive: true, mode: 0o700 });
+      const sibling = await f.command(
+        [
+          "register-cli-scan",
+          "--repository",
+          f.repository,
+          "--scan-dir",
+          siblingDir,
+          "--parent-scan-id",
+          f.scanId,
+          "--registration-json-stdin",
+        ],
+        JSON.stringify({
+          recipe: {
+            repository: f.repository,
+            target: f.recipe.target,
+            mode: "standard",
+            config: f.recipe.config,
+          },
+          parentScanRole: "deep_pass",
+        }),
+      );
+      const siblingThread = randomUUID();
+      await f.command([
+        "set-scan-thread",
+        "--scan-id",
+        sibling["scanId"] as string,
+        "--thread-id",
+        siblingThread,
+      ]);
+      await writeFile(
+        join(f.codexHome, "sessions", `rollout-${siblingThread}.jsonl`),
+        [
+          {
+            type: "session_meta",
+            payload: { id: siblingThread, cwd: siblingDir },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 1000, output_tokens: 100 },
+              },
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      checkpoint.passes.push({
+        directory,
+        scanId: sibling["scanId"] as string,
+      });
+    }
     if (priorMerge) {
       // Completion is durable before the first merge can start. Its optional
       // session write can fail before either acceptance or a failure is saved.
@@ -1069,6 +1130,13 @@ test.each([
         "--cost-json",
         JSON.stringify(cost(1100, 110)),
       ]);
+    }
+    if (phase === "in-flight") {
+      // Merge inputs are durable before the optional session metadata write.
+      await writeFile(
+        join(f.scanDir, "artifacts/deep-scan/merge-inputs.json"),
+        JSON.stringify({ scans: [], previous: null }),
+      );
     }
     if (phase === "accepted") {
       checkpoint.mergedScanIds = [f.childId!];
@@ -1241,14 +1309,14 @@ test.each([
           "scan"
         ] as JsonObject;
         expect(saved).toMatchObject({ progress: { status: "complete" } });
-        if (phase === "before-merge") {
+        if (phase === "before-merge" || phase === "completed-before-merge") {
           expect(result.cost).toMatchObject({
-            inputTokens: 110,
-            outputTokens: 13,
+            inputTokens: phase === "completed-before-merge" ? 1110 : 110,
+            outputTokens: phase === "completed-before-merge" ? 113 : 13,
           });
           expect(saved["cost"]).toMatchObject({
-            inputTokens: 110,
-            outputTokens: 13,
+            inputTokens: phase === "completed-before-merge" ? 1110 : 110,
+            outputTokens: phase === "completed-before-merge" ? 113 : 13,
           });
         } else {
           expect(result.cost).toBeNull();
