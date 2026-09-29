@@ -1539,12 +1539,15 @@ export class CodexSecurity {
         throwIfAborted(signal, scanDir);
         return snapshot;
       };
-      const historicalCost = async (threadId: string) => {
+      const historicalCost = async (
+        threadId: string,
+        scanDirectory = scanDir,
+      ) => {
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
           repository: repo,
-          scanDirectory: scanDir,
+          scanDirectory,
         });
         historical.start(threadId);
         return (await stopTracking(historical)).cost;

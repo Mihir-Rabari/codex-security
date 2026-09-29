@@ -91,7 +91,10 @@ export interface DeepScanComposition {
   ): Promise<ScanMergeInput>;
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
-  historicalCost?(threadId: string): Promise<ScanCost | null>;
+  historicalCost?(
+    threadId: string,
+    scanDirectory?: string,
+  ): Promise<ScanCost | null>;
 }
 
 function validatePassDirectories(state: DeepScanCheckpoint): void {
@@ -291,7 +294,15 @@ export async function runDeepScans(
       if (recoverOutcomes && record.progress.status === "failed")
         observePassFailure(state, pass, recoveredSuccess);
       saved.set(record.scanId, record);
-      if (
+      if (record.progress.status === "running" && record.continuationThreadId)
+        reportPassCost(
+          pass.directory,
+          (await input.historicalCost?.(
+            record.continuationThreadId,
+            record.scanDir,
+          )) ?? null,
+        );
+      else if (
         record.progress.status === "complete" ||
         (record.progress.status === "failed" && record.continuationThreadId)
       )

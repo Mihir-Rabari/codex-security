@@ -20,7 +20,12 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "../src/errors.js";
-import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanCost,
+} from "../src/cost.js";
+import { createScanCostReporter } from "../src/scan-monitoring.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
   runDeepScans,
@@ -669,6 +674,181 @@ describe("ordinary scan composition", () => {
     expect((await h.checkpoint()).mergedScanIds).toEqual([id]);
     expect((await h.checkpoint()).terminalReason).toBe("capped");
   });
+
+  test.each([
+    { savedCost: false, usage: true, budget: "none" },
+    { savedCost: true, usage: true, budget: "none" },
+    { savedCost: true, usage: false, budget: "none" },
+    { savedCost: true, usage: false, budget: "required" },
+    { savedCost: true, usage: true, budget: "exhausted" },
+  ] as const)(
+    "recovers running child usage before a pending merge can saturate: %j",
+    async ({ savedCost, usage, budget }) => {
+      const h = await harness({ stopAfterNoNew: 1, maxDiscoveryRuns: 2 });
+      const directory = "artifacts/deep-scan/passes/pass-1";
+      const childDirectory = join(h.input.scanDir, directory);
+      const pendingDirectory = "artifacts/deep-scan/passes/pass-2";
+      const pendingScanDir = join(h.input.scanDir, pendingDirectory);
+      const childId = randomUUID();
+      const pendingId = randomUUID();
+      const partialCost = estimateScanCost("gpt-6-astra", {
+        input_tokens: 10,
+        output_tokens: 1,
+      })!;
+      const recoveredCost = estimateScanCost("gpt-6-astra", {
+        input_tokens: 1150,
+        output_tokens: 115,
+      })!;
+      h.records.set(childId, {
+        scanId: childId,
+        scanDir: childDirectory,
+        parentScanId: h.input.scanId,
+        targetPath: h.input.repository,
+        progress: { status: "running" },
+        continuationThreadId: "interrupted-child",
+        ...(savedCost ? { cost: partialCost } : {}),
+      });
+      h.records.set(pendingId, {
+        scanId: pendingId,
+        scanDir: pendingScanDir,
+        parentScanId: h.input.scanId,
+        targetPath: h.input.repository,
+        progress: { status: "complete" },
+        cost: partialCost,
+      });
+      h.input.projectChild = async (scanId, scanDir) => {
+        const completed = result(scanId, scanDir);
+        return {
+          scanId,
+          scanDir,
+          draft: semanticScanDraft(
+            h.input.scanId,
+            completed.manifest.scan,
+            [],
+            completed.coverage,
+          ),
+          sourceFindings: [],
+        };
+      };
+      await h.seed({
+        version: 2,
+        startedAt: h.input.startedAt,
+        passes: [
+          { directory, scanId: childId },
+          { directory: pendingDirectory, scanId: pendingId, completed: true },
+        ],
+        mergedScanIds: [],
+        aggregate: null,
+        noNewStreak: 0,
+        consecutiveErrors: 0,
+      });
+      const codexHome = join(h.input.scanDir, "codex");
+      await mkdir(join(codexHome, "sessions"), { recursive: true });
+      const sessions = [
+        ["interrupted-child", childDirectory, undefined, 1000],
+        ["child-local", join(childDirectory, "artifacts"), undefined, 100],
+        ["descendant", undefined, "interrupted-child", 50],
+        ["sibling", join(pendingScanDir, "artifacts"), undefined, 1000000],
+        [
+          "parent-local",
+          join(h.input.scanDir, "artifacts"),
+          undefined,
+          1000000,
+        ],
+      ] as const;
+      for (const [
+        index,
+        [id, cwd, parentThreadId, tokens],
+      ] of sessions.entries()) {
+        await writeFile(
+          join(codexHome, "sessions", `rollout-${id}.jsonl`),
+          [
+            {
+              type: "session_meta",
+              payload: {
+                id,
+                cwd,
+                parent_thread_id: parentThreadId,
+                timestamp: h.input.startedAt,
+              },
+            },
+            ...(usage || index >= 3
+              ? [
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "token_count",
+                      info: {
+                        total_token_usage: {
+                          input_tokens: tokens,
+                          output_tokens: tokens / 10,
+                        },
+                      },
+                    },
+                  },
+                ]
+              : []),
+          ]
+            .map((event) => JSON.stringify(event))
+            .join("\n") + "\n",
+        );
+      }
+      let historyReads = 0;
+      h.input.historicalCost = async (
+        threadId,
+        scanDirectory = h.input.scanDir,
+      ) => {
+        historyReads += 1;
+        const tracker = new ScanCostTracker({
+          codexHome,
+          model: "gpt-6-astra",
+          scanDirectory,
+        });
+        tracker.start(threadId);
+        return (await tracker.stop()).cost;
+      };
+      h.input.scanOptions.requireCost = budget !== "none";
+      const reportCost = createScanCostReporter({
+        options:
+          budget === "exhausted"
+            ? { maxCostUsd: recoveredCost.estimatedUsd / 2 }
+            : {},
+        scanDir: h.input.scanDir,
+        costAbortController: h.controller,
+        budgetSignal: h.controller.signal,
+        getActiveScan: () => null,
+        workbench: async () => ({}),
+      });
+      const costs = new Map<string, Readonly<ScanCost> | null>();
+      h.input.onCost = (key, cost) => {
+        costs.set(key, cost);
+        if (cost !== null) reportCost(cost);
+      };
+      const costsBeforeMerge: Array<Readonly<ScanCost> | null | undefined> = [];
+      const merge = h.input.merge;
+      h.input.merge = async (...args) => {
+        costsBeforeMerge.push(costs.get(directory));
+        return merge(...args);
+      };
+      if (budget === "required" || budget === "exhausted") {
+        await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+          budget === "required"
+            ? ScanCostTrackingError
+            : ScanCostLimitExceededError,
+        );
+        expect(h.mergeInputs).toEqual([]);
+        expect(h.published).toEqual([]);
+      } else {
+        await runDeepScans(h.input);
+        expect(h.mergeInputs).toEqual([1]);
+        expect(costsBeforeMerge).toEqual([usage ? recoveredCost : null]);
+        expect((await h.checkpoint()).terminalReason).toBe("saturated");
+      }
+      expect(h.calls).toEqual([]);
+      expect(historyReads).toBe(1);
+      expect(costs.get(directory)).toEqual(usage ? recoveredCost : null);
+    },
+  );
 
   test("continues saved legacy counters and coverage using only new ordinary scans", async () => {
     const h = await harness({ maxDiscoveryRuns: 3, stopAfterNoNew: 4 });
