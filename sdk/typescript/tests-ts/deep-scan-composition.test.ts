@@ -684,13 +684,19 @@ describe("ordinary scan composition", () => {
   ] as const)(
     "recovers running child usage before a pending merge can saturate: %j",
     async ({ savedCost, usage, budget }) => {
-      const h = await harness({ stopAfterNoNew: 1, maxDiscoveryRuns: 2 });
+      const h = await harness({
+        stopAfterNoNew: 1,
+        maxDiscoveryRuns: budget === "exhausted" ? 3 : 2,
+      });
       const directory = "artifacts/deep-scan/passes/pass-1";
       const childDirectory = join(h.input.scanDir, directory);
       const pendingDirectory = "artifacts/deep-scan/passes/pass-2";
       const pendingScanDir = join(h.input.scanDir, pendingDirectory);
       const childId = randomUUID();
       const pendingId = randomUUID();
+      const siblingId = randomUUID();
+      const siblingDirectory = "artifacts/deep-scan/passes/pass-3";
+      const siblingScanDir = join(h.input.scanDir, siblingDirectory);
       const partialCost = estimateScanCost("gpt-6-astra", {
         input_tokens: 10,
         output_tokens: 1,
@@ -716,29 +722,60 @@ describe("ordinary scan composition", () => {
         progress: { status: "complete" },
         cost: partialCost,
       });
-      h.input.projectChild = async (scanId, scanDir) => {
-        const completed = result(scanId, scanDir);
+      if (budget === "exhausted")
+        h.records.set(siblingId, {
+          scanId: siblingId,
+          scanDir: siblingScanDir,
+          parentScanId: h.input.scanId,
+          targetPath: h.input.repository,
+          progress: { status: "running" },
+          continuationThreadId: "sibling",
+          cost: partialCost,
+        });
+      h.input.projectChild = async (scanId, scanDir, projectionSignal) => {
+        projectionSignal.throwIfAborted();
+        const completed = result(
+          scanId,
+          scanDir,
+          budget === "exhausted" ? "retained-issue" : undefined,
+        );
         return {
           scanId,
           scanDir,
           draft: semanticScanDraft(
             h.input.scanId,
             completed.manifest.scan,
-            [],
-            completed.coverage,
+            completed.findings.findings,
+            {
+              ...completed.coverage,
+              deferred: [{ reason: "Retained accepted coverage." }],
+            },
           ),
-          sourceFindings: [],
+          sourceFindings: completed.findings.findings,
         };
       };
+      const aggregate =
+        budget === "exhausted"
+          ? (
+              await h.input.projectChild(
+                pendingId,
+                pendingScanDir,
+                h.controller.signal,
+              )
+            ).draft
+          : null;
       await h.seed({
         version: 2,
         startedAt: h.input.startedAt,
         passes: [
           { directory, scanId: childId },
           { directory: pendingDirectory, scanId: pendingId, completed: true },
+          ...(budget === "exhausted"
+            ? [{ directory: siblingDirectory, scanId: siblingId }]
+            : []),
         ],
-        mergedScanIds: [],
-        aggregate: null,
+        mergedScanIds: aggregate ? [pendingId] : [],
+        aggregate,
         noNewStreak: 0,
         consecutiveErrors: 0,
       });
@@ -748,7 +785,7 @@ describe("ordinary scan composition", () => {
         ["interrupted-child", childDirectory, undefined, 1000],
         ["child-local", join(childDirectory, "artifacts"), undefined, 100],
         ["descendant", undefined, "interrupted-child", 50],
-        ["sibling", join(pendingScanDir, "artifacts"), undefined, 1000000],
+        ["sibling", siblingScanDir, undefined, 1000000],
         [
           "parent-local",
           join(h.input.scanDir, "artifacts"),
@@ -805,7 +842,9 @@ describe("ordinary scan composition", () => {
           scanDirectory,
         });
         tracker.start(threadId);
-        return (await tracker.stop()).cost;
+        const snapshot = await tracker.stop();
+        h.controller.signal.throwIfAborted();
+        return snapshot.cost;
       };
       h.input.scanOptions.requireCost = budget !== "none";
       const reportCost = createScanCostReporter({
@@ -837,7 +876,19 @@ describe("ordinary scan composition", () => {
             : ScanCostLimitExceededError,
         );
         expect(h.mergeInputs).toEqual([]);
-        expect(h.published).toEqual([]);
+        if (aggregate) {
+          expect((await h.checkpoint()).terminalReason).toBe("capped");
+          expect(h.published.at(-1)!.findings).toEqual(aggregate.findings);
+          expect(h.published.at(-1)!.coverage.deferred).toContainEqual({
+            reason: "Retained accepted coverage.",
+          });
+          expect(costs.get(siblingDirectory)).toEqual(
+            estimateScanCost("gpt-6-astra", {
+              input_tokens: 1000000,
+              output_tokens: 100000,
+            }),
+          );
+        } else expect(h.published).toEqual([]);
       } else {
         await runDeepScans(h.input);
         expect(h.mergeInputs).toEqual([1]);
@@ -845,7 +896,7 @@ describe("ordinary scan composition", () => {
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toEqual([]);
-      expect(historyReads).toBe(1);
+      expect(historyReads).toBe(aggregate ? 2 : 1);
       expect(costs.get(directory)).toEqual(usage ? recoveredCost : null);
     },
   );

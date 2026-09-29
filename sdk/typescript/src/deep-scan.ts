@@ -262,7 +262,9 @@ export async function runDeepScans(
         state.passes
           .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
           .map((pass) => pass.directory),
-        state.legacy?.coverage,
+        state.mergedScanIds.some((id) => !completed.has(id))
+          ? state.aggregate.coverage
+          : state.legacy?.coverage,
       ),
     };
   };
@@ -285,29 +287,43 @@ export async function runDeepScans(
       records.sort((a, b) =>
         (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
       );
-    let recoveredSuccess = false;
-    for (const record of records) {
+    const passes = records.flatMap((record) => {
       const index = savedPassIndex(input, state, record);
-      if (index < 0) continue;
+      if (index < 0) return [];
       const pass = state.passes[index]!;
       registerPass(pass, record.scanId);
-      if (recoverOutcomes && record.progress.status === "failed")
-        observePassFailure(state, pass, recoveredSuccess);
       saved.set(record.scanId, record);
+      return [{ record, pass }];
+    });
+    const costs = new Map<string, Readonly<ScanCost> | null>();
+    for (const { record, pass } of passes) {
+      if (
+        record.cost ||
+        record.progress.status === "complete" ||
+        ((record.progress.status === "running" ||
+          record.progress.status === "failed") &&
+          record.continuationThreadId)
+      ) {
+        costs.set(pass.directory, record.cost ?? null);
+        input.onCost(pass.directory, null);
+      }
+    }
+    // Recover every receipt before budget callbacks can abort another recovery.
+    for (const { record, pass } of passes) {
       if (record.progress.status === "running" && record.continuationThreadId)
-        reportPassCost(
+        costs.set(
           pass.directory,
           (await input.historicalCost?.(
             record.continuationThreadId,
             record.scanDir,
           )) ?? null,
         );
-      else if (
-        record.progress.status === "complete" ||
-        (record.progress.status === "failed" && record.continuationThreadId)
-      )
-        reportPassCost(pass.directory, record.cost ?? null);
-      else if (record.cost) input.onCost(pass.directory, record.cost);
+    }
+    for (const [directory, cost] of costs) reportPassCost(directory, cost);
+    let recoveredSuccess = false;
+    for (const { record, pass } of passes) {
+      if (recoverOutcomes && record.progress.status === "failed")
+        observePassFailure(state, pass, recoveredSuccess);
       if (
         record.progress.status === "complete" &&
         !completed.has(record.scanId)
@@ -327,14 +343,6 @@ export async function runDeepScans(
   };
   const deadline =
     Date.parse(state.startedAt) + settings.maxTimeHours * 3_600_000;
-  await refreshPasses(
-    state.terminalReason === undefined && Date.now() < deadline,
-  );
-  if (state.mergedScanIds.some((id) => !completed.has(id))) {
-    throw new Error(
-      "An accepted merge input is no longer a sealed child scan.",
-    );
-  }
   const deadlineController = new AbortController();
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const tick = (): void => {
@@ -537,6 +545,14 @@ export async function runDeepScans(
     }
   };
   try {
+    await refreshPasses(
+      state.terminalReason === undefined && Date.now() < deadline,
+    );
+    if (state.mergedScanIds.some((id) => !completed.has(id))) {
+      throw new Error(
+        "An accepted merge input is no longer a sealed child scan.",
+      );
+    }
     if (state.consecutiveErrors >= settings.stopAfterConsecutiveErrors)
       throw consecutiveErrorLimit;
     while (state.terminalReason === undefined) {
@@ -591,7 +607,11 @@ export async function runDeepScans(
     await input.publish(state.aggregate!);
     return state;
   } catch (error) {
-    if (signal.reason instanceof ScanTransportClosedError) throw error;
+    if (
+      (!signal.aborted && error instanceof ScanTransportClosedError) ||
+      signal.reason instanceof ScanTransportClosedError
+    )
+      throw error;
     stopDiscovery(
       state,
       externalStop.signal.reason === consecutiveErrorLimit

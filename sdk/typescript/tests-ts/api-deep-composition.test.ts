@@ -168,6 +168,7 @@ test.each([
     cleanupFailure: true,
   },
   { workers: 1, budget: false, logFailure: true },
+  { workers: 1, budget: false, sessionFailure: true },
   { workers: 1, budget: false, usage: "missing-merge" },
   { workers: 1, budget: false, native: "sealed", usage: "missing-merge" },
   { workers: 1, budget: false, usage: "unreported-cache" },
@@ -187,6 +188,7 @@ test.each([
   usage?: "missing-merge" | "missing-child" | "unreported-cache";
   requiredCost?: boolean;
   logFailure?: boolean;
+  sessionFailure?: boolean;
   emptyDeadline?: boolean;
   lostCompletion?: boolean;
   knowledge?:
@@ -211,6 +213,7 @@ test.each([
     usage,
     requiredCost,
     logFailure,
+    sessionFailure,
     emptyDeadline,
     lostCompletion,
     knowledge,
@@ -397,6 +400,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
     const warnings: string[] = [];
     let childTurns = 0;
     let mergeAttempts = 0;
+    let sessionWrites = 0;
     let threadCount = 0;
     const progressRuns: ScanProgress[][] = [];
     let progress: ScanProgress[];
@@ -535,6 +539,15 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             };
           },
           runWorkbench: async (options, args, input) => {
+            if (
+              sessionFailure &&
+              args[0] === "set-scan-thread" &&
+              registrations.get(args[args.indexOf("--scan-id") + 1]!)?.[
+                "mode"
+              ] === "deep" &&
+              ++sessionWrites === 1
+            )
+              throw new Error("Synthetic session metadata write failure.");
             // Model a process exit after sealing: its catch block cannot persist parent cost.
             if (
               measuredChild &&
@@ -1123,6 +1136,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         workers,
         subagents: 3,
         stopAfterNoNew: 2,
+        ...(sessionFailure ? { stopAfterConsecutiveErrors: 1 } : {}),
         maxDiscoveryRuns: 4,
         maxTimeHours: 1,
         outputDir: scanDir,
@@ -1276,6 +1290,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           parent["scanId"] as string,
         ]);
         expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
+        const child = [...registrations.values()].find(
+          ({ mode }) => mode === "standard",
+        )!;
+        const savedChild = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          child["scanId"] as string,
+        ]);
+        const childCost = (savedChild["scan"] as JsonObject)["cost"];
+        expect(childCost).toBeDefined();
+        expect((saved["scan"] as JsonObject)["cost"]).toEqual(childCost);
         expect(
           JSON.parse(
             await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
@@ -1753,6 +1778,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         const scan = saved["scan"] as ScanLogSource;
         expect(scan.continuationThreadId).toBe(result.threadId!);
         await assertFollowUpLogs(scan);
+      }
+      if (sessionFailure) {
+        expect(sessionWrites).toBe(2);
+        expect(mergeAttempts).toBe(2);
+        expect(
+          warnings.filter((warning) =>
+            warning.startsWith("Could not save scan session:"),
+          ),
+        ).toEqual([
+          "Could not save scan session: Synthetic session metadata write failure.",
+        ]);
       }
       if (budget) {
         expect(result.cost!.estimatedUsd).toBeGreaterThan(0.001);

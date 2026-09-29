@@ -1,4 +1,4 @@
-import { semanticCoverage } from "./helpers/semantic-scan.js";
+import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -18,6 +18,7 @@ import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
+import { ScanCostLimitExceededError } from "../src/errors.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   DEEP_SCAN_CHECKPOINT,
@@ -67,7 +68,11 @@ async function interruptedScan(
   > = {},
   resolvedDeep = false,
   startedMerge = true,
-  ordinaryPass: { cost?: ScanCost } | null = {},
+  ordinaryPass: {
+    cost?: ScanCost;
+    findings?: SemanticScan["findings"];
+    coverage?: SemanticScan["coverage"];
+  } | null = {},
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -242,8 +247,8 @@ async function interruptedScan(
     childId = child["scanId"] as string;
     const aggregate: SemanticScan = {
       scanId,
-      findings: [],
-      coverage: {
+      findings: ordinaryPass.findings ?? [],
+      coverage: ordinaryPass.coverage ?? {
         completeness: "partial",
         surfaces: [],
         explicitExclusions: [],
@@ -1018,6 +1023,226 @@ test.each([
     await expect(
       f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
     ).rejects.toThrow("running scan");
+  },
+);
+
+test.each([true, false])(
+  "resume preserves accepted results when recovered child costs exhaust the budget (saved merge session: %p)",
+  async (savedMergeSession) => {
+    const cost = (input_tokens: number, output_tokens: number) =>
+      estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
+    const coverage = semanticCoverage({
+      completeness: "partial",
+      surfaces: [{ label: "Accepted source review", disposition: "reported" }],
+      deferred: [{ reason: "Retained review follow-up." }],
+    });
+    const finding = semanticFinding({
+      identity: { anchor: "unsafe-output" },
+      locations: [{ path: "source.py", startLine: 1 }],
+    });
+    const f = await interruptedScan(
+      "deep",
+      false,
+      { maxCostUsd: 0.01 },
+      true,
+      true,
+      { cost: cost(100, 10), findings: [finding], coverage },
+    );
+    const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
+    const checkpoint = JSON.parse(
+      await readFile(checkpointPath, "utf8"),
+    ) as DeepScanCheckpoint;
+    checkpoint.startedAt = new Date().toISOString();
+    const acceptedChild = await readFile(join(f.childDir!, "findings.json"));
+    const writeUsage = async (
+      threadId: string,
+      cwd: string,
+      inputTokens: number,
+      outputTokens: number,
+    ) => {
+      await writeFile(
+        join(f.codexHome, "sessions", `rollout-${threadId}.jsonl`),
+        [
+          { type: "session_meta", payload: { id: threadId, cwd } },
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: inputTokens,
+                  output_tokens: outputTokens,
+                },
+              },
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+    };
+    await writeUsage(
+      f.threadId,
+      join(f.scanDir, "artifacts/deep-scan/merge"),
+      10,
+      1,
+    );
+    for (const [index, input, output] of [
+      [2, 10_000, 1_000],
+      [3, 20_000, 2_000],
+    ] as const) {
+      const directory = `artifacts/deep-scan/passes/pass-${index}`;
+      const scanDir = join(f.scanDir, directory);
+      await mkdir(scanDir, { recursive: true, mode: 0o700 });
+      const registration = await f.command(
+        [
+          "register-cli-scan",
+          "--repository",
+          f.repository,
+          "--scan-dir",
+          scanDir,
+          "--parent-scan-id",
+          f.scanId,
+          "--registration-json-stdin",
+        ],
+        JSON.stringify({
+          recipe: { ...f.recipe, mode: "standard" },
+          parentScanRole: "deep_pass",
+        }),
+      );
+      const scanId = registration["scanId"] as string;
+      const threadId = randomUUID();
+      await f.command([
+        "set-scan-thread",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        threadId,
+      ]);
+      await writeUsage(threadId, scanDir, input, output);
+      checkpoint.passes.push({ directory, scanId });
+    }
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+    let turns = 0;
+    const client = resumeClient(
+      f,
+      () => ({
+        startThread() {
+          if (savedMergeSession)
+            throw new Error("Budget recovery must not start another session.");
+          return {
+            id: null,
+            async runStreamed() {
+              turns++;
+              throw new Error(
+                "Budget recovery must not start another model turn.",
+              );
+            },
+          };
+        },
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              turns++;
+              throw new Error(
+                "Budget recovery must not start another model turn.",
+              );
+            },
+          };
+        },
+      }),
+      async (options, args, input) => {
+        const response = await runWorkbench(options, args, input);
+        if (!savedMergeSession && args.includes(f.scanId)) {
+          if (args[0] === "get-cli-scan-resume") response["threadId"] = null;
+          if (args[0] === "get-scan")
+            (response["scan"] as JsonObject)["continuationThreadId"] = null;
+        }
+        return response;
+      },
+    )({ codexOverrides: f.recipe.config });
+    try {
+      const pending = client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        maxCostUsd: 0.01,
+        ...f.recipe.deepScan,
+      });
+      if (!savedMergeSession) {
+        await expect(pending).rejects.toBeInstanceOf(
+          ScanCostLimitExceededError,
+        );
+        const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+          "scan"
+        ] as JsonObject;
+        expect(saved).toMatchObject({ progress: { status: "failed" } });
+        expect(saved["cost"]).toBeUndefined();
+        expect(turns).toBe(0);
+        expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
+          acceptedChild,
+        );
+        return;
+      }
+      const result = await pending;
+      const expectedCost = cost(30_110, 3_011);
+      expect(turns).toBe(0);
+      expect(result.manifest.scan.id).toBe(f.scanId);
+      expect(result.manifest.scan.sealedAt).toBeString();
+      expect(result.threadId).toBe(f.threadId);
+      expect(result.cost).toMatchObject({
+        inputTokens: expectedCost.inputTokens,
+        outputTokens: expectedCost.outputTokens,
+      });
+      expect(result.cost!.estimatedUsd).toBeCloseTo(expectedCost.estimatedUsd);
+      expect(result.findings.findings).toHaveLength(1);
+      expect(result.findings.findings[0]).toMatchObject({
+        title: finding.title,
+        locations: finding.locations,
+      });
+      expect(result.coverage).toMatchObject({
+        completeness: "partial",
+        surfaces: coverage.surfaces,
+        deferred: expect.arrayContaining(
+          coverage.deferred.map((entry) => expect.objectContaining(entry)),
+        ),
+      });
+      const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
+      expect(saved).toMatchObject({
+        terminalReason: "capped",
+        mergedScanIds: [f.childId],
+        aggregate: {
+          findings: [finding],
+          coverage: {
+            ...coverage,
+            deferred: expect.arrayContaining(coverage.deferred),
+          },
+        },
+      });
+      expect(
+        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+      ).toMatchObject({
+        progress: { status: "complete" },
+        cost: { inputTokens: 30_110, outputTokens: 3_011 },
+      });
+      expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
+        acceptedChild,
+      );
+    } finally {
+      await client.close();
+    }
   },
 );
 

@@ -1191,6 +1191,7 @@ export class CodexSecurity {
       budgetAbortController.signal,
     ]);
     let mergeCost: Readonly<ScanCost> | null = null;
+    let scanThreadId: string | undefined;
     const passCosts = new Map<string, Readonly<ScanCost> | null>();
     const combinedCost = (
       current: Readonly<ScanCost> | null,
@@ -1456,6 +1457,29 @@ export class CodexSecurity {
         sealed,
       } = registered;
       let { resumeThreadId } = registered;
+      scanThreadId =
+        typeof resumeThreadId === "string" ? resumeThreadId : undefined;
+      const saveScanThread = async (
+        threadId: string,
+        persistenceSignal: AbortSignal | undefined,
+      ): Promise<void> => {
+        try {
+          await workbench({ ...workbenchOptions, signal: persistenceSignal }, [
+            "set-scan-thread",
+            "--scan-id",
+            scanId,
+            "--thread-id",
+            threadId,
+          ]);
+        } catch (error) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not save scan session: ${safeErrorMessage(error)}`,
+          );
+        }
+      };
       if (
         !sealed &&
         mode === "deep" &&
@@ -1624,6 +1648,7 @@ export class CodexSecurity {
           typeof resumeThreadId === "string"
             ? resumeThreadId
             : (checkpoint?.legacy?.originThreadId ?? null);
+        scanThreadId = sealedThreadId ?? undefined;
         const emptyComposition =
           mode === "deep" &&
           checkpoint?.terminalReason === "capped" &&
@@ -1877,8 +1902,6 @@ export class CodexSecurity {
         approvalPolicy,
       };
       let thread: CodexThreadLike;
-      let activityThreadId =
-        typeof resumeThreadId === "string" ? resumeThreadId : undefined;
       if (typeof resumeThreadId === "string") {
         if (codex.resumeThread === undefined) {
           throw new CodexSecurityError(
@@ -2186,16 +2209,11 @@ export class CodexSecurity {
                           throw new CodexSecurityError(
                             "Codex did not resume the original scan session.",
                           );
+                        scanThreadId = threadId;
                         tracker.start(threadId);
                         if (budgetRecovery !== null)
                           budgetRecovery.threadId = threadId;
-                        await ownedWorkbench([
-                          "set-scan-thread",
-                          "--scan-id",
-                          scanId,
-                          "--thread-id",
-                          threadId,
-                        ]);
+                        await saveScanThread(threadId, undefined);
                       }
                       for (const activity of scanActivitiesFromEvent(
                         event,
@@ -2270,7 +2288,7 @@ export class CodexSecurity {
               workbenchValidated: true,
               model,
               onThreadStarted: async (threadId) => {
-                activityThreadId = threadId;
+                scanThreadId = threadId;
                 if (typeof resumeThreadId === "string") {
                   if (threadId !== resumeThreadId) {
                     throw new CodexSecurityError(
@@ -2281,22 +2299,7 @@ export class CodexSecurity {
                 }
                 if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
                 tracker.start(threadId);
-                try {
-                  await workbench(workbenchOptions, [
-                    "set-scan-thread",
-                    "--scan-id",
-                    scanId,
-                    "--thread-id",
-                    threadId,
-                  ]);
-                } catch (error) {
-                  notifyObserver(
-                    "onWarning",
-                    options.onWarning,
-                    options.onObserverError,
-                    `Could not save scan session: ${safeErrorMessage(error)}`,
-                  );
-                }
+                await saveScanThread(threadId, signal);
               },
               onFinalize: finalize,
               onScanStarted: options.onScanStarted,
@@ -2308,8 +2311,8 @@ export class CodexSecurity {
                   : (activity) =>
                       options.onActivity?.({
                         ...activity,
-                        id: `${activityThreadId}:${activity.id}`,
-                        worker: workerNumber(activityThreadId!),
+                        id: `${scanThreadId}:${activity.id}`,
+                        worker: workerNumber(scanThreadId!),
                       }),
               onProgress: reportScanProgress,
               onWorkerStatus: options.onWorkerStatus,
@@ -2634,7 +2637,12 @@ export class CodexSecurity {
           ? terminalCost
           : options.mode === "deep"
             ? (completionCost ??
-              (tracked?.cost ? completeCost(tracked.cost) : null))
+              (tracked?.cost ||
+              (scanThreadId === undefined &&
+                options.resumeScanId === undefined &&
+                options.registeredScan === undefined)
+                ? completeCost(tracked?.cost ?? null)
+                : null))
             : snapshot?.cost;
       if (
         activeScan !== null &&
