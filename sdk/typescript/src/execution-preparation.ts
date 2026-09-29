@@ -18,6 +18,7 @@ import {
   modelProviderConfigOverride,
   scanModelProvider,
   scanCompositionOverrides,
+  withScanSubagents,
   writeCodexConfig,
   type JsonObject,
 } from "./config.js";
@@ -55,7 +56,6 @@ import type { InspectedExecutable } from "./trusted-executable.js";
 export const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 
-export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
   surface: "cli" | "sdk";
   createCodex?: (options: CodexOptions) => CodexClientLike;
@@ -160,12 +160,11 @@ export interface PreparedRuntime {
 export type ScanPermissions = { filesystem: JsonObject; network: JsonObject };
 
 export interface PreparedExecution {
-  readonly policy: ExecutionPolicy;
+  readonly checkPermissions: boolean;
   readonly source: ExecutionSource;
   inheritedPermissions?: ScanPermissions;
   safetyIdentifier?: string;
   readonly runtime: PreparedRuntime;
-  readonly environment: Record<string, string>;
   runtimeHome: string;
   effectiveConfig: JsonObject;
   preflightConfig: JsonObject;
@@ -240,8 +239,7 @@ export function createExecutionCodex(
   delete sdkCodexConfig["permissions"];
   if (commandAuth) delete sdkCodexConfig["model_providers"];
   const checkPermissions =
-    (session.policy !== "ordinary" ||
-      session.inheritedPermissions !== undefined) &&
+    (session.checkPermissions || session.inheritedPermissions !== undefined) &&
     client.createCodex === undefined;
   if (session.inheritedPermissions !== undefined || checkPermissions) {
     const permissions = sessionConfig["permissions"] as JsonObject;
@@ -455,6 +453,7 @@ export async function prepareAmbientExecution(
 export async function prepareAmbientRuntime(
   execution: AmbientExecution,
   signal?: AbortSignal,
+  preparedPlugin?: PluginInstall,
 ): Promise<PreparedRuntime> {
   const codexHome = await realpath(
     execution.environment["CODEX_HOME"] ||
@@ -462,11 +461,13 @@ export async function prepareAmbientRuntime(
   );
   const bootstrapWorkspace = await createIsolatedHome();
   try {
-    const marketplaceRoot = await createMarketplace(
-      bootstrapWorkspace,
-      execution.pluginRoot,
-      signal,
-    );
+    const marketplaceRoot =
+      preparedPlugin?.marketplaceRoot ??
+      (await createMarketplace(
+        bootstrapWorkspace,
+        execution.pluginRoot,
+        signal,
+      ));
     const pluginRoot = join(marketplaceRoot, "plugins", PLUGIN_NAME);
     return {
       codexHome,
@@ -479,7 +480,7 @@ export async function prepareAmbientRuntime(
         CODEX_HOME: codexHome,
       },
       credentialsAvailable: false,
-      plugin: {
+      plugin: preparedPlugin ?? {
         pluginRoot,
         installedRoot: pluginRoot,
         marketplaceRoot,
@@ -531,31 +532,16 @@ export async function nativeScanConfiguration(
   return config;
 }
 
-/** A Standard pass preserves the caller's write and network policy. */
-export function prepareDiscoveryExecution(
-  session: PreparedExecution,
-): PreparedExecution {
-  return { ...session, policy: "discovery" };
-}
-
-/** The merge uses the same inherited policy while applying its subagent budget. */
+/** The merge retains inherited permissions and applies its own subagent budget. */
 export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,
 ): PreparedExecution {
-  const config = structuredClone(session.sessionConfig);
-  const features = isRecord(config["features"]) ? config["features"] : {};
-  config["features"] = {
-    ...features,
-    multi_agent_v2: {
-      ...(isRecord(features["multi_agent_v2"])
-        ? features["multi_agent_v2"]
-        : {}),
-      enabled: true,
-      max_concurrent_threads_per_session: subagents + 1,
-    },
+  return {
+    ...session,
+    checkPermissions: true,
+    sessionConfig: withScanSubagents(session.sessionConfig, subagents),
   };
-  return { ...session, policy: "merge", sessionConfig: config };
 }
 
 /** Read-only helpers retain denied paths while intentionally removing write access. */
