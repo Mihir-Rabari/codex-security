@@ -873,7 +873,7 @@ def _join_deep_scan(
     )
     if scan["status"] == "running" and scan["canceled_at"] is None:
         require_scan_target_identity(scan)
-    if scan["status"] == "running":
+    if scan["status"] == "running" and sealed_scan_producer_version(scan) is None:
         scan_history.require_current_deep_scan(connection, scan)
     return {**scan_context(connection, scan["id"]), "startDisposition": "joined"}
 
@@ -1427,6 +1427,30 @@ def complete_scan_locked(
     return context
 
 
+def sealed_scan_producer_version(scan: sqlite3.Row) -> str | None:
+    # A process can stop after sealing files but before committing completion.
+    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    if manifest_path is not None:
+        manifest = read_json_object(manifest_path)
+        manifest_scan = manifest.get("scan")
+        if isinstance(manifest_scan, dict) and (
+            manifest_scan.get("sealedAt") is not None
+            or manifest_scan.get("artifacts") not in (None, [])
+        ):
+            try:
+                binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+                _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=binding["coverageMode"],
+                    completion_binding=binding,
+                )
+                return manifest_scan["producer"]["version"]
+            except ContractError as exc:
+                raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    return None
+
+
 def cli_scan_resume(
     connection: sqlite3.Connection, scan: sqlite3.Row, claim_token: str | None
 ) -> dict[str, Any]:
@@ -1435,10 +1459,7 @@ def cli_scan_resume(
         scan,
         parse_scan_recipe=parse_scan_recipe,
         scan_contract=scan_contract,
-        require_scan_directory=require_canonical_scan_directory,
-        artifact_path=artifact_path,
-        read_json_object=read_json_object,
-        workbench_completion_binding=workbench_completion_binding,
+        sealed_producer_version=sealed_scan_producer_version,
         claim_token=claim_token,
     )
     composition = load_composition(connection, scan)

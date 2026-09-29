@@ -14,11 +14,10 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
 from workbench_composition import CompositionView
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
+from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
@@ -55,10 +54,7 @@ def cli_scan_resume(
     *,
     parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-    require_scan_directory: Callable[[Path], Path],
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
+    sealed_producer_version: Callable[[sqlite3.Row], str | None],
     claim_token: str | None = None,
 ) -> dict[str, Any]:
     if scan["recipe_json"] is None:
@@ -84,30 +80,13 @@ def cli_scan_resume(
     ):
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = parse_scan_recipe(scan["recipe_json"], repository)
-    scan_dir = require_scan_directory(Path(scan["scan_dir"]))
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
-    # A process can stop after sealing files but before committing completion.
-    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    if manifest_path is not None:
-        manifest = read_json_object(manifest_path)
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and (
-            manifest_scan.get("sealedAt") is not None
-            or manifest_scan.get("artifacts") not in (None, [])
-        ):
-            try:
-                binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-                _prepare_scan_finalization(
-                    scan_dir,
-                    expected_coverage_mode=binding["coverageMode"],
-                    completion_binding=binding,
-                )
-                result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
-            except ContractError as exc:
-                raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
-    if "sealedProducerVersion" not in result:
+    producer_version = sealed_producer_version(scan)
+    if producer_version is None:
         require_current_deep_scan(connection, scan)
+    else:
+        result["sealedProducerVersion"] = producer_version
     return result
 
 

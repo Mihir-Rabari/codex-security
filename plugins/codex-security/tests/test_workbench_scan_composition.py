@@ -492,6 +492,83 @@ def native_scan_completion(tmp_path: Path):
     return state, target, arguments, started, complete
 
 
+@pytest.mark.parametrize("saved_recipe", [False, True])
+@pytest.mark.parametrize("saved_thread", [False, True])
+def test_native_legacy_rejoin_requires_verified_sealed_results(
+    native_scan_completion, saved_recipe: bool, saved_thread: bool
+) -> None:
+    state, _, arguments, started, complete = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    if saved_thread:
+        run_workbench(
+            state,
+            "set-scan-thread",
+            "--scan-id",
+            scan["scanId"],
+            "--thread-id",
+            "merge-execution",
+            "--claim-token",
+            scan["handoffClaimToken"],
+        )
+    joins = (
+        arguments,
+        (
+            "begin-deep-scan",
+            "--scan-id",
+            scan["scanId"],
+            "--thread-id",
+            "native-owner",
+            "--claim-token",
+            scan["handoffClaimToken"],
+        ),
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
+            "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
+            "manifest_path, terminal_reason, created_at, updated_at) "
+            "SELECT id, 1, 'synthetic-recovery', 'succeeded', 'terminal', 1, 0, 1, 1, "
+            "?, 'saturated', started_at, updated_at FROM scans WHERE id = ?",
+            (str(directory / "scan-manifest.json"), scan["scanId"]),
+        )
+    for join in joins:
+        rejected = run_workbench(state, *join, check=False)
+        assert "retired coordinator" in rejected["stderr"]
+    run_workbench(
+        state,
+        "prepare-scan-completion",
+        "--scan-id",
+        scan["scanId"],
+        "--claim-token",
+        scan["handoffClaimToken"],
+    )
+    (directory / CHECKPOINT).unlink()
+    if not saved_recipe:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
+            )
+    sealed = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    for join in joins:
+        joined = run_workbench(state, *join)
+        assert joined["startDisposition"] == "joined"
+        assert joined["scan"]["scanId"] == scan["scanId"]
+        assert joined["scan"]["handoffClaimToken"] == scan["handoffClaimToken"]
+        assert joined["scan"]["progress"]["status"] == "running"
+        assert {name: (directory / name).read_bytes() for name in sealed} == sealed
+    (directory / "findings.json").write_bytes(sealed["findings.json"] + b" ")
+    for join in joins:
+        rejected = run_workbench(state, *join, check=False)
+        assert "Cannot resume sealed scan" in rejected["stderr"]
+    (directory / "findings.json").write_bytes(sealed["findings.json"])
+    assert complete()["progress"]["status"] == "complete"
+    assert {name: (directory / name).read_bytes() for name in sealed} == sealed
+
+
 def test_native_registration_returns_verified_sealed_resume(native_scan_completion) -> None:
     state, target, _, started, _ = native_scan_completion
     scan = started["scan"]
