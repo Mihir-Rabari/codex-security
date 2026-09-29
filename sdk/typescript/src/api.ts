@@ -2712,10 +2712,7 @@ export class CodexSecurity {
           ? terminalCost
           : options.mode === "deep"
             ? (completionCost ??
-              (tracked?.cost ||
-              (scanThreadId === undefined &&
-                options.resumeScanId === undefined &&
-                options.registeredScan === undefined)
+              (tracked?.cost || scanThreadId === undefined
                 ? completeCost(tracked?.cost ?? null)
                 : null))
             : snapshot?.cost;

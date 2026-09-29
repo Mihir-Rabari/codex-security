@@ -141,6 +141,13 @@ test.each([
     workers: 1,
     budget: false,
     partialCheckpoint: true,
+    native: "discovery",
+    requiredCost: true,
+  },
+  {
+    workers: 1,
+    budget: false,
+    partialCheckpoint: true,
     completedCleanup: true,
   },
   { workers: 1, budget: false, provider: { env_key: "OPENAI_API_KEY" } },
@@ -1144,6 +1151,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                           }
                           return;
                         }
+                        if (native) {
+                          // Native cancellation records the stop before draining SDK work.
+                          await runWorkbench(commandOptions, [
+                            "cancel-scan",
+                            "--scan-id",
+                            registeredScan!.scanId,
+                            "--defer-publication",
+                            "--thread-id",
+                            registeredScan!.threadId,
+                          ]);
+                        }
                         controller.abort(
                           new Error("Synthetic user cancellation"),
                         );
@@ -1428,7 +1446,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
           ),
         ).toMatchObject({
-          terminalReason: partialCheckpoint ? "canceled" : "capped",
+          ...(native
+            ? {}
+            : { terminalReason: partialCheckpoint ? "canceled" : "capped" }),
           aggregate: null,
           mergedScanIds: [],
         });
