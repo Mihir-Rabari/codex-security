@@ -1664,12 +1664,12 @@ export class CodexSecurity {
       if (sealed) {
         // Reconcile sealing before the ordinary completion transaction without rewriting artifacts.
         const saved = await workbench(workbenchOptions, [
-          "get-cli-scan-resume",
+          "get-scan",
           "--scan-id",
           scanId,
         ]);
         const savedScan = saved["scan"] as unknown as SavedScanRecord;
-        const checkpoint = compositionCheckpointFromWorkbench(saved);
+        const checkpoint = compositionCheckpointFromWorkbench(registration);
         resumeThreadId = savedScan["continuationThreadId"];
         restorePriorAccounting(checkpoint);
         sealedThreadId =
@@ -1731,12 +1731,7 @@ export class CodexSecurity {
           (options.resumeScanId !== undefined ||
             options.registeredScan !== undefined)
         ) {
-          const saved = await workbench(workbenchOptions, [
-            "get-cli-scan-resume",
-            "--scan-id",
-            scanId,
-          ]);
-          const checkpoint = compositionCheckpointFromWorkbench(saved);
+          const checkpoint = compositionCheckpointFromWorkbench(registration);
           restorePriorAccounting(checkpoint);
         }
         activeScan = { id: scanId, options: workbenchOptions };
