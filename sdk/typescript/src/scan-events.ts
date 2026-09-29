@@ -198,7 +198,8 @@ export async function runScanTurn(
       );
     }
     if (options.onFinalize !== undefined) {
-      usage = (await options.onFinalize(usage)) ?? usage;
+      const finalizedUsage = await options.onFinalize(usage);
+      if (finalizedUsage !== undefined) usage = finalizedUsage;
     }
     throwIfAborted(options.signal, options.scanDir);
     return {
