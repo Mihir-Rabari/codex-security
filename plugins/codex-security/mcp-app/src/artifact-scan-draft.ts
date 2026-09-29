@@ -412,11 +412,13 @@ async function readCurrentCheckpoints(
   for (const entry of await fs.readdir(root, { withFileTypes: true })) {
     if (!entry.name.endsWith(".json") || entry.name === excludedCheckpoint)
       continue;
+    // Publication can acknowledge a pending entry while we read; its immutable
+    // evidence remains in the history directory.
     const input = parsePersistedScanDraft(
       parseJsonObject(
         await readArtifactText(
           context,
-          [...components, entry.name],
+          ["checkpoints", entry.name],
           "current scan checkpoint",
         ),
         "current scan checkpoint",
@@ -749,12 +751,23 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-/** Persisted drafts must use the current semantic schema; never discard old evidence. */
+/** Accept current semantic drafts and canonical snapshots written by the workbench. */
 export function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   try {
-    return parseScanDraft(input);
+    const coverage = input["coverage"];
+    return parseScanDraft(
+      isObject(coverage) &&
+        coverage["documentType"] === "codex-security.coverage"
+        ? semanticScanDraft(
+            input["scanId"] as string,
+            input,
+            input["findings"] as JsonObject[],
+            coverage,
+          )
+        : input,
+    );
   } catch (cause) {
     throw new Error(
       "Saved scan draft uses an unsupported semantic format. Start a new scan; the original evidence is retained.",

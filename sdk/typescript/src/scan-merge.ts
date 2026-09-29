@@ -131,10 +131,11 @@ export function validateScanMerge(
       if (earliest < inputs.length) novelInputs.add(earliest);
     }
     const finding = { ...selected };
-    if (prior.length)
-      finding.identity = structuredClone(
-        (prior.includes(selected) ? selected : prior[0]!).identity,
-      );
+    if (prior.length) {
+      const established = prior.includes(selected) ? selected : prior[0]!;
+      finding.ruleId = established.ruleId;
+      finding.identity = structuredClone(established.identity);
+    }
     const history = exactUnion(
       [selected, ...prior].flatMap(
         (entry) => (entry.provenance["previousFindings"] as JsonObject[]) ?? [],

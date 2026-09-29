@@ -127,13 +127,19 @@ test("retains accepted identity and synthesis when a new canonical source is sel
     { summary: "Earlier supporting detail." },
   ];
   const next = child("second", [
-    finding("different", { summary: "Better current narrative." }),
+    finding("different", {
+      ruleId: "different-rule",
+      summary: "Better current narrative.",
+    }),
   ]);
   const before = structuredClone({ previous, next });
   const current = merge(submission(["second:0", "first:0"]), [next], previous);
   expect(current.newFindingScanIds).toEqual([]);
   expect(current.aggregate.findings[0]!.identity).toEqual(
     previous.findings[0]!.identity,
+  );
+  expect(scanFindingIdentity(current.aggregate.findings[0]!)).toBe(
+    scanFindingIdentity(previous.findings[0]!),
   );
   expect(current.aggregate.findings[0]!.summary).toBe(
     "Better current narrative.",

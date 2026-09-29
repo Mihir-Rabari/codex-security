@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -216,6 +217,42 @@ try {
   );
   assert.equal(await readFile(oldCheckpoint, "utf8"), oldContents);
 
+  const hostSnapshotRoot = path.join(root, "host-canonical-checkpoint");
+  await mkdir(hostSnapshotRoot);
+  await saveScanDraftCheckpoint(
+    { ...context, root: hostSnapshotRoot },
+    {
+      scanId,
+      scope: carriedParentManifest.scan.scope,
+      threatModel: carriedParentManifest.scan.threatModel,
+      findings: (
+        await readJson(parentCheckpointRoot, "findings.json")
+      ).findings.map((entry) => ({
+        ...entry,
+        findingId: "generated",
+        occurrenceId: "generated",
+      })),
+      coverage: {
+        ...(await readJson(parentCheckpointRoot, "coverage.json")),
+        documentType: "codex-security.coverage",
+        schemaVersion: "1.0",
+        scanId,
+      },
+    },
+  );
+  await recordCodexSecurityScanDraft(
+    { ...context, root: hostSnapshotRoot },
+    { ...input, findings: [] },
+  );
+  assert.deepEqual(
+    (await readJson(hostSnapshotRoot, "findings.json")).findings,
+    (await readJson(parentCheckpointRoot, "findings.json")).findings,
+  );
+  assert.equal(
+    (await readJson(hostSnapshotRoot, "scan-manifest.json")).scan.scope.summary,
+    input.scope.summary,
+  );
+
   const pendingRoot = path.join(root, "pending-only-checkpoints");
   await mkdir(pendingRoot);
   await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
@@ -231,10 +268,25 @@ try {
     path.join(pendingDirectory, "pending.json"),
     JSON.stringify(pendingInput),
   );
-  await recordCodexSecurityScanDraft(
-    { ...context, root: pendingRoot },
-    { ...input, findings: [] },
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "pending.json"),
+    JSON.stringify(pendingInput),
   );
+  const originalReaddir = fs.readdir;
+  fs.readdir = async (...args) => {
+    const entries = await originalReaddir(...args);
+    if (args[0] === pendingDirectory)
+      await rm(path.join(pendingDirectory, "pending.json"));
+    return entries;
+  };
+  try {
+    await recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    );
+  } finally {
+    fs.readdir = originalReaddir;
+  }
   assert.deepEqual(
     new Set(
       (await readJson(pendingRoot, "findings.json")).findings.map(
