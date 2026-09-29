@@ -656,6 +656,10 @@ function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   // SDK diagnostics can include repository text; match complete runtime refusals.
   return [
+    "cyber_policy",
+    "Request rejected: cyber_policy.",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",

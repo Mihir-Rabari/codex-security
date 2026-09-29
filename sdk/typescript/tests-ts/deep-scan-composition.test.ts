@@ -698,33 +698,44 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test("keeps a runtime refusal fatal after a merge validation error", async () => {
-    const h = await harness({ maxDiscoveryRuns: 1 });
-    h.setRun(async (options) =>
-      result(options.resumeScanId!, options.outputDir!, "supported-issue"),
-    );
-    const merge = h.input.merge;
-    const refusal = new Error("Request blocked by cyberPolicy.");
-    let attempts = 0;
-    h.input.merge = async (prompt, signal) => {
-      if (++attempts > 1) throw refusal;
-      return {
-        ...((await merge(prompt, signal)) as JsonObject),
-        cyber_policy: false,
+  test.each([
+    "Request blocked by cyberPolicy.",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
+    "Request rejected: cyber_policy.",
+    "cyber_policy",
+  ])(
+    "keeps runtime refusal %s fatal after a merge validation error",
+    async (message) => {
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      h.setRun(async (options) =>
+        result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+      );
+      const merge = h.input.merge;
+      const refusal = await codexStreamError(
+        JSON.stringify({ type: "turn.failed", error: { message } }),
+      );
+      let attempts = 0;
+      h.input.merge = async (prompt, signal) => {
+        if (++attempts > 1) throw refusal;
+        return {
+          ...((await merge(prompt, signal)) as JsonObject),
+          cyber_policy: false,
+        };
       };
-    };
 
-    await expect(runDeepScans(h.input)).rejects.toBe(refusal);
+      await expect(runDeepScans(h.input)).rejects.toBe(refusal);
 
-    expect(attempts).toBe(2);
-    expect(h.calls).toHaveLength(1);
-    expect(await h.checkpoint()).toMatchObject({
-      terminalReason: "failed",
-      mergeFailures: 1,
-      mergedScanIds: [],
-    });
-    expect(h.published).toEqual([]);
-  });
+      expect(attempts).toBe(2);
+      expect(h.calls).toHaveLength(1);
+      expect(await h.checkpoint()).toMatchObject({
+        terminalReason: "failed",
+        mergeFailures: 1,
+        mergedScanIds: [],
+      });
+      expect(h.published).toEqual([]);
+    },
+  );
 
   test.each(["SDK parser", "schema"])(
     "retries a merge after a %s diagnostic containing policy-like data",
@@ -1891,6 +1902,10 @@ describe("ordinary scan composition", () => {
     "metering",
     "permission before registration",
     "permission after registration",
+    "Request flagged for possible cybersecurity risk.",
+    "Request flagged for potentially high-risk cyber activity.",
+    "Request rejected: cyber_policy.",
+    "cyber_policy",
     "This content was flagged for possible cybersecurity risk.",
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",
