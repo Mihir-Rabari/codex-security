@@ -214,7 +214,8 @@ export async function runScanTurn(
       );
     }
     if (options.onFinalize !== undefined) {
-      usage = (await options.onFinalize(usage)) ?? usage;
+      const finalizedUsage = await options.onFinalize(usage);
+      if (finalizedUsage !== undefined) usage = finalizedUsage;
     }
     throwIfAborted(options.signal, options.scanDir);
     return {
@@ -266,7 +267,6 @@ export async function readCodexTurn(options: {
     } else if (event.type === "turn.completed") {
       status = "completed";
       usage = event["usage"];
-      break;
     } else if (event.type === "turn.failed") {
       throw new CodexSecurityError(turnFailureMessage(event["error"]));
     } else if (event.type === "error" && typeof event["message"] === "string") {
