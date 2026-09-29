@@ -23,8 +23,8 @@ interface CompositionMetadata {
   noNewStreak: number;
   consecutiveErrors: number;
   mergeFailures?: number;
-  /** A prior merge session was lost; later sessions cannot reconstruct its cost. */
-  mergeCostUnavailable?: true;
+  /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
+  costUnavailable?: true;
   /** A discovery stop decision. Sealing and publication belong to the parent. */
   terminalReason?: "saturated" | "capped" | "failed" | "canceled";
   [extension: string]: unknown;

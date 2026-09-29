@@ -543,6 +543,8 @@ test.each([
       ["absent", "unknown-child"],
       ["larger", "unknown-child"],
       ["stale", "running-child"],
+      ["absent", "running-threadless"],
+      ["larger", "running-threadless"],
       ["absent", "failed-threadless"],
       ["stale", "failed-threadless"],
       ["larger", "unknown-merge"],
@@ -665,10 +667,11 @@ test.each([
       await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.terminalReason = terminalReason;
-    if (accounting === "marked-merge") checkpoint.mergeCostUnavailable = true;
+    if (accounting === "marked-merge") checkpoint.costUnavailable = true;
     if (
       (saved === "absent" && accounting === "complete") ||
       accounting === "running-child" ||
+      accounting === "running-threadless" ||
       accounting === "failed-threadless"
     ) {
       const directory = "artifacts/deep-scan/passes/pass-2";
@@ -697,7 +700,15 @@ test.each([
           5_000,
         );
       }
-      if (accounting !== "running-child")
+      if (accounting === "running-threadless")
+        await f.command([
+          "preserve-scan-results",
+          "--scan-id",
+          scanId,
+          "--cost-json",
+          JSON.stringify(cost(1000, 100)),
+        ]);
+      else if (accounting !== "running-child")
         await f.command([
           "fail-scan",
           "--scan-id",
@@ -1684,7 +1695,12 @@ test.each([
 ] as const)(
   "sealed resume with a %p checkpoint (tracking failure: %p, cost limit: %p)",
   async (checkpoint, trackingFailure, requiredCost) => {
-    const f = await interruptedScan();
+    const f = await interruptedScan("deep", false, {}, false, true, {
+      cost: estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 375,
+        output_tokens: 3,
+      })!,
+    });
     const cost = estimateScanCost("gpt-5.6-sol", {
       input_tokens: 1375,
       output_tokens: 13,
@@ -1855,6 +1871,111 @@ with sqlite3.connect(sys.argv[1]) as connection:
         await Promise.all(
           artifactNames.map((name) => readFile(join(f.scanDir, name))),
         ),
+      ).toEqual(artifacts);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+] as const)(
+  "sealed recovery distinguishes a parent snapshot from a completed total (complete: %p, required cost: %p)",
+  async (completed, requiredCost) => {
+    const finding = semanticFinding({
+      identity: { anchor: "retained-review" },
+    });
+    const f = await interruptedScan("deep", false, {}, true, true, {
+      findings: [finding],
+    });
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 100,
+    })!;
+    await finishDiscovery(f);
+    await f.command([
+      "preserve-scan-results",
+      "--scan-id",
+      f.scanId,
+      "--cost-json",
+      JSON.stringify(cost),
+    ]);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const names = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+      DEEP_SCAN_CHECKPOINT,
+    ];
+    const artifacts = await Promise.all(
+      names.map((name) => readFile(join(f.scanDir, name))),
+    );
+    let completions = 0;
+    const client = resumeClient(
+      f,
+      () => ({
+        startThread() {
+          throw new Error("Sealed recovery needs no new session.");
+        },
+        resumeThread(threadId) {
+          return {
+            id: threadId,
+            async runStreamed() {
+              throw new Error("Sealed recovery needs no model turn.");
+            },
+          };
+        },
+      }),
+      async (options, args, input) => {
+        if (args[0] === "complete-scan") completions++;
+        const response = await runWorkbench(options, args, input);
+        if (completed && args[0] === "get-cli-scan-resume")
+          await f.command([
+            "complete-scan",
+            "--scan-id",
+            f.scanId,
+            "--cost-json",
+            JSON.stringify(cost),
+          ]);
+        return response;
+      },
+    )({ codexOverrides: f.recipe.config });
+    try {
+      const pending = client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+        ...(requiredCost ? { maxCostUsd: 1 } : {}),
+      });
+      if (requiredCost && !completed) {
+        await expect(pending).rejects.toBeInstanceOf(ScanCostTrackingError);
+        expect(completions).toBe(0);
+      } else {
+        const result = await pending;
+        expect(result.cost).toEqual(completed ? cost : null);
+        expect(result.findings.findings).toHaveLength(1);
+        expect(result.findings.findings[0]!.title).toBe(finding.title);
+        expect(completions).toBe(1);
+      }
+      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(saved).toMatchObject({
+        progress: {
+          status: requiredCost && !completed ? "running" : "complete",
+        },
+      });
+      if (completed || requiredCost)
+        expect(saved["cost"] as unknown).toEqual(cost);
+      else expect(saved["cost"]).toBeUndefined();
+      expect(
+        await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
       ).toEqual(artifacts);
     } finally {
       await client.close();

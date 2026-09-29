@@ -57,6 +57,7 @@ class _CheckpointState(TypedDict):
 
 class CompositionCheckpoint(_CheckpointState, total=False):
     mergeFailures: int
+    costUnavailable: Literal[True]
     legacy: LegacyComposition
     terminalReason: Literal["saturated", "capped", "failed", "canceled"]
 

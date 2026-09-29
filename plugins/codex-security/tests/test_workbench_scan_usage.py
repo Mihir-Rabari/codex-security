@@ -528,7 +528,16 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     }
 
 
-def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("prior_session_unavailable", "child_session_saved", "merge_session_saved"),
+    [(False, True, True), (True, True, True), (False, False, True), (False, True, False)],
+)
+def test_completion_counts_ordinary_child_scans_and_descendants(
+    tmp_path: Path,
+    prior_session_unavailable: bool,
+    child_session_saved: bool,
+    merge_session_saved: bool,
+) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     environment = fixture.environment
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -557,18 +566,48 @@ def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) 
         ),
         environment=environment,
     )
-    run_workbench(
-        fixture.state_dir,
-        "set-scan-thread",
-        "--scan-id",
-        child["scanId"],
-        "--thread-id",
-        "sdk-worker",
-        environment=environment,
-    )
+    if child_session_saved:
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            child["scanId"],
+            "--thread-id",
+            "sdk-worker",
+            environment=environment,
+        )
+    else:
+        run_workbench(
+            fixture.state_dir,
+            "fail-scan",
+            "--scan-id",
+            child["scanId"],
+            "--message",
+            "Synthetic failure after optional session persistence failed.",
+            "--cost-json",
+            json.dumps({"model": "synthetic-model", "estimatedUsd": 0.01, **_counts(20, 0, 5)}),
+            environment=environment,
+        )
     checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     document = json.loads(checkpoint.read_text())
     document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
+    if not merge_session_saved:
+        write_completed_contract(directory, child["scanId"], fixture.target, relative_path="app.py")
+        run_workbench(
+            fixture.state_dir,
+            "complete-scan",
+            "--scan-id",
+            child["scanId"],
+            environment=environment,
+        )
+        document["passes"][0]["completed"] = True
+        document["mergedScanIds"] = [child["scanId"]]
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
+            )
+    if prior_session_unavailable:
+        document["costUnavailable"] = True
     checkpoint.write_text(json.dumps(document))
     _state_graph(
         environment,
@@ -585,11 +624,13 @@ def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) 
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
+    incomplete = prior_session_unavailable or not child_session_saved or not merge_session_saved
     assert usage == {
-        "coverage": "complete",
+        "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
+        **(_counts(37, 0, 10) if child_session_saved else _counts(10, 0, 3)),
+        "threadCount": 3 if child_session_saved else 1,
+        **({"warnings": ["scan_thread_unavailable"]} if incomplete else {}),
     }
 
 

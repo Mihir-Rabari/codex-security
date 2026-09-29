@@ -21,6 +21,7 @@ from workbench_composition import (
     CompositionView,
     composition_children,
     composition_execution_threads,
+    load_composition,
 )
 
 TOKEN_FIELDS = {
@@ -93,7 +94,8 @@ def collect_scan_usage(
 ) -> dict[str, Any]:
     """Count only complete, attributable rollout events inside this scan's window."""
 
-    roots = _scan_root_thread_ids(connection, scan, thread_id)
+    composition = load_composition(connection, scan)
+    roots = _scan_root_thread_ids(connection, scan, thread_id, composition=composition)
     if not roots:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -107,6 +109,22 @@ def collect_scan_usage(
         return _unavailable_usage("scan_window_unavailable")
 
     warnings: set[str] = set()
+    checkpoint = composition.checkpoint
+    # Known currency receipts do not make unavailable session token counts complete.
+    if (
+        checkpoint is not None
+        and (
+            checkpoint.get("costUnavailable")
+            or (
+                not scan["continuation_thread_id"]
+                and (
+                    checkpoint["mergedScanIds"]
+                    or any(item.get("completed") for item in checkpoint["passes"])
+                )
+            )
+        )
+    ) or any(not child["continuation_thread_id"] for child in composition.children):
+        warnings.add("scan_thread_unavailable")
     try:
         sessions, missing_thread_ids = _discover_rollout_sessions(
             state_database,

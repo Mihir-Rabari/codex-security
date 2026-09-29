@@ -93,7 +93,7 @@ export interface DeepScanComposition {
     threadId: string,
     scanDirectory?: string,
   ): Promise<ScanCost | null>;
-  mergeCostUnavailable?: boolean;
+  costUnavailable?: boolean;
 }
 
 function validatePassDirectories(state: DeepScanCheckpoint): void {
@@ -122,6 +122,10 @@ function savedPassIndex(
   if (pass.scanId !== undefined && pass.scanId !== record.scanId)
     throw new Error("Saved scan pass registration changed.");
   return index;
+}
+
+function missingRunningSession(record: SavedScanRecord): boolean {
+  return record.progress.status === "running" && !record.continuationThreadId;
 }
 
 /** Reject stopped discovery without writes, worker startup or cost notifications. */
@@ -161,7 +165,10 @@ export async function terminalDeepScanError(
     for (const record of savedScansFromWorkbench(listed)) {
       const index = savedPassIndex(input, state, record);
       // Missing optional thread/cost persistence does not establish zero usage.
-      if (index >= 0) costs[index] = record.cost ?? null;
+      if (index >= 0)
+        costs[index] = missingRunningSession(record)
+          ? null
+          : (record.cost ?? null);
     }
     if (state.legacy) {
       costs.push(
@@ -172,7 +179,7 @@ export async function terminalDeepScanError(
           null,
       );
     }
-    if (state.mergeCostUnavailable) costs.push(null);
+    if (state.costUnavailable) costs.push(null);
     constituents = costs.filter((cost) => cost !== undefined);
   } catch {
     // Optional accounting must not replace the terminal rejection or a known total.
@@ -196,7 +203,7 @@ export async function runDeepScans(
   const state =
     (await loadDeepScanCheckpoint(scanDir)) ??
     newDeepScanCheckpoint(input.startedAt);
-  if (input.mergeCostUnavailable) state.mergeCostUnavailable = true;
+  if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
@@ -298,16 +305,10 @@ export async function runDeepScans(
     });
     const costs = new Map<string, Readonly<ScanCost> | null>();
     for (const { record, pass } of passes) {
-      if (
-        record.cost ||
-        record.progress.status === "complete" ||
-        ((record.progress.status === "running" ||
-          record.progress.status === "failed") &&
-          record.continuationThreadId)
-      ) {
-        costs.set(pass.directory, record.cost ?? null);
-        input.onCost(pass.directory, null);
-      }
+      const missingSession = missingRunningSession(record);
+      if (missingSession) state.costUnavailable = true;
+      costs.set(pass.directory, missingSession ? null : (record.cost ?? null));
+      input.onCost(pass.directory, null);
     }
     // Recover every receipt before budget callbacks can abort another recovery.
     for (const { record, pass } of passes) {
@@ -319,6 +320,10 @@ export async function runDeepScans(
             record.scanDir,
           )) ?? null,
         );
+    }
+    if (state.costUnavailable) {
+      await save();
+      reportPassCost("previous-work", null);
     }
     for (const [directory, cost] of costs) reportPassCost(directory, cost);
     let recoveredSuccess = false;
@@ -476,18 +481,23 @@ export async function runDeepScans(
       for (let attempt = 0; ; attempt += 1) {
         discoverySignal.throwIfAborted();
         try {
+          const resuming = pass.scanId !== undefined;
           const result = await client.run(input.repository, {
             ...input.scanOptions,
             mode: "standard",
             outputDir: join(scanDir, pass.directory),
-            ...(pass.scanId === undefined
-              ? { parentScanId: scanId }
-              : { resumeScanId: pass.scanId, parentScanId: undefined }),
+            ...(resuming
+              ? { resumeScanId: pass.scanId, parentScanId: undefined }
+              : { parentScanId: scanId }),
             deepScanPass: true,
             signal: discoverySignal,
             onRegisteredScan: async (registration) => {
               registerPass(pass, registration["scanId"] as string);
+              input.onCost(pass.directory, null);
+              if (resuming && registration["threadId"] === null)
+                state.costUnavailable = true;
               await save();
+              if (state.costUnavailable) reportPassCost("previous-work", null);
             },
             onCost: (cost) => {
               latestCost = cost;

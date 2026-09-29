@@ -161,6 +161,7 @@ async function harness(
         maximumActive = Math.max(maximumActive, active);
         const id = options.resumeScanId ?? randomUUID();
         records.set(id, {
+          ...records.get(id),
           scanId: id,
           scanDir: options.outputDir!,
           parentScanId: scanId,
@@ -171,6 +172,7 @@ async function harness(
         await options.onRegisteredScan?.({
           scanId: id,
           scanDir: options.outputDir!,
+          threadId: records.get(id)!.continuationThreadId ?? null,
         });
         try {
           const completed = await run({ ...options, resumeScanId: id });
@@ -720,9 +722,36 @@ describe("ordinary scan composition", () => {
     { savedCost: true, usage: false, budget: "none" },
     { savedCost: true, usage: false, budget: "required" },
     { savedCost: true, usage: true, budget: "exhausted" },
+    ...[false, true].flatMap((savedCost) =>
+      ["none", "required"].map((budget) => ({
+        savedCost,
+        usage: true,
+        budget,
+        threadSaved: false,
+      })),
+    ),
+    ...["failed", "canceled"].flatMap((status) =>
+      ["none", "required"].map((budget) => ({
+        savedCost: false,
+        usage: false,
+        budget,
+        status,
+        threadSaved: false,
+      })),
+    ),
+    ...["failed", "canceled"].map((status) => ({
+      savedCost: true,
+      usage: false,
+      budget: "required",
+      status,
+      threadSaved: false,
+      zeroCost: true,
+    })),
   ] as const)(
     "recovers running child usage before a pending merge can saturate: %j",
-    async ({ savedCost, usage, budget }) => {
+    async ({ savedCost, usage, budget, ...saved }) => {
+      const threadSaved = !("threadSaved" in saved) || saved.threadSaved;
+      const status = "status" in saved ? saved.status : "running";
       const h = await harness({
         stopAfterNoNew: 1,
         maxDiscoveryRuns: budget === "exhausted" ? 3 : 2,
@@ -737,8 +766,8 @@ describe("ordinary scan composition", () => {
       const siblingDirectory = "artifacts/deep-scan/passes/pass-3";
       const siblingScanDir = join(h.input.scanDir, siblingDirectory);
       const partialCost = estimateScanCost("gpt-6-astra", {
-        input_tokens: 10,
-        output_tokens: 1,
+        input_tokens: "zeroCost" in saved ? 0 : 10,
+        output_tokens: "zeroCost" in saved ? 0 : 1,
       })!;
       const recoveredCost = estimateScanCost("gpt-6-astra", {
         input_tokens: 1150,
@@ -749,8 +778,8 @@ describe("ordinary scan composition", () => {
         scanDir: childDirectory,
         parentScanId: h.input.scanId,
         targetPath: h.input.repository,
-        progress: { status: "running" },
-        continuationThreadId: "interrupted-child",
+        progress: { status },
+        ...(threadSaved ? { continuationThreadId: "interrupted-child" } : {}),
         ...(savedCost ? { cost: partialCost } : {}),
       });
       h.records.set(pendingId, {
@@ -908,7 +937,16 @@ describe("ordinary scan composition", () => {
         costsBeforeMerge.push(costs.get(directory));
         return merge(...args);
       };
-      if (budget === "required" || budget === "exhausted") {
+      const expectedReceipt =
+        status !== "running" && savedCost
+          ? partialCost
+          : usage && threadSaved
+            ? recoveredCost
+            : null;
+      if (
+        (budget === "required" && expectedReceipt === null) ||
+        budget === "exhausted"
+      ) {
         await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
           budget === "required"
             ? ScanCostTrackingError
@@ -931,14 +969,157 @@ describe("ordinary scan composition", () => {
       } else {
         await runDeepScans(h.input);
         expect(h.mergeInputs).toEqual([1]);
-        expect(costsBeforeMerge).toEqual([usage ? recoveredCost : null]);
+        expect(costsBeforeMerge).toEqual([expectedReceipt]);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toEqual([]);
-      expect(historyReads).toBe(aggregate ? 2 : 1);
-      expect(costs.get(directory)).toEqual(usage ? recoveredCost : null);
+      expect(historyReads).toBe(aggregate ? 2 : threadSaved ? 1 : 0);
+      expect(costs.get(directory)).toEqual(expectedReceipt);
     },
   );
+
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "keeps lost child accounting unknown across completion and resume (required: %p, resumed: %p)",
+    async (requireCost, resuming) => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      h.input.scanOptions.requireCost = requireCost;
+      const known = estimateScanCost("gpt-6-astra", {
+        input_tokens: 100,
+        output_tokens: 10,
+      })!;
+      const costs = new Map<string, Readonly<ScanCost> | null>();
+      h.input.onCost = (key, cost) => costs.set(key, cost);
+      if (resuming) {
+        const id = randomUUID();
+        const directory = "artifacts/deep-scan/passes/pass-1";
+        h.records.set(id, {
+          scanId: id,
+          scanDir: join(h.input.scanDir, directory),
+          parentScanId: h.input.scanId,
+          targetPath: h.input.repository,
+          progress: { status: "running" },
+          cost: known,
+        });
+        await h.seed({
+          version: 2,
+          startedAt: h.input.startedAt,
+          passes: [{ directory, scanId: id }],
+          mergedScanIds: [],
+          aggregate: null,
+          noNewStreak: 0,
+          consecutiveErrors: 0,
+        });
+      }
+      let turns = 0;
+      h.setRun(async (options) => {
+        turns++;
+        const id = options.resumeScanId!;
+        options.onCost?.(known);
+        if (!resuming && turns === 1)
+          throw new Error(
+            "Synthetic interruption after optional session write failed.",
+          );
+        const completed = new ScanResult({
+          ...result(id, options.outputDir!),
+          turnResult: {
+            model: "gpt-6-astra",
+            usage: { input_tokens: 100, output_tokens: 10 },
+          },
+        });
+        h.records.get(id)!.continuationThreadId = completed.threadId!;
+        h.records.get(id)!.cost = completed.cost;
+        return completed;
+      });
+      if (requireCost) {
+        await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+          ScanCostTrackingError,
+        );
+        expect(turns).toBe(resuming ? 0 : 1);
+        expect(h.mergeInputs).toEqual([]);
+        expect([...costs.values()]).toContain(null);
+        return;
+      }
+      const publish = h.input.publish;
+      h.input.publish = async () => {
+        throw new ScanTransportClosedError(
+          "Synthetic interruption after accepted merge.",
+        );
+      };
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanTransportClosedError,
+      );
+      expect(turns).toBe(resuming ? 1 : 2);
+      expect([...costs.values()]).toContain(null);
+      expect([...costs.values()]).toContainEqual(known);
+
+      h.input.publish = publish;
+      costs.clear();
+      await runDeepScans(h.input);
+      expect(turns).toBe(resuming ? 1 : 2);
+      expect(h.published.at(-1)!.findings).toEqual([]);
+      expect([...costs.values()]).toContain(null);
+      expect([...costs.values()]).toContainEqual(known);
+      h.input.scanOptions.requireCost = true;
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanCostTrackingError,
+      );
+      expect(turns).toBe(resuming ? 1 : 2);
+    },
+  );
+
+  test("keeps every registered sibling in accounting when a budget callback aborts the batch", async () => {
+    const h = await harness({ workers: 2, maxDiscoveryRuns: 2 });
+    const cost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 100,
+      output_tokens: 10,
+    })!;
+    const costs = new Map<string, Readonly<ScanCost> | null>();
+    const reportCost = createScanCostReporter({
+      options: { maxCostUsd: cost.estimatedUsd / 2 },
+      scanDir: h.input.scanDir,
+      costAbortController: h.controller,
+      budgetSignal: h.controller.signal,
+      getActiveScan: () => null,
+      workbench: async () => ({}),
+    });
+    h.input.onCost = (key, receipt) => {
+      costs.set(key, receipt);
+      if (receipt !== null) reportCost(receipt);
+    };
+    let secondStarted!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    h.setRun(async (options) => {
+      if (options.outputDir!.endsWith("pass-1")) {
+        await ready;
+        options.onCost?.(cost);
+        options.signal!.throwIfAborted();
+      } else {
+        secondStarted();
+        await abortable(
+          () => new Promise<never>(() => undefined),
+          options.signal,
+        );
+      }
+      throw new Error("The budget must stop both workers.");
+    });
+    await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+      ScanCostLimitExceededError,
+    );
+    expect(h.calls).toHaveLength(2);
+    expect(costs.get("artifacts/deep-scan/passes/pass-1")).toEqual(cost);
+    expect(costs.get("artifacts/deep-scan/passes/pass-2")).toBeNull();
+    expect((await h.checkpoint()).terminalReason).toBe("capped");
+  });
 
   test("continues saved legacy counters and coverage using only new ordinary scans", async () => {
     const h = await harness({ maxDiscoveryRuns: 3, stopAfterNoNew: 4 });
@@ -1549,7 +1730,7 @@ describe("ordinary scan composition", () => {
         h.records.get(scanId)!.cost = completed.cost;
         return completed;
       });
-      const stopped = executed && requireCost;
+      const stopped = requireCost;
       if (stopped)
         await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
           ScanCostTrackingError,
@@ -1559,10 +1740,11 @@ describe("ordinary scan composition", () => {
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
         expect(h.published.at(-1)!.coverage["completeness"]).toBe("partial");
       }
-      expect(h.calls).toHaveLength((resumed ? 0 : 4) + (stopped ? 0 : 1));
+      expect(h.calls).toHaveLength(
+        (resumed ? 0 : requireCost && !executed ? 2 : 4) + (stopped ? 0 : 1),
+      );
       expect(h.mergeInputs).toEqual(stopped ? [] : [1]);
-      expect(costs.has(failedDirectory)).toBe(executed);
-      if (executed) expect(costs.get(failedDirectory)).toBeNull();
+      expect(costs.get(failedDirectory)).toBeNull();
       expect([...costs.values()].some((cost) => cost !== null)).toBe(!stopped);
     },
   );
@@ -1600,7 +1782,7 @@ describe("ordinary scan composition", () => {
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toHaveLength(1);
-      expect(costs[0]).toEqual(partial);
+      expect(costs).toContainEqual(partial);
       expect(costs.at(-1)).toBeNull();
     },
   );
@@ -1864,6 +2046,7 @@ describe("ordinary scan composition", () => {
         parentScanId: h.input.scanId,
         targetPath: h.input.repository,
         progress: { status: "running" },
+        continuationThreadId: "saved-child-session",
       });
       const coverage = semanticCoverage({ completeness: "partial" });
       const checkpoint: DeepScanCheckpoint = {
