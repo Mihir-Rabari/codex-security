@@ -2517,7 +2517,6 @@ export class CodexSecurity {
         failure instanceof ScanCostLimitExceededError &&
         !accounting.hasUnknown &&
         budgetRecovery !== null &&
-        budgetRecovery.threadId !== null &&
         activeScan !== null &&
         !this.#abortController.signal.aborted &&
         options.signal?.aborted !== true

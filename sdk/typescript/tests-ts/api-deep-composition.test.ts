@@ -136,6 +136,7 @@ test.each([
   { workers: 1, budget: false, empty: true },
   { workers: 2, budget: false, provider: undefined },
   { workers: 1, budget: true, provider: undefined },
+  { workers: 1, budget: true, empty: true },
   { workers: 1, budget: true, firstChildBudget: true },
   { workers: 1, budget: false, provider: { env_key: "OPENAI_API_KEY" } },
   {
@@ -1440,7 +1441,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
       expect(result.findings.findings).toHaveLength(empty ? 0 : budget ? 2 : 1);
       if (empty) {
         expect(mergeAttempts).toBe(0);
-        expect(warnings).toEqual([]);
+        if (budget) expect(result.threadId).toBeNull();
+        else expect(warnings).toEqual([]);
       }
       expect(result.coverage.completeness).toBe(
         budget ? "partial" : "complete",
@@ -1449,7 +1451,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
       );
       expect(checkpoint.terminalReason).toBe(budget ? "capped" : "saturated");
-      expect(checkpoint.noNewStreak).toBe(empty ? 2 : budget ? 0 : 1);
+      expect(checkpoint.noNewStreak).toBe(
+        empty ? (budget ? 1 : 2) : budget ? 0 : 1,
+      );
       expect(checkpoint.passes).toHaveLength(2);
       expect(checkpoint.mergedScanIds).toHaveLength(budget ? 1 : 2);
       expect(registrations.size).toBe(3);
