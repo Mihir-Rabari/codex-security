@@ -148,11 +148,17 @@ test.each([false, true])(
       expect(descendantPid).toBeDefined();
       expect(spawning).toHaveBeenCalledTimes(1);
     } finally {
+      spawning.mockRestore();
       clearTimeout(timeout);
       child?.kill("SIGKILL");
-      if (descendantPid !== undefined) process.kill(descendantPid, "SIGKILL");
+      if (descendantPid !== undefined) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
       await pending.catch(() => undefined);
-      spawning.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   },
