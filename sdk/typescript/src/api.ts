@@ -1509,7 +1509,11 @@ export class CodexSecurity {
         });
         if (terminal !== null) {
           // A failed optional thread write does not prove the merge was free.
-          if (typeof resumeThreadId !== "string") terminalMergeCost = null;
+          if (
+            typeof resumeThreadId !== "string" &&
+            terminal.accounting.mergeStarted !== false
+          )
+            terminalMergeCost = null;
           const { constituents } = terminal.accounting;
           if (constituents !== null && typeof resumeThreadId === "string") {
             terminalMergeCost = await readHistoricalCost(
@@ -1642,6 +1646,7 @@ export class CodexSecurity {
           checkpoint?.costUnavailable ||
           (typeof resumeThreadId !== "string" &&
             checkpoint !== null &&
+            checkpoint.mergeStarted !== false &&
             (checkpoint.mergedScanIds.length > 0 ||
               checkpoint.passes.some((pass) => pass.completed)))
         ) {
@@ -1679,6 +1684,7 @@ export class CodexSecurity {
         if (
           sealedThreadId === null &&
           !emptyComposition &&
+          checkpoint?.mergeStarted !== false &&
           !accounting.has("previous-work")
         )
           throw new CodexSecurityError(
@@ -1705,7 +1711,10 @@ export class CodexSecurity {
           (savedScan.progress.status === "complete" || !accounting.hasUnknown)
         )
           accounting.completed ??= savedScan.cost ?? null;
-        if (typeof resumeThreadId !== "string" && emptyComposition)
+        if (
+          typeof resumeThreadId !== "string" &&
+          (emptyComposition || checkpoint?.mergeStarted === false)
+        )
           accounting.completed ??= accounting.complete;
         if (
           accounting.completed === null &&

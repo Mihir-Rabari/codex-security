@@ -1,4 +1,4 @@
-import { expandHome } from "./codex-home.js";
+import { expandHome, environmentValue } from "./codex-home.js";
 export { expandHome } from "./codex-home.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -189,19 +189,6 @@ export interface ScanArtifactRestorer {
   restoreMany(
     artifacts: readonly { path: string; contents: Uint8Array }[],
   ): Promise<void>;
-}
-
-function environmentValue(
-  environment: ProcessEnvironment,
-  requested: string,
-): string | undefined {
-  const exact = environment[requested]?.trim();
-  if (exact) return exact;
-  return Object.entries(environment)
-    .find(
-      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-    )?.[1]
-    ?.trim();
 }
 
 export function codexSecurityStateDirectory(

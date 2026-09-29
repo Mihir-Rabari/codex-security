@@ -539,6 +539,7 @@ export async function matchScanFindingsInternal(
 }
 
 interface PreparedReadOnlyClient {
+  model: ReturnType<typeof scanModelConfiguration> | undefined;
   config: JsonObject;
   create: NonNullable<ReadOnlyCodexOptions["createCodex"]>;
   configOverrides: string[];
@@ -549,12 +550,15 @@ async function prepareReadOnlyClient(
   options: ReadOnlyCodexOptions,
 ): Promise<PreparedReadOnlyClient> {
   const config = options.createCodex
-    ? (options.config?.codexOverrides ?? {})
+    ? options.config?.codexOverrides
     : options.config
       ? await mergedCodexConfig(options.config)
-      : {};
+      : undefined;
+  const model =
+    config === undefined ? undefined : scanModelConfiguration(config);
   if (options.codex || options.createCodex)
     return {
+      model,
       config: { ...config, mcp_servers: disabledMcpConfiguration(config, []) },
       create: options.codex ? () => options.codex! : options.createCodex!,
       configOverrides: [],
@@ -592,9 +596,11 @@ async function prepareReadOnlyClient(
     environment,
     options,
   );
-  if (commandAuth) delete config["model_providers"];
+  const sdkConfig = { ...config };
+  if (commandAuth) delete sdkConfig["model_providers"];
   return {
-    config: { ...config, mcp_servers: mcpServers },
+    model,
+    config: { ...sdkConfig, mcp_servers: mcpServers },
     configOverrides: commandAuth
       ? modelProviderConfigOverride(providerConfig)
       : [],
@@ -621,8 +627,7 @@ async function startReadOnlyCodexThread(
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
   const client = await prepareReadOnlyClient(options);
   const config = client.config;
-  const configuredModel =
-    config === undefined ? undefined : scanModelConfiguration(config);
+  const configuredModel = client.model;
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
     options.reasoningEffort ??
