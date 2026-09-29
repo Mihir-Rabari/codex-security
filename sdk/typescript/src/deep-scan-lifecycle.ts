@@ -56,10 +56,6 @@ export function exhaustPassRetries(
   return stopped;
 }
 
-export function recordMergeFailure(state: DeepScanCheckpoint): number {
-  return (state.mergeFailures = (state.mergeFailures ?? 0) + 1);
-}
-
 export function acceptMerge(
   state: DeepScanCheckpoint,
   merged: ScanMergeResult,

@@ -12,7 +12,6 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
-from workbench_composition import composition_child_ids
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
 from workbench_validation import bounded_output_text
 
@@ -76,7 +75,6 @@ def list_global_findings(
 
 
 def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
-    child_ids = composition_child_ids(connection)
     parents: dict[tuple[str, str], tuple[str, str]] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
@@ -87,17 +85,17 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
     for match in connection.execute(
         """
         SELECT before_scans.target_id, before.finding_id AS before_finding_id,
-            after.finding_id AS after_finding_id, before.scan_id AS before_scan_id, after.scan_id AS after_scan_id
+            after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
         JOIN scans AS before_scans ON before_scans.id = before.scan_id
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
+            AND before_scans.parent_scan_role IS NOT 'deep_pass'
+            AND after_scans.parent_scan_role IS NOT 'deep_pass'
         """
     ):
-        if match["before_scan_id"] in child_ids or match["after_scan_id"] in child_ids:
-            continue
         before = group((match["target_id"], match["before_finding_id"]))
         after = group((match["target_id"], match["after_finding_id"]))
         if before != after:
@@ -106,9 +104,9 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
     latest_scan_by_target = {
         row["target_id"]: row["id"]
         for row in connection.execute(
-            "SELECT target_id, id FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT target_id, id FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
         )
-        if row["id"] not in child_ids
     }
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
@@ -143,10 +141,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE scans.parent_scan_role IS NOT 'deep_pass'
         """,
     ):
-        if row["scan_id"] not in child_ids:
-            grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+        grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
 
     findings = []
     for occurrences in grouped.values():

@@ -110,8 +110,3 @@ export async function loadDeepScanCheckpoint(
     return null;
   }
 }
-
-/** Keep extensions, optional fields, and property order intact on disk. */
-export function serializeDeepScanCheckpoint(state: DeepScanCheckpoint): string {
-  return JSON.stringify(state);
-}

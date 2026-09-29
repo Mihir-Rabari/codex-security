@@ -5,12 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import sys
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_composition import composition_child_ids
 
 
 def upsert_finding(
@@ -64,16 +59,16 @@ def index_findings(
     findings = document.get("findings")
     if not isinstance(findings, list):
         raise SystemExit("findings.json must contain a findings array.")
-    repository_id = connection.execute(
-        "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
-    ).fetchone()["target_id"]
-    publish = scan_id not in composition_child_ids(connection)
+    scan = connection.execute(
+        "SELECT target_id, parent_scan_role FROM scans WHERE id = ?", (scan_id,)
+    ).fetchone()
+    publish = scan["parent_scan_role"] != "deep_pass"
     for finding in findings:
         if not isinstance(finding, dict):
             raise SystemExit("findings.json entries must be objects.")
         severity = finding["severity"]
         confidence = finding["confidence"]
-        upsert_finding(connection, finding, timestamp, repository_id, publish=publish)
+        upsert_finding(connection, finding, timestamp, scan["target_id"], publish=publish)
         connection.execute(
             """
             INSERT INTO finding_occurrences (

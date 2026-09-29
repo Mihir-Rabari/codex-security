@@ -307,8 +307,7 @@ def list_scans(
     clauses: list[str] = []
     values: list[Any] = []
     if args is None or not args.scan_root:
-        clauses.append("scans.id NOT IN (SELECT value FROM json_each(?))")
-        values.append(json.dumps(sorted(composition_child_ids(connection))))
+        clauses.append("scans.parent_scan_role IS NOT 'deep_pass'")
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -471,13 +470,13 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
-    child_ids = composition_child_ids(connection)
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT * FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
         )
-        if scan["id"] not in child_ids and _same_repository(scan, requested)
+        if _same_repository(scan, requested)
     ]
 
     available = []

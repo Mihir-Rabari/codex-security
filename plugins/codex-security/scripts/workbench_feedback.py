@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,7 +11,6 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from workbench_composition import composition_child_ids
 from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
@@ -54,7 +52,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
-                AND source_scans.id NOT IN (SELECT value FROM json_each(?))
+                AND source_scans.parent_scan_role IS NOT 'deep_pass'
         )
         SELECT *
         FROM ranked_decisions
@@ -66,7 +64,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
         LIMIT 50
         """,
-        (scan["target_id"], scan["id"], json.dumps(sorted(composition_child_ids(connection)))),
+        (scan["target_id"], scan["id"]),
     )
     false_positives = []
     for row in rows:

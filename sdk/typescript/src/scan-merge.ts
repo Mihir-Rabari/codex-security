@@ -301,16 +301,11 @@ function reconcileScanMerge(
       ...inputs.map((input) => input.draft[field]),
       previous?.[field],
     ].filter((context) => context !== undefined);
-    const distinct = contexts.filter(
-      (context, index) =>
-        contexts.findIndex((other) => isDeepStrictEqual(context, other)) ===
-        index,
-    );
-    if (distinct.length > 1)
+    if (contexts.some((context) => !isDeepStrictEqual(context, contexts[0])))
       throw new Error(
         `Scan merge has ambiguous ${field}; provide the reconciled ${field} explicitly.`,
       );
-    return distinct[0];
+    return contexts[0];
   };
   const threatModel = retainedContext("threatModel");
   if (threatModel !== undefined) aggregate.threatModel = threatModel;
@@ -342,8 +337,8 @@ export function combineScanCoverage(
   priorCoverage?: SemanticCoverage,
 ): SemanticCoverage {
   const completed = [
-    ...inputs.map((input) => input.draft.coverage),
     ...(priorCoverage ? [priorCoverage] : []),
+    ...inputs.map((input) => input.draft.coverage),
   ];
   const coverage: SemanticCoverage = {
     completeness:
@@ -364,10 +359,9 @@ export function combineScanCoverage(
   >(
     field: Field,
   ): void => {
-    const records: unknown[] = structuredClone(priorCoverage?.[field] ?? []);
-    for (const input of inputs)
-      for (const record of structuredClone(input.draft.coverage[field] ?? []))
-        records.push(record);
+    const records = completed.flatMap<unknown>((source) =>
+      structuredClone(source[field] ?? []),
+    );
     coverage[field] = exactUnion(records) as SemanticCoverage[Field];
   };
   combineField("surfaces");

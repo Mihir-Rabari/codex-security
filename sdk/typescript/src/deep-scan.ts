@@ -26,7 +26,6 @@ import {
   DEEP_SCAN_CHECKPOINT,
   loadDeepScanCheckpoint,
   newDeepScanCheckpoint,
-  serializeDeepScanCheckpoint,
   type DeepScanCheckpoint,
 } from "./deep-scan-checkpoint.js";
 import {
@@ -36,7 +35,6 @@ import {
   observePassCompletion,
   observePassFailure,
   passDirectory,
-  recordMergeFailure,
   registerPass,
   reservePass,
   stopDiscovery,
@@ -203,7 +201,7 @@ export async function runDeepScans(
   let savedSnapshot: string | undefined;
   let queuedSave: { snapshot: string; pending: Promise<void> } | undefined;
   const save = async (): Promise<void> => {
-    const snapshot = serializeDeepScanCheckpoint(state);
+    const snapshot = JSON.stringify(state);
     // A newer complete snapshot includes the changes of every queued caller.
     // All callers share its durability barrier; an in-flight write is unchanged.
     if (queuedSave) {
@@ -333,9 +331,11 @@ export async function runDeepScans(
           await input.projectChild(record.scanId, record.scanDir, signal),
         );
         if (recoverOutcomes)
-          recoveredSuccess =
-            observePassCompletion(state, pass, recoveredSuccess) ||
-            recoveredSuccess;
+          recoveredSuccess = observePassCompletion(
+            state,
+            pass,
+            recoveredSuccess,
+          );
         else pass.completed = true;
       }
     }
@@ -434,7 +434,7 @@ export async function runDeepScans(
           isCodexCybersecurityPolicyRefusal(error)
         )
           throw error;
-        const failures = recordMergeFailure(state);
+        const failures = (state.mergeFailures = (state.mergeFailures ?? 0) + 1);
         await save();
         if (failures >= settings.stopAfterConsecutiveErrors) throw error;
       }

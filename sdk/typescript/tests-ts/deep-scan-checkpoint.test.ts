@@ -3,7 +3,6 @@ import { expect, test } from "bun:test";
 import {
   compositionCheckpointFromWorkbench,
   decodeDeepScanCheckpoint,
-  serializeDeepScanCheckpoint,
   type DeepScanCheckpointSummary,
 } from "../src/deep-scan-checkpoint.js";
 
@@ -21,7 +20,7 @@ test.each(["current", "legacy"])(
     );
     const before = JSON.stringify(document);
     const checkpoint = decodeDeepScanCheckpoint(document);
-    expect(serializeDeepScanCheckpoint(checkpoint)).toBe(before);
+    expect(JSON.stringify(checkpoint)).toBe(before);
     expect(JSON.stringify(document)).toBe(before);
     if (name === "current") {
       expect(checkpoint.passes[0]!["extension"]).toEqual({ retain: 1 });
