@@ -130,7 +130,9 @@ export function scanPrompt(
     targetInstruction(target, python),
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
-          "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          "During the audit, checkpoint the unsealed canonical scan-manifest.json, findings.json, and coverage.json before combining or revalidating returned baseline or investigator results and after each validation decision. Reuse these same files; do not wait for the final report or depend on a draft MCP tool.",
+          "For unfinished checkpoints, set scan.complete to false and coverage.completeness to partial. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
+          "Write the final canonical scan-manifest.json, findings.json, and coverage.json with the provisional scan.complete marker removed, retaining truthful coverage and any deferred work. Do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
         ]
       : [
           "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",

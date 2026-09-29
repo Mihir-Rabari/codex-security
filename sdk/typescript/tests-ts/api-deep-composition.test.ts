@@ -136,6 +136,13 @@ test.each([
   { workers: 2, budget: false, provider: undefined },
   { workers: 1, budget: true, provider: undefined },
   { workers: 1, budget: true, firstChildBudget: true },
+  { workers: 1, budget: false, partialCheckpoint: true },
+  {
+    workers: 1,
+    budget: false,
+    partialCheckpoint: true,
+    completedCleanup: true,
+  },
   { workers: 1, budget: false, provider: { env_key: "OPENAI_API_KEY" } },
   {
     workers: 1,
@@ -180,6 +187,8 @@ test.each([
   workers: number;
   budget: boolean;
   firstChildBudget?: boolean;
+  partialCheckpoint?: boolean;
+  completedCleanup?: boolean;
   trackingFailure?: boolean;
   artifactFailure?: "directory" | "draft" | "checkpoint" | "publication";
   cleanupFailure?: boolean;
@@ -205,6 +214,8 @@ test.each([
     workers,
     budget,
     firstChildBudget,
+    partialCheckpoint,
+    completedCleanup,
     provider,
     native,
     trackingFailure,
@@ -245,19 +256,43 @@ test.each([
         writeFile(join(repo, name), "print('public synthetic fixture')\n"),
       ),
     );
-    const childFindings: JsonObject[] = firstChildBudget
-      ? JSON.parse(
-          await readFile(
-            join(pluginRoot, "examples/completed-scan/findings.json"),
-            "utf8",
-          ),
-        ).findings.slice(0, 1)
-      : [];
+    const childFindings: JsonObject[] =
+      firstChildBudget || partialCheckpoint
+        ? JSON.parse(
+            await readFile(
+              join(pluginRoot, "examples/completed-scan/findings.json"),
+              "utf8",
+            ),
+          ).findings.slice(0, 1)
+        : [];
     for (const finding of childFindings) {
       for (const field of ["findingId", "occurrenceId", "fingerprints"])
         delete finding[field];
       finding["locations"] = [{ path: "app.py", startLine: 1, endLine: 1 }];
+      if (partialCheckpoint)
+        finding["codeEvidence"] = [
+          {
+            id: "source",
+            label: "Reviewed source",
+            path: "app.py",
+            startLine: 1,
+            code: "print('public synthetic fixture')",
+            explanation:
+              "Synthetic source evidence retained before interruption.",
+          },
+        ];
     }
+    const pendingCandidate = partialCheckpoint
+      ? {
+          ...structuredClone(childFindings[0]!),
+          identity: { anchor: "pending-source-review" },
+          title: "Pending source review",
+          validation: {
+            summary: "Independent validation is pending.",
+            counterEvidence: ["A caller restriction remains to be verified."],
+          },
+        }
+      : undefined;
     const version = JSON.parse(
       await readFile(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"),
     ).version;
@@ -389,6 +424,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         );
     }
     let controller = new AbortController();
+    let checkpointSignal: AbortSignal | undefined;
     let interrupted = false;
     let savedExecutionThread: string | undefined;
     let sealedArtifacts: Map<string, Buffer<ArrayBuffer>> | undefined;
@@ -1015,12 +1051,25 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                       }
                       const draft: SemanticScan = {
                         scanId: id,
+                        ...(partialCheckpoint ? { complete: false } : {}),
                         findings: childFindings as SemanticFinding[],
                         coverage: {
-                          completeness: "complete",
+                          completeness: partialCheckpoint
+                            ? "partial"
+                            : "complete",
                           surfaces: [],
                           explicitExclusions: [],
-                          deferred: [],
+                          deferred: partialCheckpoint
+                            ? [
+                                {
+                                  id: "pending-candidate",
+                                  candidateId: "pending-candidate",
+                                  reason:
+                                    "Independent source validation is pending.",
+                                  candidate: pendingCandidate!,
+                                },
+                              ]
+                            : [],
                         },
                       };
                       const documents = prepareSemanticScanDraft(
@@ -1031,6 +1080,75 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                         },
                         draft,
                       );
+                      if (partialCheckpoint) {
+                        checkpointSignal = turnOptions!.signal;
+                        // A Deep discovery worker has no workbench MCP. Its
+                        // ordinary unsealed files must survive interruption.
+                        await Promise.all([
+                          writeFile(
+                            join(directory, "scan-manifest.json"),
+                            JSON.stringify({
+                              scan: { ...documents.manifest.scan, id },
+                            }),
+                          ),
+                          writeFile(
+                            join(directory, "findings.json"),
+                            JSON.stringify({
+                              ...documents.findings,
+                              scanId: id,
+                            }),
+                          ),
+                          writeFile(
+                            join(directory, "coverage.json"),
+                            JSON.stringify({
+                              ...documents.coverage,
+                              scanId: id,
+                            }),
+                          ),
+                          appendFile(
+                            join(
+                              sessionHome,
+                              "sessions",
+                              `rollout-${thread.id}.jsonl`,
+                            ),
+                            JSON.stringify({
+                              type: "event_msg",
+                              payload: {
+                                type: "token_count",
+                                info: {
+                                  total_token_usage: {
+                                    input_tokens: 10,
+                                    output_tokens: 3,
+                                  },
+                                },
+                              },
+                            }) + "\n",
+                          ),
+                        ]);
+                        if (completedCleanup) {
+                          try {
+                            yield {
+                              type: "turn.completed",
+                              usage: {
+                                input_tokens: 10,
+                                cached_input_tokens: 0,
+                                cache_write_input_tokens: 0,
+                                output_tokens: 3,
+                                reasoning_output_tokens: 0,
+                              },
+                            };
+                          } finally {
+                            controller.abort(
+                              new Error("Synthetic user cancellation"),
+                            );
+                          }
+                          return;
+                        }
+                        controller.abort(
+                          new Error("Synthetic user cancellation"),
+                        );
+                        throw controller.signal.reason;
+                      }
                       const draftPath = join(
                         directory,
                         "drafts",
@@ -1276,8 +1394,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         });
         return;
       }
-      if (firstChildBudget) {
-        await expect(run()).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+      if (firstChildBudget || partialCheckpoint) {
+        await expect(run()).rejects.toBeInstanceOf(
+          partialCheckpoint ? ScanInterruptedError : ScanCostLimitExceededError,
+        );
         expect(mergeAttempts).toBe(0);
         expect(turns.map((turn) => turn.mode)).toEqual(["standard"]);
         expect(registrations.size).toBe(2);
@@ -1289,7 +1409,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           "--scan-id",
           parent["scanId"] as string,
         ]);
-        expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: partialCheckpoint ? "canceled" : "failed" },
+        });
         const child = [...registrations.values()].find(
           ({ mode }) => mode === "standard",
         )!;
@@ -1306,7 +1428,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
           ),
         ).toMatchObject({
-          terminalReason: "capped",
+          terminalReason: partialCheckpoint ? "canceled" : "capped",
           aggregate: null,
           mergedScanIds: [],
         });
@@ -1315,9 +1437,44 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         ).findings;
         expect(findings).toHaveLength(1);
         expect(findings[0]).toMatchObject(childFindings[0]!);
-        expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
-        ).toMatchObject({ completeness: "partial" });
+        const coverage = JSON.parse(
+          await readFile(join(scanDir, "coverage.json"), "utf8"),
+        );
+        expect(coverage.completeness).toBe("partial");
+        if (partialCheckpoint) {
+          expect(controller.signal.aborted).toBe(true);
+          expect(checkpointSignal!.aborted).toBe(!completedCleanup);
+          expect(
+            commands.filter(
+              ({ command }) =>
+                command === "complete-scan" || command === "write-scan-draft",
+            ),
+          ).toEqual([]);
+          expect((childCost as JsonObject)["estimatedUsd"]).toBeGreaterThan(0);
+          expect(findings[0].provenance.sourceFindings).toHaveLength(1);
+          expect(findings[0].provenance.sourceFindings[0]).toMatchObject({
+            id: `${child["scanId"]}:0`,
+            finding: childFindings[0],
+          });
+          expect(coverage.deferred).toContainEqual(
+            expect.objectContaining({
+              id: `${child["scanId"]}/pending-candidate`,
+              candidateId: expect.stringMatching(
+                new RegExp(`^${child["scanId"]}:`),
+              ),
+              sourceCandidateId: "pending-candidate",
+              reason: "Independent source validation is pending.",
+              candidate: pendingCandidate,
+            }),
+          );
+          // Check the model-facing file contract, not exact instruction wording.
+          for (const field of [
+            "scan.complete",
+            "coverage.deferred",
+            "candidateId",
+          ])
+            expect(turns[0]!.prompt).toContain(field);
+        }
         return;
       }
       if (artifactFailure) {

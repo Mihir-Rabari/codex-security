@@ -302,7 +302,9 @@ export function createExecutionCodex(
       },
     },
   });
-  if (session.runtimeConfig === undefined) return { codex, environment };
+  const deepWorker = session.policy !== "ordinary";
+  if (session.runtimeConfig === undefined && !deepWorker)
+    return { codex, environment };
   const lockConfiguration = (signal?: AbortSignal) =>
     lockExecutionConfiguration(session, config ?? sessionConfig, signal);
   const wrapThread = (thread: CodexThreadLike): CodexThreadLike => ({
@@ -314,15 +316,35 @@ export function createExecutionCodex(
         events: (async function* () {
           let release: (() => Promise<void>) | undefined =
             await lockConfiguration(options.signal);
+          const controller = deepWorker ? new AbortController() : undefined;
+          const forwardAbort = () => controller?.abort(options.signal?.reason);
+          const detach = () =>
+            options.signal?.removeEventListener("abort", forwardAbort);
+          if (controller) {
+            if (options.signal?.aborted) forwardAbort();
+            else
+              options.signal?.addEventListener("abort", forwardAbort, {
+                once: true,
+              });
+          }
           try {
-            const { events } = await thread.runStreamed(input, options);
+            const { events } = await thread.runStreamed(
+              input,
+              controller ? { ...options, signal: controller.signal } : options,
+            );
             for await (const event of events) {
               // Native startup has loaded its config before emitting SDK events.
               await release?.();
               release = undefined;
+              // The Deep coordinator treats completion as the worker boundary.
+              // Ordinary scans drain the process to retain late exit errors.
+              const completed = deepWorker && event.type === "turn.completed";
+              if (completed) detach();
               yield event;
+              if (completed) return;
             }
           } finally {
+            detach();
             await release?.();
           }
         })(),

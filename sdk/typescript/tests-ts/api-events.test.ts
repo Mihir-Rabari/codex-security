@@ -1,4 +1,6 @@
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -23,9 +25,19 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   completedEvents,
   createApiTestFixtures,
+  preparedRuntime,
   runEvents,
   type ScanObserverName,
 } from "./support/api-events.js";
+
+import {
+  createExecutionCodex,
+  prepareExecutionSource,
+  type CodexClientLike,
+  type ExecutionPolicy,
+  type PreparedExecution,
+} from "../src/execution-preparation.js";
+import { readCodexTurn } from "../src/scan-events.js";
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -1229,4 +1241,197 @@ describe("one-shot scan events", () => {
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
   });
+});
+
+describe("Deep worker terminal lifecycle", () => {
+  async function execution(
+    root: string,
+    policy: ExecutionPolicy,
+    overlay: boolean,
+    createCodex: Parameters<typeof createExecutionCodex>[0]["createCodex"],
+  ): Promise<CodexClientLike> {
+    const codexHome = join(root, "codex-home");
+    await mkdir(codexHome, { mode: 0o700 });
+    const environment = {
+      PATH: process.env["PATH"] ?? "",
+      CODEX_HOME: codexHome,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const source = prepareExecutionSource({
+      command: { command: process.execPath },
+      configuration: {},
+      environment,
+    });
+    const session: PreparedExecution = {
+      policy,
+      source,
+      runtime: preparedRuntime(codexHome),
+      environment,
+      runtimeHome: codexHome,
+      effectiveConfig: {},
+      preflightConfig: {},
+      sessionConfig: {},
+      ...(overlay ? { runtimeConfig: {} } : {}),
+      authentication: source.authentication,
+      approvalPolicy: "never",
+      python: process.execPath,
+      releaseCredentialHome: null,
+    };
+    return createExecutionCodex({ surface: "sdk", createCodex }, session, {})
+      .codex;
+  }
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      [false, true].flatMap((resume) =>
+        [false, true].map((overlay) => ({ policy, resume, overlay })),
+      ),
+    ),
+  )(
+    "closes a completed real Deep subprocess: %j",
+    async ({ policy, resume, overlay }) => {
+      const root = await temporaryDirectory();
+      const preload = join(root, "held-open.mjs");
+      const pidPath = join(root, "worker.pid");
+      const events: ThreadEvent[] = [];
+      for await (const event of completedEvents()) events.push(event);
+      await writeFile(
+        preload,
+        [
+          'import { writeFileSync } from "node:fs";',
+          "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
+          `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+          ...events.map(
+            (event) =>
+              `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
+          ),
+          "setInterval(() => {}, 1_000);",
+          "await new Promise(() => {});",
+        ].join("\n"),
+      );
+      const executable = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const codex = await execution(
+        root,
+        policy,
+        overlay,
+        (options) =>
+          new Codex({
+            ...options,
+            codexPathOverride: executable,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
+          }),
+      );
+      const thread = resume
+        ? codex.resumeThread!("thread-1", {})
+        : codex.startThread({});
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5_000);
+      let pid: number | undefined;
+      let exited = false;
+      try {
+        const { events } = await thread.runStreamed(
+          "Synthetic process fixture; no model.",
+          { signal: controller.signal },
+        );
+        await expect(readCodexTurn({ thread, events })).resolves.toMatchObject({
+          threadId: "thread-1",
+          status: "completed",
+          finalResponse: "scan complete",
+        });
+        expect(controller.signal.aborted).toBe(false);
+        pid = Number(await readFile(pidPath, "utf8"));
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          try {
+            process.kill(pid, 0);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+              exited = true;
+              break;
+            }
+            throw error;
+          }
+          if (Date.now() >= deadline)
+            throw new Error("Completed Deep worker did not exit.");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      } finally {
+        clearTimeout(timer);
+        controller.abort();
+        pid ??= Number(await readFile(pidPath, "utf8").catch(() => "0"));
+        if (!exited && pid > 0) {
+          try {
+            process.kill(pid);
+          } catch {}
+        }
+      }
+    },
+  );
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      (["before", "active", "completed"] as const).map((when) => ({
+        policy,
+        when,
+      })),
+    ),
+  )(
+    "forwards only active Deep worker cancellation: %j",
+    async ({ policy, when }) => {
+      const root = await temporaryDirectory();
+      const parent = new AbortController();
+      const cancellation = new Error("Synthetic coordinator cancellation.");
+      if (when === "before") parent.abort(cancellation);
+      let workerSignal: AbortSignal | undefined;
+      let closed = false;
+      const codex = await execution(root, policy, false, () => ({
+        startThread: () => ({
+          id: "thread-1",
+          async runStreamed(_input, options) {
+            workerSignal = options.signal;
+            return {
+              events: (async function* () {
+                try {
+                  workerSignal!.throwIfAborted();
+                  yield { type: "thread.started", thread_id: "thread-1" };
+                  workerSignal!.throwIfAborted();
+                  yield { type: "turn.completed", usage: null };
+                  throw new Error(
+                    "A completed worker must close its iterator.",
+                  );
+                } finally {
+                  closed = true;
+                  if (when === "completed") parent.abort(cancellation);
+                }
+              })(),
+            };
+          },
+        }),
+      }));
+      const thread = codex.startThread({});
+      const { events } = await thread.runStreamed("Synthetic events.", {
+        signal: parent.signal,
+      });
+      const result = readCodexTurn({
+        thread,
+        events,
+        onEvent: (event) => {
+          if (when === "active" && event.type === "thread.started")
+            parent.abort(cancellation);
+        },
+      });
+      if (when === "completed")
+        await expect(result).resolves.toMatchObject({ status: "completed" });
+      else await expect(result).rejects.toBe(cancellation);
+      expect(closed).toBe(true);
+      expect(workerSignal).not.toBe(parent.signal);
+      expect(workerSignal!.aborted).toBe(when !== "completed");
+      expect(parent.signal.reason).toBe(cancellation);
+    },
+  );
 });
