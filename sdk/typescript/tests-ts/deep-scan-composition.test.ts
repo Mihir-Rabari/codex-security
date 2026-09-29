@@ -1209,7 +1209,15 @@ describe("ordinary scan composition", () => {
       noNewStreak: 3,
       consecutiveErrors: 0,
     });
+    const costs = new Map<string, Readonly<ScanCost> | null>();
+    h.input.onCost = (key, cost) => costs.set(key, cost);
     await runDeepScans(h.input);
+    expect(costs.has("legacy")).toBe(true);
+    expect(costs.get("legacy")).toBeNull();
+    costs.clear();
+    await runDeepScans(h.input);
+    expect(costs.has("legacy")).toBe(true);
+    expect(costs.get("legacy")).toBeNull();
     const state = await h.checkpoint();
     expect(h.calls).toHaveLength(1);
     expect(state.passes).toHaveLength(1);

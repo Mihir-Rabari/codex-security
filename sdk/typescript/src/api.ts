@@ -1,6 +1,7 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import { prepareScanSkill, scanPrompt } from "./scan-preparation.js";
+import { findScanSession } from "./scan-logs.js";
 
 import {
   scanAuthentication,
@@ -1483,6 +1484,22 @@ export class CodexSecurity {
           );
         }
       };
+      const isLegacyScanSession = async (
+        threadId: string,
+      ): Promise<boolean> => {
+        const saved = await findScanSession(runtime.codexHome, threadId);
+        const startedAt =
+          typeof registration["startedAt"] === "string"
+            ? Date.parse(registration["startedAt"])
+            : NaN;
+        // Native owners can include earlier conversation work, even from this directory.
+        return (
+          saved?.workingDirectory === scanDir &&
+          saved.startedAt !== null &&
+          Number.isFinite(startedAt) &&
+          saved.startedAt >= startedAt
+        );
+      };
       if (
         !sealed &&
         mode === "deep" &&
@@ -1493,6 +1510,11 @@ export class CodexSecurity {
           threadId: string,
           scanDirectory: string,
         ) => {
+          if (
+            scanDirectory === scanDir &&
+            !(await isLegacyScanSession(threadId))
+          )
+            return null;
           const historical = new ScanCostTracker({
             codexHome: runtime.codexHome,
             model,
@@ -1570,6 +1592,14 @@ export class CodexSecurity {
         threadId: string,
         scanDirectory = scanDir,
       ) => {
+        if (
+          scanDirectory === scanDir &&
+          !(await isLegacyScanSession(threadId).catch((error: unknown) => {
+            reportTrackingError(error);
+            return false;
+          }))
+        )
+          return null;
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
@@ -1638,6 +1668,8 @@ export class CodexSecurity {
       const restorePriorAccounting = (
         checkpoint: DeepScanCheckpointSummary | null,
       ): void => {
+        if (checkpoint?.legacy)
+          passCosts.set("legacy", checkpoint.legacy.cost ?? null);
         if (
           checkpoint?.costUnavailable ||
           (typeof resumeThreadId !== "string" &&
@@ -1687,8 +1719,14 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "The sealed scan has no saved execution session.",
           );
-        if (checkpoint?.legacy?.cost)
-          passCosts.set("legacy", checkpoint.legacy.cost);
+        if (checkpoint?.legacy)
+          passCosts.set(
+            "legacy",
+            checkpoint.legacy.cost ??
+              (checkpoint.legacy.originThreadId
+                ? await historicalCost(checkpoint.legacy.originThreadId)
+                : null),
+          );
         if (checkpoint != null) {
           const children = await workbench(workbenchOptions, [
             "list-scans",
@@ -1702,6 +1740,10 @@ export class CodexSecurity {
         }
         if (mode === "deep" && checkpoint == null) {
           completionCost = await historicalCost(sealedThreadId!);
+          completionCost ??= savedScan.cost ?? null;
+          passCosts.set("legacy", completionCost);
+          // This retired origin was measured above; it is not a composed merge session.
+          resumeThreadId = null;
         }
         if (
           !passCosts.has("previous-work") &&
@@ -1711,7 +1753,7 @@ export class CodexSecurity {
           completionCost ??= savedScan.cost ?? null;
         if (
           typeof resumeThreadId !== "string" &&
-          (emptyComposition || checkpoint?.legacy?.cost)
+          (emptyComposition || checkpoint?.legacy)
         )
           completionCost ??= completeCost(null);
         if (

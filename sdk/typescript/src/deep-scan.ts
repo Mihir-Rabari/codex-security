@@ -256,7 +256,7 @@ export async function runDeepScans(
         "Restore the original Deep Scan session logs to verify its saved cost limit.",
       );
   }
-  if (state.legacy?.cost) input.onCost("legacy", state.legacy.cost);
+  if (state.legacy) input.onCost("legacy", state.legacy.cost ?? null);
   const validateMerge = await createScanMergeValidator(input.pluginRoot);
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
