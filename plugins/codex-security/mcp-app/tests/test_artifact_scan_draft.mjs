@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdir,
@@ -32,9 +33,8 @@ const module = await import(
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
-  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraft: publishScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  saveScanDraftCheckpoint,
   scanDraftInputSchema,
 } = module;
 
@@ -46,7 +46,6 @@ try {
   const context = {
     root,
     repoRoot: root,
-    layout: "scan",
     scanId,
     scope: ".",
     mode: "standard",
@@ -146,6 +145,105 @@ try {
   assert.equal(
     (await readJson(parentCheckpointRoot, "findings.json")).findings.length,
     1,
+  );
+
+  // This is the exact current parent payload that merge_saved_results persists.
+  const producerCheckpoint = JSON.parse(
+    execFileSync(
+      process.env.PYTHON ??
+        (process.platform === "win32" ? "python" : "python3"),
+      [
+        "-B",
+        "-c",
+        `
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_saved_results import _read_saved_parent_result
+print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
+`,
+        path.resolve(import.meta.dirname, "../../scripts"),
+        parentCheckpointRoot,
+        scanId,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  assert.deepEqual(producerCheckpoint.scope.includePaths, ["."]);
+  assert.deepEqual(producerCheckpoint.coverage.includePaths, ["."]);
+  assert.deepEqual(producerCheckpoint.coverage.excludePaths, []);
+  assert.equal(producerCheckpoint.coverage.mode, "repository");
+  assert.equal(producerCheckpoint.coverage.inventoryStrategy, "repository");
+  const producerContext = { ...context, root: parentCheckpointRoot };
+  const producerPath = await saveScanDraftCheckpoint(
+    producerContext,
+    producerCheckpoint,
+  );
+  const producerBytes = await readFile(producerPath, "utf8");
+  await recordCodexSecurityScanDraft(producerContext, {
+    ...input,
+    findings: [],
+  });
+  assert.deepEqual(
+    (await readJson(parentCheckpointRoot, "findings.json")).findings,
+    producerCheckpoint.findings,
+  );
+  assert.deepEqual(
+    (await readJson(parentCheckpointRoot, "coverage.json")).includePaths,
+    ["."],
+  );
+  assert.equal(await readFile(producerPath, "utf8"), producerBytes);
+  for (const [name, changed, expected] of [
+    [
+      "scan-identity",
+      { scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608" },
+      /different scan/,
+    ],
+    [
+      "coverage",
+      { coverage: { ...producerCheckpoint.coverage, completeness: "invalid" } },
+      /current schema/,
+    ],
+  ]) {
+    const invalidContext = {
+      ...context,
+      root: path.join(root, "producer-" + name),
+    };
+    await saveScanDraftCheckpoint(invalidContext, {
+      ...producerCheckpoint,
+      ...changed,
+    });
+    await assert.rejects(
+      recordCodexSecurityScanDraft(invalidContext, input),
+      expected,
+    );
+  }
+
+  const unsupportedCheckpointContext = {
+    ...context,
+    root: path.join(root, "unsupported-checkpoint"),
+  };
+  const { handoffClaimToken: _oldClaim, ...oldCheckpoint } = {
+    ...input,
+    findings: [
+      { ...finding, validation: { assertions: "obsolete string list" } },
+    ],
+  };
+  await saveScanDraftCheckpoint(unsupportedCheckpointContext, oldCheckpoint);
+  await assert.rejects(
+    recordCodexSecurityScanDraft(unsupportedCheckpointContext, input),
+    /Saved scan draft does not match the current schema/,
+  );
+  const retained = await readdir(
+    path.join(unsupportedCheckpointContext.root, "checkpoints"),
+  );
+  assert.equal(retained.length, 1);
+  assert.deepEqual(
+    await readJson(
+      unsupportedCheckpointContext.root,
+      "checkpoints/" + retained[0],
+    ),
+    oldCheckpoint,
   );
 
   const interruptedParentRoot = path.join(
@@ -2247,8 +2345,8 @@ try {
     /handoffClaimToken/,
   );
   await assert.rejects(
-    recordCodexSecurityScanDraft({ ...context, layout: "worker" }, input),
-    /authoritative parent scan context/,
+    recordCodexSecurityScanDraft({ ...context, scanId: undefined }, input),
+    /scanId does not match/,
   );
   await assert.rejects(
     recordCodexSecurityScanDraft({ ...context, status: "complete" }, input),
@@ -2506,4 +2604,38 @@ async function recordFreshScanDraft(context, input) {
     }),
   ]);
   return recordCodexSecurityScanDraft(context, input);
+}
+
+// Exercise reconciliation with explicit fixture publication; production publishes under the workbench lock.
+function recordCodexSecurityScanDraft(context, input, publish, signal) {
+  return publishScanDraft(
+    context,
+    input,
+    publish ??
+      (async (draft, _digest, checkpoint) => {
+        await saveScanDraftCheckpoint(context, checkpoint);
+        for (const [name, document] of Object.entries({
+          "scan-manifest.json": draft.manifest,
+          "findings.json": draft.findings,
+          "coverage.json": draft.coverage,
+        }))
+          await writeFile(
+            path.join(context.root, name),
+            JSON.stringify(document) + "\n",
+          );
+      }),
+    signal,
+  );
+}
+
+async function saveScanDraftCheckpoint(context, input) {
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(snapshot))
+    .digest("hex");
+  const directory = path.join(context.root, "checkpoints");
+  await mkdir(directory, { recursive: true });
+  const checkpointPath = path.join(directory, digest + ".json");
+  await writeFile(checkpointPath, JSON.stringify(snapshot) + "\n");
+  return checkpointPath;
 }

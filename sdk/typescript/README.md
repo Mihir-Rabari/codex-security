@@ -1582,7 +1582,16 @@ If discovery finished before the interruption, resume completes and seals the
 same scan. No archiving or new attempt directory is needed. A failed connection
 leaves the existing scan available for another resume attempt.
 
-Compatible saved scans can resume after a plugin update. Already-sealed results
+Compatible saved scans can resume after a plugin update. Unsealed scans from the
+retired Deep Scan runtime cannot resume; start a fresh scan instead. Saved drafts
+must match the current schema. Recover unfinished worker or reducer fragments
+from that runtime with the prior release; the current runtime reads parent drafts
+and ordinary scan checkpoints. Existing report files remain available, and
+rejecting a failed or canceled checkpoint leaves its saved accounting unchanged.
+Older unreleased builds identified child scans by their artifact paths. That
+state is no longer migrated; start fresh scans for those database snapshots.
+Existing report files remain available.
+Already-sealed results
 keep their original producer version and contents when completion is recorded.
 Unsupported or invalid sealed artifacts are rejected before resuming, preserving
 the saved scan state and files.

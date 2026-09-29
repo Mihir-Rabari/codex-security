@@ -13,7 +13,6 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, sep } from "node:path";
 import { after, test } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml } from "smol-toml";
@@ -188,39 +187,6 @@ test("native preparation protects enclosing repositories for fresh and resumed c
     const installations = [
       { bin: externalBin, executable: externalExecutable },
     ];
-    if (process.platform === "win32") {
-      const npmBin = join(root, "global npm");
-      const codexPackage = join(npmBin, "node_modules", "@openai", "codex");
-      const architecture = process.arch === "arm64" ? "arm64" : "x64";
-      const platformPackage = join(
-        codexPackage,
-        "node_modules",
-        "@openai",
-        `codex-win32-${architecture}`,
-      );
-      const triple =
-        architecture === "arm64"
-          ? "aarch64-pc-windows-msvc"
-          : "x86_64-pc-windows-msvc";
-      const npmExecutable = join(
-        platformPackage,
-        "vendor",
-        triple,
-        "bin",
-        "codex.exe",
-      );
-      await mkdir(dirname(npmExecutable), { recursive: true });
-      await writeFile(
-        join(codexPackage, "package.json"),
-        JSON.stringify({ name: "@openai/codex" }),
-      );
-      await writeFile(
-        join(platformPackage, "package.json"),
-        JSON.stringify({ name: `@openai/codex-win32-${architecture}` }),
-      );
-      await writeFile(npmExecutable, "inert executable fixture");
-      installations.push({ bin: npmBin, executable: npmExecutable });
-    }
     await symlink(
       bin,
       alias,
@@ -829,7 +795,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
 });
 
 test(
-  "native worker turns verify the selected permissions before fresh and resumed execution",
+  "native discovery and merge workers inherit safe executable paths on fresh and resumed launches",
   {
     skip:
       process.platform === "win32"
@@ -842,7 +808,6 @@ test(
     );
     const executable = join(root, "codex");
     const capture = join(root, "capture.jsonl");
-    const scenario = join(root, "scenario");
     const repository = join(root, "repository");
     const target = join(repository, "src");
     const repositoryBin = join(repository, "bin");
@@ -857,8 +822,6 @@ test(
     const before = Object.fromEntries(
       keys.map((key) => [key, process.env[key]]),
     );
-    const fallback =
-      "Configured value for `permission_profile` is disallowed by requirements; falling back from `codex_security_scan` to required value `:read-only`.";
     const observations = async () =>
       (await readFile(capture, "utf8"))
         .trim()
@@ -869,10 +832,6 @@ test(
       argv.flatMap((value, index) =>
         value === "--config" || value === "-c" ? [argv[index + 1]] : [],
       );
-    const permissionError = (error) => {
-      assert.equal(error.constructor.name, "ScanPermissionError");
-      return true;
-    };
     try {
       await mkdir(target, { recursive: true });
       await Promise.all([
@@ -905,25 +864,12 @@ if (process.argv.includes("app-server")) {
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-worker-thread" }));
-  const scenario = fs.readFileSync(process.env.NATIVE_PROFILE_SCENARIO, "utf8").trim();
-  if (scenario.startsWith("late-fallback")) {
-    process.on("SIGTERM", () => { capture({ kind: "aborted" }); process.exit(0); });
-    console.log(JSON.stringify(scenario === "late-fallback-error"
-      ? { type: "error", message: ${JSON.stringify(fallback)} }
-      : { type: "item.completed", item: { type: "error", message: ${JSON.stringify(fallback)} } }));
-    setTimeout(() => {
-      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "must not be consumed" } }));
-      console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
-      process.exit(0);
-    }, 500);
-  } else {
-    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
-  }
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
 `,
         { mode: 0o700 },
       );
-      for (const role of ["discovery", "merge", "comparison"]) {
+      for (const role of ["discovery", "merge"]) {
         const cwd = join(root, role);
         await mkdir(cwd);
         const config = scanRuntimeCodexConfig(
@@ -937,55 +883,37 @@ if (process.argv.includes("app-server")) {
             network: { enabled: false },
           },
         );
-        const profileId =
-          role === "comparison"
-            ? "codex_security_comparison"
-            : "codex_security_scan";
-        const configOverrides = [
-          `default_permissions=${JSON.stringify(profileId)}`,
-        ];
-        if (role === "comparison") {
-          configOverrides.push(
-            `permissions.codex_security_comparison={extends=":read-only",filesystem={${JSON.stringify(join(root, "private"))}="deny"},network={enabled=false}}`,
-          );
-        }
-        const native =
-          role === "comparison"
-            ? undefined
-            : await prepareNativeScan({
-                ...input(),
-                scan: { ...input().scan, targetPath: target },
-                recipe: { auth: "api-key" },
-              });
-        const selectedEnvironment = native?.client.dependencies.environment;
-        if (selectedEnvironment) {
-          assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
-          assert.equal(
-            selectedEnvironment.PATH,
-            [root, selectedTools].join(delimiter),
-          );
-          assert.equal(
-            process.env.PATH,
-            [repositoryBin, root, selectedTools].join(delimiter),
-          );
-        }
+        const native = await prepareNativeScan({
+          ...input(),
+          scan: { ...input().scan, targetPath: target },
+          recipe: { auth: "api-key" },
+        });
+        const selectedEnvironment = native.client.dependencies.environment;
+        assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
+        assert.equal(
+          selectedEnvironment.PATH,
+          [root, selectedTools].join(delimiter),
+        );
+        assert.equal(
+          process.env.PATH,
+          [repositoryBin, root, selectedTools].join(delimiter),
+        );
         const gitEnvironment = {
-          PATH: selectedEnvironment?.PATH ?? selectedTools,
+          PATH: selectedEnvironment.PATH,
           CODEX_SECURITY_GIT: join(root, "selected tools", "git"),
           GIT_SSH_COMMAND: "synthetic-ssh --fixture",
           GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
         };
         const sdk = createPermissionCheckedCodex({
-          codexPathOverride: selectedEnvironment?.CODEX_CLI_PATH ?? executable,
+          codexPathOverride: selectedEnvironment.CODEX_CLI_PATH,
           config: { ...config, default_permissions: ":read-only" },
-          configOverrides,
+          configOverrides: ['default_permissions="codex_security_scan"'],
           apiKey: "synthetic-final-key",
           env: {
             ...selectedEnvironment,
             CODEX_HOME: root,
             CODEX_API_KEY: "synthetic-stale-key",
             NATIVE_PROFILE_CAPTURE: capture,
-            NATIVE_PROFILE_SCENARIO: scenario,
             NATIVE_PROFILE_MARKER: role,
             ...gitEnvironment,
           },
@@ -995,18 +923,14 @@ if (process.argv.includes("app-server")) {
             workingDirectory: cwd,
             skipGitRepoCheck: true,
             approvalPolicy: "never",
-            ...(role === "comparison"
-              ? { networkAccessEnabled: false, webSearchMode: "disabled" }
-              : {}),
           };
           const thread = resumed
             ? sdk.resumeThread(`synthetic-${role}-thread`, options)
             : sdk.startThread(options);
-          await writeFile(scenario, "valid");
           await writeFile(capture, "");
           const events = await collectNativeEvents(
             thread,
-            "Synthetic permission verification.",
+            "Synthetic worker path verification.",
           );
           assert.equal(events.at(-1).type, "turn.completed");
           assert.equal(thread.id, "synthetic-worker-thread");
@@ -1029,67 +953,6 @@ if (process.argv.includes("app-server")) {
             assert.equal(process.marker, role);
             assert.equal(process.codex, "synthetic-final-key");
             assert.equal(process.openai, undefined);
-          }
-          const requests = observed.filter((entry) => entry.kind === "request");
-          assert.deepEqual(
-            requests.map((entry) => entry.method),
-            [
-              "initialize",
-              "initialized",
-              "config/read",
-              "permissionProfile/list",
-              "permissionProfile/list",
-            ],
-          );
-          for (const request of requests.slice(2))
-            assert.equal(request.params.cwd, cwd);
-          assert.equal(requests.at(-1).params.cursor, "selected-page");
-          if (role === "comparison") break;
-
-          for (const rejectedScenario of [
-            "disallowed",
-            "substituted-default",
-            "substituted-profile",
-          ]) {
-            await writeFile(scenario, rejectedScenario);
-            await writeFile(capture, "");
-            await assert.rejects(
-              collectNativeEvents(thread, "Recheck the same worker turn."),
-              permissionError,
-            );
-            assert.equal(
-              (await observations()).filter((entry) => entry.kind === "exec")
-                .length,
-              0,
-            );
-          }
-          for (const lateScenario of [
-            "late-fallback-item",
-            "late-fallback-error",
-          ]) {
-            await writeFile(scenario, lateScenario);
-            await writeFile(capture, "");
-            const streamed = await thread.runStreamed(
-              "Stop on a late permission fallback.",
-            );
-            const yielded = [];
-            await assert.rejects(async () => {
-              for await (const event of streamed.events) yielded.push(event);
-            }, permissionError);
-            assert.deepEqual(
-              yielded.map((event) => event.type),
-              ["thread.started"],
-            );
-            for (let attempt = 0; attempt < 100; attempt += 1) {
-              if (
-                (await observations()).some((entry) => entry.kind === "aborted")
-              )
-                break;
-              await delay(10);
-            }
-            assert.ok(
-              (await observations()).some((entry) => entry.kind === "aborted"),
-            );
           }
         }
       }

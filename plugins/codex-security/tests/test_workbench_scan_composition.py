@@ -13,10 +13,49 @@ from threading import Barrier, Event
 from unittest import mock
 
 import pytest
-from workbench_test_support import SCRIPT, run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    SCRIPT,
+    checkpoint,
+    recipe,
+    register,
+    run_workbench,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
+
+
+def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
+    saved = workbench_api["saved_results"]
+    root = Path("/synthetic-scan")
+    children = [
+        {"id": "broken", "scan_dir": str(root / "broken")},
+        {"id": "retained", "scan_dir": str(root / "retained")},
+    ]
+    monkeypatch.setattr(saved, "read_composition_checkpoint", lambda _: None)
+    monkeypatch.setattr(saved, "composition_children", lambda *_: children)
+    monkeypatch.setattr(saved, "write_scan_local_bytes", lambda *_: None)
+    retained_coverage = {"surfaces": [{"id": "retained/surface", "summary": "Saved work"}]}
+    with mock.patch.object(
+        saved,
+        "_stopped_child_draft",
+        side_effect=[
+            ValueError("Synthetic malformed artifact"),
+            {"findings": [], "coverage": retained_coverage},
+        ],
+    ):
+        result = saved.save_composed_checkpoint(
+            None, None, {"id": "parent", "scan_dir": str(root)}, root
+        )
+    assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
+    assert result["coverage"]["deferred"][0] == {
+        "id": "unmerged-broken",
+        "reason": "Independent scan did not complete and merge. Saved work: broken. "
+        "Recovery failed: Synthetic malformed artifact",
+    }
+    assert result["complete"] is False
 
 
 @pytest.mark.parametrize("alias", ["exact", "case", "directory"])
@@ -68,65 +107,6 @@ def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path
     )
     assert report.read_text() == "# Original report\n"
     assert evidence.read_text() == "Synthetic supporting evidence\n"
-
-
-def recipe(target: Path, mode: str = "standard") -> dict:
-    return {
-        "repository": str(target),
-        "target": {"kind": "repository", "paths": []},
-        "mode": mode,
-        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
-        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
-    }
-
-
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700)
-    saved_recipe = recipe(target, mode)
-    if paths:
-        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
-    return run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        *(("--parent-scan-id", parent) if parent else ()),
-        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
-    )
-
-
-def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
-    value = {
-        "version": 2,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "passes": list(passes),
-        "mergedScanIds": list(merged),
-        "aggregate": None,
-        "noNewStreak": 0,
-        "consecutiveErrors": 0,
-        **({"terminalReason": terminal} if terminal else {}),
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=json.dumps(value),
-    )
-    return value
 
 
 @pytest.mark.parametrize("accepted", [False, True])
@@ -262,7 +242,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
 
 
 @pytest.mark.parametrize("name", ["current", "legacy"])
-def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
+def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("print('fixture')\n")
@@ -283,18 +263,6 @@ def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monk
     stored = {"id": scan["scanId"], "scan_dir": scan["scanDir"]}
     loaded = workbench_api["read_composition_checkpoint"](stored)
     assert loaded == original
-    encoded = workbench_api["saved_results"].encode_composition_checkpoint(loaded)
-    assert json.loads(encoded) == original
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=encoded.decode(),
-    )
-    assert workbench_api["read_composition_checkpoint"](stored) == original
 
 
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
@@ -589,6 +557,105 @@ def native_scan_completion(tmp_path: Path):
     return state, target, arguments, started, complete
 
 
+@pytest.mark.parametrize("saved_recipe", [False, True])
+@pytest.mark.parametrize("artifact_state", ["unsealed", "sealed", "tampered"])
+def test_native_legacy_registration_only_rejoins_validated_sealed_results(
+    native_scan_completion, saved_recipe: bool, artifact_state: str
+) -> None:
+    state, target, _, started, complete = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    token = scan["handoffClaimToken"]
+    run_workbench(
+        state,
+        "set-scan-thread",
+        "--scan-id",
+        scan["scanId"],
+        "--thread-id",
+        "saved-execution",
+        "--claim-token",
+        token,
+    )
+    if artifact_state != "unsealed":
+        run_workbench(
+            state, "prepare-scan-completion", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+    if artifact_state == "tampered":
+        findings_path = directory / "findings.json"
+        findings_path.write_bytes(findings_path.read_bytes() + b" ")
+    checkpoint_path = directory / CHECKPOINT
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["legacy"] = {"discoveryRuns": 1, "coverage": {"completeness": "complete"}}
+    checkpoint_path.write_text(json.dumps(checkpoint))
+    identity_query = (
+        "SELECT recipe_json, continuation_thread_id, deep_scan_owner_thread_id, handoff_claim_token "
+        "FROM scans WHERE id = ?"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        if not saved_recipe:
+            connection.execute(
+                "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
+            )
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
+            "workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at, "
+            "terminal_reason, manifest_path) "
+            "SELECT id, 1, 'synthetic-legacy', 'succeeded', 'terminal', 1, 0, 3, 8, started_at, "
+            "updated_at, 'saturated', ? FROM scans WHERE id = ?",
+            (str(directory / "scan-manifest.json"), scan["scanId"]),
+        )
+        original_identity = connection.execute(identity_query, (scan["scanId"],)).fetchone()
+    originals = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", CHECKPOINT)
+    }
+    rebound = run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(directory),
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "scanId": scan["scanId"],
+                "threadId": "native-owner",
+                "claimToken": token,
+                "recipe": recipe(target, "deep"),
+            }
+        ),
+        check=artifact_state == "sealed",
+    )
+    if artifact_state == "sealed":
+        assert rebound["scanId"] == scan["scanId"]
+        assert rebound["threadId"] == "saved-execution"
+        resumed = run_workbench(
+            state, "get-cli-scan-resume", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+        assert resumed["threadId"] == "saved-execution"
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()[1:]
+                == original_identity[1:]
+            )
+        assert (
+            resumed["sealedProducerVersion"]
+            == json.loads(originals["scan-manifest.json"])["scan"]["producer"]["version"]
+        )
+        assert complete()["progress"]["status"] == "complete"
+    else:
+        assert (
+            "retired runtime" if artifact_state == "unsealed" else "Cannot resume sealed scan"
+        ) in rebound["stderr"]
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()
+                == original_identity
+            )
+    assert {name: (directory / name).read_bytes() for name in originals} == originals
+
+
 @pytest.mark.parametrize("during_retry", [False, True])
 def test_native_target_retry_reuses_completed_result(
     native_scan_completion, workbench_api, monkeypatch, during_retry: bool
@@ -876,9 +943,8 @@ def test_native_parent_binds_once_and_keeps_native_claim(
 
 
 @pytest.mark.parametrize("target_entry", [False, True])
-@pytest.mark.parametrize("recipe_maximum", [None, 9])
-def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
-    tmp_path: Path, target_entry: bool, recipe_maximum: int | None
+def test_native_legacy_settings_remain_readable_without_rebinding(
+    tmp_path: Path, target_entry: bool
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -962,12 +1028,7 @@ def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
         assert connection.execute(
             "SELECT deep_scan_owner_thread_id, continuation_thread_id, handoff_claim_token FROM scans"
         ).fetchall() == [("native-owner", None if target_entry else "native-owner", token)]
-    saved_recipe = recipe(target, "deep")
-    if recipe_maximum is None:
-        del saved_recipe["deepScan"]
-    else:
-        saved_recipe["deepScan"]["maxDiscoveryRuns"] = recipe_maximum
-    run_workbench(
+    rejected = run_workbench(
         state,
         "register-cli-scan",
         "--repository",
@@ -977,59 +1038,18 @@ def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
         "--registration-json-stdin",
         input_text=json.dumps(
             {
-                "recipe": saved_recipe,
+                "recipe": recipe(target, "deep"),
                 "scanId": scan["scanId"],
                 "threadId": "native-owner",
                 "claimToken": token,
             }
         ),
+        check=False,
     )
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["scanId"] == scan["scanId"]
-    assert joined["recipe"] == saved_recipe
-    assert "deepScanSettings" not in joined
-    assert joined["compositionCheckpoint"]["legacy"]["originThreadId"] == "native-owner"
-    assert joined["compositionCheckpoint"]["legacy"]["discoveryRuns"] == 3
-    assert joined["compositionCheckpoint"]["noNewStreak"] == 2
-    assert joined["compositionCheckpoint"]["consecutiveErrors"] == 1
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 0,
-        "completed": 2,
-        "maximum": recipe_maximum or 8,
-        "consolidating": False,
-    }
-    scan_dir = Path(scan["scanDir"])
-    saved_checkpoint = json.loads((scan_dir / CHECKPOINT).read_text())
-    children = []
-    for index in range(1, 3):
-        directory = f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(
-            state, target, scan_dir / directory, parent=scan["scanId"], role="deep_pass"
-        )
-        children.append(child)
-        saved_checkpoint["passes"].append({"directory": directory, "scanId": child["scanId"]})
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        *(("--claim-token", token) if token else ()),
-        input_text=json.dumps(saved_checkpoint),
-    )
-    child = children[0]
-    write_completed_contract(
-        Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
-    )
-    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 1,
-        "completed": 3,
-        "maximum": recipe_maximum or 8,
-        "consolidating": True,
-    }
+    assert "retired runtime. Start a fresh scan" in rejected["stderr"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT recipe_json FROM scans").fetchone() == (None,)
+        assert connection.execute("SELECT * FROM deep_scan_runs").fetchone() == legacy
 
 
 @pytest.mark.parametrize(
@@ -1311,56 +1331,6 @@ def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
         run_workbench(state, "get-scan", "--scan-id", rerun["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-
-
-@pytest.mark.parametrize("missing_outputs", [False, True])
-def test_membership_migration_backfills_stored_paths_once(
-    tmp_path: Path, missing_outputs: bool
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    parent_dir = tmp_path / "parent.previous-synthetic"
-    parent = register(state, target, parent_dir, mode="deep")
-    child = register(
-        state, target, parent_dir / "artifacts/deep-scan/passes/pass-1", parent=parent["scanId"]
-    )
-    rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
-    database = state / "workbench.sqlite3"
-    marker = parent_dir / "saved-output.txt"
-    marker.write_bytes(b"Saved outputs must not change during migration.")
-    with sqlite3.connect(database) as connection:
-        connection.execute("DROP INDEX scans_by_composition_parent")
-        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
-        before = connection.execute(
-            "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-        ).fetchall()
-    if missing_outputs:
-        parent_dir.rename(tmp_path / "removed-output")
-    run_workbench(state, "database-info")
-    run_workbench(state, "database-info")
-    with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute(
-                "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-            ).fetchall()
-            == before
-        )
-        assert dict(connection.execute("SELECT id, parent_scan_role FROM scans")) == {
-            parent["scanId"]: None,
-            child["scanId"]: "deep_pass",
-            rerun["scanId"]: None,
-        }
-        assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
-        ).fetchone() == (1,)
-    saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
-    assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
-    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
-        parent["scanId"],
-        rerun["scanId"],
-    }
 
 
 def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
@@ -2103,9 +2073,12 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
         run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-    retained = run_workbench(state, *preserve)
+    retained = run_workbench(
+        state, *preserve, "--cost-json", json.dumps({"usage": usage, "cost": cost})
+    )
     assert retained["scan"]["findingCount"] == 1
     assert retained["scan"]["cost"] == cost
+    assert retained["scan"]["usage"] == usage
     assert retained["scan"]["progress"]["independentReviews"]["active"] == 0
     retained_child = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
     assert retained_child["progress"]["status"] == "failed"
