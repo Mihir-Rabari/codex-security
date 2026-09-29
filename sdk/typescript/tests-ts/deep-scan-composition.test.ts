@@ -232,33 +232,40 @@ async function harness(
       const path = join(scanDir, "artifacts/deep-scan/merge-inputs.json");
       expect(prompt).toContain(JSON.stringify(path));
       const payload = JSON.parse(await readFile(path, "utf8")) as {
-        scans: SemanticScan[];
-        previous: SemanticScan | null;
+        findings: SemanticScan["findings"];
       };
-      mergeInputs.push(payload.scans.length);
-      const findings = structuredClone(payload.previous?.findings ?? []);
-      for (const source of payload.scans.flatMap((scan) => scan.findings)) {
-        const existing = findings.find(
-          (finding) =>
-            scanFindingIdentity(finding) === scanFindingIdentity(source),
-        );
-        if (!existing) findings.push(source);
+      const checkpoint = checkpoints.at(-1)!;
+      mergeInputs.push(
+        checkpoint.passes.filter(
+          (pass) =>
+            pass.completed && !checkpoint.mergedScanIds.includes(pass.scanId!),
+        ).length,
+      );
+      const byIdentity = new Map<
+        string,
+        { sourceFindingIds: string[]; canonicalSourceFindingId: string }
+      >();
+      for (const source of payload.findings) {
+        const identity = scanFindingIdentity(source);
+        const ids = source.provenance.sourceFindingIds!;
+        const existing = byIdentity.get(identity);
+        if (existing) existing.sourceFindingIds.push(...ids);
         else
-          (existing["provenance"] as JsonObject)["sourceFindingIds"] = [
-            ...((existing["provenance"] as JsonObject)[
-              "sourceFindingIds"
-            ] as string[]),
-            ...((source["provenance"] as JsonObject)[
-              "sourceFindingIds"
-            ] as string[]),
-          ];
+          byIdentity.set(identity, {
+            sourceFindingIds: [...ids],
+            canonicalSourceFindingId: ids[0]!,
+          });
       }
-      return { scanId, findings };
+      return { scanId, groups: [...byIdentity.values()] };
     },
     writer: {
       async restore(path, contents) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), contents);
+      },
+      async restoreMany(artifacts) {
+        for (const { path, contents } of artifacts)
+          await this.restore(path, contents);
       },
     },
     async publish(draft) {
@@ -291,56 +298,112 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
-  test("serializes concurrent child checkpoint writes", async () => {
-    const h = await harness({ workers: 2, stopAfterNoNew: 2 });
-    const registrationsReady = Promise.withResolvers<void>();
-    const releaseWrite = Promise.withResolvers<void>();
-    let registrations = 0;
-    const createClient = h.input.createClient;
-    h.input.createClient = () => {
-      const client = createClient();
-      return {
-        ...client,
-        run(repository, options = {}) {
-          return client.run(repository, {
-            ...options,
-            async onRegisteredScan(registration) {
-              const pending = options.onRegisteredScan?.(registration);
-              if (++registrations === 2) registrationsReady.resolve();
-              return pending;
-            },
-          });
-        },
+  test.each([false, true])(
+    "coalesces durable repeated registrations and retries a shared failure (%p)",
+    async (failFirst) => {
+      const h = await harness({
+        workers: 3,
+        maxDiscoveryRuns: 3,
+        stopAfterNoNew: 4,
+      });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const failure = new Error("Synthetic shared checkpoint failure.");
+      let registered = 0;
+      let arrived = 0;
+      const allArrived = Promise.withResolvers<void>();
+      let attempts = 0;
+      let writing = 0;
+      let maximumWriting = 0;
+      const createClient = h.input.createClient;
+      h.input.createClient = () => {
+        const client = createClient();
+        return {
+          ...client,
+          run(repository, options = {}) {
+            return client.run(repository, {
+              ...options,
+              async onRegisteredScan(registration) {
+                if (++arrived === 3) allArrived.resolve();
+                await allArrived.promise;
+                const outcomes = await Promise.allSettled([
+                  options.onRegisteredScan!(registration),
+                  options.onRegisteredScan!(registration),
+                ]);
+                if (failFirst) {
+                  expect(outcomes).toEqual([
+                    { status: "rejected", reason: failure },
+                    { status: "rejected", reason: failure },
+                  ]);
+                  await options.onRegisteredScan!(registration);
+                } else
+                  expect(outcomes.map((outcome) => outcome.status)).toEqual([
+                    "fulfilled",
+                    "fulfilled",
+                  ]);
+                registered++;
+                expect(
+                  (await h.checkpoint()).passes.some(
+                    (pass) => pass.scanId === registration["scanId"],
+                  ),
+                ).toBe(true);
+                await options.onRegisteredScan!(registration);
+              },
+            });
+          },
+        };
       };
-    };
-    const workbench = h.input.workbench;
-    let writing = 0;
-    let maximumWriting = 0;
-    h.input.workbench = async (args, contents) => {
-      if (args[0] !== "save-scan-artifact") return workbench(args, contents);
-      writing += 1;
-      maximumWriting = Math.max(maximumWriting, writing);
+      const workbench = h.input.workbench;
+      h.input.workbench = async (args, contents) => {
+        if (args[0] !== "save-scan-artifact") return workbench(args, contents);
+        writing++;
+        maximumWriting = Math.max(maximumWriting, writing);
+        try {
+          const state = JSON.parse(contents!) as DeepScanCheckpoint;
+          if (
+            state.passes.some((pass) => pass.scanId) &&
+            state.passes.every((pass) => !pass.completed)
+          ) {
+            expect(state.passes.every((pass) => pass.scanId)).toBe(true);
+            if (++attempts === 1) {
+              entered.resolve();
+              await release.promise;
+              if (failFirst) throw failure;
+            }
+          }
+          return await workbench(args, contents);
+        } finally {
+          writing--;
+        }
+      };
+      h.input.publish = async (draft) => {
+        expect((await h.checkpoint()).aggregate).toEqual(draft);
+      };
+      const pending = runDeepScans(h.input);
       try {
-        const state = JSON.parse(contents!) as DeepScanCheckpoint;
-        if (state.passes.some((pass) => pass.scanId))
-          await releaseWrite.promise;
-        return await workbench(args, contents);
+        await Promise.race([entered.promise, pending]);
+        expect(registered).toBe(0);
       } finally {
-        writing -= 1;
+        release.resolve();
       }
-    };
-    const execution = runDeepScans(h.input);
-    try {
-      await Promise.race([registrationsReady.promise, execution]);
-    } finally {
-      releaseWrite.resolve();
-    }
-    await execution;
-    expect(maximumWriting).toBe(1);
-    const state = await h.checkpoint();
-    expect(state.mergedScanIds).toHaveLength(2);
-    expect(state.terminalReason).toBe("saturated");
-  });
+      const state = await pending;
+      expect(attempts).toBe(failFirst ? 2 : 1);
+      expect(maximumWriting).toBe(1);
+      expect(h.metrics().closed).toBe(3);
+      expect(state.mergedScanIds).toHaveLength(3);
+      expect(state.passes.every((pass) => pass.completed)).toBe(true);
+      expect(state.terminalReason).toBe("capped");
+      expect(await h.checkpoint()).toEqual(state);
+      expect(
+        h.checkpoints.every(
+          (snapshot, index) =>
+            index === 0 ||
+            JSON.stringify(snapshot) !==
+              JSON.stringify(h.checkpoints[index - 1]),
+        ),
+      ).toBe(true);
+    },
+  );
 
   test("preserves a checkpoint write failure and still saves terminal state", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
@@ -368,7 +431,8 @@ describe("ordinary scan composition", () => {
     const state = await h.checkpoint();
     expect(h.calls).toHaveLength(4);
     expect(h.metrics()).toEqual({ closed: 4, maximumActive: 2 });
-    expect(h.mergeInputs).toEqual([2, 2]);
+    expect(h.mergeInputs).toEqual([]);
+    expect(h.published).toHaveLength(2);
     expect(state.noNewStreak).toBe(4);
     expect(state.terminalReason).toBe("saturated");
     expect(new Set(h.published.map((draft) => draft.scanId))).toEqual(
@@ -408,20 +472,29 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test.each(["failed", "canceled"] as const)(
-    "does not complete a %s checkpoint when its database transition was interrupted",
-    async (terminalReason) => {
+  test.each(
+    ["failed", "canceled"].flatMap((reason) =>
+      [false, true].map((aggregate) => ({
+        reason: reason as "failed" | "canceled",
+        aggregate,
+      })),
+    ),
+  )(
+    "does not complete a $reason checkpoint (aggregate: $aggregate)",
+    async ({ reason: terminalReason, aggregate }) => {
       const h = await harness();
       const checkpoint: DeepScanCheckpoint = {
         version: 2,
         startedAt: h.input.startedAt,
         passes: [],
         mergedScanIds: [],
-        aggregate: {
-          scanId: h.input.scanId,
-          findings: [],
-          coverage: semanticCoverage(),
-        },
+        aggregate: aggregate
+          ? {
+              scanId: h.input.scanId,
+              findings: [],
+              coverage: semanticCoverage(),
+            }
+          : null,
         noNewStreak: 0,
         consecutiveErrors: 0,
         terminalReason,
@@ -627,7 +700,7 @@ describe("ordinary scan composition", () => {
   });
 
   test.each([
-    ["missing field", "rationale"],
+    ["missing field", "canonicalSourceFindingId"],
     ["unexpected field", "cyber_policy"],
     ["JSON syntax", "cyber_policy"],
   ])(
@@ -644,10 +717,10 @@ describe("ordinary scan composition", () => {
         const output = await merge(prompt, signal);
         if (prompts.length !== 1) return output;
         if (kind === "JSON syntax") return JSON.parse("cyber_policy");
-        const invalid = structuredClone(output) as { findings: JsonObject[] };
+        const invalid = structuredClone(output) as { groups: JsonObject[] };
         if (kind === "unexpected field")
           return { ...invalid, cyber_policy: false };
-        delete (invalid.findings[0]!["confidence"] as JsonObject)["rationale"];
+        delete invalid.groups[0]!["canonicalSourceFindingId"];
         return invalid;
       };
 
@@ -807,18 +880,30 @@ describe("ordinary scan composition", () => {
           scanDir,
           budget === "exhausted" ? "retained-issue" : undefined,
         );
+        const draft = semanticScanDraft(
+          h.input.scanId,
+          completed.manifest.scan,
+          completed.findings.findings,
+          {
+            ...completed.coverage,
+            deferred: [{ reason: "Retained accepted coverage." }],
+          },
+        );
+        for (const [index, finding] of draft.findings.entries())
+          finding.provenance = {
+            ...finding.provenance,
+            sourceFindingIds: [`${scanId}:${index}`],
+            sourceFindings: [
+              {
+                id: `${scanId}:${index}`,
+                finding: completed.findings.findings[index]!,
+              },
+            ],
+          };
         return {
           scanId,
           scanDir,
-          draft: semanticScanDraft(
-            h.input.scanId,
-            completed.manifest.scan,
-            completed.findings.findings,
-            {
-              ...completed.coverage,
-              deferred: [{ reason: "Retained accepted coverage." }],
-            },
-          ),
+          draft,
           sourceFindings: completed.findings.findings,
         };
       };
@@ -931,11 +1016,13 @@ describe("ordinary scan composition", () => {
         costs.set(key, cost);
         if (cost !== null) reportCost(cost);
       };
-      const costsBeforeMerge: Array<Readonly<ScanCost> | null | undefined> = [];
-      const merge = h.input.merge;
-      h.input.merge = async (...args) => {
-        costsBeforeMerge.push(costs.get(directory));
-        return merge(...args);
+      const costsBeforePublication: Array<
+        Readonly<ScanCost> | null | undefined
+      > = [];
+      const publish = h.input.publish;
+      h.input.publish = async (...args) => {
+        costsBeforePublication.push(costs.get(directory));
+        return publish(...args);
       };
       const expectedReceipt =
         status !== "running" && savedCost
@@ -968,8 +1055,8 @@ describe("ordinary scan composition", () => {
         } else expect(h.published).toEqual([]);
       } else {
         await runDeepScans(h.input);
-        expect(h.mergeInputs).toEqual([1]);
-        expect(costsBeforeMerge).toEqual([expectedReceipt]);
+        expect(h.mergeInputs).toEqual([]);
+        expect(costsBeforePublication).toEqual([expectedReceipt]);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toEqual([]);
@@ -1121,96 +1208,27 @@ describe("ordinary scan composition", () => {
     expect((await h.checkpoint()).terminalReason).toBe("capped");
   });
 
-  test("continues saved legacy counters and coverage using only new ordinary scans", async () => {
-    const h = await harness({ maxDiscoveryRuns: 3, stopAfterNoNew: 4 });
-    const coverage = semanticCoverage({
-      completeness: "partial",
-      surfaces: [],
-      deferred: [
-        { id: "legacy-unresolved", reason: "Saved unresolved validation." },
-      ],
-    });
-    await h.seed({
+  test("retains old coordinator results but refuses live continuation", async () => {
+    const h = await harness();
+    const checkpoint: DeepScanCheckpoint = {
       version: 2,
       startedAt: h.input.startedAt,
-      passes: [],
-      mergedScanIds: [],
-      aggregate: { scanId: h.input.scanId, findings: [], coverage },
-      legacy: { discoveryRuns: 2, coverage },
-      noNewStreak: 3,
-      consecutiveErrors: 0,
-    });
-    await runDeepScans(h.input);
-    const state = await h.checkpoint();
-    expect(h.calls).toHaveLength(1);
-    expect(state.passes).toHaveLength(1);
-    expect(state.noNewStreak).toBe(4);
-    expect(state.terminalReason).toBe("saturated");
-    expect(state.aggregate!.coverage["deferred"]).toEqual(coverage.deferred);
-    expect(state.aggregate!.coverage["completeness"]).toBe("partial");
-
-    const ready = await harness();
-    await ready.seed({
-      ...state,
       passes: [],
       mergedScanIds: [],
       aggregate: {
-        ...state.aggregate!,
-        scanId: ready.input.scanId,
+        scanId: h.input.scanId,
+        findings: [],
+        coverage: semanticCoverage(),
       },
-    });
-    await runDeepScans(ready.input);
-    expect(ready.calls).toEqual([]);
-    expect(ready.mergeInputs).toEqual([]);
-    expect(ready.published.at(-1)!.coverage["deferred"]).toEqual(
-      coverage.deferred,
-    );
-  });
-
-  test("recovers legacy paid usage once and requires it before spending under a saved limit", async () => {
-    const h = await harness({ maxDiscoveryRuns: 1 });
-    const coverage = semanticCoverage({ completeness: "partial" });
-    const state: DeepScanCheckpoint = {
-      version: 2,
-      startedAt: h.input.startedAt,
-      passes: [],
-      mergedScanIds: [],
-      aggregate: { scanId: h.input.scanId, findings: [], coverage },
-      legacy: {
-        discoveryRuns: 1,
-        coverage,
-        originThreadId: "original-session",
-      },
+      legacy: { discoveryRuns: 2 },
       noNewStreak: 0,
       consecutiveErrors: 0,
     };
-    await h.seed(state);
-    h.input.scanOptions.requireCost = true;
-    h.input.historicalCost = async () => null;
-    await expect(runDeepScans(h.input)).rejects.toThrow(
-      "original Deep Scan session logs",
-    );
+    await h.seed(checkpoint);
+    await expect(runDeepScans(h.input)).rejects.toThrow("retired coordinator");
+    expect(await h.checkpoint()).toEqual(checkpoint);
     expect(h.calls).toEqual([]);
-    const cost = estimateScanCost("gpt-6-astra", {
-      input_tokens: 10000,
-      output_tokens: 2000,
-    })!;
-    let recoveries = 0;
-    h.input.historicalCost = async (threadId) => {
-      expect(threadId).toBe("original-session");
-      recoveries++;
-      return cost;
-    };
-    const costs = new Map();
-    h.input.onCost = (id, receipt) => {
-      costs.set(id, receipt);
-    };
-    await runDeepScans(h.input);
-    await runDeepScans(h.input);
-    expect(recoveries).toBe(1);
-    expect(costs.get("legacy")).toEqual(cost);
-    expect((await h.checkpoint()).legacy!.cost).toEqual(cost);
-    expect(h.calls).toEqual([]);
+    expect(h.published).toEqual([]);
   });
 
   test.each([
@@ -1237,7 +1255,7 @@ describe("ordinary scan composition", () => {
       expect(state.passes).toHaveLength(1);
       expect(state.noNewStreak).toBe(1);
       expect(state.mergedScanIds).toHaveLength(1);
-      expect(h.mergeInputs).toEqual([1]);
+      expect(h.mergeInputs).toEqual([]);
     },
   );
 
@@ -1743,7 +1761,7 @@ describe("ordinary scan composition", () => {
       expect(h.calls).toHaveLength(
         (resumed ? 0 : requireCost && !executed ? 2 : 4) + (stopped ? 0 : 1),
       );
-      expect(h.mergeInputs).toEqual(stopped ? [] : [1]);
+      expect(h.mergeInputs).toEqual([]);
       expect(costs.get(failedDirectory)).toBeNull();
       expect([...costs.values()].some((cost) => cost !== null)).toBe(!stopped);
     },
@@ -1778,7 +1796,7 @@ describe("ordinary scan composition", () => {
         });
       } else {
         await runDeepScans(h.input);
-        expect(h.mergeInputs).toEqual([1]);
+        expect(h.mergeInputs).toEqual([]);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toHaveLength(1);
@@ -1974,10 +1992,10 @@ describe("ordinary scan composition", () => {
 
   test("reports the original deadline when the final merge reaches saturation late", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
-    const merge = h.input.merge;
+    const project = h.input.projectChild;
     const clock = spyOn(Date, "now");
-    h.input.merge = async (...args) => {
-      const merged = await merge(...args);
+    h.input.projectChild = async (...args) => {
+      const merged = await project(...args);
       clock.mockReturnValue(Date.parse(h.input.startedAt) + 3_600_001);
       return merged;
     };
@@ -1989,7 +2007,7 @@ describe("ordinary scan composition", () => {
         terminalReason: "capped",
       });
       expect(h.calls).toHaveLength(1);
-      expect(h.mergeInputs).toEqual([1]);
+      expect(h.mergeInputs).toEqual([]);
       expect(h.published.at(-1)!.findings).toEqual([]);
     } finally {
       clock.mockRestore();
@@ -2055,7 +2073,6 @@ describe("ordinary scan composition", () => {
         passes: [{ directory, scanId }],
         mergedScanIds: [],
         aggregate: { scanId: h.input.scanId, findings: [], coverage },
-        legacy: { discoveryRuns: 2, coverage },
         noNewStreak: 2,
         consecutiveErrors: 1,
         mergeFailures: 1,
@@ -2121,7 +2138,7 @@ describe("ordinary scan composition", () => {
           mergeFailures: 0,
           terminalReason: "capped",
         });
-        expect(h.mergeInputs).toEqual([1]);
+        expect(h.mergeInputs).toEqual([]);
         expect(h.metrics()).toEqual({ closed: 2, maximumActive: 1 });
         expect(await readFile(childCheckpoint)).toEqual(childBytes);
       } finally {
@@ -2130,33 +2147,6 @@ describe("ordinary scan composition", () => {
     },
   );
 });
-
-test.each(["failed", "canceled"] as const)(
-  "does not execute a saved %s checkpoint",
-  async (terminalReason) => {
-    const h = await harness();
-    const checkpoint: DeepScanCheckpoint = {
-      version: 2,
-      startedAt: h.input.startedAt,
-      passes: [],
-      mergedScanIds: [],
-      aggregate: null,
-      noNewStreak: 0,
-      consecutiveErrors: 0,
-      terminalReason,
-    };
-    const path = join(h.input.scanDir, DEEP_SCAN_CHECKPOINT);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify(checkpoint));
-    await expect(runDeepScans(h.input)).rejects.toThrow(
-      `saved Deep Scan is ${terminalReason}`,
-    );
-    expect(h.calls).toEqual([]);
-    expect(h.mergeInputs).toEqual([]);
-    expect(h.published).toEqual([]);
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(checkpoint);
-  },
-);
 
 test("caps an expired empty composition without requesting a model merge", async () => {
   const h = await harness();

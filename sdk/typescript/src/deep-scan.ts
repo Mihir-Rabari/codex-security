@@ -11,7 +11,8 @@ import {
 import type { DeepScanOptions } from "./scan-settings.js";
 import {
   combineScanCoverage,
-  createScanMergeValidator,
+  validateScanMerge,
+  unchangedScanGroups,
   scanMergePrompt,
   type ScanMergeInput,
 } from "./scan-merge.js";
@@ -39,11 +40,7 @@ import {
   reservePass,
   stopDiscovery,
 } from "./deep-scan-lifecycle.js";
-import {
-  savedScanFromWorkbench,
-  savedScansFromWorkbench,
-  type SavedScanRecord,
-} from "./workbench-types.js";
+import { type SavedScanRecord } from "./workbench-types.js";
 export {
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
@@ -60,7 +57,6 @@ export class TerminalDeepScanError extends ScanInterruptedError {
     readonly accounting: {
       constituents: ReadonlyArray<Readonly<ScanCost> | null> | null;
       savedTotal: Readonly<ScanCost> | null;
-      legacyThreadId?: string;
     },
   ) {
     super(message, scanDir);
@@ -150,7 +146,7 @@ export async function terminalDeepScanError(
       "--scan-id",
       input.scanId,
     ]);
-    savedTotal = savedScanFromWorkbench(saved).cost ?? null;
+    savedTotal = (saved["scan"] as SavedScanRecord).cost ?? null;
     validatePassDirectories(state);
     const listed = await input.workbench([
       "list-scans",
@@ -162,22 +158,13 @@ export async function terminalDeepScanError(
       state.passes.map((pass) =>
         pass.scanId === undefined ? undefined : null,
       );
-    for (const record of savedScansFromWorkbench(listed)) {
+    for (const record of listed["scans"] as SavedScanRecord[]) {
       const index = savedPassIndex(input, state, record);
       // Missing optional thread/cost persistence does not establish zero usage.
       if (index >= 0)
         costs[index] = missingRunningSession(record)
           ? null
           : (record.cost ?? null);
-    }
-    if (state.legacy) {
-      costs.push(
-        state.legacy.cost ??
-          (state.legacy.originThreadId
-            ? await input.historicalCost?.(state.legacy.originThreadId)
-            : null) ??
-          null,
-      );
     }
     if (state.costUnavailable) costs.push(null);
     constituents = costs.filter((cost) => cost !== undefined);
@@ -190,7 +177,6 @@ export async function terminalDeepScanError(
     {
       constituents,
       savedTotal,
-      legacyThreadId: state.legacy?.originThreadId ?? undefined,
     },
   );
 }
@@ -203,6 +189,10 @@ export async function runDeepScans(
   const state =
     (await loadDeepScanCheckpoint(scanDir)) ??
     newDeepScanCheckpoint(input.startedAt);
+  if (state["legacy"] !== undefined)
+    throw new Error(
+      "This Deep Scan used the retired coordinator. Its saved results remain available; start a new scan to continue reviewing.",
+    );
   if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
@@ -242,37 +232,25 @@ export async function runDeepScans(
     return queued.pending;
   };
   await save();
-  const previousRuns = state.legacy?.discoveryRuns ?? 0;
-  if (state.legacy && !state.legacy.cost) {
-    const cost = state.legacy.originThreadId
-      ? await input.historicalCost?.(state.legacy.originThreadId)
-      : null;
-    if (cost) {
-      state.legacy.cost = cost;
-      await save();
-    }
-    if (!cost && input.scanOptions.requireCost)
-      throw new Error(
-        "Restore the original Deep Scan session logs to verify its saved cost limit.",
-      );
-  }
-  if (state.legacy?.cost) input.onCost("legacy", state.legacy.cost);
-  const validateMerge = await createScanMergeValidator(input.pluginRoot);
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
+  const coverage = new Map<
+    string,
+    { draft: { coverage: SemanticScan["coverage"] } }
+  >();
   const updateAggregateCoverage = (): void => {
     if (state.aggregate === null) return;
     const merged = new Set(state.mergedScanIds);
     state.aggregate = {
       ...state.aggregate,
       coverage: combineScanCoverage(
-        [...completed.values()].filter((pass) => merged.has(pass.scanId)),
+        [...coverage].filter(([id]) => merged.has(id)).map(([, pass]) => pass),
         state.passes
           .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
           .map((pass) => pass.directory),
-        state.mergedScanIds.some((id) => !completed.has(id))
+        state.mergedScanIds.some((id) => !coverage.has(id))
           ? state.aggregate.coverage
-          : state.legacy?.coverage,
+          : undefined,
       ),
     };
   };
@@ -290,7 +268,7 @@ export async function runDeepScans(
       "--scan-root",
       join(scanDir, "artifacts/deep-scan/passes"),
     ]);
-    const records = savedScansFromWorkbench(listed);
+    const records = listed["scans"] as SavedScanRecord[];
     if (recoverOutcomes)
       records.sort((a, b) =>
         (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
@@ -332,12 +310,18 @@ export async function runDeepScans(
         observePassFailure(state, pass, recoveredSuccess);
       if (
         record.progress.status === "complete" &&
-        !completed.has(record.scanId)
+        !coverage.has(record.scanId)
       ) {
-        completed.set(
+        const projected = await input.projectChild(
           record.scanId,
-          await input.projectChild(record.scanId, record.scanDir, signal),
+          record.scanDir,
+          signal,
         );
+        coverage.set(record.scanId, {
+          draft: { coverage: projected.draft.coverage },
+        });
+        if (!state.mergedScanIds.includes(record.scanId))
+          completed.set(record.scanId, projected);
         if (recoverOutcomes)
           recoveredSuccess = observePassCompletion(
             state,
@@ -377,7 +361,7 @@ export async function runDeepScans(
     polling = true;
     void workbench(["get-scan", "--scan-id", scanId])
       .then((result) => {
-        const { progress } = savedScanFromWorkbench(result);
+        const { progress } = result["scan"] as SavedScanRecord;
         if (
           progress["status"] === "canceled" ||
           progress["status"] === "failed"
@@ -404,32 +388,37 @@ export async function runDeepScans(
     if (!pending.length && (!allowEmpty || state.aggregate !== null)) return;
     if (!pending.length) {
       state.aggregate = {
-        ...validateMerge({ scanId, findings: [] }, [], null).aggregate,
-        coverage: combineScanCoverage([], [], state.legacy?.coverage),
+        ...validateScanMerge({ scanId, groups: [] }, [], null).aggregate,
+        coverage: combineScanCoverage([]),
       };
       await save();
       return;
     }
-    const prompt = await scanMergePrompt(
-      scanId,
-      pending,
-      state.aggregate,
-      scanDir,
-      input.writer,
-    );
-    let merged: ReturnType<typeof validateMerge>;
+    const clean = pending.every((input) => input.draft.findings.length === 0);
+    const prompt = clean
+      ? ""
+      : await scanMergePrompt(
+          scanId,
+          pending,
+          state.aggregate,
+          scanDir,
+          input.writer,
+        );
+    let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
     for (;;) {
       executionSignal.throwIfAborted();
       try {
-        const response = await input.merge(
-          validationError === undefined
-            ? prompt
-            : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
-          executionSignal,
-        );
+        const response = clean
+          ? unchangedScanGroups(scanId, state.aggregate)
+          : await input.merge(
+              validationError === undefined
+                ? prompt
+                : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
+              executionSignal,
+            );
         try {
-          merged = validateMerge(response, pending, state.aggregate);
+          merged = validateScanMerge(response, pending, state.aggregate);
         } catch (error) {
           validationError = error;
           throw error;
@@ -454,10 +443,10 @@ export async function runDeepScans(
       state,
       merged,
       pending.map((result) => result.scanId),
-      combineScanCoverage([...completed.values()], [], state.legacy?.coverage),
+      combineScanCoverage([...coverage.values()]),
     );
     await save();
-    await input.publish(state.aggregate!);
+    for (const result of pending) completed.delete(result.scanId);
   };
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
@@ -504,14 +493,15 @@ export async function runDeepScans(
               input.onCost(pass.directory, cost);
             },
           });
-          completed.set(
+          const projected = await input.projectChild(
             result.manifest.scan.id,
-            await input.projectChild(
-              result.manifest.scan.id,
-              result.scanDir,
-              signal,
-            ),
+            result.scanDir,
+            signal,
           );
+          completed.set(result.manifest.scan.id, projected);
+          coverage.set(result.manifest.scan.id, {
+            draft: { coverage: projected.draft.coverage },
+          });
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
           observePassCompletion(state, pass);
@@ -563,7 +553,7 @@ export async function runDeepScans(
     await refreshPasses(
       state.terminalReason === undefined && Date.now() < deadline,
     );
-    if (state.mergedScanIds.some((id) => !completed.has(id))) {
+    if (state.mergedScanIds.some((id) => !coverage.has(id))) {
       throw new Error(
         "An accepted merge input is no longer a sealed child scan.",
       );
@@ -572,6 +562,7 @@ export async function runDeepScans(
       throw consecutiveErrorLimit;
     while (state.terminalReason === undefined) {
       executionSignal.throwIfAborted();
+      const previousAggregate = state.aggregate;
       await mergePending();
       const discoveryDeadlineReached =
         deadlineController.signal.aborted || Date.now() >= deadline;
@@ -600,10 +591,12 @@ export async function runDeepScans(
         stopDiscovery(state, stop);
         break;
       }
+      if (state.aggregate !== null && state.aggregate !== previousAggregate)
+        await input.publish(state.aggregate);
       const batch = unfinished.slice(0, settings.workers);
       while (
         batch.length < settings.workers &&
-        previousRuns + state.passes.length < settings.maxDiscoveryRuns
+        state.passes.length < settings.maxDiscoveryRuns
       ) {
         batch.push(reservePass(state));
       }

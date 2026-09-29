@@ -21,10 +21,7 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
-import {
-  combineScanCoverage,
-  createScanMergeValidator,
-} from "../src/scan-merge.js";
+import { combineScanCoverage, validateScanMerge } from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -207,9 +204,17 @@ test("normalizes sealed legacy findings for merging while retaining exact source
       (index) => legacy.findings[index]!,
     ),
   );
-  const merge = await createScanMergeValidator(PLUGIN_ROOT);
-  const { coverage: _coverage, ...draft } = projected.draft;
-  const result = merge(draft, [projected], null);
+  const result = validateScanMerge(
+    {
+      scanId: fixture.parentScanId,
+      groups: projected.draft.findings.map((finding) => ({
+        sourceFindingIds: finding.provenance.sourceFindingIds!,
+        canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
+      })),
+    },
+    [projected],
+    null,
+  );
   expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
     { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
   ]);

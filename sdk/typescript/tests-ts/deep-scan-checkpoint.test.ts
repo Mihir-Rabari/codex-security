@@ -41,8 +41,10 @@ test.each(["current", "legacy"])(
         },
       ]);
     } else {
-      expect(checkpoint.legacy!.originThreadId).toBeNull();
-      expect(Object.hasOwn(checkpoint.legacy!, "cost")).toBe(false);
+      expect(
+        (checkpoint["legacy"] as Record<string, unknown>)["originThreadId"],
+      ).toBeNull();
+      expect(Object.hasOwn(checkpoint["legacy"]!, "cost")).toBe(false);
       expect(checkpoint.terminalReason).toBe("capped");
     }
   },
@@ -65,8 +67,11 @@ test.each(["current", "legacy"])(
     const { aggregate: _aggregate, legacy, ...metadata } = checkpoint;
     const document: DeepScanCheckpointSummary = metadata;
     if (legacy) {
-      const { coverage: _coverage, ...legacyMetadata } = legacy;
-      document.legacy = legacyMetadata;
+      const { coverage: _coverage, ...legacyMetadata } = legacy as Record<
+        string,
+        unknown
+      >;
+      document["legacy"] = legacyMetadata;
     }
     const summary = compositionCheckpointFromWorkbench({
       compositionCheckpoint: document,
@@ -75,8 +80,10 @@ test.each(["current", "legacy"])(
     expect(summary.version).toBe(2);
     expect(Object.hasOwn(summary, "aggregate")).toBe(false);
     if (legacy) {
-      expect(summary.legacy!.originThreadId).toBeNull();
-      expect(Object.hasOwn(summary.legacy!, "coverage")).toBe(false);
+      expect(
+        (summary["legacy"] as Record<string, unknown>)["originThreadId"],
+      ).toBeNull();
+      expect(Object.hasOwn(summary["legacy"]!, "coverage")).toBe(false);
     }
   },
 );
