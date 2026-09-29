@@ -22,6 +22,8 @@ interface CompositionMetadata {
   noNewStreak: number;
   consecutiveErrors: number;
   mergeFailures?: number;
+  /** Missing in older checkpoints; false proves that no model merge has started. */
+  mergeStarted?: boolean;
   /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
   costUnavailable?: true;
   /** A discovery stop decision. Sealing and publication belong to the parent. */
@@ -46,6 +48,7 @@ export function newDeepScanCheckpoint(startedAt: string): DeepScanCheckpoint {
     passes: [],
     mergedScanIds: [],
     aggregate: null,
+    mergeStarted: false,
     noNewStreak: 0,
     consecutiveErrors: 0,
   };

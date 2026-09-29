@@ -1468,6 +1468,73 @@ test.each([
   },
 );
 
+test.each([false, true])(
+  "sealed clean composition needs no merge session (required cost: %p)",
+  async (requiredCost) => {
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 100,
+      output_tokens: 10,
+    })!;
+    const f = await interruptedScan("deep", false, {}, true, false, { cost });
+    const path = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
+    const checkpoint = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as DeepScanCheckpoint;
+    checkpoint.mergeStarted = false;
+    checkpoint.mergedScanIds = [f.childId!];
+    checkpoint.aggregate = {
+      scanId: f.scanId,
+      findings: [],
+      coverage: semanticCoverage({ completeness: "partial" }),
+    };
+    checkpoint.terminalReason = "capped";
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const before = await readFile(path);
+    let turns = 0;
+    const client = resumeClient(f, () => ({
+      startThread() {
+        return {
+          id: null,
+          async runStreamed() {
+            turns++;
+            throw new Error("A clean composition has no model merge.");
+          },
+        };
+      },
+      resumeThread() {
+        throw new Error("A clean composition has no saved model session.");
+      },
+    }))({ codexOverrides: f.recipe.config });
+    try {
+      const result = await client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+        ...(requiredCost ? { maxCostUsd: 1 } : {}),
+      });
+      expect(result.cost).toEqual(cost);
+      expect(result.threadId).toBeNull();
+      expect(result.findings.findings).toEqual([]);
+      expect(turns).toBe(0);
+      expect(await readFile(path)).toEqual(before);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
 test.each([
   [null, false, false],
   [undefined, false, false],

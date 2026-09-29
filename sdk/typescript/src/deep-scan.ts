@@ -57,6 +57,7 @@ export class TerminalDeepScanError extends ScanInterruptedError {
     readonly accounting: {
       constituents: ReadonlyArray<Readonly<ScanCost> | null> | null;
       savedTotal: Readonly<ScanCost> | null;
+      mergeStarted?: boolean;
     },
   ) {
     super(message, scanDir);
@@ -177,6 +178,7 @@ export async function terminalDeepScanError(
     {
       constituents,
       savedTotal,
+      mergeStarted: state.mergeStarted,
     },
   );
 }
@@ -404,6 +406,10 @@ export async function runDeepScans(
           scanDir,
           input.writer,
         );
+    if (!clean && state.mergeStarted !== true) {
+      state.mergeStarted = true;
+      await save();
+    }
     let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
     for (;;) {

@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   compositionCheckpointFromWorkbench,
   decodeDeepScanCheckpoint,
+  newDeepScanCheckpoint,
   type DeepScanCheckpointSummary,
 } from "../src/deep-scan-checkpoint.js";
 
@@ -98,4 +99,17 @@ test("workbench responses distinguish an absent checkpoint from an unsupported v
       compositionCheckpoint: { version: 1 },
     }),
   ).toThrow("Unsupported saved Deep Scan checkpoint.");
+});
+
+test("fresh checkpoints distinguish free host grouping from missing model accounting", () => {
+  const checkpoint = newDeepScanCheckpoint("2026-01-01T00:00:00Z");
+  expect(checkpoint.mergeStarted).toBe(false);
+  expect(
+    compositionCheckpointFromWorkbench({ compositionCheckpoint: checkpoint })
+      ?.mergeStarted,
+  ).toBe(false);
+  expect(
+    decodeDeepScanCheckpoint({ ...checkpoint, mergeStarted: true })
+      .mergeStarted,
+  ).toBe(true);
 });

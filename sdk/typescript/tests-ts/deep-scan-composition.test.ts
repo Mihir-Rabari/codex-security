@@ -229,6 +229,10 @@ async function harness(
       throw new Error(`Unexpected workbench operation ${args[0]}`);
     },
     async merge(prompt) {
+      expect(
+        JSON.parse(await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"))
+          .mergeStarted,
+      ).toBe(true);
       const path = join(scanDir, "artifacts/deep-scan/merge-inputs.json");
       expect(prompt).toContain(JSON.stringify(path));
       const payload = JSON.parse(await readFile(path, "utf8")) as {
@@ -432,6 +436,7 @@ describe("ordinary scan composition", () => {
     expect(h.calls).toHaveLength(4);
     expect(h.metrics()).toEqual({ closed: 4, maximumActive: 2 });
     expect(h.mergeInputs).toEqual([]);
+    expect(state.mergeStarted).toBe(false);
     expect(h.published).toHaveLength(2);
     expect(state.noNewStreak).toBe(4);
     expect(state.terminalReason).toBe("saturated");
