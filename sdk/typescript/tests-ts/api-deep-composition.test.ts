@@ -143,9 +143,19 @@ test.each([
     provider: { auth: { type: "command", command: "synthetic-auth-provider" } },
   },
   { workers: 1, budget: false, native: "feedback" },
-  { workers: 1, budget: false, native: "discovery" },
+  {
+    workers: 1,
+    budget: false,
+    native: "discovery",
+    provider: { env_key: "PROVIDER_KEY" },
+  },
   { workers: 1, budget: false, native: "discovery", userCancel: true },
-  { workers: 1, budget: false, native: "sealed" },
+  {
+    workers: 1,
+    budget: false,
+    native: "sealed",
+    provider: { env_key: "PROVIDER_KEY" },
+  },
   { workers: 1, budget: false, trackingFailure: true },
   { workers: 1, budget: false, artifactFailure: "directory" },
   { workers: 1, budget: false, artifactFailure: "draft" },
@@ -249,6 +259,7 @@ test.each([
       await readFile(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"),
     ).version;
     let runtimeVersion = version;
+    const customProvider = provider?.["env_key"] === "PROVIDER_KEY";
     const environment = {
       ...process.env,
       CODEX_HOME: codexHome,
@@ -258,12 +269,15 @@ test.each([
       GIT_SSH_COMMAND: "synthetic-ssh --fixture",
       GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
       CODEX_SAFETY_IDENTIFIER: "ambient-identifier",
+      ...(customProvider ? { PROVIDER_KEY: "synthetic-provider-key" } : {}),
       ...(native ? { OPENAI_API_KEY: "synthetic-native-key" } : {}),
       ...(provider === undefined
         ? {}
         : {
-            OPENAI_API_KEY: "synthetic-provider-key",
-            CODEX_API_KEY: "synthetic-native-key",
+            OPENAI_API_KEY: customProvider
+              ? undefined
+              : "synthetic-provider-key",
+            CODEX_API_KEY: customProvider ? undefined : "synthetic-native-key",
           }),
     };
     const nativeSettings = {
@@ -271,6 +285,9 @@ test.each([
       model_reasoning_effort: "ultra",
       forced_login_method: "chatgpt",
       cli_auth_credentials_store: "file",
+      ...(provider === undefined
+        ? {}
+        : { model_provider: "custom", model_providers: { custom: provider } }),
       mcp_servers: {
         synthetic: {
           command: "synthetic-mcp",
@@ -412,7 +429,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           ...environment,
           OPENAI_API_KEY: undefined,
           CODEX_API_KEY: undefined,
-          CODEX_SAFETY_IDENTIFIER: undefined,
+          CODEX_SAFETY_IDENTIFIER: customProvider
+            ? environment.CODEX_SAFETY_IDENTIFIER
+            : undefined,
           CODEX_SECURITY_CONFIG_PATH: undefined,
           CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: undefined,
         };
@@ -682,10 +701,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             if (provider !== undefined) {
               expect(options.apiKey).toBeUndefined();
               expect(options.env?.["OPENAI_API_KEY"]).toBe(
-                "synthetic-provider-key",
+                environment.OPENAI_API_KEY,
               );
               expect(options.env?.["CODEX_API_KEY"]).toBe(
-                "synthetic-native-key",
+                environment.CODEX_API_KEY,
               );
             }
             const env = options.env!;
@@ -1573,8 +1592,12 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             (saved["config"] as JsonObject)["cli_auth_credentials_store"],
           ).toBe("file");
         }
-        expect(environment.OPENAI_API_KEY).toBe("synthetic-provider-key");
-        expect(environment.CODEX_API_KEY).toBe("synthetic-native-key");
+        expect(environment.OPENAI_API_KEY).toBe(
+          customProvider ? undefined : "synthetic-provider-key",
+        );
+        expect(environment.CODEX_API_KEY).toBe(
+          customProvider ? undefined : "synthetic-native-key",
+        );
       }
       for (const turn of turns) {
         const permission = turn.overrides?.find((value) =>
@@ -1607,30 +1630,46 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           environment.GIT_CONFIG_GLOBAL,
         );
         expect(turn.environment["CODEX_SAFETY_IDENTIFIER"]).toBe(
-          native && !prepareNative ? "saved-native-identifier" : undefined,
+          native && !prepareNative
+            ? "saved-native-identifier"
+            : customProvider
+              ? "ambient-identifier"
+              : undefined,
         );
+        if (customProvider) {
+          expect(turn.environment["PROVIDER_KEY"]).toBe(
+            "synthetic-provider-key",
+          );
+          expect(turn.environment).not.toHaveProperty("OPENAI_API_KEY");
+          expect(turn.environment).not.toHaveProperty("CODEX_API_KEY");
+        }
       }
       const children = turns.filter((turn) => turn.mode === "standard");
       expect(children).toHaveLength(native === "discovery" ? 3 : 2);
       expect(new Set(children.map((turn) => turn.id)).size).toBe(2);
       if (prepareNative) {
-        const accounts = (await readFile(accountLog, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
-        expect(accounts[0]).toMatchObject({ home: codexHome, account: "A" });
-        expect(accounts.at(-1)).toMatchObject({
-          home: codexHome,
-          account: "B",
-        });
-        for (const { args } of accounts)
-          expect(args).toContain('cli_auth_credentials_store="file"');
-        expect(
-          accounts.every(
-            ({ home, account }) =>
-              home === codexHome && ["A", "B"].includes(account),
-          ),
-        ).toBe(true);
+        if (customProvider) {
+          expect(existsSync(accountLog)).toBe(false);
+          expect(nativeRecipe!["safetyIdentifier"]).toBe("ambient-identifier");
+        } else {
+          const accounts = (await readFile(accountLog, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(accounts[0]).toMatchObject({ home: codexHome, account: "A" });
+          expect(accounts.at(-1)).toMatchObject({
+            home: codexHome,
+            account: "B",
+          });
+          for (const { args } of accounts)
+            expect(args).toContain('cli_auth_credentials_store="file"');
+          expect(
+            accounts.every(
+              ({ home, account }) =>
+                home === codexHome && ["A", "B"].includes(account),
+            ),
+          ).toBe(true);
+        }
         expect(
           children.map(({ account, resumed }) => ({ account, resumed })),
         ).toEqual([

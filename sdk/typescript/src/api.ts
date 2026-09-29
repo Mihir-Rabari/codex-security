@@ -3109,6 +3109,7 @@ export class CodexSecurity {
         );
       if (
         options.safetyIdentifier !== undefined &&
+        !options.preserveProviderEnvironment &&
         authentication.method !== "api_key" &&
         !(
           authentication.method === "stored_credentials" &&
