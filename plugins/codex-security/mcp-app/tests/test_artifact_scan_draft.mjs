@@ -1147,6 +1147,33 @@ try {
     );
     assert.equal(saved.deferred.length, terminal ? 0 : 1);
   }
+  const extensionRoot = path.join(root, "current-extension-candidate");
+  await mkdir(extensionRoot);
+  const extensionContext = { ...context, root: extensionRoot };
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [
+        {
+          candidateId: finding.extensions.candidateId,
+          reason: "Review pending.",
+        },
+      ],
+    },
+  });
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
+    findings: [{ ...finding, provenance: { source: "local_plugin" } }],
+  });
+  assert.deepEqual(
+    (await readJson(extensionRoot, "coverage.json")).deferred,
+    [],
+  );
+
   const surfaceRoot = path.join(root, "explicit-surface-resolution");
   await mkdir(surfaceRoot);
   const surfaceContext = { ...context, root: surfaceRoot };

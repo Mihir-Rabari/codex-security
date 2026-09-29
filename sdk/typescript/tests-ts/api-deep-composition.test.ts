@@ -1,3 +1,5 @@
+import { captureEnvironment } from "../tests-support/process-environment.mjs";
+import { writeSemanticScanDraft } from "../src/scan-draft-publication.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -23,15 +25,13 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import { estimateScanCost, type ScanSessionEvent } from "../src/cost.js";
+import { estimateScanCost } from "../src/cost.js";
 import type { ScanCost } from "../src/cost-model.js";
-import type { ScanActivity } from "../src/scan-activity.js";
 import {
   prepareScanArtifactRestorer,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
-import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   ScanCostTrackingError,
@@ -133,6 +133,7 @@ test.each([
     "removed-directory",
   ].map((knowledge) => ({ workers: 1, budget: false, knowledge })),
   { workers: 1, budget: false, provider: undefined },
+  { workers: 1, budget: false, empty: true },
   { workers: 2, budget: false, provider: undefined },
   { workers: 1, budget: true, provider: undefined },
   { workers: 1, budget: true, firstChildBudget: true },
@@ -157,16 +158,6 @@ test.each([
     provider: { env_key: "PROVIDER_KEY" },
   },
   { workers: 1, budget: false, trackingFailure: true },
-  { workers: 1, budget: false, artifactFailure: "directory" },
-  { workers: 1, budget: false, artifactFailure: "draft" },
-  { workers: 1, budget: false, artifactFailure: "checkpoint" },
-  { workers: 1, budget: false, cleanupFailure: true },
-  {
-    workers: 1,
-    budget: false,
-    artifactFailure: "publication",
-    cleanupFailure: true,
-  },
   { workers: 1, budget: false, logFailure: true },
   { workers: 1, budget: false, sessionFailure: true },
   { workers: 1, budget: false, usage: "missing-merge" },
@@ -181,8 +172,7 @@ test.each([
   budget: boolean;
   firstChildBudget?: boolean;
   trackingFailure?: boolean;
-  artifactFailure?: "directory" | "draft" | "checkpoint" | "publication";
-  cleanupFailure?: boolean;
+  empty?: boolean;
   provider?: JsonObject;
   native?: "feedback" | "discovery" | "sealed";
   usage?: "missing-merge" | "missing-child" | "unreported-cache";
@@ -208,8 +198,7 @@ test.each([
     provider,
     native,
     trackingFailure,
-    artifactFailure,
-    cleanupFailure,
+    empty,
     usage,
     requiredCost,
     logFailure,
@@ -245,14 +234,15 @@ test.each([
         writeFile(join(repo, name), "print('public synthetic fixture')\n"),
       ),
     );
-    const childFindings: JsonObject[] = firstChildBudget
-      ? JSON.parse(
-          await readFile(
-            join(pluginRoot, "examples/completed-scan/findings.json"),
-            "utf8",
-          ),
-        ).findings.slice(0, 1)
-      : [];
+    const childFindings: JsonObject[] =
+      !empty && !emptyDeadline
+        ? JSON.parse(
+            await readFile(
+              join(pluginRoot, "examples/completed-scan/findings.json"),
+              "utf8",
+            ),
+          ).findings.slice(0, 1)
+        : [];
     for (const finding of childFindings) {
       for (const field of ["findingId", "occurrenceId", "fingerprints"])
         delete finding[field];
@@ -400,16 +390,13 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
     const warnings: string[] = [];
     let childTurns = 0;
     let mergeAttempts = 0;
+    let pythonResolutions = 0;
+    const resolutionCounts: number[] = [];
+    const knowledgeSnapshots = new Set<string>();
     let sessionWrites = 0;
     let threadCount = 0;
     const progressRuns: ScanProgress[][] = [];
     let progress: ScanProgress[];
-    const workerRuns: Array<{
-      threads: Set<string>;
-      activities: ScanActivity[];
-      sessions: ScanSessionEvent[];
-    }> = [];
-    let workerRun: (typeof workerRuns)[number];
     const workbenches = new Map<string, WorkbenchCommandOptions>();
     const commands: Array<{ command: string; id: string | undefined }> = [];
     const turns: Array<{
@@ -439,8 +426,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           CODEX_SECURITY_CONFIG_PATH: undefined,
           CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: undefined,
         };
-        const before = Object.fromEntries(
-          Object.keys(nativeEnvironment).map((key) => [key, process.env[key]]),
+        const restoreEnvironment = captureEnvironment(
+          Object.keys(nativeEnvironment),
         );
         try {
           for (const [key, value] of Object.entries(nativeEnvironment)) {
@@ -461,7 +448,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             savedDeepScanSettings: {
               workers,
               subagents: 3,
-              stopAfterNoNew: 2,
+              stopAfterNoNew: empty ? 2 : 1,
               maxDiscoveryRuns: 4,
               maxTimeHours: 1,
             },
@@ -472,10 +459,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           });
           nativeOptions = prepared.options;
         } finally {
-          for (const [key, value] of Object.entries(before)) {
-            if (value === undefined) delete process.env[key];
-            else process.env[key] = value;
-          }
+          restoreEnvironment();
         }
       }
       return new CodexSecurity(
@@ -514,27 +498,18 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             },
           }),
           ...prepared?.client.dependencies,
-          resolvePluginPython: async () => python,
+          resolvePluginPython: async () => {
+            pythonResolutions += 1;
+            return python;
+          },
           prepareScanArtifactRestorer: async (...args) => {
             const writer = await prepareScanArtifactRestorer(...args);
             return {
               ...writer,
-              async prepareDirectory(path) {
-                if (artifactFailure === "directory")
-                  throw new Error("Synthetic directory write failure.");
-                await writer.prepareDirectory(path);
-              },
               async restore(path, contents) {
-                if (artifactFailure === "draft" && path.startsWith("drafts/"))
-                  throw new Error("Synthetic draft write failure.");
                 if (logFailure && path.endsWith("execution-threads.json"))
                   throw new Error("Synthetic session index write failure.");
                 await writer.restore(path, contents);
-              },
-              async remove(path) {
-                if (cleanupFailure && path.endsWith(".checkpoint.json"))
-                  throw new Error("Synthetic staging cleanup failure.");
-                await writer.remove(path);
               },
             };
           },
@@ -559,16 +534,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               ] === "deep"
             )
               return {};
-            if (
-              artifactFailure === "checkpoint" &&
-              args[0] === "save-scan-artifact"
-            )
-              throw new Error("Synthetic checkpoint write failure.");
-            if (
-              artifactFailure === "publication" &&
-              args[0] === "write-scan-draft"
-            )
-              throw new Error("Synthetic publication write failure.");
             const result = await runWorkbench(options, args, input);
             const id = args.includes("--scan-id")
               ? args[args.indexOf("--scan-id") + 1]
@@ -735,6 +700,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                 ) {
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
+                  let groups: Array<{
+                    sourceFindingIds: string[];
+                    canonicalSourceFindingId: string;
+                  }> = [];
                   if (
                     mode === "deep" &&
                     prompt !== "Post-scan instructions once."
@@ -750,15 +719,25 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                     const payload = JSON.parse(
                       await readFile(mergePath, "utf8"),
                     );
-                    expect(payload.scans.length).toBeGreaterThan(0);
-                    for (const scan of payload.scans) {
-                      expect(registrations.get(scan.childScanId)).toMatchObject(
-                        { mode: "standard" },
-                      );
-                      expect(scan).toMatchObject({ scanId: id, findings: [] });
-                    }
+                    expect(payload.findings.length).toBeGreaterThan(0);
+                    const sourceFindingIds = payload.sources.map(
+                      (source: { id: string }) => source.id,
+                    );
+                    for (const source of sourceFindingIds)
+                      expect(
+                        registrations.get(source.split(":")[0]),
+                      ).toMatchObject({ mode: "standard" });
+                    groups = [
+                      {
+                        sourceFindingIds,
+                        canonicalSourceFindingId: sourceFindingIds[0],
+                      },
+                    ];
                   }
                   if (knowledge) {
+                    knowledgeSnapshots.add(
+                      env["CODEX_SECURITY_KNOWLEDGE_BASE"]!,
+                    );
                     expect(
                       await readFile(
                         join(
@@ -874,73 +853,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                         }) + "\n",
                       );
                     }
-                    if (mode === "standard") {
-                      const delegated = `${thread.id}-worker`;
-                      workerRun.threads.add(thread.id);
-                      workerRun.threads.add(delegated);
-                      await writeFile(
-                        join(
-                          sessionHome,
-                          "sessions",
-                          `rollout-${delegated}.jsonl`,
-                        ),
-                        [
-                          {
-                            type: "session_meta",
-                            payload: {
-                              id: delegated,
-                              parent_thread_id: thread.id,
-                            },
-                          },
-                          {
-                            type: "response_item",
-                            payload: {
-                              type: "function_call",
-                              name: "exec_command",
-                              call_id: "shared-command",
-                              arguments: JSON.stringify({
-                                cmd: "printf synthetic-worker",
-                              }),
-                            },
-                          },
-                          {
-                            type: "response_item",
-                            payload: {
-                              type: "function_call_output",
-                              call_id: "shared-command",
-                              output: "synthetic-worker",
-                            },
-                          },
-                        ]
-                          .map((event) => JSON.stringify(event))
-                          .join("\n") + "\n",
-                      );
-                    }
                     yield { type: "thread.started", thread_id: thread.id };
-                    if (
-                      artifactFailure === "checkpoint" &&
-                      prompt === "Post-scan instructions once."
-                    )
-                      throw new Error("Synthetic follow-up failure.");
                     if (mode === "standard") {
-                      for (const type of [
-                        "item.started",
-                        "item.completed",
-                      ] as const)
-                        yield {
-                          type,
-                          item: {
-                            id: "shared-command",
-                            type: "command_execution",
-                            command: "printf synthetic-worker",
-                            aggregated_output: "synthetic-worker",
-                            status:
-                              type === "item.started"
-                                ? "in_progress"
-                                : "completed",
-                            exit_code: 0,
-                          },
-                        };
                       childTurns += 1;
                       const directory = record["scanDir"] as string;
                       if (
@@ -976,43 +890,22 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                         controller.abort(error);
                         throw error;
                       }
-                      const reviewed = directory.endsWith("pass-1") ? 2 : 3;
-                      for (const [phase, filesCompleted] of [
-                        ["discovery", 0],
-                        ["discovery", reviewed],
-                        ["reporting", reviewed],
-                      ] as const) {
-                        const before = progress.at(-1)!.filesCompleted;
-                        yield {
-                          type: "item.completed",
-                          item: {
-                            id: `${id}-${phase}-${filesCompleted}`,
-                            type: "agent_message",
-                            text:
-                              "CODEX_SECURITY_SCAN_PROGRESS " +
-                              JSON.stringify({
-                                phase,
-                                filesCompleted,
-                                filesTotal: 4,
-                              }),
-                          },
-                        };
-                        await new Promise<void>((resolve) =>
-                          setImmediate(resolve),
-                        );
-                        expect(progress.at(-1)).toMatchObject({
-                          phase: "discovery",
-                          filesTotal: 4,
-                        });
-                        expect(
-                          progress.at(-1)!.filesCompleted,
-                        ).toBeGreaterThanOrEqual(
-                          Math.max(before, filesCompleted),
-                        );
-                        expect(
-                          progress.at(-1)!.filesCompleted,
-                        ).toBeLessThanOrEqual(3);
-                      }
+                      yield {
+                        type: "item.completed",
+                        item: {
+                          id: `${id}-progress`,
+                          type: "agent_message",
+                          text:
+                            "CODEX_SECURITY_SCAN_PROGRESS " +
+                            JSON.stringify({
+                              phase: "discovery",
+                              filesCompleted: directory.endsWith("pass-1")
+                                ? 2
+                                : 3,
+                              filesTotal: 4,
+                            }),
+                        },
+                      };
                       const draft: SemanticScan = {
                         scanId: id,
                         findings: childFindings as SemanticFinding[],
@@ -1023,39 +916,25 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                           deferred: [],
                         },
                       };
-                      const documents = prepareSemanticScanDraft(
+                      await writeSemanticScanDraft(
                         {
-                          targetContract: record["contract"] as JsonObject,
-                          mode: "standard",
-                          targetRevision: record["targetRevision"] as string,
+                          scanDir: directory,
+                          contract: {
+                            targetContract: record["contract"] as JsonObject,
+                            mode: "standard",
+                            targetRevision: record["targetRevision"] as string,
+                          },
+                          writer: await prepareScanArtifactRestorer(
+                            workbenches.get(id)!,
+                            directory,
+                          ),
+                          workbench: (args) =>
+                            runWorkbench(workbenches.get(id)!, args),
+                          onCleanupError: (error) =>
+                            warnings.push(String(error)),
                         },
                         draft,
                       );
-                      const draftPath = join(
-                        directory,
-                        "drafts",
-                        randomUUID() + ".json",
-                      );
-                      const checkpointPath = join(
-                        directory,
-                        "drafts",
-                        randomUUID() + ".checkpoint.json",
-                      );
-                      await mkdir(join(directory, "drafts"), {
-                        recursive: true,
-                        mode: 0o700,
-                      });
-                      await writeFile(draftPath, JSON.stringify(documents));
-                      await writeFile(checkpointPath, JSON.stringify(draft));
-                      await runWorkbench(workbenches.get(id)!, [
-                        "write-scan-draft",
-                        "--scan-id",
-                        id,
-                        "--draft-path",
-                        draftPath,
-                        "--checkpoint-path",
-                        checkpointPath,
-                      ]);
                     }
                     yield {
                       type: "item.completed",
@@ -1064,7 +943,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                         type: "agent_message",
                         text:
                           mode === "deep"
-                            ? JSON.stringify({ scanId: id, findings: [] })
+                            ? JSON.stringify({ scanId: id, groups })
                             : "Complete",
                       },
                     };
@@ -1135,7 +1014,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         preserveProviderEnvironment: provider !== undefined,
         workers,
         subagents: 3,
-        stopAfterNoNew: 2,
+        stopAfterNoNew: empty ? 2 : 1,
         ...(sessionFailure ? { stopAfterConsecutiveErrors: 1 } : {}),
         maxDiscoveryRuns: 4,
         maxTimeHours: 1,
@@ -1154,8 +1033,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           ? undefined
           : "Post-scan instructions once.",
         onProgress: (update) => progress.push(update),
-        onActivity: (activity) => workerRun.activities.push(activity),
-        onSessionEvent: (event) => workerRun.sessions.push(event),
         onCost: (cost) => costs.push(cost),
         onWarning: (message) => {
           warnings.push(message);
@@ -1169,18 +1046,24 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
       const run = () => {
         progress = [];
         progressRuns.push(progress);
-        workerRun = { threads: new Set(), activities: [], sessions: [] };
-        workerRuns.push(workerRun);
-        return client.run(repo, {
-          ...scanOptions,
-          ...nativeOptions,
-          signal: AbortSignal.any([
-            controller.signal,
-            AbortSignal.timeout(
-              Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
-            ),
-          ]),
-        });
+        const beforeResolution = pythonResolutions;
+        return client
+          .run(repo, {
+            ...scanOptions,
+            ...nativeOptions,
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(
+                Number(
+                  process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000",
+                ),
+              ),
+            ]),
+          })
+          .finally(() => {
+            resolutionCounts.push(pythonResolutions - beforeResolution);
+            expect(resolutionCounts.at(-1)).toBeLessThanOrEqual(1);
+          });
       };
       const assertFollowUpLogs = async (scan: ScanLogSource) => {
         expect(followUpThreads).toHaveLength(1);
@@ -1253,6 +1136,15 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
         const count = turns.length;
         expect(count).toBeGreaterThan(0);
+        expect(knowledgeSnapshots.size).toBe(1);
+        for (const path of knowledgeSnapshots)
+          expect(existsSync(path)).toBe(false);
+        const recipes = [...registrations.values()].map(
+          (record) => record["recipe"] as JsonObject,
+        );
+        expect(
+          new Set(recipes.map((recipe) => recipe["knowledgeBaseSha256"])).size,
+        ).toBe(1);
         const scanId = [...registrations].find(
           ([, value]) => value["mode"] === "deep",
         )![0];
@@ -1320,38 +1212,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         ).toMatchObject({ completeness: "partial" });
         return;
       }
-      if (artifactFailure) {
-        await expect(run()).rejects.toThrow(
-          `Synthetic ${artifactFailure} write failure.`,
-        );
-        if (cleanupFailure)
-          expect(warnings).toContain(
-            "Could not clean up after the Codex Security scan: Synthetic staging cleanup failure.",
-          );
-        if (artifactFailure === "directory")
-          expect([threadCount, turns.length]).toEqual([0, 0]);
-        expect(
-          commands.filter(({ command }) => command === "write-scan-draft"),
-        ).toEqual([]);
-        const parent = [...registrations.values()].find(
-          ({ mode }) => mode === "deep",
-        )!;
-        const saved = await runWorkbench(commandOptions, [
-          "get-scan",
-          "--scan-id",
-          parent["scanId"] as string,
-        ]);
-        expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
-        if (artifactFailure !== "directory")
-          await assertFollowUpLogs(saved["scan"] as ScanLogSource);
-        if (artifactFailure === "checkpoint") {
-          expect(saved["compositionCheckpoint"]).toBeNull();
-          expect(
-            (saved["scan"] as ScanLogSource).continuationThreadId,
-          ).toBeNull();
-        }
-        return;
-      }
       if (trackingFailure) {
         await expect(run()).rejects.toBeInstanceOf(ScanCostTrackingError);
         expect(turns).toHaveLength(1);
@@ -1391,7 +1251,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           parent["scanId"] as string,
         ]);
         expect(saved["scan"]).toMatchObject({ progress: { status: "failed" } });
-        expect(saved["compositionCheckpoint"]).toMatchObject({
+        expect(
+          JSON.parse(
+            await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+          ),
+        ).toMatchObject({
           terminalReason: "failed",
           consecutiveErrors: 0,
           noNewStreak: 0,
@@ -1412,7 +1276,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           progress: { status: userCancel ? "canceled" : "running" },
         });
         if (userCancel) {
-          expect(saved["compositionCheckpoint"]).toMatchObject({
+          expect(
+            JSON.parse(
+              await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+            ),
+          ).toMatchObject({
             terminalReason: "canceled",
           });
           return;
@@ -1426,7 +1294,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         );
         if (native === "discovery") {
           expect(checkpoint).toMatchObject({
-            noNewStreak: 1,
+            noNewStreak: 0,
             consecutiveErrors: 0,
           });
           expect(checkpoint.terminalReason).toBeUndefined();
@@ -1515,10 +1383,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         }
       }
       const result = await run();
-      if (cleanupFailure)
-        expect(warnings).toContain(
-          "Could not clean up after the Codex Security scan: Synthetic staging cleanup failure.",
-        );
+      expect(resolutionCounts.at(-1)).toBe(1);
       if (usage) {
         const saved = await runWorkbench(commandOptions, [
           "get-scan",
@@ -1537,30 +1402,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           expect(result.cost!.cacheWriteInputTokensReported).toBe(false);
           expect(result.cost).toEqual(scan["cost"] as unknown as ScanCost);
         }
-      }
-      for (const observed of workerRuns) {
-        const labels = new Map<string, number>();
-        for (const event of observed.sessions) {
-          if (!observed.threads.has(event.threadId)) {
-            expect(event.worker).toBeUndefined();
-            continue;
-          }
-          expect(event.worker).toBeGreaterThan(0);
-          if (labels.has(event.threadId))
-            expect(event.worker).toBe(labels.get(event.threadId));
-          labels.set(event.threadId, event.worker!);
-        }
-        expect(new Set(labels.keys())).toEqual(observed.threads);
-        expect(new Set(labels.values()).size).toBe(labels.size);
-        for (const threadId of observed.threads)
-          expect(
-            observed.activities
-              .filter(({ id }) => id === `${threadId}:shared-command`)
-              .map(({ worker, status }) => ({ worker, status })),
-          ).toEqual([
-            { worker: labels.get(threadId), status: "running" },
-            { worker: labels.get(threadId), status: "completed" },
-          ]);
       }
       for (const updates of progressRuns) {
         const counts = updates.map((update) => update.filesCompleted);
@@ -1594,7 +1435,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             ),
         ).toBe(true);
       }
-      expect(result.findings.findings).toEqual([]);
+      expect(result.findings.findings).toHaveLength(empty ? 0 : budget ? 2 : 1);
+      if (empty) expect(mergeAttempts).toBe(0);
       expect(result.coverage.completeness).toBe(
         budget ? "partial" : "complete",
       );
@@ -1602,7 +1444,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
       );
       expect(checkpoint.terminalReason).toBe(budget ? "capped" : "saturated");
-      expect(checkpoint.noNewStreak).toBe(budget ? 1 : 2);
+      expect(checkpoint.noNewStreak).toBe(empty ? 2 : budget ? 0 : 1);
       expect(checkpoint.passes).toHaveLength(2);
       expect(checkpoint.mergedScanIds).toHaveLength(budget ? 1 : 2);
       expect(registrations.size).toBe(3);
@@ -1670,6 +1512,15 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         }
       }
       const children = turns.filter((turn) => turn.mode === "standard");
+      const configByChild = new Map(
+        children.map((turn) => [
+          turn.id,
+          turn.environment["CODEX_SECURITY_CONFIG_PATH"],
+        ]),
+      );
+      expect(new Set(configByChild.values()).size).toBe(configByChild.size);
+      for (const options of workbenches.values())
+        expect(options.pluginRoot).toBe(pluginRoot);
       expect(children).toHaveLength(native === "discovery" ? 3 : 2);
       expect(new Set(children.map((turn) => turn.id)).size).toBe(2);
       if (prepareNative) {

@@ -150,7 +150,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
                   relative.split("/"),
                   "staged scan draft",
                 );
-                await replaceArtifactText(path, Buffer.from(contents).toString("utf8"));
+                await replaceArtifactText(
+                  path,
+                  Buffer.from(contents).toString("utf8"),
+                );
               },
               remove: async (relative) => {
                 const path = await artifactDestination(
@@ -684,15 +687,10 @@ function coverageHasOutstandingWork(coverage: SemanticCoverage): boolean {
 }
 
 function findingCandidateId(finding: JsonObject): string | undefined {
-  const provenance = finding.provenance;
-  if (
-    isObject(provenance) &&
-    typeof provenance.candidateId === "string" &&
-    provenance.candidateId.trim()
-  ) {
-    return provenance.candidateId;
-  }
-  return undefined;
+  return [
+    isObject(finding.provenance) ? finding.provenance.candidateId : undefined,
+    isObject(finding.extensions) ? finding.extensions.candidateId : undefined,
+  ].find((id): id is string => typeof id === "string" && id.trim().length > 0);
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */
