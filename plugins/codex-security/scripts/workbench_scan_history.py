@@ -1055,14 +1055,18 @@ def finding_matches(
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
         WHERE matches.before_occurrence_id = ?
-            AND (occurrences.scan_id = ? OR occurrences.scan_id IN (SELECT id FROM public_scans))
+            AND (occurrences.scan_id = ? OR EXISTS (
+                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
+            ))
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
         WHERE matches.after_occurrence_id = ?
-            AND (occurrences.scan_id = ? OR occurrences.scan_id IN (SELECT id FROM public_scans))
+            AND (occurrences.scan_id = ? OR EXISTS (
+                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
+            ))
         ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, scan_id, occurrence_id, scan_id),
@@ -1077,7 +1081,7 @@ def finding_matches(
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE scans.id IN (SELECT id FROM public_scans)
+            WHERE EXISTS (SELECT 1 FROM public_scans WHERE public_scans.id = scans.id)
                 OR scans.id = ?
             """.format(placeholders="?"),
             (occurrence_id, scan_id),

@@ -224,6 +224,84 @@ def insert_scan(
     )
 
 
+def test_finding_history_work_does_not_grow_with_unrelated_scans(workbench_db, workbench_api):
+    connection = workbench_db
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('history', '0', '0')"
+    )
+
+    def add_scan(scan_id, timestamp):
+        insert_scan(
+            connection,
+            workspace_id="history",
+            scan_id=scan_id,
+            mode="standard",
+            status="complete",
+            phase="reporting",
+            timestamp=timestamp,
+        )
+
+    connection.execute(
+        "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) "
+        "VALUES ('shared', 'shared', 'synthetic', 'fixture', '0', '0')"
+    )
+    for index, scan_id in enumerate(("before", "selected", "after", "hidden")):
+        add_scan(scan_id, str(index))
+        connection.execute(
+            "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
+            "confidence, remediation, created_at) "
+            "VALUES (?, 'shared', ?, 'Fixture', 'Synthetic evidence', 'high', 'high', 'Fix', '0')",
+            (scan_id, scan_id),
+        )
+    connection.execute(
+        "UPDATE scans SET parent_scan_id = 'before', parent_scan_role = 'deep_pass' "
+        "WHERE id IN ('selected', 'hidden')"
+    )
+    connection.execute("UPDATE scans SET parent_scan_id = 'before' WHERE id = 'after'")
+    for before, after in (("before", "selected"), ("selected", "after")):
+        connection.execute(
+            "INSERT INTO scan_comparisons "
+            "(before_scan_id, after_scan_id, result_json, created_at, updated_at) "
+            "VALUES (?, ?, '{}', '0', '0')",
+            (before, after),
+        )
+        connection.execute(
+            "INSERT INTO scan_comparison_matches "
+            "(before_scan_id, after_scan_id, before_occurrence_id, after_occurrence_id, reason) "
+            "VALUES (?, ?, ?, ?, 'Synthetic confirmed match')",
+            (before, after, before, after),
+        )
+
+    def measure():
+        instructions = 0
+
+        def step():
+            nonlocal instructions
+            instructions += 1
+            return 0
+
+        connection.set_progress_handler(step, 1)
+        try:
+            result = workbench_api["scan_history"].finding_matches(
+                connection, "selected", "selected", "1"
+            )
+        finally:
+            connection.set_progress_handler(None, 0)
+        return result, instructions
+
+    # Count executed SQLite instructions, independent of machine speed or load.
+    expected, original_work = measure()
+    matches, first, bounds = expected
+    assert [match["scanId"] for match in matches] == ["after", "before"]
+    assert first == "0"
+    assert bounds == ["before", "after"]
+    for index in range(1024):
+        add_scan(f"unrelated-{index}", "4")
+    observed, expanded_work = measure()
+    assert observed == expected
+    assert expanded_work <= original_work
+
+
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
