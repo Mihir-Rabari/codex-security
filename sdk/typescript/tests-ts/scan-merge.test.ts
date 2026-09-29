@@ -329,7 +329,14 @@ test("model input excludes all coverage and retains complete source evidence onc
       ],
     }),
   };
-  const two = child("two");
+  const two = child("two", [
+    finding("two", {
+      provenance: {
+        ...finding().provenance,
+        sourceFindings: [{ id: "historical:0", finding: finding("original") }],
+      },
+    }),
+  ]);
   const original = structuredClone({ previous, two });
   const bytes = scanMergeModelInputs([two], previous);
   const parsed = JSON.parse(bytes.toString());
@@ -340,6 +347,14 @@ test("model input excludes all coverage and retains complete source evidence onc
     { id: "two:0", finding: two.sourceFindings[0]! },
   ]);
   expect(parsed.findings[0].provenance.sourceFindings).toBeUndefined();
+  const grouped = merge(
+    submission(parsed.sources.map(({ id }: { id: string }) => id)),
+    [two],
+    previous,
+  );
+  expect(grouped.aggregate.findings[0]!.provenance.sourceFindings).toEqual(
+    parsed.sources,
+  );
   let writes = 0;
   const prompt = await scanMergePrompt(parent, [two], previous, root, {
     async restore() {

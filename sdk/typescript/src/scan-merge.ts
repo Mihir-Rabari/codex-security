@@ -50,22 +50,10 @@ function refs(finding: SemanticFinding): string[] {
   return ids;
 }
 
-/** The model chooses groups; only the host supplies finding text and exact evidence. */
-export function validateScanMerge(
-  raw: unknown,
+function scanMergeSources(
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
-): ScanMergeResult {
-  const merged = mergeSchema.parse(raw);
-  for (const source of [
-    ...inputs.map((input) => input.draft),
-    ...(previous ? [previous] : []),
-  ]) {
-    if (source.scanId !== merged.scanId)
-      throw new Error("Scan merge source belongs to a different parent scan.");
-    if (source.complete === false)
-      throw new Error("Scan merge requires completed inputs.");
-  }
+) {
   const sources = new Map<
     string,
     { original: JsonObject; canonical: SemanticFinding; input?: number }
@@ -91,6 +79,26 @@ export function validateScanMerge(
       });
     }
   }
+  return sources;
+}
+
+/** The model chooses groups; only the host supplies finding text and exact evidence. */
+export function validateScanMerge(
+  raw: unknown,
+  inputs: readonly ScanMergeInput[],
+  previous: ScanAggregate | null,
+): ScanMergeResult {
+  const merged = mergeSchema.parse(raw);
+  for (const source of [
+    ...inputs.map((input) => input.draft),
+    ...(previous ? [previous] : []),
+  ]) {
+    if (source.scanId !== merged.scanId)
+      throw new Error("Scan merge source belongs to a different parent scan.");
+    if (source.complete === false)
+      throw new Error("Scan merge requires completed inputs.");
+  }
+  const sources = scanMergeSources(inputs, previous);
   const owners = new Map<string, number>();
   for (const [index, group] of merged.groups.entries()) {
     if (!group.sourceFindingIds.includes(group.canonicalSourceFindingId))
@@ -274,7 +282,6 @@ export function scanMergeModelInputs(
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
 ): Buffer {
-  const sources = new Map<string, JsonObject>();
   const canonical = (finding: SemanticFinding) => {
     const {
       sourceFindings,
@@ -282,25 +289,22 @@ export function scanMergeModelInputs(
       originalCandidates,
       ...provenance
     } = finding.provenance;
-    for (const source of sourceFindings ?? [])
-      sources.set(source.id, source.finding);
     return {
       ...finding,
       provenance,
       retainedDetails: { previousFindings, originalCandidates },
     };
   };
-  const findings = [...(previous?.findings ?? []).map(canonical)];
-  for (const input of inputs) {
-    for (const [index, finding] of input.draft.findings.entries()) {
-      sources.set(`${input.scanId}:${index}`, input.sourceFindings[index]!);
-      findings.push(canonical(finding));
-    }
-  }
+
   return Buffer.from(
     JSON.stringify({
-      findings,
-      sources: [...sources].map(([id, finding]) => ({ id, finding })),
+      findings: [
+        ...(previous?.findings ?? []),
+        ...inputs.flatMap((input) => input.draft.findings),
+      ].map(canonical),
+      sources: [...scanMergeSources(inputs, previous)].map(
+        ([id, { original }]) => ({ id, finding: original }),
+      ),
     }),
   );
 }
