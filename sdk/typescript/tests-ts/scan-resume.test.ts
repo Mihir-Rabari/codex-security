@@ -1,3 +1,4 @@
+import { publishDraft } from "./support/scan-publication.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -25,10 +26,7 @@ import {
   TerminalDeepScanError,
   type DeepScanCheckpoint,
 } from "../src/deep-scan.js";
-import {
-  prepareSemanticScanDraft,
-  type SemanticScan,
-} from "../src/scan-semantics.js";
+import type { SemanticScan } from "../src/scan-semantics.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { capture, dependencies } from "./cli-fixtures.js";
@@ -255,7 +253,7 @@ async function interruptedScan(
         deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
       },
     };
-    await writeDraft(command, child, "standard", {
+    await publishDraft(command, child, "standard", {
       ...aggregate,
       scanId: childId,
     });
@@ -310,41 +308,6 @@ async function interruptedScan(
     childId,
     childDir,
   };
-}
-
-async function writeDraft(
-  command: (args: readonly string[], input?: string) => Promise<JsonObject>,
-  registration: JsonObject,
-  mode: "deep" | "standard",
-  draft: SemanticScan,
-) {
-  const directory = registration["scanDir"] as string;
-  const documents = prepareSemanticScanDraft(
-    {
-      targetContract: registration["contract"] as JsonObject,
-      mode,
-      targetRevision: registration["targetRevision"] as string,
-    },
-    draft,
-  );
-  const draftPath = join(directory, "drafts", randomUUID() + ".json");
-  const checkpointPath = join(
-    directory,
-    "drafts",
-    randomUUID() + ".checkpoint.json",
-  );
-  await mkdir(join(directory, "drafts"), { recursive: true, mode: 0o700 });
-  await writeFile(draftPath, JSON.stringify(documents));
-  await writeFile(checkpointPath, JSON.stringify(draft));
-  await command([
-    "write-scan-draft",
-    "--scan-id",
-    registration["scanId"] as string,
-    "--draft-path",
-    draftPath,
-    "--checkpoint-path",
-    checkpointPath,
-  ]);
 }
 
 test("resume preserves its identity, launch recipe, accepted child and checkpoint", async () => {
@@ -528,274 +491,22 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     ],
     JSON.stringify(checkpoint),
   );
-  await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+  await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
-// Accounting is shared by both terminal states; canceled cases retain coverage
-// for recovered totals and missing optional child or merge persistence.
-test.each([
-  ...(
-    [
-      ["absent", "complete"],
-      ["stale", "complete"],
-      ["exact", "complete"],
-      ["larger", "complete"],
-      ["absent", "unknown-child"],
-      ["larger", "unknown-child"],
-      ["stale", "running-child"],
-      ["absent", "running-threadless"],
-      ["larger", "running-threadless"],
-      ["absent", "failed-threadless"],
-      ["stale", "failed-threadless"],
-      ["larger", "unknown-merge"],
-      ["absent", "unregistered-merge"],
-      ["stale", "unregistered-merge"],
-      ["absent", "marked-merge"],
-      ["larger", "marked-merge"],
-      ["larger", "unavailable"],
-      ["larger", "parent-unavailable"],
-      ["larger", "unknown-legacy"],
-      ["larger", "mismatched-child"],
-      ["larger", "missing-child"],
-      ["absent", "legacy-saved"],
-      ["absent", "legacy-current"],
-      ["absent", "legacy-logs"],
-      ["absent", "shared-legacy"],
-      ["larger", "shared-legacy"],
-    ] as const
-  ).map(([saved, accounting]) => ["failed", saved, accounting] as const),
-  ["canceled", "absent", "complete"],
-  ["canceled", "larger", "unknown-child"],
-  ["canceled", "stale", "failed-threadless"],
-  ["canceled", "absent", "unregistered-merge"],
-] as const)(
-  "rejecting a %s checkpoint reconciles %s saved cost with %s accounting",
-  async (terminalReason, saved, accounting) => {
-    const cost = (input_tokens: number, output_tokens: number) =>
-      estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
-    const childCost =
-      accounting === "unknown-child" ? undefined : cost(100_000, 10_000);
-    const legacy =
-      accounting === "legacy-saved" ||
-      accounting === "legacy-logs" ||
-      accounting === "legacy-current" ||
-      accounting === "shared-legacy" ||
-      accounting === "unknown-legacy";
-    const separateLegacy = legacy && accounting !== "legacy-current";
-    const recoveredCost = cost(
-      (separateLegacy ? 103_000 : 101_000) +
-        (accounting === "legacy-logs" ? 425 : 0),
-      (separateLegacy ? 10_300 : 10_100) +
-        (accounting === "legacy-logs" ? 42 : 0),
-    );
-    const savedCost =
-      saved === "absent"
-        ? undefined
-        : saved === "stale"
-          ? cost(1_000, 100)
-          : saved === "larger"
-            ? cost(200_000, 20_000)
-            : recoveredCost;
-    const complete =
-      accounting === "complete" ||
-      (legacy &&
-        accounting !== "unknown-legacy" &&
-        accounting !== "shared-legacy");
-    const expectedCost =
-      complete && saved !== "larger" ? recoveredCost : savedCost;
-    const f = await interruptedScan(
-      "deep",
-      false,
-      {},
-      false,
-      accounting !== "unregistered-merge",
-      { cost: childCost },
-    );
-    const sessionStartedAt = (
-      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
-    )["startedAt"] as string;
-    // Give independent child and merge sessions overlapping lifetimes. Merge
-    // accounting must not include the child a second time through its directory.
-    const writeUsage = async (
-      path: string,
-      id: string,
-      cwd: string,
-      inputTokens: number,
-      outputTokens: number,
-      parentThreadId?: string,
-    ) => {
-      await writeFile(
-        path,
-        [
-          {
-            type: "session_meta",
-            payload: {
-              id,
-              cwd,
-              timestamp: sessionStartedAt,
-              ...(parentThreadId === undefined
-                ? {}
-                : { parent_thread_id: parentThreadId }),
-            },
-          },
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: {
-                  input_tokens: inputTokens,
-                  output_tokens: outputTokens,
-                },
-              },
-            },
-          },
-        ]
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
-      );
-    };
-    await writeUsage(
-      f.sessionPath,
-      f.threadId,
-      join(f.scanDir, "artifacts/deep-scan/merge"),
-      1_000,
-      100,
-    );
-    const childThreadId = randomUUID();
-    await writeUsage(
-      join(f.codexHome, "sessions", `rollout-${childThreadId}.jsonl`),
-      childThreadId,
-      f.childDir!,
-      100_000,
-      10_000,
-    );
-    if (accounting === "unknown-merge") await rm(f.sessionPath);
+test.each(["failed", "canceled"] as const)(
+  "rejecting a %s checkpoint preserves saved accounting and artifacts",
+  async (terminalReason) => {
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 100,
+    })!;
+    const f = await interruptedScan("deep", false, {}, false, true, { cost });
     const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
     const checkpoint = JSON.parse(
       await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.terminalReason = terminalReason;
-    if (accounting === "marked-merge") checkpoint.costUnavailable = true;
-    if (
-      (saved === "absent" && accounting === "complete") ||
-      accounting === "running-child" ||
-      accounting === "running-threadless" ||
-      accounting === "failed-threadless"
-    ) {
-      const directory = "artifacts/deep-scan/passes/pass-2";
-      await mkdir(join(f.scanDir, directory), { recursive: true, mode: 0o700 });
-      const registration = await f.command(
-        [
-          "register-cli-scan",
-          "--repository",
-          f.repository,
-          "--scan-dir",
-          join(f.scanDir, directory),
-          "--parent-scan-id",
-          f.scanId,
-          "--registration-json-stdin",
-        ],
-        JSON.stringify({ recipe: { ...f.recipe, mode: "standard" } }),
-      );
-      const scanId = registration["scanId"] as string;
-      if (accounting === "failed-threadless") {
-        const unrecordedThread = randomUUID();
-        await writeUsage(
-          join(f.codexHome, "sessions", `rollout-${unrecordedThread}.jsonl`),
-          unrecordedThread,
-          join(f.scanDir, directory),
-          50_000,
-          5_000,
-        );
-      }
-      if (accounting === "running-threadless")
-        await f.command([
-          "preserve-scan-results",
-          "--scan-id",
-          scanId,
-          "--cost-json",
-          JSON.stringify(cost(1000, 100)),
-        ]);
-      else if (accounting !== "running-child")
-        await f.command([
-          "fail-scan",
-          "--scan-id",
-          scanId,
-          "--defer-publication",
-          "--message",
-          accounting === "failed-threadless"
-            ? "Synthetic failure after optional session persistence failed."
-            : "Synthetic failure before session startup.",
-          ...(accounting === "failed-threadless"
-            ? []
-            : ["--cost-json", JSON.stringify(cost(0, 0))]),
-        ]);
-      checkpoint.passes.push(
-        { directory, scanId },
-        { directory: "artifacts/deep-scan/passes/pass-3" },
-      );
-    }
-    if (legacy) {
-      const legacyThreadId =
-        accounting === "legacy-current" ? f.threadId : randomUUID();
-      checkpoint.legacy = {
-        discoveryRuns: 1,
-        coverage: semanticCoverage(),
-        originThreadId: legacyThreadId,
-        ...(accounting === "legacy-saved"
-          ? { cost: cost(2_000, 200) }
-          : accounting === "legacy-current"
-            ? { cost: cost(1_000, 100) }
-            : {}),
-      };
-      if (accounting === "legacy-logs" || accounting === "shared-legacy") {
-        await writeUsage(
-          join(f.codexHome, "sessions", `rollout-${legacyThreadId}.jsonl`),
-          legacyThreadId,
-          f.scanDir,
-          2_000,
-          200,
-        );
-        if (accounting === "shared-legacy") {
-          const path = join(
-            f.codexHome,
-            "sessions",
-            `rollout-${legacyThreadId}.jsonl`,
-          );
-          await writeFile(
-            path,
-            (await readFile(path, "utf8")).replace(
-              sessionStartedAt,
-              "2000-01-01T00:00:00Z",
-            ),
-          );
-        }
-        const workerId = randomUUID();
-        // Legacy workers and reducers started independently. Their output
-        // directories identify them without admitting the newer pass or merge.
-        for (const [id, cwd, input, output, parent] of [
-          [
-            workerId,
-            join(f.scanDir, "artifacts/deep_discovery/workers/worker/output"),
-            250,
-            25,
-            undefined,
-          ],
-          [randomUUID(), join(f.scanDir, "artifacts"), 125, 12, undefined],
-          [randomUUID(), f.repository, 50, 5, workerId],
-        ] as const) {
-          await writeUsage(
-            join(f.codexHome, "sessions", `rollout-${id}.jsonl`),
-            id,
-            cwd,
-            input,
-            output,
-            parent,
-          );
-        }
-      }
-    }
     await f.command(
       [
         "save-scan-artifact",
@@ -806,15 +517,13 @@ test.each([
       ],
       JSON.stringify(checkpoint),
     );
-    // The terminal checkpoint can reach disk before the aggregate cost DB write.
-    if (savedCost)
-      await f.command([
-        "preserve-scan-results",
-        "--scan-id",
-        f.scanId,
-        "--cost-json",
-        JSON.stringify(savedCost),
-      ]);
+    await f.command([
+      "preserve-scan-results",
+      "--scan-id",
+      f.scanId,
+      "--cost-json",
+      JSON.stringify(cost),
+    ]);
     const paths = [
       checkpointPath,
       f.checkpoint,
@@ -826,32 +535,19 @@ test.each([
       ].map((name) => join(f.childDir!, name)),
     ];
     const artifacts = await Promise.all(paths.map((path) => readFile(path)));
-    const calls: string[][] = [];
-    const clients: unknown[] = [];
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    // Terminal rejection must work without recovering session accounting.
+    await rm(f.sessionPath);
+    const calls: string[] = [];
     const notifications: string[] = [];
     const client = resumeClient(
       f,
-      (options) => {
-        clients.push(options);
-        throw new Error(
-          "A terminal scan must not create a worker or run another model turn.",
-        );
+      () => {
+        throw new Error("Terminal resume must not create a worker.");
       },
       async (options, args, input) => {
-        calls.push([...args]);
-        if (
-          (args[0] === "list-scans" && accounting === "unavailable") ||
-          (args[0] === "get-scan" && accounting === "parent-unavailable")
-        )
-          throw new Error("Optional accounting is unavailable.");
-        const result = await runWorkbench(options, args, input);
-        if (args[0] === "list-scans" && accounting === "mismatched-child") {
-          const scans = result["scans"] as JsonObject[];
-          scans[0]!["parentScanId"] = randomUUID();
-        }
-        if (args[0] === "list-scans" && accounting === "missing-child")
-          result["scans"] = [];
-        return result;
+        calls.push(args[0]!);
+        return runWorkbench(options, args, input);
       },
     )({ codexOverrides: f.recipe.config });
     try {
@@ -875,43 +571,21 @@ test.each([
           },
         }),
       ).rejects.toBeInstanceOf(TerminalDeepScanError);
-      expect(clients).toEqual([]);
       expect(notifications).toEqual([]);
-      const failures = calls.filter(([command]) => command === "fail-scan");
-      expect(failures).toHaveLength(1);
-      expect(failures[0]!.includes("--cost-json")).toBe(
-        expectedCost !== undefined && accounting !== "parent-unavailable",
-      );
-      expect(calls.map(([command]) => command)).not.toContain(
+      for (const command of [
+        "fail-scan",
+        "preserve-scan-results",
         "save-scan-artifact",
-      );
-      expect(calls.map(([command]) => command)).not.toContain(
         "prepare-scan-completion",
-      );
+        "list-scans",
+      ])
+        expect(calls).not.toContain(command);
       expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
         artifacts,
       );
-      const parent = (await f.command(["get-scan", "--scan-id", f.scanId]))[
-        "scan"
-      ] as JsonObject;
-      expect(parent).toMatchObject({ progress: { status: "failed" } });
-      if (expectedCost) {
-        expect(parent["cost"]).toMatchObject({
-          inputTokens: expectedCost.inputTokens,
-          outputTokens: expectedCost.outputTokens,
-        });
-        expect((parent["cost"] as JsonObject)["estimatedUsd"]).toBeCloseTo(
-          expectedCost.estimatedUsd,
-          12,
-        );
-        if (saved === "larger")
-          expect(parent["cost"] as unknown).toEqual(savedCost!);
-      } else expect(parent["cost"]).toBeUndefined();
-      const child = (await f.command(["get-scan", "--scan-id", f.childId!]))[
-        "scan"
-      ] as JsonObject;
-      expect(child).toMatchObject({ progress: { status: "complete" } });
-      expect(child["cost"] as unknown).toEqual(childCost);
+      expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
+        saved,
+      );
     } finally {
       await client.close();
     }
@@ -1169,7 +843,12 @@ test.each([true, false])(
       ],
       JSON.stringify(checkpoint),
     );
-    await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+    await publishDraft(
+      f.command,
+      f.registration,
+      "deep",
+      checkpoint.aggregate!,
+    );
     let turns = 0;
     const client = resumeClient(
       f,
@@ -1362,7 +1041,12 @@ test.each([
         coverage: semanticCoverage({ completeness: "partial" }),
       };
       checkpoint.terminalReason = "saturated";
-      await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+      await publishDraft(
+        f.command,
+        f.registration,
+        "deep",
+        checkpoint.aggregate,
+      );
     }
     await f.command(
       [
@@ -1544,43 +1228,148 @@ test.each([
   },
 );
 
-test.each([
-  [false, false],
-  [true, false],
-  [false, true],
-])(
-  "completed legacy discovery recovers partial results when its saved budget is exhausted (sealed: %p, restore logs: %p)",
-  async (sealed, restoreLogs) => {
-    const f = await interruptedScan(
-      "deep",
-      false,
-      { maxCostUsd: 0.001 },
-      true,
-      false,
-      null,
-    );
-    const cost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 10000,
-      output_tokens: 2000,
-    })!;
-    const expectedCost = {
-      inputTokens: 10000,
-      outputTokens: 2000,
-      estimatedUsd: cost.estimatedUsd,
-    };
-    await writeFile(
-      f.sessionPath,
-      JSON.stringify({
-        type: "session_meta",
-        payload: {
-          id: f.threadId,
-          cwd: f.scanDir,
-          timestamp: (
-            await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
-          )["startedAt"] as string,
+test("sealed legacy results retain their saved accounting", async () => {
+  const f = await interruptedScan(
+    "deep",
+    false,
+    { maxCostUsd: 0.001 },
+    true,
+    false,
+    null,
+  );
+  const cost = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 10000,
+    output_tokens: 2000,
+  })!;
+  const expectedCost = {
+    inputTokens: 10000,
+    outputTokens: 2000,
+    estimatedUsd: cost.estimatedUsd,
+  };
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
         },
-      }) + "\n",
-    );
+      },
+    }) + "\n",
+  );
+  const coverage = semanticCoverage({
+    completeness: "partial",
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [{ reason: "Retained legacy discovery coverage." }],
+  });
+  const checkpoint: DeepScanCheckpoint = {
+    version: 2,
+    startedAt: "2000-01-01T00:00:00Z",
+    passes: [],
+    mergedScanIds: [],
+    aggregate: { scanId: f.scanId, findings: [], coverage },
+    noNewStreak: 0,
+    consecutiveErrors: 0,
+    terminalReason: "capped",
+    mergeFailures: 1,
+    legacy: {
+      discoveryRuns: 1,
+      coverage,
+      originThreadId: f.threadId,
+      cost,
+    },
+  };
+  await f.command(
+    [
+      "save-scan-artifact",
+      "--scan-id",
+      f.scanId,
+      "--artifact-path",
+      DEEP_SCAN_CHECKPOINT,
+    ],
+    JSON.stringify(checkpoint),
+  );
+  const artifactNames = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+    "report.md",
+    DEEP_SCAN_CHECKPOINT,
+  ];
+  await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
+  await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+  const artifacts = await Promise.all(
+    artifactNames.map((name) => readFile(join(f.scanDir, name))),
+  );
+  let turns = 0;
+  const client = resumeClient(f, () => ({
+    startThread() {
+      return {
+        id: null,
+        async runStreamed() {
+          turns++;
+          throw new Error("Completed legacy discovery needs no model turn.");
+        },
+      };
+    },
+    resumeThread() {
+      throw new Error("The retired coordinator must not resume.");
+    },
+  }))({ codexOverrides: f.recipe.config });
+  const options: ScanOptions = {
+    mode: "deep",
+    outputDir: f.scanDir,
+    resumeScanId: f.scanId,
+    maxCostUsd: 0.001,
+    ...f.recipe.deepScan,
+  };
+  try {
+    const result = await client.run(f.repository, options);
+    expect(result.manifest.scan.id).toBe(f.scanId);
+    expect(result.manifest.scan.sealedAt).toBeString();
+    expect(result.threadId).toBe(f.threadId);
+    expect(result.coverage.completeness).toBe("partial");
+    expect(result.cost).toMatchObject(expectedCost);
+    expect(turns).toBe(0);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: "complete" },
+      cost: expectedCost,
+    });
+    expect(
+      await Promise.all(
+        artifactNames.map((name) => readFile(join(f.scanDir, name))),
+      ),
+    ).toEqual(artifacts);
+  } finally {
+    await client.close();
+  }
+});
+
+test.each([
+  "managed",
+  "native",
+  "wrong-claim",
+  "wrong-target",
+  "wrong-output",
+  "changed-artifact",
+] as const)(
+  "sealed publication reads without authentication or execution (%s)",
+  async (scenario) => {
+    const childCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 375,
+      output_tokens: 3,
+    })!;
+    const expectedCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1375,
+      output_tokens: 13,
+    })!;
+    const f = await interruptedScan("deep", false, {}, true, true, {
+      cost: childCost,
+    });
     await appendFile(
       f.sessionPath,
       JSON.stringify({
@@ -1588,44 +1377,49 @@ test.each([
         payload: {
           type: "token_count",
           info: {
-            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
+            total_token_usage: { input_tokens: 1000, output_tokens: 10 },
           },
         },
       }) + "\n",
     );
-    const coverage = semanticCoverage({
-      completeness: "partial",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [{ reason: "Retained legacy discovery coverage." }],
-    });
-    const checkpoint: DeepScanCheckpoint = {
-      version: 2,
-      startedAt: "2000-01-01T00:00:00Z",
-      passes: [],
-      mergedScanIds: [],
-      aggregate: { scanId: f.scanId, findings: [], coverage },
-      noNewStreak: 0,
-      consecutiveErrors: 0,
-      terminalReason: "capped",
-      mergeFailures: 1,
-      legacy: {
-        discoveryRuns: 1,
-        coverage,
-        originThreadId: f.threadId,
-        ...(restoreLogs ? {} : { cost }),
-      },
-    };
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
+    await finishDiscovery(f);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const native = scenario !== "managed";
+    const owner = "synthetic-native-owner";
+    const claim = randomUUID();
+    if (native) {
+      const nativeHome = join(f.root, "native-home");
+      await rename(f.codexHome, nativeHome);
+      f.environment.CODEX_HOME = nativeHome;
+      execFileSync(f.python, [
+        "-c",
+        `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE scans SET deep_scan_owner_thread_id = ?, handoff_claim_token = ? WHERE id = ?", sys.argv[2:])
+`,
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        owner,
+        claim,
         f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
+      ]);
+    }
+    let repository = f.repository;
+    let outputDir = f.scanDir;
+    if (scenario === "wrong-target") {
+      repository = join(f.root, "other-repository");
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "source.py"),
+        "# another synthetic source\n",
+      );
+    }
+    if (scenario === "wrong-output") {
+      outputDir = join(f.root, "other-output");
+      await mkdir(outputDir, { mode: 0o700 });
+      await cp(f.scanDir, outputDir, { recursive: true });
+    }
+    if (scenario === "changed-artifact")
+      await appendFile(join(f.scanDir, "findings.json"), "\n");
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
@@ -1633,88 +1427,87 @@ test.each([
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];
-    if (sealed) {
-      await writeDraft(
-        f.command,
-        f.registration,
-        "deep",
-        checkpoint.aggregate!,
-      );
-      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    }
-    const artifacts = sealed
-      ? await Promise.all(
-          artifactNames.map((name) => readFile(join(f.scanDir, name))),
-        )
-      : undefined;
-    let starts = 0;
-    let turns = 0;
-    const client = resumeClient(f, () => ({
-      startThread() {
-        starts++;
-        return {
-          id: null,
-          async runStreamed() {
-            turns++;
-            throw new Error("Completed legacy discovery needs no model turn.");
-          },
-        };
+    const artifacts = await Promise.all(
+      artifactNames.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const commands: string[] = [];
+    let authentications = 0;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: f.environment,
+        ...(native
+          ? {
+              ambientExecution: {
+                command: { command: "synthetic-unused-codex" },
+                configuration: {},
+                environment: f.environment,
+                preserveProviderEnvironment: false,
+                pluginRoot: PLUGIN_ROOT,
+              },
+            }
+          : {}),
+        prepareRuntime: async () => {
+          throw new Error(
+            "Saved publication must not prepare a Codex runtime.",
+          );
+        },
+        createCodex: () => {
+          throw new Error("Saved publication must not create a model client.");
+        },
+        resolvePluginPython: async () => f.python,
+        runWorkbench: async (options, args, input) => {
+          commands.push(args[0]!);
+          return runWorkbench(options, args, input);
+        },
       },
-      resumeThread() {
-        throw new Error("The retired coordinator must not resume.");
-      },
-    }))({ codexOverrides: f.recipe.config });
-    const options: ScanOptions = {
-      mode: "deep",
-      outputDir: f.scanDir,
-      resumeScanId: f.scanId,
-      maxCostUsd: 0.001,
-      ...f.recipe.deepScan,
-    };
+    );
     try {
-      if (restoreLogs) {
-        const savedSession = await readFile(f.sessionPath);
-        const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
-        const savedCheckpoint = await readFile(checkpointPath);
-        const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-        await rm(f.sessionPath);
-        try {
-          await expect(client.run(f.repository, options)).rejects.toThrow(
-            "Restore the original Deep Scan session logs",
-          );
-          expect(starts).toBe(0);
-          expect(turns).toBe(0);
-          expect(before["scan"]).toMatchObject({
-            progress: { status: "running" },
-          });
-          expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-            before,
-          );
-          expect(await readFile(checkpointPath)).toEqual(savedCheckpoint);
-        } finally {
-          await writeFile(f.sessionPath, savedSession);
-        }
-      }
-      const result = await client.run(f.repository, options);
-      expect(result.manifest.scan.id).toBe(f.scanId);
-      expect(result.manifest.scan.sealedAt).toBeString();
-      expect(result.threadId).toBe(f.threadId);
-      expect(result.coverage.completeness).toBe("partial");
-      expect(result.cost).toMatchObject(expectedCost);
-      expect(turns).toBe(0);
-      expect(
-        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-      ).toMatchObject({
-        progress: { status: "complete" },
-        cost: expectedCost,
+      const pending = client.run(repository, {
+        mode: "deep",
+        outputDir,
+        maxCostUsd: 1,
+        ...(native
+          ? {
+              registeredScan: {
+                scanId: f.scanId,
+                scanDir: outputDir,
+                threadId: owner,
+                handoffClaimToken:
+                  scenario === "wrong-claim" ? randomUUID() : claim,
+              },
+            }
+          : { resumeScanId: f.scanId }),
+        onAuthentication() {
+          authentications++;
+        },
       });
-      if (sealed) {
+      if (scenario === "managed" || scenario === "native") {
+        const result = await pending;
+        expect(result.cost).toEqual(expectedCost);
+        expect(result.threadId).toBe(f.threadId);
+        expect(result.repositoryFindings).toEqual([]);
+        expect(commands).toContain("list-global-findings");
         expect(
-          await Promise.all(
-            artifactNames.map((name) => readFile(join(f.scanDir, name))),
-          ),
-        ).toEqual(artifacts!);
+          commands.filter((command) => command === "complete-scan"),
+        ).toHaveLength(1);
+      } else {
+        await expect(pending).rejects.toThrow(
+          scenario === "wrong-claim"
+            ? "another continuation"
+            : scenario === "changed-artifact"
+              ? "Cannot resume sealed scan"
+              : "match its target, directory and mode",
+        );
+        expect(commands).not.toContain("complete-scan");
       }
+      expect(authentications).toBe(0);
+      expect(commands).not.toContain("get-scan-feedback");
+      expect(
+        await Promise.all(
+          artifactNames.map((name) => readFile(join(f.scanDir, name))),
+        ),
+      ).toEqual(artifacts);
     } finally {
       await client.close();
     }
@@ -1722,21 +1515,16 @@ test.each([
 );
 
 test.each([
-  ["unsealed", "other-directory", false],
-  ["unsealed", "predates-scan", false],
-  ["unsealed", "undated", false],
-  ["unsealed", "other-directory", true],
-  ["unsealed", "dedicated", true],
-  ["migrate", "predates-scan", false],
-  ["migrate", "dedicated", true],
+  ["sealed", "other-directory", false],
   ["sealed", "predates-scan", false],
+  ["sealed", "undated", false],
+  ["sealed", "other-directory", true],
   ["sealed", "dedicated", true],
   ["sealed-v1", "predates-scan", false],
   ["sealed-v1", "predates-scan", true],
-  ["failed", "predates-scan", false],
-  ["canceled", "predates-scan", false],
+  ["sealed-v1", "dedicated", true],
 ] as const)(
-  "legacy recovery attributes only scan-owned sessions (%s, %s, required: %p)",
+  "sealed legacy accounting includes only scan-owned sessions (%s, %s, required: %p)",
   async (state, origin, required) => {
     const f = await interruptedScan("deep", false, {}, true, false, null);
     const usage = { input_tokens: 1_000_000, output_tokens: 100 };
@@ -1782,15 +1570,14 @@ test.each([
       aggregate,
       noNewStreak: 0,
       consecutiveErrors: 0,
-      terminalReason:
-        state === "failed" || state === "canceled" ? state : "capped",
+      terminalReason: "capped",
       legacy: {
         originThreadId: f.threadId,
         discoveryRuns: 1,
         coverage: aggregate.coverage,
       },
     };
-    if (state === "sealed-v1" || state === "migrate") {
+    if (state === "sealed-v1") {
       await f.command([
         "set-scan-thread",
         "--scan-id",
@@ -1828,16 +1615,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
         JSON.stringify(checkpoint),
       );
     }
-    if (state === "migrate") {
-      await writeDraft(f.command, f.registration, "deep", aggregate);
-      execFileSync(f.python, [
-        "-c",
-        "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET deep_scan_owner_thread_id=continuation_thread_id, continuation_thread_id=NULL WHERE id=?',(sys.argv[2],)); c.commit()",
-        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-        f.scanId,
-      ]);
-    }
-    const sealed = state === "sealed" || state === "sealed-v1";
     const names = [
       "scan-manifest.json",
       "findings.json",
@@ -1845,13 +1622,11 @@ with sqlite3.connect(sys.argv[1]) as connection:
       "report.md",
       ...(state === "sealed" ? [DEEP_SCAN_CHECKPOINT] : []),
     ];
-    if (sealed) {
-      await writeDraft(f.command, f.registration, "deep", aggregate);
-      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    }
-    const artifacts = sealed
-      ? await Promise.all(names.map((name) => readFile(join(f.scanDir, name))))
-      : null;
+    await publishDraft(f.command, f.registration, "deep", aggregate);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const artifacts = await Promise.all(
+      names.map((name) => readFile(join(f.scanDir, name))),
+    );
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
     let turns = 0;
     const unusedThread = (id: string | null) => ({
@@ -1873,13 +1648,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         ...f.recipe.deepScan,
         ...(required ? { maxCostUsd: 10 } : {}),
       });
-      if (state === "failed" || state === "canceled") {
-        const error: unknown = await pending.catch((error: unknown) => error);
-        expect(error).toBeInstanceOf(TerminalDeepScanError);
-        expect(
-          (error as TerminalDeepScanError).accounting.constituents,
-        ).toEqual([null]);
-      } else if (required && origin !== "dedicated") {
+      if (required && origin !== "dedicated") {
         await expect(pending).rejects.toThrow(/cost limit/);
         expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
           before,
@@ -1898,12 +1667,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
         "scan"
       ] as JsonObject;
       if (origin !== "dedicated") expect(saved["cost"]).toBeUndefined();
-      if (artifacts)
-        expect(
-          await Promise.all(
-            names.map((name) => readFile(join(f.scanDir, name))),
-          ),
-        ).toEqual(artifacts);
+      expect(
+        await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+      ).toEqual(artifacts);
       expect(turns).toBe(0);
     } finally {
       await client.close();
@@ -1913,6 +1679,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
 
 test.each([
   [null, false, false],
+  ["native-unbound", false, false],
   [undefined, false, false],
   [null, true, false],
   [null, true, true],
@@ -1936,6 +1703,9 @@ test.each([
       outputTokens: 13,
       estimatedUsd: cost.estimatedUsd,
     };
+    const sessionStartedAt = (
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+    )["startedAt"] as string;
     await finishDiscovery(f);
     if (checkpoint !== "v2") {
       await rm(join(f.scanDir, DEEP_SCAN_CHECKPOINT));
@@ -1967,6 +1737,21 @@ with sqlite3.connect(sys.argv[1]) as connection:
         JSON.stringify(cost),
       ]);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    if (checkpoint === "native-unbound") {
+      execFileSync(f.python, [
+        "-c",
+        `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        "UPDATE scans SET recipe_json = NULL, deep_scan_owner_thread_id = ? WHERE id = ?",
+        (sys.argv[3], sys.argv[2]),
+    )
+`,
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        f.scanId,
+        f.threadId,
+      ]);
+    }
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
@@ -1977,15 +1762,11 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
-    const savedCheckpoint = (
-      await f.command(["get-scan", "--scan-id", f.scanId])
-    )["compositionCheckpoint"];
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const savedCheckpoint = saved["compositionCheckpoint"];
     if (checkpoint === "v2")
       expect(savedCheckpoint).toMatchObject({ version: 2 });
     else expect(savedCheckpoint).toBeNull();
-    const sessionStartedAt = (
-      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
-    )["startedAt"] as string;
     for (const [threadId, cwd, inputTokens, outputTokens, timestamp] of [
       [f.threadId, f.scanDir, 1000, 10, sessionStartedAt],
       [
@@ -2068,7 +1849,15 @@ with sqlite3.connect(sys.argv[1]) as connection:
       const pending = client.run(f.repository, {
         mode: "deep",
         outputDir: f.scanDir,
-        resumeScanId: f.scanId,
+        ...(checkpoint === "native-unbound"
+          ? {
+              registeredScan: {
+                scanId: f.scanId,
+                scanDir: f.scanDir,
+                threadId: f.threadId,
+              },
+            }
+          : { resumeScanId: f.scanId }),
         ...f.recipe.deepScan,
         ...(requiredCost ? { maxCostUsd: 1 } : {}),
         onWarning: (warning) => warnings.push(warning),

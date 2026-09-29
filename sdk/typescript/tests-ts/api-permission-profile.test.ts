@@ -7,6 +7,7 @@ import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
+import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import { executablePathForSpawn } from "../src/runtime.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -20,7 +21,12 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 type Role = "discovery" | "merge" | "standard" | "custom" | "comparison";
-type Scenario = "rejected" | "fallback" | "active";
+type Scenario =
+  | "rejected"
+  | "fallback"
+  | "active"
+  | "substituted-default"
+  | "substituted-profile";
 
 async function fixture(
   role: Role,
@@ -72,10 +78,22 @@ async function fixture(
       'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, apiKey: process.env.CODEX_API_KEY });',
       'if (args.includes("mcp")) { console.log("[]"); process.exit(0); }',
       'if (args.includes("app-server")) {',
+      "  const selected = config.default_permissions;",
+      "  const profile = config.permissions[selected];",
+      '  profile.description = "Synthetic description"; if (profile.network) profile.network.fixtureNull = null;',
+      ...(scenario === "substituted-default"
+        ? ['  config.default_permissions = ":read-only";']
+        : []),
+      ...(scenario === "substituted-profile"
+        ? [
+            '  for (const [path, value] of Object.entries(profile.filesystem)) if (value === "deny") delete profile.filesystem[path];',
+          ]
+        : []),
       '  require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {',
       "    const request = JSON.parse(line);",
+      '    record({ kind: "request", method: request.method, params: request.params });',
       "    if (request.id === undefined) return;",
-      '    const result = request.method === "initialize" ? {} : request.method === "config/read" ? { config } : request.method === "permissionProfile/list" ? { data: [{ id: config.default_permissions, allowed: ' +
+      '    const result = request.method === "initialize" ? {} : request.method === "config/read" ? { config } : request.method === "permissionProfile/list" ? request.params?.cursor !== "selected-page" ? { data: [{ id: "other-profile", allowed: true }], nextCursor: "selected-page" } : { data: [{ id: selected, allowed: ' +
         (role === "comparison"
           ? 'config.default_permissions !== "codex_security_comparison" || '
           : "") +
@@ -366,6 +384,27 @@ async function fixture(
     signal: controller.signal,
   };
   return {
+    async runProtocol() {
+      const sdk = createPermissionCheckedCodex({
+        codexPathOverride: executablePathForSpawn(executable),
+        env: environment,
+        config: {
+          default_permissions: "codex_security_scan",
+          permissions: { codex_security_scan: inheritedPermissions },
+        },
+      });
+      const threadOptions = { workingDirectory: cwd, skipGitRepoCheck: true };
+      const thread = resumed
+        ? sdk.resumeThread(threadId, threadOptions)
+        : sdk.startThread(threadOptions);
+      const { events } = await thread.runStreamed(
+        "Synthetic permission check.",
+        { signal: controller.signal },
+      );
+      for await (const _event of events) {
+        /* Consume the real child protocol. */
+      }
+    },
     run: (onScanStarted?: () => void) =>
       client.run(repository, {
         ...options,
@@ -383,23 +422,26 @@ async function fixture(
     warnings,
     completedArtifacts,
     customCalls: () => customCalls,
-    observations: async () =>
+    observations: async (requests = false) =>
       (await readFile(capture, "utf8"))
         .trim()
         .split("\n")
         .filter(Boolean)
-        .map((line) => JSON.parse(line)),
+        .map((line) => JSON.parse(line))
+        .filter(({ kind }) =>
+          requests ? kind === "request" : kind !== "request",
+        ),
     async close() {
       clearTimeout(timeout);
       try {
         await client.close();
-        // The Codex SDK removes child listeners during cleanup; exit state is retained.
-        for (const child of children)
-          while (child.exitCode === null && child.signalCode === null)
-            await new Promise<void>((resolve) => setImmediate(resolve));
       } finally {
         spawn.mockRestore();
       }
+      // The SDK removes child listeners during cleanup; exit state is retained.
+      for (const child of children)
+        while (child.exitCode === null && child.signalCode === null)
+          await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
 }
@@ -413,6 +455,18 @@ test.each(["sdk", "cli"] as const)(
           const h = await fixture(role, resumed, scenario, surface);
           try {
             await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+            const requests = await h.observations(true);
+            expect(requests.map(({ method }) => method)).toEqual([
+              "initialize",
+              "initialized",
+              "config/read",
+              "permissionProfile/list",
+              "permissionProfile/list",
+            ]);
+            expect(requests.at(-1).params).toMatchObject({
+              cursor: "selected-page",
+              cwd: h.cwd,
+            });
             const observations = await h.observations();
             expect(
               observations.filter(({ kind }) => kind === "preflight"),
@@ -442,6 +496,34 @@ test.each(["sdk", "cli"] as const)(
             await h.close();
           }
         }
+  },
+);
+
+test.each(["rejected", "substituted-default", "substituted-profile"] as const)(
+  "checks the paginated profile and rejects %s before executing the child",
+  async (scenario) => {
+    const h = await fixture("discovery", false, scenario, "sdk");
+    try {
+      await expect(h.runProtocol()).rejects.toBeInstanceOf(ScanPermissionError);
+      const requests = await h.observations(true);
+      expect(requests.map(({ method }) => method)).toEqual([
+        "initialize",
+        "initialized",
+        "config/read",
+        "permissionProfile/list",
+        "permissionProfile/list",
+      ]);
+      expect(requests.at(-1).params).toMatchObject({
+        cursor: "selected-page",
+        cwd: h.cwd,
+      });
+      expect(
+        (await h.observations()).filter(({ kind }) => kind === "exec"),
+      ).toEqual([]);
+      expect(h.commands).not.toContain("complete-scan");
+    } finally {
+      await h.close();
+    }
   },
 );
 

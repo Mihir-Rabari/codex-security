@@ -46,6 +46,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from project_scan_artifacts import merge_coverage
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -1331,21 +1332,13 @@ def complete_scan_locked(
                 )
                 coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
                 coverage["completeness"] = "partial"
-                for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-                    rows = coverage.setdefault(field, [])
-                    for row in recovered["coverage"].get(field, []):
-                        if row not in rows:
-                            rows.append(row)
+                merge_coverage(coverage, recovered["coverage"])
                 documents = current_manifest, {"findings": recovered["findings"]}, coverage
             elif scan["mode"] != "deep":
                 documents = saved_results.merge_saved_results(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
                     warnings,
                     stopped=False,
                     reason="",
@@ -1516,6 +1509,15 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Cannot resume: the original checkout revision or contents changed."
                 )
+            sealed_version = scan_history.sealed_scan_producer_version(
+                scan,
+                scan_dir,
+                artifact_path=artifact_path,
+                read_json_object=read_json_object,
+                workbench_completion_binding=workbench_completion_binding,
+            )
+            if sealed_version is None:
+                scan_history.require_current_deep_runtime(connection, scan)
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1524,13 +1526,16 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
                 connection.execute(
-                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = NULL, "
+                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = ?, "
                     "updated_at = ? WHERE id = ?",
-                    (json.dumps(recipe, allow_nan=False), now(), scan_id),
+                    (
+                        json.dumps(recipe, allow_nan=False),
+                        scan["continuation_thread_id"] if sealed_version is not None else None,
+                        now(),
+                        scan_id,
+                    ),
                 )
             scan = require_scan(connection, scan_id)
-        with scan_completion_lock(scan_id):
-            scan = saved_results.migrate_legacy_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
         return scan_history.scan_registration(connection, scan, scan_contract)
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
@@ -2762,7 +2767,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan, composition
+            _WORKBENCH_DB_CONTEXT, connection, scan
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
@@ -3383,12 +3388,6 @@ def main() -> None:
                     workbench_completion_binding=workbench_completion_binding,
                     claim_token=args.claim_token,
                 )
-                if args.migrate and "sealedProducerVersion" not in result:
-                    with scan_completion_lock(scan["id"]):
-                        scan = saved_results.migrate_legacy_scan(
-                            _WORKBENCH_DB_CONTEXT, connection, scan
-                        )
-                    result = scan_history.scan_registration(connection, scan, scan_contract)
             except SystemExit as exc:
                 if not args.allow_unavailable:
                     raise

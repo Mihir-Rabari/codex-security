@@ -19,7 +19,6 @@ from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
 from workbench_composition import (
     CompositionView,
-    composition_child_ids,
     load_composition,
     read_composition_checkpoint,
 )
@@ -92,35 +91,58 @@ def cli_scan_resume(
     scan_dir = require_scan_directory(Path(scan["scan_dir"]))
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
+    sealed_version = sealed_scan_producer_version(
+        scan,
+        scan_dir,
+        artifact_path=artifact_path,
+        read_json_object=read_json_object,
+        workbench_completion_binding=workbench_completion_binding,
+    )
+    if sealed_version is None:
+        require_current_deep_runtime(connection, scan)
+    else:
+        result["sealedProducerVersion"] = sealed_version
+    return result
+
+
+def sealed_scan_producer_version(
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    *,
+    artifact_path: Callable[..., Path | None],
+    read_json_object: Callable[[Path], dict[str, Any]],
+    workbench_completion_binding: Callable[..., dict[str, Any]],
+) -> str | None:
+    # A process can stop after sealing files but before committing completion.
+    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    if manifest_path is None:
+        return None
+    manifest = read_json_object(manifest_path)
+    manifest_scan = manifest.get("scan")
+    if not isinstance(manifest_scan, dict) or (
+        manifest_scan.get("sealedAt") is None and manifest_scan.get("artifacts") in (None, [])
+    ):
+        return None
+    try:
+        binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+        _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=binding["coverageMode"],
+            completion_binding=binding,
+        )
+        return manifest_scan["producer"]["version"]
+    except ContractError as exc:
+        raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+
+
+def require_current_deep_runtime(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
     if (
         scan["mode"] == "deep"
-        and read_composition_checkpoint(scan) is None
         and connection.execute(
             "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
         ).fetchone()
-        is not None
     ):
-        result["threadId"] = None
-    # A process can stop after sealing files but before committing completion.
-    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    if manifest_path is not None:
-        manifest = read_json_object(manifest_path)
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and (
-            manifest_scan.get("sealedAt") is not None
-            or manifest_scan.get("artifacts") not in (None, [])
-        ):
-            try:
-                binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-                _prepare_scan_finalization(
-                    scan_dir,
-                    expected_coverage_mode=binding["coverageMode"],
-                    completion_binding=binding,
-                )
-                result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
-            except ContractError as exc:
-                raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
-    return result
+        raise SystemExit("This Deep Scan uses a retired runtime. Start a fresh scan.")
 
 
 def scan_registration(
@@ -1059,35 +1081,36 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
+        JOIN scans ON scans.id = matches.after_scan_id
         WHERE matches.before_occurrence_id = ?
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
+        JOIN scans ON scans.id = matches.before_scan_id
         WHERE matches.after_occurrence_id = ?
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
-        (occurrence_id, occurrence_id),
+        (occurrence_id, scan_id, occurrence_id, scan_id),
     ).fetchall()
     linked_rows = list(
-        _rows_for_ids(
-            connection,
+        connection.execute(
             f"""
-            {_LINKED_FINDINGS_SQL}
+            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
                 scans.started_at, scans.id AS scan_id
             FROM linked
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
+            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
             """,
-            (occurrence_id,),
+            (occurrence_id, scan_id),
         )
     )
-    child_ids = composition_child_ids(connection) - {scan_id}
-    linked_rows = [row for row in linked_rows if row["scan_id"] not in child_ids]
-    rows = [row for row in rows if row["scan_id"] not in child_ids]
     known_scans = sorted(
         {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
     )
