@@ -32,14 +32,27 @@ export function expandHome(
 ): string {
   const home =
     (process.platform === "win32"
-      ? (environmentEntry(environment, "USERPROFILE") ??
-        environmentEntry(environment, "HOME"))
-      : (environmentEntry(environment, "HOME") ??
-        environmentEntry(environment, "USERPROFILE"))) ?? homedir();
+      ? (environmentValue(environment, "USERPROFILE") ??
+        environmentValue(environment, "HOME"))
+      : (environmentValue(environment, "HOME") ??
+        environmentValue(environment, "USERPROFILE"))) ?? homedir();
   if (value === "~") return home;
   if (value.startsWith("~/")) return join(home, value.slice(2));
   if (value.startsWith("~\\")) {
     return join(home, ...value.slice(2).split("\\"));
   }
   return value;
+}
+
+export function environmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested]?.trim();
+  if (exact) return exact;
+  return Object.entries(environment)
+    .find(
+      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+    )?.[1]
+    ?.trim();
 }
