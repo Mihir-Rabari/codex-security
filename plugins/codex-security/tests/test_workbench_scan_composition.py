@@ -129,6 +129,138 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
     return value
 
 
+@pytest.mark.parametrize("accepted", [False, True])
+def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_failure(
+    tmp_path: Path, workbench_api, accepted: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings = json.loads((child_dir / "findings.json").read_text())
+    findings["findings"][0]["writeup"] = {"reportPath": "findings/proof/proof.md"}
+    (child_dir / "findings.json").write_text(json.dumps(findings))
+    report_dir = child_dir / "findings/proof"
+    report_dir.mkdir(parents=True)
+    (report_dir / "proof.md").write_text("# Retained observation\n[Trace](trace.txt)\n")
+    (report_dir / "trace.txt").write_text("Synthetic supporting evidence\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    child_bytes = {name: (child_dir / name).read_bytes() for name in names}
+    saved = checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+        merged=[child["scanId"]] if accepted else [],
+    )
+    if accepted:
+        saved["aggregate"] = workbench_api["saved_results"].project_scan_artifacts(
+            parent["scanId"],
+            child["scanId"],
+            child_dir,
+            parent_dir,
+            *(json.loads(child_bytes[name]) for name in names),
+        )["draft"]
+        run_workbench(
+            state,
+            "save-scan-artifact",
+            "--scan-id",
+            parent["scanId"],
+            "--artifact-path",
+            CHECKPOINT,
+            input_text=json.dumps(saved),
+        )
+    composition_bytes = (parent_dir / CHECKPOINT).read_bytes()
+    wrapper = tmp_path / "fail_first_parent_checkpoint.py"
+    wrapper.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(SCRIPT.parent)!r})\n"
+        "import workbench_db, workbench_saved_results\n"
+        "original = workbench_saved_results.write_scan_local_bytes\n"
+        "def write(directory, relative, payload, **kwargs):\n"
+        f"    if str(directory) == {str(parent_dir)!r} and relative.startswith('checkpoints/'):\n"
+        "        raise OSError('Synthetic first parent checkpoint failure.')\n"
+        "    return original(directory, relative, payload, **kwargs)\n"
+        "workbench_saved_results.write_scan_local_bytes = write\n"
+        "raise SystemExit(workbench_db.main())\n"
+    )
+    stopped = subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            "fail-scan",
+            "--scan-id",
+            parent["scanId"],
+            "--message",
+            "Synthetic scan interruption.",
+        ],
+        capture_output=True,
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+        text=True,
+        check=False,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    failed = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert failed["resultsRecoveryNeeded"]
+    assert any("Synthetic first parent checkpoint failure" in item for item in failed["warnings"])
+    assert not list((parent_dir / "checkpoints").glob("*.json"))
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (parent["scanId"],)
+        ).fetchone() == (None,)
+
+    recovery = ("recover-scan-results", "--scan-id", parent["scanId"])
+    recovered = run_workbench(state, *recovery)["scan"]
+    assert recovered["findingCount"] == 1
+    assert not recovered["resultsRecoveryNeeded"]
+    assert recovered["findings"][0]["title"] == findings["findings"][0]["title"]
+    assert json.loads((parent_dir / "coverage.json").read_text())["completeness"] == "partial"
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"][0]
+    report = parent_dir / retained["writeup"]["reportPath"]
+    assert report.read_bytes() == (report_dir / "proof.md").read_bytes()
+    assert (report.parent / "trace.txt").read_bytes() == (report_dir / "trace.txt").read_bytes()
+    assert {name: (child_dir / name).read_bytes() for name in names} == child_bytes
+    assert (parent_dir / CHECKPOINT).read_bytes() == composition_bytes
+
+    published = {name: (parent_dir / name).read_bytes() for name in (*names, "report.md")}
+    frozen = json.loads(published["scan-manifest.json"])["scan"]["preservedSources"]
+    assert frozen
+    sources = {path.name: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")}
+    saved["aggregate"] = {
+        "scanId": parent["scanId"],
+        "findings": [retained],
+        "coverage": json.loads(published["coverage.json"]),
+    }
+    saved["aggregate"]["findings"][0]["title"] = (
+        "Later composition must not replace frozen evidence"
+    )
+    (parent_dir / CHECKPOINT).write_text(json.dumps(saved))
+    for manifest_only in (False, True):
+        if manifest_only:
+            with sqlite3.connect(state / "workbench.sqlite3") as connection:
+                connection.execute(
+                    "UPDATE scans SET retained_source_digests_json = NULL WHERE id = ?",
+                    (parent["scanId"],),
+                )
+        assert run_workbench(state, *recovery)["scan"]["findingCount"] == 1
+        assert {name: (parent_dir / name).read_bytes() for name in published} == published
+        assert {
+            path.name: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")
+        } == sources
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            recorded = connection.execute(
+                "SELECT retained_source_digests_json FROM scans WHERE id = ?", (parent["scanId"],)
+            ).fetchone()[0]
+        assert json.loads(recorded) == frozen
+
+
 @pytest.mark.parametrize("name", ["current", "legacy"])
 def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     target = tmp_path / "target"

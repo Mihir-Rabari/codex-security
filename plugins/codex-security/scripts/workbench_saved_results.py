@@ -323,6 +323,9 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
             else:
                 include_parent = True
 
+    if frozen_sources is None:
+        save_composed_checkpoint(db, connection, scan, scan_dir)
+
     workers = connection.execute(
         "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
         "FROM deep_scan_workers WHERE scan_id = ?",
