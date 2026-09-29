@@ -247,8 +247,22 @@ export async function runDeepScans(
   }
   if (state.legacy?.cost) input.onCost("legacy", state.legacy.cost);
   const validateMerge = await createScanMergeValidator(input.pluginRoot);
-  const accepted = new Map<string, ScanMergeInput>();
+  const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
+  const updateAggregateCoverage = (): void => {
+    if (state.aggregate === null) return;
+    const merged = new Set(state.mergedScanIds);
+    state.aggregate = {
+      ...state.aggregate,
+      coverage: combineScanCoverage(
+        [...completed.values()].filter((pass) => merged.has(pass.scanId)),
+        state.passes
+          .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
+          .map((pass) => pass.directory),
+        state.legacy?.coverage,
+      ),
+    };
+  };
   const reportPassCost = (key: string, cost: Readonly<ScanCost> | null) => {
     input.onCost(key, cost);
     if (cost === null && input.scanOptions.requireCost)
@@ -285,9 +299,9 @@ export async function runDeepScans(
       else if (record.cost) input.onCost(pass.directory, record.cost);
       if (
         record.progress.status === "complete" &&
-        !accepted.has(record.scanId)
+        !completed.has(record.scanId)
       ) {
-        accepted.set(
+        completed.set(
           record.scanId,
           await input.projectChild(record.scanId, record.scanDir, signal),
         );
@@ -305,7 +319,7 @@ export async function runDeepScans(
   await refreshPasses(
     state.terminalReason === undefined && Date.now() < deadline,
   );
-  if (state.mergedScanIds.some((id) => !accepted.has(id))) {
+  if (state.mergedScanIds.some((id) => !completed.has(id))) {
     throw new Error(
       "An accepted merge input is no longer a sealed child scan.",
     );
@@ -355,7 +369,7 @@ export async function runDeepScans(
       throw new Error("Deep Scan reached its consecutive merge error limit.");
     const pending = state.passes.flatMap((pass) => {
       const result =
-        pass.scanId === undefined ? undefined : accepted.get(pass.scanId);
+        pass.scanId === undefined ? undefined : completed.get(pass.scanId);
       return result && !state.mergedScanIds.includes(result.scanId)
         ? [result]
         : [];
@@ -411,7 +425,7 @@ export async function runDeepScans(
       state,
       merged,
       pending.map((result) => result.scanId),
-      combineScanCoverage([...accepted.values()], [], state.legacy?.coverage),
+      combineScanCoverage([...completed.values()], [], state.legacy?.coverage),
     );
     await save();
     await input.publish(state.aggregate!);
@@ -421,6 +435,17 @@ export async function runDeepScans(
   ): Promise<void> => {
     const client = input.createClient();
     let latestCost: Readonly<ScanCost> | undefined;
+    const failPass = async (error: unknown): Promise<void> => {
+      if (pass.scanId === undefined) return;
+      await workbench([
+        "fail-scan",
+        "--scan-id",
+        pass.scanId,
+        "--message",
+        safeErrorMessage(error).slice(0, 2400),
+        ...(latestCost ? ["--cost-json", JSON.stringify(latestCost)] : []),
+      ]);
+    };
     try {
       // These existing retry delays do not create another logical scan.
       const retries = [60_000, 180_000, 540_000];
@@ -445,7 +470,7 @@ export async function runDeepScans(
               input.onCost(pass.directory, cost);
             },
           });
-          accepted.set(
+          completed.set(
             result.manifest.scan.id,
             await input.projectChild(
               result.manifest.scan.id,
@@ -467,18 +492,7 @@ export async function runDeepScans(
             externalStop.abort(error);
           if (discoverySignal.aborted) throw error;
           if (attempt >= retries.length) {
-            if (pass.scanId !== undefined) {
-              await workbench([
-                "fail-scan",
-                "--scan-id",
-                pass.scanId,
-                "--message",
-                safeErrorMessage(error).slice(0, 2400),
-                ...(latestCost
-                  ? ["--cost-json", JSON.stringify(latestCost)]
-                  : []),
-              ]);
-            }
+            await failPass(error);
             if (
               exhaustPassRetries(
                 state,
@@ -499,18 +513,9 @@ export async function runDeepScans(
     } catch (error) {
       if (
         discoverySignal.aborted &&
-        !(discoverySignal.reason instanceof ScanTransportClosedError) &&
-        pass.scanId !== undefined
-      ) {
-        await workbench([
-          "fail-scan",
-          "--scan-id",
-          pass.scanId,
-          "--message",
-          safeErrorMessage(discoverySignal.reason).slice(0, 2400),
-          ...(latestCost ? ["--cost-json", JSON.stringify(latestCost)] : []),
-        ]).catch(() => undefined);
-      }
+        !(discoverySignal.reason instanceof ScanTransportClosedError)
+      )
+        await failPass(discoverySignal.reason).catch(() => undefined);
       throw error;
     } finally {
       try {
@@ -570,17 +575,7 @@ export async function runDeepScans(
       await refreshPasses();
     }
     await mergePending(true);
-    const unresolved = state.passes
-      .filter((pass) => !pass.scanId || !accepted.has(pass.scanId))
-      .map((pass) => pass.directory);
-    state.aggregate = {
-      ...state.aggregate!,
-      coverage: combineScanCoverage(
-        [...accepted.values()],
-        unresolved,
-        state.legacy?.coverage,
-      ),
-    };
+    updateAggregateCoverage();
     await save();
     await input.publish(state.aggregate!);
     return state;
@@ -600,23 +595,7 @@ export async function runDeepScans(
             ? "canceled"
             : "failed",
     );
-    if (state.aggregate !== null) {
-      state.aggregate = {
-        ...state.aggregate,
-        coverage: combineScanCoverage(
-          [...accepted.values()].filter((pass) =>
-            state.mergedScanIds.includes(pass.scanId),
-          ),
-          state.passes
-            .filter(
-              (pass) =>
-                !pass.scanId || !state.mergedScanIds.includes(pass.scanId),
-            )
-            .map((pass) => pass.directory),
-          state.legacy?.coverage,
-        ),
-      };
-    }
+    updateAggregateCoverage();
     await save().catch(() => undefined);
     if (state.aggregate !== null)
       await input.publish(state.aggregate).catch(() => undefined);
