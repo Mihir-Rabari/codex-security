@@ -866,9 +866,15 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
         claim_token = scan["handoff_claim_token"] if scan["handoff_status"] == "delivered" else None
     else:
         scan = require_scan(connection, args.scan_id)
+    return _join_deep_scan(connection, scan, args.thread_id, claim_token)
+
+
+def _join_deep_scan(
+    connection: sqlite3.Connection, scan: sqlite3.Row, thread_id: str, claim_token: str | None
+) -> dict[str, Any]:
     workspace = require_workspace(connection, scan["workspace_id"])
     owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
-    if owner != args.thread_id or scan["mode"] != "deep":
+    if owner != thread_id or scan["mode"] != "deep":
         raise SystemExit("A Deep Scan can only be resumed by its owning Codex thread.")
     handoff.require_current_continuation(
         scan, claim_token, error_message="Deep Scan is owned by another continuation."
@@ -955,6 +961,20 @@ def _start_prompt_driven_scan(
             raise SystemExit(
                 "The selected scan target changed while the scan was starting. Try again."
             )
+        if args.mode == "deep":
+            existing = scan_history.existing_deep_scan_for_target(
+                connection, thread_id, target_path, scope
+            )
+            if existing is not None:
+                connection.commit()
+                return _join_deep_scan(
+                    connection,
+                    existing,
+                    thread_id,
+                    existing["handoff_claim_token"]
+                    if existing["handoff_status"] == "delivered"
+                    else None,
+                )
         existing = connection.execute(
             """
             SELECT scans.* FROM scans

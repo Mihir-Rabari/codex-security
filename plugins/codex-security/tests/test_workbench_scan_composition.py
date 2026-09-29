@@ -7,8 +7,9 @@ import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event
 from unittest import mock
 
 import pytest
@@ -310,6 +311,59 @@ def test_resume_distinguishes_empty_artifact_drafts_from_sealed_results(
     resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
     assert resumed["sealedProducerVersion"] == json.loads(sealed)["scan"]["producer"]["version"]
     assert path.read_bytes() == sealed
+
+
+@pytest.mark.parametrize("other_context", [None, "Different optional context."])
+def test_native_parent_serializes_concurrent_starts_with_different_context(
+    tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch, other_context: str | None
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    run_workbench(state, "database-info")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with mock.patch.object(
+        sys,
+        "argv",
+        [
+            "workbench",
+            "begin-deep-scan",
+            "--thread-id",
+            "native-owner",
+            "--target-path",
+            str(target),
+            "--scan-root",
+            str(tmp_path / "scans"),
+        ],
+    ):
+        args = workbench_api["parse_args"]("test")
+    history = workbench_api["scan_history"]
+    existing_scan = history.existing_deep_scan_for_target
+    initial_lookups = Barrier(2)
+
+    def synchronized_lookup(connection, *identity):
+        existing = existing_scan(connection, *identity)
+        if not connection.in_transaction:
+            initial_lookups.wait(timeout=10)
+        return existing
+
+    def start(context):
+        request = copy.copy(args)
+        request.user_context = context
+        with closing(workbench_api["connect"]()) as connection:
+            return workbench_api["begin_deep_scan"](connection, request)
+
+    monkeypatch.setattr(history, "existing_deep_scan_for_target", synchronized_lookup)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(start, ["Original optional context.", other_context]))
+    assert sorted(result["startDisposition"] for result in results) == ["created", "joined"]
+    created = next(result["scan"] for result in results if result["startDisposition"] == "created")
+    joined = next(result["scan"] for result in results if result["startDisposition"] == "joined")
+    for key in ("scanId", "scanDir", "handoffClaimToken", "userContext"):
+        assert joined[key] == created[key]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
 
 
 @pytest.mark.parametrize("rejoin_context", [None, "Different optional context."])
