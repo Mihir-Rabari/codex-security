@@ -543,6 +543,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               expect(JSON.parse(input!).parentScanRole).toBe(
                 args.includes("--parent-scan-id") ? "deep_pass" : undefined,
               );
+              if (args.includes("--parent-scan-id"))
+                expect(options.pluginRoot).toBe(
+                  workbenches.get(args[args.indexOf("--parent-scan-id") + 1]!)!
+                    .pluginRoot,
+                );
               const scanId = result["scanId"] as string;
               registrations.set(scanId, {
                 ...result,
@@ -1026,7 +1031,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         scanPrompt: "Inspect the synthetic source.",
         ...(budget
           ? { maxCostUsd: 0.001 }
-          : trackingFailure || requiredCost
+          : trackingFailure || requiredCost || empty
             ? { maxCostUsd: 1 }
             : {}),
         postScanPrompt: emptyDeadline
@@ -1433,7 +1438,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         ).toBe(true);
       }
       expect(result.findings.findings).toHaveLength(empty ? 0 : budget ? 2 : 1);
-      if (empty) expect(mergeAttempts).toBe(0);
+      if (empty) {
+        expect(mergeAttempts).toBe(0);
+        expect(warnings).toEqual([]);
+      }
       expect(result.coverage.completeness).toBe(
         budget ? "partial" : "complete",
       );
@@ -1520,8 +1528,6 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           expect(config).toBeDefined();
         expect(new Set(configByChild.values()).size).toBe(configByChild.size);
       }
-      for (const options of workbenches.values())
-        expect(options.pluginRoot).toBe(pluginRoot);
       expect(children).toHaveLength(native === "discovery" ? 3 : 2);
       expect(new Set(children.map((turn) => turn.id)).size).toBe(2);
       if (prepareNative) {

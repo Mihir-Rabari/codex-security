@@ -2050,7 +2050,11 @@ export class CodexSecurity {
         }
         budgetAbortController.abort();
         const snapshot = await stopTracking(tracker, usage);
-        if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+        accounting.completed =
+          mode === "deep" && snapshot.cost !== null
+            ? accounting.complete
+            : (snapshot.cost ?? savedCost);
+        if (options.maxCostUsd !== undefined && accounting.completed === null) {
           notifyObserver(
             "onWarning",
             options.onWarning,
@@ -2058,10 +2062,6 @@ export class CodexSecurity {
             "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
           );
         }
-        accounting.completed =
-          mode === "deep" && snapshot.cost !== null
-            ? accounting.complete
-            : (snapshot.cost ?? savedCost);
         if (mode === "deep" && progress.scopeFileCount !== null)
           reportProgress({
             phase: "reporting",
