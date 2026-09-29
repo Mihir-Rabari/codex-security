@@ -421,7 +421,11 @@ test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
 );
 
 test("CLI merge failure retains accepted ordinary scans and the original thread", async () => {
-  const f = await interruptedScan();
+  const f = await interruptedScan("deep", false, {}, false, true, {
+    findings: [
+      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+    ],
+  });
   const checkpoint = JSON.parse(
     await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
   ) as DeepScanCheckpoint;
@@ -554,12 +558,8 @@ test.each([
       ["larger", "marked-merge"],
       ["larger", "unavailable"],
       ["larger", "parent-unavailable"],
-      ["larger", "unknown-legacy"],
       ["larger", "mismatched-child"],
       ["larger", "missing-child"],
-      ["absent", "legacy-saved"],
-      ["absent", "legacy-current"],
-      ["absent", "legacy-logs"],
     ] as const
   ).map(([saved, accounting]) => ["failed", saved, accounting] as const),
   ["canceled", "absent", "complete"],
@@ -573,18 +573,7 @@ test.each([
       estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
     const childCost =
       accounting === "unknown-child" ? undefined : cost(100_000, 10_000);
-    const legacy =
-      accounting === "legacy-saved" ||
-      accounting === "legacy-logs" ||
-      accounting === "legacy-current" ||
-      accounting === "unknown-legacy";
-    const separateLegacy = legacy && accounting !== "legacy-current";
-    const recoveredCost = cost(
-      (separateLegacy ? 103_000 : 101_000) +
-        (accounting === "legacy-logs" ? 425 : 0),
-      (separateLegacy ? 10_300 : 10_100) +
-        (accounting === "legacy-logs" ? 42 : 0),
-    );
+    const recoveredCost = cost(101_000, 10_100);
     const savedCost =
       saved === "absent"
         ? undefined
@@ -593,8 +582,7 @@ test.each([
           : saved === "larger"
             ? cost(200_000, 20_000)
             : recoveredCost;
-    const complete =
-      accounting === "complete" || (legacy && accounting !== "unknown-legacy");
+    const complete = accounting === "complete";
     const expectedCost =
       complete && saved !== "larger" ? recoveredCost : savedCost;
     const f = await interruptedScan(
@@ -726,52 +714,6 @@ test.each([
         { directory, scanId },
         { directory: "artifacts/deep-scan/passes/pass-3" },
       );
-    }
-    if (legacy) {
-      const legacyThreadId =
-        accounting === "legacy-current" ? f.threadId : randomUUID();
-      checkpoint.legacy = {
-        discoveryRuns: 1,
-        coverage: semanticCoverage(),
-        originThreadId: legacyThreadId,
-        ...(accounting === "legacy-saved"
-          ? { cost: cost(2_000, 200) }
-          : accounting === "legacy-current"
-            ? { cost: cost(1_000, 100) }
-            : {}),
-      };
-      if (accounting === "legacy-logs") {
-        await writeUsage(
-          join(f.codexHome, "sessions", `rollout-${legacyThreadId}.jsonl`),
-          legacyThreadId,
-          f.scanDir,
-          2_000,
-          200,
-        );
-        const workerId = randomUUID();
-        // Legacy workers and reducers started independently. Their output
-        // directories identify them without admitting the newer pass or merge.
-        for (const [id, cwd, input, output, parent] of [
-          [
-            workerId,
-            join(f.scanDir, "artifacts/deep_discovery/workers/worker/output"),
-            250,
-            25,
-            undefined,
-          ],
-          [randomUUID(), join(f.scanDir, "artifacts"), 125, 12, undefined],
-          [randomUUID(), f.repository, 50, 5, workerId],
-        ] as const) {
-          await writeUsage(
-            join(f.codexHome, "sessions", `rollout-${id}.jsonl`),
-            id,
-            cwd,
-            input,
-            output,
-            parent,
-          );
-        }
-      }
     }
     await f.command(
       [
@@ -1291,7 +1233,7 @@ test.each([
         ? null
         : {
             cost: cost(100, 10),
-            findings: phase === "accepted" ? [finding] : [],
+            findings: [finding],
           },
     );
     const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
@@ -1418,7 +1360,12 @@ test.each([
                         ...event.item,
                         text: JSON.stringify({
                           scanId: f.scanId,
-                          findings: [],
+                          groups: [
+                            {
+                              sourceFindingIds: [`${f.childId}:0`],
+                              canonicalSourceFindingId: `${f.childId}:0`,
+                            },
+                          ],
                         }),
                       },
                     };
@@ -1515,170 +1462,6 @@ test.each([
         expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
           childFindings,
         );
-    } finally {
-      await client.close();
-    }
-  },
-);
-
-test.each([
-  [false, false],
-  [true, false],
-  [false, true],
-])(
-  "completed legacy discovery recovers partial results when its saved budget is exhausted (sealed: %p, restore logs: %p)",
-  async (sealed, restoreLogs) => {
-    const f = await interruptedScan(
-      "deep",
-      false,
-      { maxCostUsd: 0.001 },
-      true,
-      false,
-      null,
-    );
-    const cost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 10000,
-      output_tokens: 2000,
-    })!;
-    const expectedCost = {
-      inputTokens: 10000,
-      outputTokens: 2000,
-      estimatedUsd: cost.estimatedUsd,
-    };
-    await appendFile(
-      f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
-          },
-        },
-      }) + "\n",
-    );
-    const coverage = semanticCoverage({
-      completeness: "partial",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [{ reason: "Retained legacy discovery coverage." }],
-    });
-    const checkpoint: DeepScanCheckpoint = {
-      version: 2,
-      startedAt: "2000-01-01T00:00:00Z",
-      passes: [],
-      mergedScanIds: [],
-      aggregate: { scanId: f.scanId, findings: [], coverage },
-      noNewStreak: 0,
-      consecutiveErrors: 0,
-      terminalReason: "capped",
-      mergeFailures: 1,
-      legacy: {
-        discoveryRuns: 1,
-        coverage,
-        originThreadId: f.threadId,
-        ...(restoreLogs ? {} : { cost }),
-      },
-    };
-    await f.command(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        f.scanId,
-        "--artifact-path",
-        DEEP_SCAN_CHECKPOINT,
-      ],
-      JSON.stringify(checkpoint),
-    );
-    const artifactNames = [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-      "report.md",
-      DEEP_SCAN_CHECKPOINT,
-    ];
-    if (sealed) {
-      await writeDraft(
-        f.command,
-        f.registration,
-        "deep",
-        checkpoint.aggregate!,
-      );
-      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    }
-    const artifacts = sealed
-      ? await Promise.all(
-          artifactNames.map((name) => readFile(join(f.scanDir, name))),
-        )
-      : undefined;
-    let starts = 0;
-    let turns = 0;
-    const client = resumeClient(f, () => ({
-      startThread() {
-        starts++;
-        return {
-          id: null,
-          async runStreamed() {
-            turns++;
-            throw new Error("Completed legacy discovery needs no model turn.");
-          },
-        };
-      },
-      resumeThread() {
-        throw new Error("The retired coordinator must not resume.");
-      },
-    }))({ codexOverrides: f.recipe.config });
-    const options: ScanOptions = {
-      mode: "deep",
-      outputDir: f.scanDir,
-      resumeScanId: f.scanId,
-      maxCostUsd: 0.001,
-      ...f.recipe.deepScan,
-    };
-    try {
-      if (restoreLogs) {
-        const savedSession = await readFile(f.sessionPath);
-        const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
-        const savedCheckpoint = await readFile(checkpointPath);
-        const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-        await rm(f.sessionPath);
-        try {
-          await expect(client.run(f.repository, options)).rejects.toThrow(
-            "Restore the original Deep Scan session logs",
-          );
-          expect(starts).toBe(0);
-          expect(turns).toBe(0);
-          expect(before["scan"]).toMatchObject({
-            progress: { status: "running" },
-          });
-          expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-            before,
-          );
-          expect(await readFile(checkpointPath)).toEqual(savedCheckpoint);
-        } finally {
-          await writeFile(f.sessionPath, savedSession);
-        }
-      }
-      const result = await client.run(f.repository, options);
-      expect(result.manifest.scan.id).toBe(f.scanId);
-      expect(result.manifest.scan.sealedAt).toBeString();
-      expect(result.threadId).toBe(f.threadId);
-      expect(result.coverage.completeness).toBe("partial");
-      expect(result.cost).toMatchObject(expectedCost);
-      expect(turns).toBe(0);
-      expect(
-        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-      ).toMatchObject({
-        progress: { status: "complete" },
-        cost: expectedCost,
-      });
-      if (sealed) {
-        expect(
-          await Promise.all(
-            artifactNames.map((name) => readFile(join(f.scanDir, name))),
-          ),
-        ).toEqual(artifacts!);
-      }
     } finally {
       await client.close();
     }
@@ -1805,9 +1588,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       f,
       () => ({
         startThread() {
-          throw new Error(
-            "The sealed legacy scan already has a saved session.",
-          );
+          throw new Error("The sealed scan already has a saved session.");
         },
         resumeThread(threadId) {
           expect(threadId).toBe(f.threadId);
@@ -1815,7 +1596,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
             id: threadId,
             async runStreamed() {
               turns++;
-              throw new Error("Sealed legacy discovery needs no model turn.");
+              throw new Error("A sealed scan needs no model turn.");
             },
           };
         },
@@ -1984,7 +1765,11 @@ test.each([
 );
 
 test("bulk recovery merges a sealed child when the parent stopped before its first merge thread", async () => {
-  const f = await interruptedScan("deep", true, {}, false, false);
+  const f = await interruptedScan("deep", true, {}, false, false, {
+    findings: [
+      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+    ],
+  });
   const before = await readFile(join(f.childDir!, "findings.json"));
   const stderr = capture();
   const stdout = capture();
@@ -2020,7 +1805,12 @@ test("bulk recovery merges a sealed child when the parent stopped before its fir
                         ...event.item,
                         text: JSON.stringify({
                           scanId: f.scanId,
-                          findings: [],
+                          groups: [
+                            {
+                              sourceFindingIds: [`${f.childId}:0`],
+                              canonicalSourceFindingId: `${f.childId}:0`,
+                            },
+                          ],
                         }),
                       },
                     };

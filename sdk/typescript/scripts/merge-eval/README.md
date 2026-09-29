@@ -8,7 +8,10 @@ and large fields with useful facts at the end and in nested history.
 The model returns source groups and selects an existing canonical finding. The
 host retains exact originals and accepted history. This deliberately gives up
 synthesizing one narrative from complementary sources; their details remain in
-provenance. The independent oracle checks grouping and evidence-supported
+provenance. Previously accepted groups select their current canonical narrative;
+they cannot revert to an archived original. The host retains the first/prior
+scope and threat model, and records each child context under `scope.sourceScans`.
+The independent oracle checks grouping and evidence-supported
 canonical selection, while the production validator checks all-source
 accounting, indivisible accepted groups, and preservation.
 
