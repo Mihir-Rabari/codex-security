@@ -411,17 +411,15 @@ async function readCurrentCheckpoints(
   for (const entry of await fs.readdir(root, { withFileTypes: true })) {
     if (!entry.name.endsWith(".json") || entry.name === excludedCheckpoint)
       continue;
-    // Publication can acknowledge a pending entry while we read; its immutable
-    // evidence remains in the history directory.
+    // Markers precede history writes and can be acknowledged while we read.
+    const contents = await readOptionalArtifactText(
+      context,
+      ["checkpoints", entry.name],
+      "current scan checkpoint",
+    );
+    if (contents === undefined) continue;
     const input = parsePersistedScanDraft(
-      parseJsonObject(
-        await readArtifactText(
-          context,
-          ["checkpoints", entry.name],
-          "current scan checkpoint",
-        ),
-        "current scan checkpoint",
-      ),
+      parseJsonObject(contents, "current scan checkpoint"),
     );
     if (input.scanId !== context.scanId)
       throw new Error(
@@ -498,14 +496,14 @@ async function lstatIfExists(
 async function readOptionalArtifactText(
   context: ArtifactContext,
   components: readonly string[],
+  label = "previous scan draft",
 ): Promise<string | undefined> {
   try {
-    return await readArtifactText(context, components, "previous scan draft");
+    return await readArtifactText(context, components, label);
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message ===
-        "previous scan draft: the requested artifact is unavailable."
+      error.message === `${label}: the requested artifact is unavailable.`
     ) {
       return undefined;
     }

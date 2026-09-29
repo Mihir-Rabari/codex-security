@@ -313,14 +313,13 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     "{old incompatible evidence",
   );
   const pendingInput = { ...input, findings: [interruptedFinding] };
-  await writeFile(
-    path.join(pendingDirectory, "pending.json"),
-    JSON.stringify(pendingInput),
-  );
+  await writeFile(path.join(pendingDirectory, "pending.json"), "");
   await writeFile(
     path.join(pendingRoot, "checkpoints", "pending.json"),
     JSON.stringify(pendingInput),
   );
+  // A stopped writer may leave its marker before publishing immutable history.
+  await writeFile(path.join(pendingDirectory, "interrupted.json"), "");
   const originalReaddir = fs.readdir;
   fs.readdir = async (...args) => {
     const entries = await originalReaddir(...args);
@@ -346,6 +345,18 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       finding.provenance.candidateId,
       interruptedFinding.provenance.candidateId,
     ]),
+  );
+
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "interrupted.json"),
+    "{malformed saved history",
+  );
+  await assert.rejects(
+    recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    ),
+    /current scan checkpoint: stored JSON is malformed/,
   );
 
   const deepParentRoot = path.join(root, "accepted-deep-parent");

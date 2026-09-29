@@ -30,7 +30,7 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
     checkpoint_path.write_bytes(encoded)
     if (checkpoint_dir / "pending/.initialized").is_file():
-        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(encoded)
+        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     return checkpoint_path
 
 
