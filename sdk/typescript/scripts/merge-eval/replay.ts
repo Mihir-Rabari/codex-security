@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -18,7 +17,11 @@ import {
   prepareScanArtifactRestorer,
   runWorkbench,
 } from "../../src/runtime.js";
-import type { ScanMergeInput } from "../../src/scan-merge.js";
+import {
+  scanMergeModelInputs,
+  type ScanMergeInput,
+} from "../../src/scan-merge.js";
+import { writeSemanticScanDraft } from "../../src/scan-publication.js";
 import {
   prepareSemanticScanDraft,
   type JsonObject,
@@ -46,7 +49,12 @@ const pluginRoot = fileURLToPath(
 const fixture = mergeFixtures().find(
   (entry) => entry.name === "independent-similar-titles",
 )!;
-const samples: Record<string, number[]> = { separate: [], batch: [] };
+const samples: {
+  pair: number;
+  mode: string;
+  inputPublication: number;
+  completionToSealedParent: number;
+}[] = [];
 const claim = (registration: JsonObject): string[] =>
   typeof registration["claimToken"] === "string"
     ? ["--claim-token", registration["claimToken"]]
@@ -92,8 +100,20 @@ try {
       const owned = (args: readonly string[], input?: string) =>
         runWorkbench(options, [...args, ...claim(registration)], input);
       const checkedWriter = await prepareScanArtifactRestorer(options, scanDir);
-      const writer =
-        mode === "batch" ? checkedWriter : { restore: checkedWriter.restore };
+      let inputPublication = 0;
+      const writer = {
+        restore: checkedWriter.restore,
+        async restoreMany(artifacts: { path: string; contents: Buffer }[]) {
+          const start = performance.now();
+          if (mode === "batch") await checkedWriter.restoreMany!(artifacts);
+          else
+            for (const { path, contents } of artifacts)
+              await checkedWriter.restore(path, contents);
+          inputPublication += performance.now() - start;
+          for (const { path, contents } of artifacts)
+            assert.deepEqual(await readFile(join(scanDir, path)), contents);
+        },
+      };
       await mkdir(childDir, { recursive: true, mode: 0o700 });
       const child = await runWorkbench(
         options,
@@ -144,36 +164,22 @@ try {
       const before = await readFile(join(childDir, "findings.json"));
       let lastChild = 0;
       let projectedChild: ScanMergeInput | undefined;
-      const publish = async (draft: SemanticScan) => {
-        const documents = prepareSemanticScanDraft(
+      const publish = (draft: SemanticScan) =>
+        writeSemanticScanDraft(
           {
-            targetContract: registration["contract"] as JsonObject,
-            mode: "deep",
+            scanDir,
+            contract: {
+              targetContract: registration["contract"] as JsonObject,
+              mode: "deep",
+            },
+            writer: checkedWriter,
+            workbench: owned,
+            onCleanupError(error) {
+              console.error(error);
+            },
           },
           draft,
         );
-        const draftPath = `drafts/${randomUUID()}.json`;
-        const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
-        await checkedWriter.restore(
-          draftPath,
-          Buffer.from(JSON.stringify(documents)),
-        );
-        await checkedWriter.restore(
-          checkpointPath,
-          Buffer.from(JSON.stringify(draft)),
-        );
-        await owned([
-          "write-scan-draft",
-          "--scan-id",
-          scanId,
-          "--draft-path",
-          join(scanDir, draftPath),
-          "--checkpoint-path",
-          join(scanDir, checkpointPath),
-        ]);
-        await checkedWriter.remove(draftPath);
-        await checkedWriter.remove(checkpointPath);
-      };
       await runDeepScans({
         scanId,
         scanDir,
@@ -214,7 +220,20 @@ try {
         }),
         merge: async () => {
           assert(projectedChild);
-          return { scanId, findings: projectedChild.draft.findings };
+          assert.deepEqual(
+            await readFile(
+              join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+            ),
+            scanMergeModelInputs([projectedChild], null),
+          );
+          return {
+            scanId,
+            groups: projectedChild.draft.findings.map((finding) => ({
+              sourceFindingIds: finding.provenance.sourceFindingIds!,
+              canonicalSourceFindingId:
+                finding.provenance.sourceFindingIds![0]!,
+            })),
+          };
         },
         publish,
         onCost() {},
@@ -233,7 +252,12 @@ try {
         await readFile(join(scanDir, "report.md"), "utf8"),
         /repair-47/,
       );
-      samples[mode]!.push(elapsed);
+      samples.push({
+        pair,
+        mode,
+        inputPublication,
+        completionToSealedParent: elapsed,
+      });
     }
   }
   const quantile = (values: number[], fraction: number) =>
@@ -245,9 +269,25 @@ try {
           "Last required child result to sealed/indexed parent, fixed correct model output; no discovery or model latency",
         findings: fixture.expected.length,
         summary: Object.fromEntries(
-          Object.entries(samples).map(([mode, values]) => [
+          ["separate", "batch"].map((mode) => [
             mode,
-            { p50: quantile(values, 0.5), p95: quantile(values, 0.95) },
+            Object.fromEntries(
+              ["inputPublication", "completionToSealedParent"].map((timing) => {
+                const values = samples
+                  .filter((sample) => sample.mode === mode)
+                  .map(
+                    (sample) =>
+                      sample[
+                        timing as
+                          "inputPublication" | "completionToSealedParent"
+                      ],
+                  );
+                return [
+                  timing,
+                  { p50: quantile(values, 0.5), p95: quantile(values, 0.95) },
+                ];
+              }),
+            ),
           ]),
         ),
         samples,
