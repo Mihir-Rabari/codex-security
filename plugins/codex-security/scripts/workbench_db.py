@@ -1435,6 +1435,31 @@ def complete_scan_locked(
     return context
 
 
+def cli_scan_resume(
+    connection: sqlite3.Connection, scan: sqlite3.Row, claim_token: str | None
+) -> dict[str, Any]:
+    result = scan_history.cli_scan_resume(
+        connection,
+        scan,
+        parse_scan_recipe=parse_scan_recipe,
+        scan_contract=scan_contract,
+        require_scan_directory=require_canonical_scan_directory,
+        artifact_path=artifact_path,
+        read_json_object=read_json_object,
+        workbench_completion_binding=workbench_completion_binding,
+        claim_token=claim_token,
+    )
+    composition = load_composition(connection, scan)
+    result["scan"] = scan_result(connection, scan, composition=composition)
+    checkpoint = composition.checkpoint
+    result["compositionCheckpoint"] = (
+        None
+        if checkpoint is None
+        else {key: value for key, value in checkpoint.items() if key != "aggregate"}
+    )
+    return result
+
+
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
@@ -1456,7 +1481,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         scan_id = require_uuid(registration["scanId"], "scan-id")
         with scan_completion_lock(scan_id), connection:
             scan = require_scan(connection, scan_id)
-            scan_history.require_current_deep_scan(connection, scan)
             workspace = require_workspace(connection, scan["workspace_id"])
             owner = handoff.owning_thread(scan, workspace, execution_fallback=False)
             if owner != registration.get("threadId"):
@@ -1476,15 +1500,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Saved scan registration must match its target, directory and mode."
                 )
-            if scan_target_identity(repository, None) != (
-                scan["target_revision"],
-                scan["target_snapshot_digest"],
-                scan["target_device"],
-                scan["target_inode"],
-            ):
-                raise SystemExit(
-                    "Cannot resume: the original checkout revision or contents changed."
-                )
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1498,7 +1513,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                     (json.dumps(recipe, allow_nan=False), now(), scan_id),
                 )
             scan = require_scan(connection, scan_id)
-        return scan_history.scan_registration(connection, scan, scan_contract)
+            return cli_scan_resume(connection, scan, registration.get("claimToken"))
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     requested_target = recipe["target"]
@@ -3323,25 +3338,7 @@ def main() -> None:
         elif args.command == "get-cli-scan-resume":
             scan = require_scan(connection, args.scan_id)
             try:
-                result = scan_history.cli_scan_resume(
-                    connection,
-                    scan,
-                    parse_scan_recipe=parse_scan_recipe,
-                    scan_contract=scan_contract,
-                    require_scan_directory=require_canonical_scan_directory,
-                    artifact_path=artifact_path,
-                    read_json_object=read_json_object,
-                    workbench_completion_binding=workbench_completion_binding,
-                    claim_token=args.claim_token,
-                )
-                composition = load_composition(connection, scan)
-                result["scan"] = scan_result(connection, scan, composition=composition)
-                checkpoint = composition.checkpoint
-                result["compositionCheckpoint"] = (
-                    None
-                    if checkpoint is None
-                    else {key: value for key, value in checkpoint.items() if key != "aggregate"}
-                )
+                result = cli_scan_resume(connection, scan, args.claim_token)
             except SystemExit as exc:
                 if not args.allow_unavailable:
                     raise

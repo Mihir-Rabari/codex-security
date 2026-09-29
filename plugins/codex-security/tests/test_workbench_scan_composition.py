@@ -492,6 +492,51 @@ def native_scan_completion(tmp_path: Path):
     return state, target, arguments, started, complete
 
 
+def test_native_registration_returns_verified_sealed_resume(native_scan_completion) -> None:
+    state, target, _, started, _ = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    token = scan["handoffClaimToken"]
+    registration = {
+        "scanId": scan["scanId"],
+        "threadId": "native-owner",
+        "claimToken": token,
+        "recipe": recipe(target, "deep"),
+    }
+
+    def bind(**kwargs):
+        return run_workbench(
+            state,
+            "register-cli-scan",
+            "--repository",
+            str(target),
+            "--scan-dir",
+            str(directory),
+            "--registration-json-stdin",
+            input_text=json.dumps(registration),
+            **kwargs,
+        )
+
+    assert "sealedProducerVersion" not in bind()
+    run_workbench(
+        state, "prepare-scan-completion", "--scan-id", scan["scanId"], "--claim-token", token
+    )
+    manifest = directory / "scan-manifest.json"
+    sealed = manifest.read_bytes()
+    resumed = bind()
+    assert resumed["sealedProducerVersion"] == json.loads(sealed)["scan"]["producer"]["version"]
+    assert resumed["claimToken"] == token
+    assert resumed["compositionCheckpoint"]["terminalReason"] == "saturated"
+    assert resumed["scan"]["progress"]["status"] == "running"
+    assert manifest.read_bytes() == sealed
+    with (directory / "findings.json").open("a") as findings:
+        findings.write(" ")
+    rejected = bind(check=False)
+    assert rejected["returncode"] != 0
+    assert "Cannot resume sealed scan" in rejected["stderr"]
+    assert manifest.read_bytes() == sealed
+
+
 def test_native_target_retry_reuses_completed_result(
     native_scan_completion,
 ) -> None:
