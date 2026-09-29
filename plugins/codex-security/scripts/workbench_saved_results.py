@@ -43,7 +43,6 @@ from workbench_composition import (
     COMPOSITION_CHECKPOINT,
     CompositionView,
     load_composition,
-    read_composition_checkpoint,
 )
 from workbench_constants import PHASES
 from workbench_scan_usage import merge_scan_cost
@@ -228,7 +227,7 @@ def _source_digests(value: Any, label: str) -> dict[str, str]:
 
 
 def _saved_results_changed(
-    db: Any, connection: Any, scan: Any, composition: CompositionView | None = None
+    db: Any, connection: Any, scan: Any, composition: CompositionView
 ) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -238,9 +237,7 @@ def _saved_results_changed(
             "FROM deep_scan_workers WHERE scan_id = ?",
             (scan["id"],),
         ).fetchall()
-        checkpoint = (
-            composition.checkpoint if composition is not None else read_composition_checkpoint(scan)
-        )
+        checkpoint = composition.checkpoint
         paths = dict(_saved_result_paths(scan_dir, workers if checkpoint is None else []))
         frozen_sources = scan["retained_source_digests_json"]
 
@@ -357,7 +354,7 @@ def _recovery_source_digests(
 
 
 def scan_results_recovery_needed(
-    db: Any, connection: Any, scan: Any, composition: CompositionView | None = None
+    db: Any, connection: Any, scan: Any, composition: CompositionView
 ) -> bool:
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False

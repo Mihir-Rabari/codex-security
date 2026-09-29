@@ -1160,7 +1160,7 @@ def complete_budget_exhausted_scan(
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
         composition = load_composition(connection, scan)
-        scan_history.require_composition_complete(connection, scan, composition)
+        scan_history.require_composition_complete(scan, composition)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
         manifest_scan = manifest.get("scan", {})
@@ -1228,7 +1228,7 @@ def complete_scan_locked(
         error_message="Scan completion is owned by another continuation.",
     )
     composition = composition if composition is not None else load_composition(connection, scan)
-    scan_history.require_composition_complete(connection, scan, composition)
+    scan_history.require_composition_complete(scan, composition)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1382,7 +1382,7 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        scan_history.require_composition_complete(connection, scan, composition)
+        scan_history.require_composition_complete(scan, composition)
         handoff.require_current_continuation(
             scan,
             claim_token,
@@ -2666,7 +2666,7 @@ def scan_result(
     }
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
     independent_reviews = (
-        scan_history.independent_review_progress(connection, scan, composition)
+        scan_history.independent_review_progress(scan, composition)
         if scan["mode"] == "deep"
         else None
     )

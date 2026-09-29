@@ -17,10 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
-from workbench_composition import (
-    CompositionView,
-    load_composition,
-)
+from workbench_composition import CompositionView
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -150,9 +147,7 @@ def scan_registration(
     }
 
 
-def require_composition_complete(
-    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView
-) -> None:
+def require_composition_complete(scan: sqlite3.Row, composition: CompositionView) -> None:
     if scan["mode"] != "deep":
         return
     checkpoint = composition.checkpoint
@@ -160,24 +155,16 @@ def require_composition_complete(
         if checkpoint.get("terminalReason") in {"saturated", "capped"}:
             return
     else:
-        legacy = connection.execute(
-            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone()
+        legacy = composition.legacy_run
         if legacy is not None and legacy["status"] == "succeeded" and legacy["manifest_path"]:
             return
     raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
 
 
 def independent_review_progress(
-    connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    composition: CompositionView | None = None,
+    composition: CompositionView,
 ) -> dict[str, Any] | None:
-    composition = (
-        composition
-        if composition is not None
-        else load_composition(connection, scan, checkpoint=False)
-    )
     run = composition.legacy_run
     children = composition.children
     if children or scan["recipe_json"] is not None:
