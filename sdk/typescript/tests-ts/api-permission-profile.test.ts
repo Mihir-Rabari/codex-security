@@ -69,7 +69,7 @@ async function fixture(
       "    return target;",
       "  };",
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, apiKey: process.env.CODEX_API_KEY });',
+      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, apiKey: process.env.CODEX_API_KEY });',
       'if (args.includes("mcp")) { console.log("[]"); process.exit(0); }',
       'if (args.includes("app-server")) {',
       '  require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {',
@@ -187,7 +187,18 @@ async function fixture(
     },
   };
   const client = new CodexSecurity(
-    { pluginPath: PLUGIN_ROOT },
+    {
+      pluginPath: PLUGIN_ROOT,
+      codexOverrides: {
+        mcp_servers: {
+          "codex-security": { command: "synthetic-workbench", enabled: true },
+          synthetic: {
+            command: "synthetic-mcp",
+            env: { SETTING: "inherited" },
+          },
+        },
+      },
+    },
     {
       environment,
       prepareRuntime: async () => ({
@@ -410,8 +421,19 @@ test.each(["sdk", "cli"] as const)(
               ({ kind }) => kind === "exec",
             );
             expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
-            if (executions.length)
+            if (executions.length) {
               expect(executions[0].args.includes("resume")).toBe(resumed);
+              expect(executions[0].mcpServers).toEqual({
+                "codex-security":
+                  role === "merge"
+                    ? { command: "node", enabled: false }
+                    : { command: "synthetic-workbench", enabled: true },
+                synthetic: {
+                  command: "synthetic-mcp",
+                  env: { SETTING: "inherited" },
+                },
+              });
+            }
             expect(h.commands).not.toContain("complete-scan");
             if (role === "merge")
               expect(

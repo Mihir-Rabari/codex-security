@@ -544,6 +544,12 @@ export function prepareMergeExecution(
   subagents: number,
 ): PreparedExecution {
   const config = structuredClone(session.sessionConfig);
+  config["mcp_servers"] = {
+    ...(isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {}),
+    // The host owns parent artifacts and lifecycle. A disabled server still
+    // needs a valid transport while Codex resolves plugin configuration.
+    "codex-security": { command: "node", enabled: false },
+  };
   const features = isRecord(config["features"]) ? config["features"] : {};
   config["features"] = {
     ...features,

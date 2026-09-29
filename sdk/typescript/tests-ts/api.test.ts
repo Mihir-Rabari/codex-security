@@ -2111,6 +2111,13 @@ describe("CodexSecurity orchestration", () => {
             codexOverrides: {
               model: "openai.gpt-5.6-luna",
               model_provider: "amazon-bedrock",
+              mcp_servers: {
+                "codex-security": {
+                  command: "synthetic-workbench",
+                  enabled: true,
+                },
+                synthetic: { command: `synthetic-mcp-${index}` },
+              },
               ...overrides,
             },
           },
@@ -2141,6 +2148,10 @@ describe("CodexSecurity orchestration", () => {
               const options = codexOptions;
               if (++started === scenarios.length) release();
               await allStarted;
+              expect(options.config?.["mcp_servers"]).toEqual({
+                "codex-security": { command: "node", enabled: false },
+                synthetic: { command: `synthetic-mcp-${index}` },
+              });
               const mcpEnvironment = Object.fromEntries(
                 Object.entries(options.env ?? {}).filter(([name]) =>
                   manifest.mcpServers["codex-security"]!.env_vars.includes(
