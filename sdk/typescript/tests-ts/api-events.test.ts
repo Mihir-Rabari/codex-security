@@ -9,7 +9,14 @@ import {
   type ThreadEvent,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
-import { runScanEvents } from "../src/api.js";
+import { runScanEvents, scanRuntimeCodexConfig } from "../src/api.js";
+import { parse as parseToml } from "smol-toml";
+import {
+  deepMerge,
+  resolveCodexProfile,
+  scanCompositionOverrides,
+  type JsonObject,
+} from "../src/config.js";
 import {
   CodexSecurityError,
   IncompleteScanError,
@@ -33,6 +40,9 @@ import {
 import {
   createExecutionCodex,
   prepareExecutionSource,
+  prepareDiscoveryExecution,
+  prepareMergeExecution,
+  type ScanPermissions,
   type CodexClientLike,
   type ExecutionPolicy,
   type PreparedExecution,
@@ -1249,6 +1259,12 @@ describe("Deep worker terminal lifecycle", () => {
     policy: ExecutionPolicy,
     overlay: boolean,
     createCodex: Parameters<typeof createExecutionCodex>[0]["createCodex"],
+    settings?: {
+      configuration: JsonObject;
+      subagents: number;
+      environment: Record<string, string>;
+      permissions: ScanPermissions;
+    },
   ): Promise<CodexClientLike> {
     const codexHome = join(root, "codex-home");
     await mkdir(codexHome, { mode: 0o700 });
@@ -1256,12 +1272,24 @@ describe("Deep worker terminal lifecycle", () => {
       PATH: process.env["PATH"] ?? "",
       CODEX_HOME: codexHome,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      ...settings?.environment,
     };
+    const configuration = settings?.configuration ?? {};
     const source = prepareExecutionSource({
       command: { command: process.execPath },
-      configuration: {},
+      configuration,
       environment,
     });
+    const sessionConfig =
+      settings === undefined
+        ? {}
+        : scanRuntimeCodexConfig(
+            policy === "discovery"
+              ? scanCompositionOverrides(configuration, settings.subagents)
+              : configuration,
+            codexHome,
+            settings.permissions,
+          );
     const session: PreparedExecution = {
       policy,
       source,
@@ -1270,14 +1298,23 @@ describe("Deep worker terminal lifecycle", () => {
       runtimeHome: codexHome,
       effectiveConfig: {},
       preflightConfig: {},
-      sessionConfig: {},
+      sessionConfig,
+      ...(settings === undefined
+        ? {}
+        : { inheritedPermissions: settings.permissions }),
       ...(overlay ? { runtimeConfig: {} } : {}),
       authentication: source.authentication,
       approvalPolicy: "never",
       python: process.execPath,
       releaseCredentialHome: null,
     };
-    return createExecutionCodex({ surface: "sdk", createCodex }, session, {})
+    const prepared =
+      settings === undefined || policy === "ordinary"
+        ? session
+        : policy === "merge"
+          ? prepareMergeExecution(session, settings.subagents)
+          : prepareDiscoveryExecution(session);
+    return createExecutionCodex({ surface: "sdk", createCodex }, prepared, {})
       .codex;
   }
 
@@ -1370,6 +1407,156 @@ describe("Deep worker terminal lifecycle", () => {
           } catch {}
         }
       }
+    },
+  );
+
+  test.each(
+    (["ordinary", "discovery", "merge"] as const).flatMap((policy) =>
+      [false, true].map((resume) => ({ policy, resume })),
+    ),
+  )(
+    "isolates selected profile budgets and settings at child launches: %j",
+    async ({ policy, resume }) => {
+      const configuration: JsonObject = {
+        model: "synthetic-root-model",
+        model_reasoning_effort: "low",
+        profile: "selected",
+        profiles: {
+          selected: {
+            model: "synthetic-selected-model",
+            model_reasoning_effort: "high",
+            features: {
+              multi_agent_v2: {
+                enabled: true,
+                max_concurrent_threads_per_session: 9,
+              },
+            },
+            default_permissions: "profile-permissions",
+            permissions: { profile: { filesystem: { ":root": "write" } } },
+            shell_environment_policy: {
+              set: { SYNTHETIC_PROFILE_SETTING: "selected" },
+            },
+          },
+        },
+        mcp_servers: { synthetic: { command: "synthetic-user-mcp" } },
+      };
+      const original = structuredClone(configuration);
+      const executable = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      await Promise.all(
+        [0, 2].map(async (subagents) => {
+          const root = await temporaryDirectory();
+          const capture = join(root, "child.json");
+          const preload = join(root, "capture-child.mjs");
+          const events: ThreadEvent[] = [];
+          for await (const event of completedEvents()) events.push(event);
+          await writeFile(
+            preload,
+            [
+              'import { writeFileSync } from "node:fs";',
+              "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
+              `writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv, key: process.env.CODEX_API_KEY, inherited: process.env.SYNTHETIC_INHERITED }));`,
+              ...events.map(
+                (event) =>
+                  `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
+              ),
+              "process.exit(0);",
+            ].join("\n"),
+          );
+          const permissions: ScanPermissions = {
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "read",
+              [join(root, "allowed")]: "write",
+            },
+            network: { enabled: false },
+          };
+          const codex = await execution(
+            root,
+            policy,
+            false,
+            (options) =>
+              new Codex({
+                ...options,
+                codexPathOverride: executable,
+                env: {
+                  ...options.env,
+                  NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                },
+              }),
+            {
+              configuration,
+              subagents,
+              permissions,
+              environment: {
+                OPENAI_API_KEY: `synthetic-key-${subagents}`,
+                SYNTHETIC_INHERITED: `inherited-${subagents}`,
+              },
+            },
+          );
+          const thread = resume
+            ? codex.resumeThread!("thread-1", { approvalPolicy: "never" })
+            : codex.startThread({ approvalPolicy: "never" });
+          const streamed = await thread.runStreamed(
+            "Synthetic settings fixture; no model.",
+            {},
+          );
+          await expect(
+            readCodexTurn({ thread, events: streamed.events }),
+          ).resolves.toMatchObject({ status: "completed" });
+          const observed = JSON.parse(await readFile(capture, "utf8")) as {
+            argv: string[];
+            key: string;
+            inherited: string;
+          };
+          expect(observed.key).toBe(`synthetic-key-${subagents}`);
+          expect(observed.inherited).toBe(`inherited-${subagents}`);
+          expect(observed.argv.includes("resume")).toBe(resume);
+          let config: JsonObject = {};
+          for (let index = 0; index < observed.argv.length; index++) {
+            if (
+              observed.argv[index] === "--config" ||
+              observed.argv[index] === "-c"
+            )
+              config = deepMerge(
+                config,
+                parseToml(observed.argv[++index]!) as JsonObject,
+              );
+          }
+          if (policy !== "ordinary") {
+            expect(config).not.toHaveProperty("profile");
+            expect(config).not.toHaveProperty("profiles");
+          }
+          expect(resolveCodexProfile(config)).toMatchObject({
+            model: "synthetic-selected-model",
+            model_reasoning_effort: "high",
+            features: {
+              multi_agent_v2: {
+                enabled: true,
+                max_concurrent_threads_per_session:
+                  policy === "ordinary" ? 9 : subagents + 1,
+              },
+            },
+            approval_policy: "never",
+            default_permissions: "codex_security_scan",
+            permissions: { codex_security_scan: permissions },
+            shell_environment_policy: {
+              set: { SYNTHETIC_PROFILE_SETTING: "selected" },
+            },
+            mcp_servers: {
+              synthetic: { command: "synthetic-user-mcp" },
+              ...(policy === "ordinary"
+                ? {}
+                : { "codex-security": { command: "node", enabled: false } }),
+            },
+          });
+          expect(
+            (config["permissions"] as JsonObject)["profile"],
+          ).toBeUndefined();
+        }),
+      );
+      expect(configuration).toEqual(original);
     },
   );
 

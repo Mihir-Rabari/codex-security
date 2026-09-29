@@ -16,6 +16,7 @@ import {
   inlineToml,
   isExternalModelProvider,
   modelProviderConfigOverride,
+  resolveCodexProfile,
   scanModelProvider,
   scanCompositionOverrides,
   setScanSubagentBudget,
@@ -579,7 +580,7 @@ export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,
 ): PreparedExecution {
-  const config = deepWorkerConfig(session.sessionConfig);
+  const config = deepWorkerConfig(resolveCodexProfile(session.sessionConfig));
   setScanSubagentBudget(config, subagents);
   return { ...session, policy: "merge", sessionConfig: config };
 }
