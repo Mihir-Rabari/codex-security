@@ -125,7 +125,7 @@ try {
           `deep-scan-rejected-${scanId ?? "standalone"}`,
         ),
         repoRoot: repository,
-        layout: "scan",
+
         scanId,
       };
       for (const artifact of [
@@ -162,7 +162,6 @@ try {
     const context = {
       root: path.join(fixture, "deep-scan-allowed"),
       repoRoot: repository,
-      layout: "scan",
     };
     await fs.mkdir(context.root);
     const artifact = "artifacts/deep-scan/checkpoint.json";

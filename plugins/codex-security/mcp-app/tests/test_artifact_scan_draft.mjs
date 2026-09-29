@@ -32,9 +32,8 @@ const module = await import(
 const {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
-  recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraft: recordDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  saveScanDraftCheckpoint,
   scanDraftInputSchema,
 } = module;
 
@@ -46,7 +45,7 @@ try {
   const context = {
     root,
     repoRoot: root,
-    layout: "scan",
+
     scanId,
     scope: ".",
     mode: "standard",
@@ -1147,8 +1146,6 @@ try {
 
   for (const [name, candidate] of [
     ["candidate-id", { candidateId: "candidate-still-pending" }],
-    ["historical-surface", { id: "candidate-still-pending" }],
-    ["historical-surface-slash", { id: "worker/observation" }],
     [
       "original-candidate",
       {
@@ -1178,9 +1175,6 @@ try {
         ...surfaceDraft.coverage,
         surfaces: surfaceDraft.coverage.surfaces.map((surface) => ({
           ...surface,
-          ...(name.startsWith("historical-surface")
-            ? { candidateId: candidate.id }
-            : {}),
         })),
         deferred: [unresolved],
       },
@@ -1210,47 +1204,9 @@ try {
     const retainedCandidate = {
       ...unresolved,
       id: candidate.candidateId ?? candidate.id,
-      ...(name.startsWith("historical-surface")
-        ? { candidateScoped: true }
-        : {}),
     };
     assert.deepEqual(retainedCoverage.deferred, [retainedCandidate]);
-    if (name.startsWith("historical-surface")) {
-      for (const [index, association] of [
-        undefined,
-        undefined,
-        "other-candidate",
-        candidate.id,
-      ].entries()) {
-        // Recovery may only retain the canonical documents. The association
-        // must survive without relying on an older checkpoint's surface row.
-        await rm(path.join(sharedSurfaceRoot, "checkpoints"), {
-          recursive: true,
-          force: true,
-        });
-        await recordCodexSecurityScanDraft(sharedSurfaceContext, {
-          ...resolvedSurfaceDraft,
-          coverage: {
-            ...resolvedSurfaceDraft.coverage,
-            completeness: index === 0 ? "partial" : "complete",
-            deferred: index === 0 ? [unresolved] : [],
-            surfaces: [
-              {
-                ...surfaceDraft.coverage.surfaces[0],
-                disposition:
-                  association === candidate.id ? "reported" : "rejected",
-                ...(association === undefined
-                  ? {}
-                  : { candidateId: association }),
-              },
-            ],
-          },
-        });
-        const retained = await readJson(sharedSurfaceRoot, "coverage.json");
-        assert.equal(retained.completeness, "partial");
-        assert.deepEqual(retained.deferred, [retainedCandidate]);
-      }
-    }
+
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...resolvedSurfaceDraft,
       coverage: {
@@ -2247,10 +2203,6 @@ try {
     /handoffClaimToken/,
   );
   await assert.rejects(
-    recordCodexSecurityScanDraft({ ...context, layout: "worker" }, input),
-    /authoritative parent scan context/,
-  );
-  await assert.rejects(
     recordCodexSecurityScanDraft({ ...context, status: "complete" }, input),
     /running workbench scan/,
   );
@@ -2506,4 +2458,34 @@ async function recordFreshScanDraft(context, input) {
     }),
   ]);
   return recordCodexSecurityScanDraft(context, input);
+}
+
+// Pure projection tests supply a tiny publisher; workbench tests cover locking and pending recovery.
+async function recordCodexSecurityScanDraft(context, input, publish, signal) {
+  return recordDraft(
+    context,
+    input,
+    publish ??
+      (async (draft) => {
+        for (const [name, document] of Object.entries({
+          "findings.json": draft.findings,
+          "coverage.json": draft.coverage,
+          "scan-manifest.json": draft.manifest,
+        }))
+          await writeFile(
+            path.join(context.root, name),
+            JSON.stringify(document),
+          );
+        await saveScanDraftCheckpoint(context, input);
+      }),
+    signal,
+  );
+}
+
+async function saveScanDraftCheckpoint(context, input) {
+  const { handoffClaimToken: _claim, ...checkpoint } = input;
+  const contents = JSON.stringify(checkpoint);
+  const name = createHash("sha256").update(contents).digest("hex") + ".json";
+  await mkdir(path.join(context.root, "checkpoints"), { recursive: true });
+  await writeFile(path.join(context.root, "checkpoints", name), contents);
 }

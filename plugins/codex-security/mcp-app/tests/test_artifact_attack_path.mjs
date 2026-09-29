@@ -291,13 +291,6 @@ async function testEmptyLedgerAcceptsAnEmptyBatch() {
   );
   assert.equal(await readFile(fixture.ledgerPath, "utf8"), "");
 
-  await assert.rejects(
-    recordCodexSecurityCandidateAttackPaths(
-      { ...fixture.context, layout: "worker" },
-      { attackPaths: [] },
-    ),
-    /scan-bound artifact context/,
-  );
   assert.equal(await readFile(fixture.ledgerPath, "utf8"), "");
 }
 
@@ -323,7 +316,7 @@ async function createFixture(label, originalRows) {
     context: {
       root,
       repoRoot: root,
-      layout: "scan",
+
       scanId,
     },
     ledgerPath,

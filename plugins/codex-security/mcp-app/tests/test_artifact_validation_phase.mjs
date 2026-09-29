@@ -208,15 +208,6 @@ try {
     /confidence/,
   );
 
-  await assertNoMutation(
-    { ...context, layout: "worker" },
-    ledger,
-    {
-      validations: updates,
-    },
-    /scan-bound artifact context/,
-  );
-
   await writeJsonl(ledger, [original[0], original[0]]);
   await assertNoMutation(
     context,
@@ -276,7 +267,7 @@ async function scanContext(root, directory, scanId) {
     }),
     mkdir(repository, { recursive: true }),
   ]);
-  return { root: scanRoot, repoRoot: repository, layout: "scan", scanId };
+  return { root: scanRoot, repoRoot: repository, scanId };
 }
 
 function candidate(candidateId, sourcePath) {

@@ -78,11 +78,6 @@ const reviewItemSchema = loadArtifactZodSchema(
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
 ): Promise<PreparedReviewItems> {
-  if (context.layout !== "scan") {
-    throw new Error(
-      `${label}: only a parent scan can prepare its shared inventory.`,
-    );
-  }
   if (!context.pluginRoot) {
     throw new Error(`${label}: the scan has no bound plugin context.`);
   }

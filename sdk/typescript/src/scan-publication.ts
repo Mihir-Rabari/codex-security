@@ -1,13 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
-import {
-  prepareSemanticScanDraft,
-  type SemanticScan,
-} from "./scan-semantics.js";
-import type {
-  ScanArtifactRestorer,
-  prepareScanArtifactRestorer,
-} from "./runtime.js";
+import type { ScanArtifactRestorer } from "./runtime.js";
 import {
   loadContract,
   readScanFile,
@@ -87,20 +78,45 @@ export async function publishScan(
     scanId,
     ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
   ]);
+  return { result, warnings: publicationWarnings(completion, preparation) };
+}
+
+/** Load a result that the workbench has already completed, without completing it again. */
+export async function loadPublishedScanResult(
+  context: ScanPublicationContext,
+  turn: CompletedScanTurn,
+  completion: JsonObject,
+): Promise<{
+  result: ScanResult;
+  warnings: { message: string; targetChanged: boolean }[];
+}> {
+  const result = await collectResult(
+    turn.turnResult,
+    turn.threadId,
+    context.scanDir,
+    context.pluginRoot,
+    context.expectation,
+    context.signal,
+    true,
+  );
+  return { result, warnings: publicationWarnings(completion) };
+}
+
+function publicationWarnings(
+  completion: JsonObject,
+  preparation: JsonObject = {},
+) {
   const targetWarnings = new Set([
     ...strings(preparation["targetWarnings"]),
     ...strings(completion["targetWarnings"]),
   ]);
   const scan = completion["scan"];
-  return {
-    result,
-    warnings: strings(isRecord(scan) ? scan["warnings"] : undefined).map(
-      (message) => ({
-        message,
-        targetChanged: targetWarnings.has(message),
-      }),
-    ),
-  };
+  return strings(isRecord(scan) ? scan["warnings"] : undefined).map(
+    (message) => ({
+      message,
+      targetChanged: targetWarnings.has(message),
+    }),
+  );
 }
 
 function strings(value: unknown): string[] {
@@ -170,56 +186,10 @@ export async function collectResult(
   });
 }
 
-/** Stage the draft and its checkpoint under the existing atomic workbench publication. */
-export async function writeSemanticScanDraft(
-  options: {
-    scanDir: string;
-    contract: Parameters<typeof prepareSemanticScanDraft>[0];
-    writer: Pick<
-      Awaited<ReturnType<typeof prepareScanArtifactRestorer>>,
-      "restore" | "remove"
-    >;
-    workbench: (args: readonly string[]) => Promise<unknown>;
-    onCleanupError: (error: unknown) => void;
-  },
-  draft: SemanticScan,
-): Promise<void> {
-  const documents = prepareSemanticScanDraft(options.contract, draft);
-  const draftPath = `drafts/${randomUUID()}.json`;
-  const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
-  const staged: string[] = [];
-  try {
-    await options.writer.restore(
-      draftPath,
-      Buffer.from(JSON.stringify(documents)),
-    );
-    staged.push(draftPath);
-    await options.writer.restore(
-      checkpointPath,
-      Buffer.from(JSON.stringify(draft)),
-    );
-    staged.push(checkpointPath);
-    await options.workbench([
-      "write-scan-draft",
-      "--scan-id",
-      draft.scanId,
-      "--draft-path",
-      join(options.scanDir, draftPath),
-      "--checkpoint-path",
-      join(options.scanDir, checkpointPath),
-    ]);
-  } finally {
-    await Promise.all(
-      staged.map(async (path) => {
-        try {
-          await options.writer.remove(path);
-        } catch (error) {
-          options.onCleanupError(error);
-        }
-      }),
-    );
-  }
-}
+export {
+  writeSemanticScanDraft,
+  writePreparedScanDraft,
+} from "./scan-draft-publication.js";
 
 /** Optional post-scan work may fail, but cannot replace the completed artifacts. */
 export async function preservePublishedArtifacts(

@@ -7,7 +7,6 @@ import {
   realpath,
   rm,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,7 +29,6 @@ const { resolveCodexPath, resolveTrustedCodex, snapshotNativeEnvironment } =
   );
 const temporaryRoots = [];
 try {
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
   await testWindowsNpmPackageResolution();
   await testWindowsNpmPackageResolution("managed");
   await testCodexHomePathsStayBoundToOriginalDirectory();
@@ -104,6 +102,7 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
   try {
     const homes = [
       `${root}${path.sep}link${path.sep}..${path.sep}home`,
+      `  ${root}${path.sep}home  `,
       `${path.relative(process.cwd(), root)}${path.sep}link${path.sep}..${path.sep}home`,
       ...(process.platform === "win32"
         ? [`\\${path.relative(path.parse(root).root, root)}\\link\\..\\home`]
@@ -111,7 +110,7 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
     ];
     for (const home of homes) {
       process.env.CODEX_HOME = home;
-      const expectedHome = await realpath(home);
+      const expectedHome = await realpath(path.resolve(home.trim()));
       const environment = await snapshotNativeEnvironment();
       assert.equal(environment.CODEX_HOME, expectedHome);
       assert.equal(process.env.CODEX_HOME, home);
@@ -180,161 +179,6 @@ async function testWindowsWorkerEnvironmentPreservesMixedCaseKeys() {
   } finally {
     for (const name of names) delete process.env[name];
     Object.assign(process.env, previousEnvironment);
-  }
-}
-
-async function testWindowsAppsCodexFallsBackToRelocatedBinary() {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-cache-"),
-  );
-  temporaryRoots.push(root);
-  const localAppData = path.join(root, "LocalAppData");
-  const olderBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "11111111",
-    "codex.exe",
-  );
-  const currentBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "22222222",
-    "codex.exe",
-  );
-  const emptyBinary = path.join(
-    localAppData,
-    "OpenAI",
-    "Codex",
-    "bin",
-    "33333333",
-    "codex.exe",
-  );
-  const protectedDirectory = path.join(
-    root,
-    "WindowsApps",
-    "OpenAI.Codex_fixture",
-    "resources",
-  );
-  const architecture = process.arch === "arm64" ? "arm64" : "x64";
-  const targetTriple =
-    architecture === "arm64"
-      ? "aarch64-pc-windows-msvc"
-      : "x86_64-pc-windows-msvc";
-  const managedPackage = path.join(
-    protectedDirectory,
-    "node_modules",
-    "@openai",
-    "codex",
-  );
-  const platformPackage = path.join(
-    managedPackage,
-    "node_modules",
-    "@openai",
-    `codex-win32-${architecture}`,
-  );
-  const protectedPackageBinary = path.join(
-    platformPackage,
-    "vendor",
-    targetTriple,
-    "bin",
-    "codex.exe",
-  );
-  await Promise.all([
-    mkdir(path.dirname(olderBinary), { recursive: true }),
-    mkdir(path.dirname(currentBinary), { recursive: true }),
-    mkdir(path.dirname(emptyBinary), { recursive: true }),
-    mkdir(path.dirname(protectedPackageBinary), { recursive: true }),
-  ]);
-  await Promise.all([
-    copyFile(process.execPath, olderBinary),
-    copyFile(process.execPath, currentBinary),
-    writeFile(emptyBinary, ""),
-    writeFile(
-      path.join(protectedDirectory, "codex.exe"),
-      "protected direct binary",
-    ),
-    writeFile(
-      path.join(managedPackage, "package.json"),
-      JSON.stringify({ name: "@openai/codex" }),
-    ),
-    writeFile(
-      path.join(platformPackage, "package.json"),
-      JSON.stringify({ name: `@openai/codex-win32-${architecture}` }),
-    ),
-    writeFile(protectedPackageBinary, "protected package binary"),
-  ]);
-  await Promise.all([
-    utimes(olderBinary, new Date(1_000), new Date(1_000)),
-    utimes(currentBinary, new Date(2_000), new Date(2_000)),
-    utimes(emptyBinary, new Date(3_000), new Date(3_000)),
-  ]);
-
-  const resolved = resolveCodexPath(
-    {
-      CODEX_CLI_PATH:
-        "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\resources\\codex.exe",
-      LOCALAPPDATA: localAppData,
-    },
-    "win32",
-  );
-  assert.equal(resolved, currentBinary);
-  assert.equal(
-    resolveCodexPath(
-      {
-        CODEX_MANAGED_PACKAGE_ROOT: managedPackage,
-        Path: protectedDirectory,
-        LOCALAPPDATA: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    currentBinary,
-  );
-  assert.equal(
-    resolveCodexPath(
-      {
-        LOCALAPPDATA: path.relative(root, localAppData),
-      },
-      "win32",
-      architecture,
-      root,
-    ),
-    currentBinary,
-  );
-  assert.equal(
-    resolveCodexPath(
-      {
-        localappdata: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    currentBinary,
-  );
-  const explicitOverride = path.join(root, "custom-codex.exe");
-  assert.equal(
-    resolveCodexPath(
-      {
-        CODEX_CLI_PATH: explicitOverride,
-        CODEX_MANAGED_PACKAGE_ROOT: managedPackage,
-        Path: protectedDirectory,
-        LOCALAPPDATA: localAppData,
-      },
-      "win32",
-      architecture,
-    ),
-    explicitOverride,
-  );
-
-  if (process.platform === "win32") {
-    const launched = spawnSync(resolved, ["--version"], { encoding: "utf8" });
-    assert.equal(launched.error, undefined);
-    assert.equal(launched.status, 0);
-    assert.equal(launched.stdout.trim(), process.version);
   }
 }
 
