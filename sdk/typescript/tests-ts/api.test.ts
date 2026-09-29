@@ -3123,7 +3123,7 @@ describe("CodexSecurity orchestration", () => {
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
-    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toMatch(/do not finalize or seal them/iu);
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -6556,7 +6556,7 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain("$codex-security:security-diff-scan");
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("complete_codex_security_scan");
-    expect(prompt).not.toContain("do not finalize or seal them");
+    expect(prompt).not.toMatch(/do not finalize or seal them/iu);
     expect(prompt).toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
@@ -6569,7 +6569,7 @@ describe("CodexSecurity orchestration", () => {
         maxCostUsd: 1,
       }),
     ).rejects.toThrow("prompt captured");
-    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toMatch(/do not finalize or seal them/iu);
     expect(prompt).not.toContain("complete_codex_security_scan");
 
     await expect(
