@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
+import { ScanPermissionError } from "../src/scan-execution.js";
 
 test("cancellation drains a preflight child that ignores graceful termination", async () => {
   const root = await mkdtemp(join(tmpdir(), "permission-stop-"));
@@ -74,3 +75,86 @@ test("cancellation drains a preflight child that ignores graceful termination", 
     await rm(root, { recursive: true, force: true });
   }
 }, 10000);
+
+test.each([false, true])(
+  "rejects an exited preflight child while a descendant retains its pipes (resumed: %p)",
+  async (resumed) => {
+    const root = await mkdtemp(join(tmpdir(), "permission-exit-"));
+    const executable = join(root, "synthetic-codex.exe");
+    const script = join(root, "preflight.cjs");
+    await writeFile(
+      script,
+      `
+      require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
+        const request = JSON.parse(line);
+        if (request.method === "initialize") console.log(JSON.stringify({ id: request.id, result: {} }));
+        if (request.method === "config/read") {
+          const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+          process.stderr.write("descendant:" + descendant.pid + "\\n", () => process.exit(1));
+        }
+      });
+    `,
+    );
+    const original = childProcess.spawn;
+    let child: childProcess.ChildProcess | undefined;
+    let descendantPid: number | undefined;
+    let stderr = "";
+    const spawning = spyOn(childProcess, "spawn").mockImplementation(((
+      command,
+      args,
+      options,
+    ) => {
+      if (command !== executable)
+        throw new Error("Unexpected fixture executable");
+      const spawned = original(
+        process.execPath,
+        [script, ...(args as string[])],
+        options ?? {},
+      );
+      child = spawned;
+      spawned.stderr!.on("data", (bytes: Buffer) => {
+        stderr += bytes.toString();
+        const match = /descendant:(\d+)\n/u.exec(stderr);
+        if (match) descendantPid = Number(match[1]);
+      });
+      return spawned;
+    }) as typeof childProcess.spawn);
+    const codex = createPermissionCheckedCodex({
+      codexPathOverride: executable,
+      env: { PATH: process.env["PATH"] ?? "" },
+      config: {
+        default_permissions: "fixture",
+        permissions: {
+          fixture: { filesystem: { "/": "read" }, network: { enabled: false } },
+        },
+      },
+    });
+    const threadOptions = { workingDirectory: root };
+    const thread = resumed
+      ? codex.resumeThread("synthetic-saved-thread", threadOptions)
+      : codex.startThread(threadOptions);
+    const pending = thread.runStreamed("inert fixture");
+    const watchdog = Promise.withResolvers<never>();
+    const timeout = setTimeout(
+      () => watchdog.reject(new Error("Preflight did not stop after exiting")),
+      5_000,
+    );
+    try {
+      await expect(
+        Promise.race([pending, watchdog.promise]),
+      ).rejects.toBeInstanceOf(ScanPermissionError);
+      expect(child!.exitCode).toBe(1);
+      expect(child!.stdout!.destroyed).toBe(true);
+      expect(descendantPid).toBeDefined();
+      expect(spawning).toHaveBeenCalledTimes(1);
+    } finally {
+      clearTimeout(timeout);
+      child?.kill("SIGKILL");
+      if (descendantPid !== undefined) process.kill(descendantPid, "SIGKILL");
+      await pending.catch(() => undefined);
+      spawning.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  10000,
+);

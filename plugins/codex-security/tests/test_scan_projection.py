@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -131,6 +133,73 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
         assert (parent_dir / destination).read_bytes() == (child_dir / source).read_bytes()
     for name, contents in fixture["files"].items():
         assert (child_dir / name).read_text() == contents
+
+
+@pytest.mark.parametrize("length, collision", [(215, False), (215, True), (220, True)])
+def test_projection_retains_long_writeups_and_evidence(
+    tmp_path, workbench_api, monkeypatch, length, collision
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent"
+    parent = register(state, target, parent_dir, mode="deep")
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    slug = "a" * length
+    base_slug = f"{child['scanId']}-{slug}"
+    report_path = f"findings/{slug}/{slug}.md"
+    source = child_dir / report_path
+    source.parent.mkdir(parents=True)
+    source.write_text("# Synthetic long report\n")
+    evidence_name = f"{base_slug}.md" if length == 215 and collision else "trace.txt"
+    evidence = source.parent / evidence_name
+    evidence.write_text("Synthetic supporting evidence\n")
+    findings_path = child_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": report_path}
+    if length > 215 and collision:
+        # A normal source report reserves the first compacted destination name.
+        other_slug = hashlib.sha256(base_slug.encode()).hexdigest()
+        other = copy.deepcopy(document["findings"][0])
+        other["identity"]["anchor"] = "other-synthetic-report"
+        other["writeup"]["reportPath"] = f"findings/{other_slug}/{other_slug}.md"
+        document["findings"].append(other)
+        other_source = child_dir / other["writeup"]["reportPath"]
+        other_source.parent.mkdir()
+        other_source.write_text("# Other synthetic report\n")
+    findings_path.write_text(json.dumps(document))
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+
+    completed = completed_projection(parent_dir, parent, child_dir, child)
+    assert completed.returncode == 0, completed.stderr
+    live = json.loads(completed.stdout)["draft"]["findings"]
+    assert len({finding["writeup"]["reportPath"] for finding in live}) == len(live)
+    for finding, original in zip(live, document["findings"], strict=True):
+        destination = parent_dir / finding["writeup"]["reportPath"]
+        assert len(destination.name) <= 255
+        assert (
+            destination.read_bytes() == (child_dir / original["writeup"]["reportPath"]).read_bytes()
+        )
+    projected = parent_dir / live[0]["writeup"]["reportPath"]
+    assert (projected.parent / evidence_name).read_bytes() == evidence.read_bytes()
+    if not collision:
+        assert projected.name == f"{base_slug}.md"
+    if length > 215 and collision:
+        assert Path(live[1]["writeup"]["reportPath"]).name == f"{child['scanId']}-{other_slug}.md"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, child["scanId"])
+        project = workbench_api["saved_results"]._stopped_child_draft
+        stopped = project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir)
+        assert project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir) == stopped
+    assert [finding["writeup"] for finding in stopped["findings"]] == [
+        finding["writeup"] for finding in live
+    ]
+    assert source.read_text() == "# Synthetic long report\n"
+    assert evidence.read_text() == "Synthetic supporting evidence\n"
 
 
 @pytest.mark.parametrize(

@@ -98,6 +98,12 @@ def project_scan_artifacts(
         if isinstance(finding.get("writeup"), dict)
     }
 
+    def report_slug(candidate: str) -> str:
+        # Report slugs are ASCII; the .md filename must fit a 255-byte component.
+        if len(candidate) + len(".md") > 255:
+            return f"{source_scan_id}-{hashlib.sha256(candidate.encode()).hexdigest()}"
+        return candidate
+
     def read(relative: str) -> bytes:
         with os.fdopen(
             open_scan_local_file_descriptor(source_directory, relative, "Scan merge evidence"),
@@ -143,12 +149,12 @@ def project_scan_artifacts(
                 if path.name != report.name
             }
             base_slug = f"{source_scan_id}-{report.parent.name}"
-            slug = base_slug
+            slug = report_slug(base_slug)
             suffix = 2
             while _collision_key(f"{slug}.md") in source_names or (
                 slug != base_slug and _collision_key(slug) in reserved_slugs
             ):
-                slug = f"{base_slug}-{suffix}"
+                slug = report_slug(f"{base_slug}-{suffix}")
                 suffix += 1
             report_slugs[report_path] = slug
             reserved_slugs.add(_collision_key(slug))

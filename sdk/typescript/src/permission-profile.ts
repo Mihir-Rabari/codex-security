@@ -184,6 +184,11 @@ async function verifyPermissionProfile(options: {
   const failed = new Promise<never>((_resolve, reject) => {
     child.on("error", reject);
     child.stdin.on("error", reject);
+    child.once("exit", () =>
+      reject(
+        new Error("Codex permission preflight ended before its response."),
+      ),
+    );
   });
   child.stderr.resume();
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });

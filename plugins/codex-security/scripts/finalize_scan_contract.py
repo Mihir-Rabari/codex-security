@@ -536,7 +536,6 @@ def write_scan_local_bytes(
             raise ContractError("external output path: expected a safe file name")
     else:
         relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
-    path = scan_dir / relative_path
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
@@ -604,7 +603,7 @@ def write_scan_local_bytes(
                 finally:
                     if existing_fd >= 0:
                         os.close(existing_fd)
-        temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+        temp_name = f".codex-security-{secrets.token_hex(8)}.tmp"
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:
             handle.write(payload)

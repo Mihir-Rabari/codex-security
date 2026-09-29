@@ -624,7 +624,7 @@ def atomic_write(
         temp_handle: _OwnedHandle | None = None
         temp_path: Path | None = None
         for _ in range(16):
-            temp_path = parent_path / f".{leaf_name}.{secrets.token_hex(8)}.tmp"
+            temp_path = parent_path / f".codex-security-{secrets.token_hex(8)}.tmp"
             try:
                 temp_handle = _create_file(
                     temp_path,
