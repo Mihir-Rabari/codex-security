@@ -86,6 +86,12 @@ export async function recordCodexSecurityCandidateAttackPaths(
   operation: "replace";
   rowsWritten: number;
 }> {
+  if (!context.scanId) {
+    throw new Error(
+      "Candidate attack-path analysis requires a scan-bound artifact context.",
+    );
+  }
+
   const { attackPaths } = candidateAttackPathsPayloadSchema.parse(input);
   const updates = new Map<string, CandidateAttackPathRecord>();
   for (const update of attackPaths) {

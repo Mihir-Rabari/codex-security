@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ScanAccounting, scanCostUsage } from "../src/scan-accounting.js";
-import { estimateScanCost } from "../src/cost.js";
+import { ScanAccounting } from "../src/scan-accounting.js";
+import { estimateScanCost, scanCostUsage } from "../src/cost.js";
 
 const receipt = (tokens: number) =>
   estimateScanCost("gpt-5.6-sol", {
@@ -20,15 +20,6 @@ test("cumulative receipts replace earlier callbacks and unknown children prevent
   expect(ledger.complete?.inputTokens).toBe(40);
   ledger.record("merge", receipt(15));
   expect(ledger.complete?.inputTokens).toBe(45);
-});
-
-test("terminal recovery retains the verified saved total when a constituent is unavailable", () => {
-  const ledger = new ScanAccounting();
-  ledger.restoreTerminal(receipt(50), [receipt(10), null]);
-  expect(ledger.completed?.inputTokens).toBe(50);
-  const complete = new ScanAccounting();
-  complete.restoreTerminal(receipt(50), [receipt(40), receipt(30)]);
-  expect(complete.completed?.inputTokens).toBe(70);
 });
 
 test("known currency does not invent missing cache-write reporting", () => {

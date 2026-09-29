@@ -54,14 +54,6 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
-def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
-    """Replace a cost receipt while preserving separately measured usage."""
-    if incoming is None:
-        return existing
-    fields = {**stored_scan_cost_fields(existing), **stored_scan_cost_fields(incoming)}
-    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
-
-
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -76,6 +68,16 @@ def reconcile_completed_scan_cost(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
+
+
+def merge_scan_cost(stored: str | None, incoming: str | None) -> str | None:
+    """Replace supplied cost/usage fields while retaining the other measured fields."""
+    fields = {**stored_scan_cost_fields(stored), **stored_scan_cost_fields(incoming)}
+    if not fields:
+        return None
+    return json.dumps(
+        fields if "usage" in fields else fields["cost"], separators=(",", ":"), allow_nan=False
+    )
 
 
 def collect_scan_usage(

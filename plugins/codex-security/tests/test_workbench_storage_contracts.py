@@ -146,4 +146,4 @@ def test_stopped_scan_preserves_parent_with_malformed_historical_checkpoint(tmp_
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
     assert manifest["status"] == "failed"
     assert manifest["sealedAt"]
-    assert f"checkpoints/pending/{name}" not in manifest["preservedSources"]
+    assert f"checkpoints/{name}" not in manifest["preservedSources"]

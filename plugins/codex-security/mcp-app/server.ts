@@ -1,4 +1,3 @@
-import { workbenchTimeout } from "./src/workbench-timeout.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -10,6 +9,7 @@ import * as z from "zod/v4";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
+  workbenchCommandTimeout,
 } from "./src/python_command.js";
 import type { ScanResults } from "./src/types.js";
 import { MCP_APP_VERSION } from "./src/version.js";
@@ -1195,7 +1195,7 @@ export function createCodexSecurityServer(): McpServer {
           },
           abortSignalFromExtra(extra),
         );
-        return nativeScanCompletedResult(scan);
+        return nativeScanCompletedResult(scan, "get-scan");
       } catch (error: unknown) {
         if (error instanceof ScanPermissionError)
           return toolErrorResult(deepScanInvocationFailureMessage(error));
@@ -2380,14 +2380,19 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
   };
 }
 
-async function nativeScanCompletedResult(scan: ScanResults) {
+async function nativeScanCompletedResult(
+  scan: ScanResults,
+  command: "complete-scan" | "get-scan" = "complete-scan",
+) {
   let completed: JsonObject;
   try {
     completed = await runWorkbench([
-      "complete-scan",
+      command,
       "--scan-id",
       scan.scanId,
-      ...optionalArg("--claim-token", scan.handoffClaimToken),
+      ...(command === "complete-scan"
+        ? optionalArg("--claim-token", scan.handoffClaimToken)
+        : []),
     ]);
   } catch (error) {
     return toolErrorResult(completionFailureMessage(error));
@@ -2601,7 +2606,7 @@ async function executeWorkbench(
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: workbenchTimeout(args[0] ?? ""),
+      timeout: workbenchCommandTimeout(args[0]),
     },
   );
   if (workbenchInput !== undefined) {

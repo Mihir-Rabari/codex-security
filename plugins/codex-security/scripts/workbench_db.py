@@ -46,6 +46,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from finding_preview import bounded_finding_details
+from project_scan_artifacts import merge_coverage
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -1299,17 +1300,13 @@ def complete_scan_locked(
                 )
                 coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
                 coverage["completeness"] = "partial"
-                saved_results.merge_coverage_rows(coverage, recovered["coverage"])
+                merge_coverage(coverage, recovered["coverage"])
                 documents = current_manifest, {"findings": recovered["findings"]}, coverage
             elif scan["mode"] != "deep":
                 documents = saved_results.merge_saved_results(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
                     warnings,
                     stopped=False,
                     reason="",
@@ -1517,13 +1514,19 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
             if saved_recipe is None:
+                sealed_version = sealed_scan_producer_version(scan)
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
                 connection.execute(
-                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = NULL, "
+                    "UPDATE scans SET recipe_json = ?, continuation_thread_id = ?, "
                     "updated_at = ? WHERE id = ?",
-                    (json.dumps(recipe, allow_nan=False), now(), scan_id),
+                    (
+                        json.dumps(recipe, allow_nan=False),
+                        scan["continuation_thread_id"] if sealed_version is not None else None,
+                        now(),
+                        scan_id,
+                    ),
                 )
             scan = require_scan(connection, scan_id)
             return cli_scan_resume(connection, scan, registration.get("claimToken"))
@@ -2731,7 +2734,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan, composition
+            _WORKBENCH_DB_CONTEXT, connection, scan
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],

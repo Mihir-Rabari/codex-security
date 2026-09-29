@@ -4,6 +4,7 @@ import type {
   ScanMergeGroups,
 } from "../../src/scan-merge.js";
 import type { SemanticFinding } from "../../src/semantic-models.js";
+import { semanticCoverage } from "../../tests-ts/helpers/semantic-scan.js";
 
 export const parentId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
@@ -56,12 +57,10 @@ function input(scanId: string, findings: SemanticFinding[]): ScanMergeInput {
           sourceFindingIds: [`${scanId}:${index}`],
         },
       })),
-      coverage: {
+      coverage: semanticCoverage({
         completeness: "partial",
-        surfaces: [],
-        explicitExclusions: [],
         deferred: [{ reason: "Synthetic outstanding work." }],
-      },
+      }),
     },
   };
 }

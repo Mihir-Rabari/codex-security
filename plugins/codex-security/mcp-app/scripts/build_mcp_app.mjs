@@ -6,26 +6,13 @@ import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "./bundle_options.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const sdkRequire = createRequire(
   join(root, "../../../sdk/typescript/package.json"),
 );
 const maxChunkBytes = 140_000;
-
-export const mcpBundleOptions = {
-  bundle: true,
-  banner: {
-    js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
-  },
-  define: { "import.meta.url": "__codexSecurityModuleUrl" },
-  external: ["fsevents"],
-  format: "cjs",
-  loader: { ".md": "text" },
-  logOverride: { "empty-import-meta": "silent" },
-  platform: "node",
-  target: "node20",
-};
 
 export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {

@@ -48,15 +48,11 @@ const stoppedScanProbe = [
   "artifact_dir = scan_dir / 'artifacts' / 'deep-scan' / 'passes' / 'pass-1'",
   "for directory in (scan_dir / 'artifacts', scan_dir / 'artifacts' / 'deep-scan', artifact_dir.parent, artifact_dir): directory.mkdir(mode=0o700)",
   "child = run('register-cli-scan', '--repository', str(target), '--scan-dir', str(artifact_dir), '--parent-scan-id', scan_id, '--recipe-json', json.dumps({**recipe,'mode':'standard'}))",
-  "result_path = scan_dir / 'result.json'",
   "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text(encoding='utf-8'))['findings'][0]",
   "for field in ('findingId','occurrenceId','fingerprints'): finding.pop(field, None)",
   "finding.setdefault('provenance', {})['candidateId'] = 'checkpoint-candidate'",
   "payload = {'scanId': scan_id, 'findings': [finding], 'coverage': {'completeness': 'partial', 'surfaces': [], 'explicitExclusions': [], 'deferred': [{'candidateId': 'pending-validation', 'reason': 'Validation stopped with the scan.', 'paths': ['src/extract.py']}]}, 'threatModel': {'summary': 'Synthetic stopped-scan threat model.'}}",
-  "if source == 'accepted':",
-  "    result_path.write_text(json.dumps(payload), encoding='utf-8')",
-
-  "else:",
+  "if source != 'accepted':",
   "    checkpoint = {**payload, 'complete': False}",
   "    checkpoint_dir = scan_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
@@ -69,7 +65,6 @@ const stoppedScanProbe = [
   "        for document in (later,):",
   "            encoded = json.dumps(document).encode()",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
-  "        result_path.write_text(json.dumps(later), encoding='utf-8')",
   "    else:",
   "        if source == 'distinct-instances':",
   "            first = json.loads(json.dumps(finding))",
@@ -79,7 +74,6 @@ const stoppedScanProbe = [
   "            checkpoint['findings'] = [first, second]",
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
-  "        result_path.write_text('{incomplete', encoding='utf-8')",
   "documents = {name: json.loads((plugin / 'examples' / 'completed-scan' / name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json')}",
   "child_findings = later['findings'] if source == 'refined-checkpoint' else checkpoint['findings'] if source == 'distinct-instances' else payload['findings']",
   "manifest = documents['scan-manifest.json']['scan']",
@@ -287,7 +281,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(frozenSources).toHaveLength(1);
   const [checkpointPath, checkpointDigest] = frozenSources[0]!;
   expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
-  expect(checkpointPath).toBe(`checkpoints/pending/${checkpointDigest}.json`);
+  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
 }, 30_000);
 
 test("preserves distinct instances from one ordinary scan candidate", () => {

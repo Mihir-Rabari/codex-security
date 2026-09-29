@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
-import { mcpBundleOptions } from "../scripts/build_mcp_app.mjs";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -36,13 +36,12 @@ try {
   await build({
     ...mcpBundleOptions,
     define: {
-      ...mcpBundleOptions.define,
       __dirname: JSON.stringify(applicationRoot),
+      ...mcpBundleOptions.define,
     },
     entryPoints: [path.join(applicationRoot, "main.ts")],
     logLevel: "silent",
     outfile: bundle,
-    platform: "node",
   });
   client = await connect();
   const started = await call("start_codex_security_standard_scan", {

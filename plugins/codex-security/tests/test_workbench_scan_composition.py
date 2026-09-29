@@ -160,7 +160,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
 
 
 @pytest.mark.parametrize("name", ["current", "legacy"])
-def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
+def test_checkpoint_reads_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("print('fixture')\n")
@@ -534,7 +534,7 @@ def test_native_legacy_rejoin_requires_verified_sealed_results(
         )
     for join in joins:
         rejected = run_workbench(state, *join, check=False)
-        assert "retired coordinator" in rejected["stderr"]
+        assert "retired runtime" in rejected["stderr"]
     run_workbench(
         state,
         "prepare-scan-completion",
@@ -1159,59 +1159,6 @@ def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
         run_workbench(state, "get-scan", "--scan-id", rerun["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-
-
-@pytest.mark.parametrize("missing_outputs", [False, True])
-def test_membership_migration_backfills_stored_paths_once(
-    tmp_path: Path, missing_outputs: bool
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    parent_dir = tmp_path / "parent.previous-synthetic"
-    parent = register(state, target, parent_dir, mode="deep")
-    child = register(
-        state, target, parent_dir / "artifacts/deep-scan/passes/pass-1", parent=parent["scanId"]
-    )
-    rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
-    database = state / "workbench.sqlite3"
-    marker = parent_dir / "saved-output.txt"
-    marker.write_bytes(b"Saved outputs must not change during migration.")
-    with sqlite3.connect(database) as connection:
-        connection.execute("DROP VIEW public_scans")
-        connection.execute("DROP INDEX scan_severity_reuse")
-        connection.execute("DELETE FROM schema_migrations WHERE version >= 44")
-        connection.execute("DROP INDEX scans_by_composition_parent")
-        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
-        before = connection.execute(
-            "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-        ).fetchall()
-    if missing_outputs:
-        parent_dir.rename(tmp_path / "removed-output")
-    run_workbench(state, "database-info")
-    run_workbench(state, "database-info")
-    with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute(
-                "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
-            ).fetchall()
-            == before
-        )
-        assert dict(connection.execute("SELECT id, parent_scan_role FROM scans")) == {
-            parent["scanId"]: None,
-            child["scanId"]: "deep_pass",
-            rerun["scanId"]: None,
-        }
-        assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
-        ).fetchone() == (1,)
-    saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
-    assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
-    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
-        parent["scanId"],
-        rerun["scanId"],
-    }
 
 
 def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
@@ -1902,9 +1849,12 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
         run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
         == "running"
     )
-    retained = run_workbench(state, *preserve)
+    retained = run_workbench(
+        state, *preserve, "--cost-json", json.dumps({"usage": usage, "cost": cost})
+    )
     assert retained["scan"]["findingCount"] == 1
     assert retained["scan"]["cost"] == cost
+    assert retained["scan"]["usage"] == usage
     assert retained["scan"]["progress"]["independentReviews"]["active"] == 0
     retained_child = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
     assert retained_child["progress"]["status"] == "failed"
@@ -2210,3 +2160,241 @@ def test_native_budget_completion_checks_claim_before_publication(tmp_path: Path
         token,
     )["scan"]
     assert joined["progress"]["status"] == "complete"
+
+
+def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
+    saved = workbench_api["saved_results"]
+    root = Path("/synthetic-scan")
+    children = [
+        {"id": "broken", "scan_dir": str(root / "broken")},
+        {"id": "retained", "scan_dir": str(root / "retained")},
+    ]
+    composition = workbench_api["load_composition"].__globals__["CompositionView"](
+        None, tuple(children), (), None
+    )
+    db = mock.Mock(
+        require_scan=lambda _, child_id: next(
+            child for child in children if child["id"] == child_id
+        )
+    )
+    monkeypatch.setattr(saved, "save_pending_checkpoint", lambda *_: None)
+    retained_coverage = {"surfaces": [{"id": "retained/surface", "summary": "Saved work"}]}
+    with mock.patch.object(
+        saved,
+        "_stopped_child_draft",
+        side_effect=[
+            ValueError("Synthetic malformed artifact"),
+            {"findings": [], "coverage": retained_coverage},
+        ],
+    ):
+        result = saved.save_composed_checkpoint(
+            db, None, {"id": "parent", "scan_dir": str(root)}, root, composition
+        )
+    assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
+    assert result["coverage"]["deferred"][0] == {
+        "id": "unmerged-broken",
+        "reason": "Independent scan did not complete and merge. Saved work: broken. "
+        "Recovery failed: Synthetic malformed artifact",
+    }
+    assert result["complete"] is False
+
+
+@pytest.mark.parametrize("alias", ["exact", "case", "directory"])
+def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": "findings/issue/issue.md"}
+    findings_path.write_text(json.dumps(document))
+    reports = child_dir / "findings/issue"
+    reports.mkdir(parents=True)
+    report = reports / "issue.md"
+    report.write_text("# Original report\n")
+    name = f"{child['scanId']}-issue.md"
+    evidence = reports / (name.upper() if alias == "case" else name)
+    if alias == "directory":
+        evidence.mkdir()
+        evidence = evidence / "trace.txt"
+    evidence.write_text("Synthetic supporting evidence\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert saved["progress"]["status"] == "canceled"
+    assert not any(
+        "conflicts with its projected report" in warning for warning in saved.get("warnings", [])
+    )
+    projected = parent_dir / "findings" / child["scanId"] / "issue/issue.md"
+    assert projected.read_bytes() == report.read_bytes()
+    assert (projected.parent / evidence.relative_to(reports)).read_bytes() == evidence.read_bytes()
+    parent_findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert (
+        parent_findings[0]["writeup"]["reportPath"] == projected.relative_to(parent_dir).as_posix()
+    )
+    assert report.read_text() == "# Original report\n"
+    assert evidence.read_text() == "Synthetic supporting evidence\n"
+
+
+@pytest.mark.parametrize("saved_recipe", [False, True])
+@pytest.mark.parametrize("artifact_state", ["unsealed", "sealed", "tampered"])
+def test_native_legacy_registration_only_rejoins_validated_sealed_results(
+    native_scan_completion, saved_recipe: bool, artifact_state: str
+) -> None:
+    state, target, _, started, complete = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    token = scan["handoffClaimToken"]
+    run_workbench(
+        state,
+        "set-scan-thread",
+        "--scan-id",
+        scan["scanId"],
+        "--thread-id",
+        "saved-execution",
+        "--claim-token",
+        token,
+    )
+    if artifact_state != "unsealed":
+        run_workbench(
+            state, "prepare-scan-completion", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+    if artifact_state == "tampered":
+        findings_path = directory / "findings.json"
+        findings_path.write_bytes(findings_path.read_bytes() + b" ")
+    checkpoint_path = directory / CHECKPOINT
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["legacy"] = {"discoveryRuns": 1, "coverage": {"completeness": "complete"}}
+    checkpoint_path.write_text(json.dumps(checkpoint))
+    identity_query = (
+        "SELECT recipe_json, continuation_thread_id, deep_scan_owner_thread_id, handoff_claim_token "
+        "FROM scans WHERE id = ?"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        if not saved_recipe:
+            connection.execute(
+                "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
+            )
+        connection.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
+            "workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at, "
+            "terminal_reason, manifest_path) "
+            "SELECT id, 1, 'synthetic-legacy', 'succeeded', 'terminal', 1, 0, 3, 8, started_at, "
+            "updated_at, 'saturated', ? FROM scans WHERE id = ?",
+            (str(directory / "scan-manifest.json"), scan["scanId"]),
+        )
+        original_identity = connection.execute(identity_query, (scan["scanId"],)).fetchone()
+    originals = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", CHECKPOINT)
+    }
+    rebound = run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(directory),
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "scanId": scan["scanId"],
+                "threadId": "native-owner",
+                "claimToken": token,
+                "recipe": recipe(target, "deep"),
+            }
+        ),
+        check=artifact_state == "sealed",
+    )
+    if artifact_state == "sealed":
+        assert rebound["scanId"] == scan["scanId"]
+        assert rebound["threadId"] == "saved-execution"
+        resumed = run_workbench(
+            state, "get-cli-scan-resume", "--scan-id", scan["scanId"], "--claim-token", token
+        )
+        assert resumed["threadId"] == "saved-execution"
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()[1:]
+                == original_identity[1:]
+            )
+        assert (
+            resumed["sealedProducerVersion"]
+            == json.loads(originals["scan-manifest.json"])["scan"]["producer"]["version"]
+        )
+        assert complete()["progress"]["status"] == "complete"
+    else:
+        assert (
+            "retired runtime" if artifact_state == "unsealed" else "Cannot resume sealed scan"
+        ) in rebound["stderr"]
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute(identity_query, (scan["scanId"],)).fetchone()
+                == original_identity
+            )
+    assert {name: (directory / name).read_bytes() for name in originals} == originals
+
+
+def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    pass_directory = "artifacts/deep-scan/passes/pass-1"
+    child_dir = parent_dir / pass_directory
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"][0]["writeup"] = {"reportPath": "findings/check/check.md"}
+    other = copy.deepcopy(findings["findings"][0])
+    other["identity"]["anchor"] = "another-finding"
+    other["writeup"]["reportPath"] = "findings/check-3/check-3.md"
+    findings["findings"].append(other)
+    findings_path.write_text(json.dumps(findings))
+    source = child_dir / "findings/check"
+    source.mkdir(parents=True)
+    base = f"{child['scanId']}-check"
+    evidence_name = f"{base}.MD".upper().replace("K", "\u212a")
+    evidence_directory = f"{base}-2.md"
+    report = f"# Validated finding\n\n[Evidence]({evidence_name})\n"
+    (source / "check.md").write_text(report)
+    (source / evidence_name).write_text("Supporting evidence.\n")
+    (source / evidence_directory).mkdir()
+    (source / evidence_directory / "trace.txt").write_text("Source trace.\n")
+    other_report = child_dir / "findings/check-3/check-3.md"
+    other_report.parent.mkdir()
+    other_report.write_text("# Another finding\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(state, parent, passes=[{"directory": pass_directory, "scanId": child["scanId"]}])
+
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 2
+    assert {finding["writeup"]["reportPath"] for finding in retained} == {
+        f"findings/{child['scanId']}/check/check.md",
+        f"findings/{child['scanId']}/check-3/check-3.md",
+    }
+    projected = parent_dir / "findings" / child["scanId"] / "check"
+    assert (projected / "check.md").read_text() == report
+    assert (projected / evidence_name).read_text() == "Supporting evidence.\n"
+    assert (projected / evidence_directory / "trace.txt").read_text() == "Source trace.\n"
+    assert (
+        parent_dir / "findings" / child["scanId"] / "check-3/check-3.md"
+    ).read_text() == "# Another finding\n"

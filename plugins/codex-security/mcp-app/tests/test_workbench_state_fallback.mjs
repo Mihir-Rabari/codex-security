@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { mcpBundleOptions } from "../scripts/build_mcp_app.mjs";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
@@ -55,7 +55,6 @@ async function testWorkbenchStateFallback() {
     entryPoints: [path.join(mcpAppRoot, "main.ts")],
     logLevel: "silent",
     outfile: serverBundlePath,
-    target: "node20",
   });
 
   try {

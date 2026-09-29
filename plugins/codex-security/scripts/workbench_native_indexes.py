@@ -88,10 +88,12 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
-        JOIN public_scans AS before_scans ON before_scans.id = before.scan_id
+        JOIN scans AS before_scans ON before_scans.id = before.scan_id
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-        JOIN public_scans AS after_scans ON after_scans.id = after.scan_id
+        JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
+            AND before_scans.parent_scan_role IS NOT 'deep_pass'
+            AND after_scans.parent_scan_role IS NOT 'deep_pass'
         """
     ):
         before = group((match["target_id"], match["before_finding_id"]))
@@ -102,8 +104,8 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
     latest_scan_by_target = {
         row["target_id"]: row["id"]
         for row in connection.execute(
-            "SELECT target_id, id FROM public_scans WHERE status = 'complete' "
-            "ORDER BY started_at, id"
+            "SELECT target_id, id FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
         )
     }
 
@@ -136,9 +138,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
                 LIMIT 1
             ) AS location_path
         FROM finding_occurrences AS occurrences
-        JOIN public_scans AS scans ON scans.id = occurrences.scan_id
+        JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE scans.parent_scan_role IS NOT 'deep_pass'
         """,
     ):
         grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)

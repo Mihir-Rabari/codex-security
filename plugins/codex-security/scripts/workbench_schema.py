@@ -4,7 +4,6 @@ import argparse
 import json
 import sqlite3
 from collections.abc import Callable
-from pathlib import Path
 
 MIGRATIONS = (
     (
@@ -918,40 +917,13 @@ MIGRATIONS = (
     ),
     (
         44,
-        "reuse scan assessments and centralize public scan visibility",
+        "reuse scan severity assessments",
         """
-        CREATE VIEW public_scans AS SELECT * FROM scans WHERE parent_scan_role IS NOT 'deep_pass';
         CREATE INDEX scan_severity_reuse ON scan_severity_assessments
             (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);
-        UPDATE scans SET status = 'failed',
-            failure_message = 'The retired Deep Scan coordinator cannot continue. Saved results remain available.',
-            completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE status = 'running' AND id IN (SELECT scan_id FROM deep_scan_runs WHERE status = 'running');
-        UPDATE deep_scan_runs SET status = 'interrupted', phase = 'terminal', cancel_requested = 1
-        WHERE status = 'running';
         """,
     ),
 )
-
-
-def backfill_composition_children(connection: sqlite3.Connection) -> None:
-    # Preserve the previous membership rule using stored paths, including archived
-    # scans and scans whose outputs no longer exist. Do not consult checkpoints.
-    rows = connection.execute(
-        "SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir "
-        "FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id "
-        "WHERE parents.mode = 'deep' AND children.mode = 'standard'"
-    ).fetchall()
-    connection.executemany(
-        "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?",
-        (
-            (child["id"],)
-            for child in rows
-            if Path(child["scan_dir"]).parent
-            == Path(child["parent_scan_dir"]) / "artifacts/deep-scan/passes"
-        ),
-    )
 
 
 def migrate_finding_workflow_review_columns(connection: sqlite3.Connection) -> None:
@@ -1107,8 +1079,6 @@ def apply_migrations(
                     migrate_finding_workflow_columns(connection)
                 elif version == 39:
                     migrate_finding_workflow_review_columns(connection)
-                elif version == 43:
-                    backfill_composition_children(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, now()),

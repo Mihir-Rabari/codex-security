@@ -18,7 +18,7 @@ import {
   modelProviderConfigOverride,
   scanModelProvider,
   scanCompositionOverrides,
-  withScanSubagents,
+  setScanSubagentBudget,
   writeCodexConfig,
   type JsonObject,
 } from "./config.js";
@@ -432,11 +432,9 @@ export async function prepareAmbientExecution(
         );
     }
   }
-  const selectedEnvironment = {
-    ...(configuredProvider
-      ? environment
-      : selectedScanEnvironment(environment, auth, modelProvider)),
-  };
+  const selectedEnvironment = configuredProvider
+    ? environment
+    : selectedScanEnvironment(environment, auth, modelProvider);
   if (!configuredProvider && selectedEnvironment["CODEX_API_KEY"]?.trim())
     delete selectedEnvironment["OPENAI_API_KEY"];
 
@@ -559,14 +557,9 @@ export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,
 ): PreparedExecution {
-  return {
-    ...session,
-    checkPermissions: true,
-    sessionConfig: withScanSubagents(
-      deepWorkerConfig(session.sessionConfig),
-      subagents,
-    ),
-  };
+  const config = deepWorkerConfig(session.sessionConfig);
+  setScanSubagentBudget(config, subagents);
+  return { ...session, checkPermissions: true, sessionConfig: config };
 }
 
 /** Read-only helpers retain denied paths while intentionally removing write access. */

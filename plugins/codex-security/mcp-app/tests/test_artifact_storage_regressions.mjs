@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
-import { mcpBundleOptions } from "../scripts/build_mcp_app.mjs";
+import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -40,13 +40,12 @@ await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
 await build({
   ...mcpBundleOptions,
   define: {
-    ...mcpBundleOptions.define,
     __dirname: JSON.stringify(applicationRoot),
+    ...mcpBundleOptions.define,
   },
   entryPoints: [path.join(applicationRoot, "main.ts")],
   logLevel: "silent",
   outfile: bundle,
-  platform: "node",
 });
 await build({
   bundle: true,
@@ -120,7 +119,6 @@ try {
           `deep-scan-rejected-${scanId ?? "standalone"}`,
         ),
         repoRoot: repository,
-
         scanId,
       };
       for (const artifact of [

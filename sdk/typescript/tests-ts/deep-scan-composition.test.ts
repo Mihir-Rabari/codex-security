@@ -339,113 +339,6 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
-  test.each([false, true])(
-    "coalesces durable repeated registrations and retries a shared failure (%p)",
-    async (failFirst) => {
-      const h = await harness({
-        workers: 3,
-        maxDiscoveryRuns: 3,
-        stopAfterNoNew: 4,
-      });
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      const failure = new Error("Synthetic shared checkpoint failure.");
-      let registered = 0;
-      let arrived = 0;
-      const allArrived = Promise.withResolvers<void>();
-      let attempts = 0;
-      let writing = 0;
-      let maximumWriting = 0;
-      const createClient = h.input.createClient;
-      h.input.createClient = () => {
-        const client = createClient();
-        return {
-          ...client,
-          run(repository, options = {}) {
-            return client.run(repository, {
-              ...options,
-              async onRegisteredScan(registration) {
-                if (++arrived === 3) allArrived.resolve();
-                await allArrived.promise;
-                const outcomes = await Promise.allSettled([
-                  options.onRegisteredScan!(registration),
-                  options.onRegisteredScan!(registration),
-                ]);
-                if (failFirst) {
-                  expect(outcomes).toEqual([
-                    { status: "rejected", reason: failure },
-                    { status: "rejected", reason: failure },
-                  ]);
-                  await options.onRegisteredScan!(registration);
-                } else
-                  expect(outcomes.map((outcome) => outcome.status)).toEqual([
-                    "fulfilled",
-                    "fulfilled",
-                  ]);
-                registered++;
-                expect(
-                  (await h.checkpoint()).passes.some(
-                    (pass) => pass.scanId === registration["scanId"],
-                  ),
-                ).toBe(true);
-                await options.onRegisteredScan!(registration);
-              },
-            });
-          },
-        };
-      };
-      const workbench = h.input.workbench;
-      h.input.workbench = async (args, contents) => {
-        if (args[0] !== "save-scan-artifact") return workbench(args, contents);
-        writing++;
-        maximumWriting = Math.max(maximumWriting, writing);
-        try {
-          const state = JSON.parse(contents!) as DeepScanCheckpoint;
-          if (
-            state.passes.some((pass) => pass.scanId) &&
-            state.passes.every((pass) => !pass.completed)
-          ) {
-            expect(state.passes.every((pass) => pass.scanId)).toBe(true);
-            if (++attempts === 1) {
-              entered.resolve();
-              await release.promise;
-              if (failFirst) throw failure;
-            }
-          }
-          return await workbench(args, contents);
-        } finally {
-          writing--;
-        }
-      };
-      h.input.publish = async (draft) => {
-        expect((await h.checkpoint()).aggregate).toEqual(draft);
-      };
-      const pending = runDeepScans(h.input);
-      try {
-        await Promise.race([entered.promise, pending]);
-        expect(registered).toBe(0);
-      } finally {
-        release.resolve();
-      }
-      const state = await pending;
-      expect(attempts).toBe(failFirst ? 2 : 1);
-      expect(maximumWriting).toBe(1);
-      expect(h.metrics().closed).toBe(3);
-      expect(state.mergedScanIds).toHaveLength(3);
-      expect(state.passes.every((pass) => pass.completed)).toBe(true);
-      expect(state.terminalReason).toBe("capped");
-      expect(await h.checkpoint()).toEqual(state);
-      expect(
-        h.checkpoints.every(
-          (snapshot, index) =>
-            index === 0 ||
-            JSON.stringify(snapshot) !==
-              JSON.stringify(h.checkpoints[index - 1]),
-        ),
-      ).toBe(true);
-    },
-  );
-
   test("preserves a checkpoint write failure and still saves terminal state", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
     const workbench = h.input.workbench;
@@ -515,22 +408,19 @@ describe("ordinary scan composition", () => {
   );
 
   test.each(
-    ["failed", "canceled"].flatMap((reason) =>
-      [false, true].map((aggregate) => ({
-        reason: reason as "failed" | "canceled",
-        aggregate,
-      })),
+    (["failed", "canceled"] as const).flatMap((terminalReason) =>
+      [false, true].map((populated) => ({ terminalReason, populated })),
     ),
   )(
-    "does not complete a $reason checkpoint (aggregate: $aggregate)",
-    async ({ reason: terminalReason, aggregate }) => {
+    "does not execute a saved $terminalReason checkpoint (aggregate: $populated)",
+    async ({ terminalReason, populated }) => {
       const h = await harness();
       const checkpoint: DeepScanCheckpoint = {
         version: 2,
         startedAt: h.input.startedAt,
         passes: [],
         mergedScanIds: [],
-        aggregate: aggregate
+        aggregate: populated
           ? {
               scanId: h.input.scanId,
               findings: [],
@@ -1285,27 +1175,26 @@ describe("ordinary scan composition", () => {
     expect((await h.checkpoint()).terminalReason).toBe("capped");
   });
 
-  test("retains old coordinator results but refuses live continuation", async () => {
+  test("rejects legacy active checkpoints without changing saved evidence", async () => {
     const h = await harness();
     const checkpoint: DeepScanCheckpoint = {
       version: 2,
       startedAt: h.input.startedAt,
       passes: [],
       mergedScanIds: [],
-      aggregate: {
-        scanId: h.input.scanId,
-        findings: [],
-        coverage: semanticCoverage(),
-      },
-      legacy: { discoveryRuns: 2 },
+      aggregate: null,
       noNewStreak: 0,
       consecutiveErrors: 0,
+      legacy: { discoveryRuns: 1, coverage: semanticCoverage() },
     };
     await h.seed(checkpoint);
-    await expect(runDeepScans(h.input)).rejects.toThrow("retired coordinator");
-    expect(await h.checkpoint()).toEqual(checkpoint);
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      "Saved legacy Deep Scans cannot be resumed; their reports remain available.",
+    );
     expect(h.calls).toEqual([]);
+    expect(h.mergeInputs).toEqual([]);
     expect(h.published).toEqual([]);
+    expect(await h.checkpoint()).toEqual(checkpoint);
   });
 
   test.each([

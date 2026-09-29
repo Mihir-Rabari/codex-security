@@ -352,7 +352,7 @@ async function testWorkersCannotPrepareInventory() {
 
   await assert.rejects(
     inventory.prepareCodexSecurityReviewItems(fixture.worker),
-    /bound plugin context/i,
+    /only a parent scan/i,
   );
 }
 
@@ -432,6 +432,7 @@ async function createFixture(label) {
     worker: {
       root: workerRoot,
       repoRoot,
+      scanId: undefined,
     },
   };
 }

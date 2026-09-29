@@ -14,10 +14,6 @@ import {
   type SemanticScan,
   type SemanticCoverage,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
-export {
-  preserveFindingDetails,
-  scanFindingIdentity,
-} from "../../../../sdk/typescript/src/scan-semantics.js";
 import { createHash } from "node:crypto";
 import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draft-publication.js";
 import { promises as fs } from "node:fs";
@@ -754,26 +750,26 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-/** Accept current semantic drafts and canonical snapshots written by the workbench. */
-export function parsePersistedScanDraft(
+/** Project current canonical metadata without coercing persisted finding details. */
+function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   try {
-    const coverage = input["coverage"];
-    return parseScanDraft(
-      isObject(coverage) &&
-        coverage["documentType"] === "codex-security.coverage"
-        ? semanticScanDraft(
-            input["scanId"] as string,
-            input,
-            input["findings"] as JsonObject[],
-            coverage,
-          )
-        : input,
+    const projected = semanticScanDraft(
+      input.scanId as string,
+      input,
+      input.findings as JsonObject[],
+      requireObject(input.coverage, "saved scan draft coverage"),
     );
+    return parseScanDraft({
+      ...input,
+      ...(isObject(input.scope) ? { scope: projected.scope } : {}),
+      findings: projected.findings,
+      coverage: projected.coverage,
+    });
   } catch (cause) {
     throw new Error(
-      "Saved scan draft uses an unsupported semantic format. Start a new scan; the original evidence is retained.",
+      "Saved scan draft does not match the current schema. Start a new scan; the saved artifacts remain available.",
       { cause },
     );
   }

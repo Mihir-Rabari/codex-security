@@ -1,4 +1,4 @@
-import type { ScanCost } from "./cost.js";
+import { addScanCosts, type ScanCost } from "./cost.js";
 
 /** Cumulative receipts replace their prior value; absent and unavailable are distinct. */
 export class ScanAccounting {
@@ -35,63 +35,4 @@ export class ScanAccounting {
     )
       this.completed = cost;
   }
-
-  restoreTerminal(
-    saved: Readonly<ScanCost> | null,
-    costs: ReadonlyArray<Readonly<ScanCost> | null> | null,
-  ): void {
-    this.completed = saved;
-    if (costs !== null) {
-      costs.forEach((cost, index) => this.record(`terminal-${index}`, cost));
-      this.acceptTotal(this.complete);
-    }
-  }
-}
-
-export function addScanCosts(
-  previous: Readonly<ScanCost> | null,
-  current: Readonly<ScanCost>,
-): ScanCost {
-  if (previous === null) return { ...current };
-  const { estimatedUsdRange: currentRange, ...currentCost } = current;
-  const previousRange = previous.estimatedUsdRange;
-  return {
-    ...currentCost,
-    inputTokens: previous.inputTokens + current.inputTokens,
-    cachedInputTokens: previous.cachedInputTokens + current.cachedInputTokens,
-    cacheWriteInputTokens:
-      previous.cacheWriteInputTokens + current.cacheWriteInputTokens,
-    outputTokens: previous.outputTokens + current.outputTokens,
-    estimatedUsd: previous.estimatedUsd + current.estimatedUsd,
-    ...(previous.cacheWriteInputTokensReported === false ||
-    current.cacheWriteInputTokensReported === false
-      ? { cacheWriteInputTokensReported: false }
-      : {}),
-    ...(previousRange === undefined || currentRange === undefined
-      ? {}
-      : {
-          estimatedUsdRange: {
-            context: "unknown" as const,
-            min: previousRange.min + currentRange.min,
-            max:
-              previousRange.max === null || currentRange.max === null
-                ? null
-                : previousRange.max + currentRange.max,
-          },
-        }),
-  };
-}
-
-export function scanCostUsage(
-  cost: Readonly<ScanCost>,
-): Record<string, number | boolean> {
-  return {
-    input_tokens: cost.inputTokens,
-    cached_input_tokens: cost.cachedInputTokens,
-    cache_write_input_tokens: cost.cacheWriteInputTokens,
-    output_tokens: cost.outputTokens,
-    ...(cost.cacheWriteInputTokensReported === false
-      ? { cache_write_input_tokens_reported: false }
-      : {}),
-  };
 }

@@ -49,20 +49,8 @@ export {
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
 
-/** A terminal checkpoint rejects execution while retaining read-only accounting. */
-export class TerminalDeepScanError extends ScanInterruptedError {
-  constructor(
-    message: string,
-    scanDir: string,
-    readonly accounting: {
-      constituents: ReadonlyArray<Readonly<ScanCost> | null> | null;
-      savedTotal: Readonly<ScanCost> | null;
-      mergeStarted?: boolean;
-    },
-  ) {
-    super(message, scanDir);
-  }
-}
+/** A terminal checkpoint rejects execution without changing saved results. */
+export class TerminalDeepScanError extends ScanInterruptedError {}
 
 export interface DeepScanComposition {
   scanId: string;
@@ -127,10 +115,7 @@ function missingRunningSession(record: SavedScanRecord): boolean {
 
 /** Reject stopped discovery without writes, worker startup or cost notifications. */
 export async function terminalDeepScanError(
-  input: Pick<
-    DeepScanComposition,
-    "scanId" | "scanDir" | "repository" | "workbench" | "historicalCost"
-  >,
+  input: Pick<DeepScanComposition, "scanDir">,
   checkpoint?: DeepScanCheckpoint,
 ): Promise<TerminalDeepScanError | null> {
   const state = checkpoint ?? (await loadDeepScanCheckpoint(input.scanDir));
@@ -139,55 +124,9 @@ export async function terminalDeepScanError(
     (state.terminalReason !== "failed" && state.terminalReason !== "canceled")
   )
     return null;
-  let savedTotal: ScanCost | null = null;
-  let constituents: Array<Readonly<ScanCost> | null> | null = null;
-  try {
-    const saved = await input.workbench([
-      "get-scan",
-      "--scan-id",
-      input.scanId,
-    ]);
-    savedTotal = (saved["scan"] as SavedScanRecord).cost ?? null;
-    validatePassDirectories(state);
-    const listed = await input.workbench([
-      "list-scans",
-      "--scan-root",
-      join(input.scanDir, "artifacts/deep-scan/passes"),
-    ]);
-    // A reserved slot cannot incur cost until its registration succeeds.
-    const costs: Array<Readonly<ScanCost> | null | undefined> =
-      state.passes.map((pass) =>
-        pass.scanId === undefined ? undefined : null,
-      );
-    for (const record of listed["scans"] as SavedScanRecord[]) {
-      const index = savedPassIndex(input, state, record);
-      // Missing optional thread/cost persistence does not establish zero usage.
-      if (index >= 0)
-        costs[index] = missingRunningSession(record)
-          ? null
-          : (record.cost ?? null);
-    }
-    if (state.legacy)
-      costs.push(
-        state.legacy.cost ??
-          (state.legacy.originThreadId
-            ? await input.historicalCost?.(state.legacy.originThreadId)
-            : null) ??
-          null,
-      );
-    if (state.costUnavailable) costs.push(null);
-    constituents = costs.filter((cost) => cost !== undefined);
-  } catch {
-    // Optional accounting must not replace the terminal rejection or a known total.
-  }
   return new TerminalDeepScanError(
     `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
     input.scanDir,
-    {
-      constituents,
-      savedTotal,
-      mergeStarted: state.mergeStarted,
-    },
   );
 }
 
@@ -199,9 +138,9 @@ export async function runDeepScans(
   const state =
     (await loadDeepScanCheckpoint(scanDir)) ??
     newDeepScanCheckpoint(input.startedAt);
-  if (state["legacy"] !== undefined)
+  if (state.legacy)
     throw new Error(
-      "This Deep Scan used the retired coordinator. Its saved results remain available; start a new scan to continue reviewing.",
+      "Saved legacy Deep Scans cannot be resumed; their reports remain available.",
     );
   if (input.costUnavailable) state.costUnavailable = true;
   const terminal = await terminalDeepScanError(input, state);

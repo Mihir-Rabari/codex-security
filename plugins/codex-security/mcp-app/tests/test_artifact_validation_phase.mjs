@@ -208,6 +208,15 @@ try {
     /confidence/,
   );
 
+  await assertNoMutation(
+    { ...context, scanId: undefined },
+    ledger,
+    {
+      validations: updates,
+    },
+    /scan-bound artifact context/,
+  );
+
   await writeJsonl(ledger, [original[0], original[0]]);
   await assertNoMutation(
     context,

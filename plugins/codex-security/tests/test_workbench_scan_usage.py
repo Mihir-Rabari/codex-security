@@ -34,6 +34,46 @@ class ScanFixture:
     diff_target: dict[str, Any] | None = None
 
 
+@pytest.mark.parametrize("include_cost", [False, True])
+def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "warnings": ["scan_thread_unavailable"],
+    }
+    measured = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(0, 0, 0),
+        "threadCount": 1,
+    }
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0,
+    }
+    merge = workbench_api["scan_usage"].merge_scan_cost
+    stored = json.dumps({"usage": usage, "cost": cost})
+    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
+    assert json.loads(merge(stored, incoming)) == {"usage": measured, "cost": cost}
+    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
+    assert json.loads(merge(None, json.dumps(cost))) == cost
+    assert merge(None, None) is None
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
+        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
+        connection.commit()
+        workbench_api["scan_usage"].reconcile_completed_scan_cost(
+            connection, {"id": "scan", "cost_json": stored}, incoming
+        )
+        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
+        assert json.loads(receipt) == {"usage": measured, "cost": cost}
+
+
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     state_dir = tmp_path / "workbench-state"
     target = tmp_path / "target"
@@ -726,6 +766,47 @@ def test_native_completion_retains_measured_usage_with_sdk_cost(
     )["scan"]
     assert repeated["cost"] == cost
     assert repeated["usage"] == expected_usage
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_fresh_completion_does_not_promote_a_running_cost_estimate(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
+        )
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path,
+                    "scan-parent",
+                    [_token_event(fixture.started_at + timedelta(microseconds=1), 30, 10)],
+                )
+            },
+            [],
+        )
+    completed = _complete_scan(fixture)["scan"]
+    assert "cost" not in completed
+    assert completed["usage"]["coverage"] == ("complete" if readable_usage else "unavailable")
+    if readable_usage:
+        assert completed["usage"]["totalTokens"] == 40
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+    assert json.loads(receipt) == {"usage": completed["usage"]}
 
 
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
