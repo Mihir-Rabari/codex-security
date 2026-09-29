@@ -529,14 +529,21 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("prior_session_unavailable", "child_session_saved", "merge_session_saved"),
-    [(False, True, True), (True, True, True), (False, False, True), (False, True, False)],
+    ("prior_session_unavailable", "child_session_saved", "merge_session_saved", "merge_started"),
+    [
+        (False, True, True, True),
+        (True, True, True, True),
+        (False, False, True, True),
+        (False, True, False, True),
+        (False, True, False, False),
+    ],
 )
 def test_completion_counts_ordinary_child_scans_and_descendants(
     tmp_path: Path,
     prior_session_unavailable: bool,
     child_session_saved: bool,
     merge_session_saved: bool,
+    merge_started: bool,
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     environment = fixture.environment
@@ -606,6 +613,8 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
             connection.execute(
                 "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
             )
+    if not merge_started:
+        document["mergeStarted"] = False
     if prior_session_unavailable:
         document["costUnavailable"] = True
     checkpoint.write_text(json.dumps(document))
@@ -624,7 +633,11 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    incomplete = prior_session_unavailable or not child_session_saved or not merge_session_saved
+    incomplete = (
+        prior_session_unavailable
+        or not child_session_saved
+        or (merge_started and not merge_session_saved)
+    )
     assert usage == {
         "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",

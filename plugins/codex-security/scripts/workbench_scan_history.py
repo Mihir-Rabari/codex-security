@@ -90,7 +90,6 @@ def cli_scan_resume(
     scan_dir = require_scan_directory(Path(scan["scan_dir"]))
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
-    require_current_deep_scan(connection, scan)
     # A process can stop after sealing files but before committing completion.
     manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
     if manifest_path is not None:
@@ -110,6 +109,8 @@ def cli_scan_resume(
                 result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
             except ContractError as exc:
                 raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    if "sealedProducerVersion" not in result:
+        require_current_deep_scan(connection, scan)
     return result
 
 

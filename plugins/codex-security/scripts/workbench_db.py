@@ -1159,9 +1159,8 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
-        scan_history.require_composition_complete(
-            connection, scan, load_composition(connection, scan)
-        )
+        composition = load_composition(connection, scan)
+        scan_history.require_composition_complete(connection, scan, composition)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
         manifest_scan = manifest.get("scan", {})
@@ -1188,7 +1187,9 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        return complete_scan_locked(connection, scan_id, args.claim_token, cost_json)
+        return complete_scan_locked(
+            connection, scan_id, args.claim_token, cost_json, composition=composition
+        )
 
 
 def complete_scan_locked(
@@ -1199,6 +1200,7 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    composition: CompositionView | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1225,7 +1227,7 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    composition = load_composition(connection, scan)
+    composition = composition if composition is not None else load_composition(connection, scan)
     scan_history.require_composition_complete(connection, scan, composition)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
@@ -1360,7 +1362,6 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
     cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
     if "usage" not in cost_fields and (
         cost_json is None or scan["deep_scan_owner_thread_id"] is not None

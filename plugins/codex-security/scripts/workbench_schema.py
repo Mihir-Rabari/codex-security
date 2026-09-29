@@ -927,7 +927,7 @@ MIGRATIONS = (
             failure_message = 'The retired Deep Scan coordinator cannot continue. Saved results remain available.',
             completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-        WHERE status = 'running' AND id IN (SELECT scan_id FROM deep_scan_runs);
+        WHERE status = 'running' AND id IN (SELECT scan_id FROM deep_scan_runs WHERE status = 'running');
         UPDATE deep_scan_runs SET status = 'interrupted', phase = 'terminal', cancel_requested = 1
         WHERE status = 'running';
         """,

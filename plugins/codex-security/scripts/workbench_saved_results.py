@@ -288,7 +288,9 @@ def _saved_results_changed(
         return False
 
 
-def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[str, str], bool]:
+def _recovery_source_digests(
+    db: Any, connection: Any, scan: Any, composition: CompositionView
+) -> tuple[dict[str, str], bool]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
     include_parent = True
@@ -326,7 +328,6 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
             else:
                 include_parent = True
 
-    composition = load_composition(connection, scan)
     if frozen_sources is None:
         save_composed_checkpoint(db, connection, scan, scan_dir, composition)
 
@@ -1461,13 +1462,17 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
-        recovery_source_digests, include_parent = _recovery_source_digests(db, connection, scan)
+        composition = load_composition(connection, scan)
+        recovery_source_digests, include_parent = _recovery_source_digests(
+            db, connection, scan, composition
+        )
         if not preserve_scan_results_locked(
             db,
             connection,
             scan_id,
             recovery_source_digests=recovery_source_digests,
             include_parent_with_recovery=include_parent,
+            composition=composition,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
         clear_legacy_publication_error(connection, scan_id)

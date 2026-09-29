@@ -118,7 +118,8 @@ def collect_scan_usage(
         and (
             checkpoint.get("costUnavailable")
             or (
-                not scan["continuation_thread_id"]
+                checkpoint.get("mergeStarted") is not False
+                and not scan["continuation_thread_id"]
                 and (
                     checkpoint["mergedScanIds"]
                     or any(item.get("completed") for item in checkpoint["passes"])
