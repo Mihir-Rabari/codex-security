@@ -1,10 +1,10 @@
+/// <reference lib="esnext.disposable" preserve="true" />
+
 import {
   ScanAccounting,
   addScanCosts,
   scanCostUsage,
 } from "./scan-accounting.js";
-/// <reference lib="esnext.disposable" preserve="true" />
-
 import { prepareScanSkill, scanPrompt } from "./scan-preparation.js";
 
 import {

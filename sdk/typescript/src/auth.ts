@@ -15,6 +15,7 @@ import {
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 
 import { configuredCodexHome } from "./codex-home.js";
+/** @internal */
 export { configuredCodexHome, environmentEntry } from "./codex-home.js";
 
 /** @internal */
