@@ -57,11 +57,15 @@ export interface SeverityClassification {
 
 /** @internal Per-finding persistence used by saved-scan classification. */
 export interface SeverityClassificationCheckpoint {
-  load(result: SeverityClassification): Promise<SeverityAssessment[]>;
+  load(
+    result: SeverityClassification,
+    findings: readonly SeverityClassificationFinding[],
+  ): Promise<SeverityAssessment[]>;
   save(
     finding: SeverityClassificationFinding,
     assessment: SeverityAssessment,
     result: SeverityClassification,
+    reused?: boolean,
   ): Promise<void>;
 }
 
@@ -145,7 +149,7 @@ export async function classifySeverityInternal(
     assessments: [],
   };
   const cached = new Map(
-    (await checkpoint?.load(result))?.map((assessment) => [
+    (await checkpoint?.load(result, findings))?.map((assessment) => [
       assessment.findingId,
       assessment,
     ]),
@@ -158,6 +162,7 @@ export async function classifySeverityInternal(
       validateSeverityClassification({ ...result, assessments: [previous] }, [
         finding,
       ]);
+      await checkpoint?.save(finding, previous, result, true);
       result.assessments.push(previous);
       continue;
     }

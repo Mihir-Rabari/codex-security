@@ -13,120 +13,18 @@ from threading import Barrier, Event
 from unittest import mock
 
 import pytest
-from workbench_test_support import SCRIPT, run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    SCRIPT,
+    checkpoint,
+    recipe,
+    register,
+    run_workbench,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
-
-
-@pytest.mark.parametrize("alias", ["exact", "case", "directory"])
-def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("\n" * 50)
-    state = tmp_path / "state"
-    parent = register(state, target, tmp_path / "parent", mode="deep")
-    parent_dir = Path(parent["scanDir"])
-    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
-    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
-    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
-    findings_path = child_dir / "findings.json"
-    document = json.loads(findings_path.read_text())
-    document["findings"][0]["writeup"] = {"reportPath": "findings/issue/issue.md"}
-    findings_path.write_text(json.dumps(document))
-    reports = child_dir / "findings/issue"
-    reports.mkdir(parents=True)
-    report = reports / "issue.md"
-    report.write_text("# Original report\n")
-    name = f"{child['scanId']}-issue.md"
-    evidence = reports / (name.upper() if alias == "case" else name)
-    if alias == "directory":
-        evidence.mkdir()
-        evidence = evidence / "trace.txt"
-    evidence.write_text("Synthetic supporting evidence\n")
-    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    checkpoint(
-        state,
-        parent,
-        passes=[
-            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
-        ],
-    )
-    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
-    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
-    assert saved["progress"]["status"] == "canceled"
-    assert not any(
-        "conflicts with its projected report" in warning for warning in saved.get("warnings", [])
-    )
-    slug = f"{child['scanId']}-issue-2"
-    projected = parent_dir / "findings" / slug / f"{slug}.md"
-    assert projected.read_bytes() == report.read_bytes()
-    assert (projected.parent / evidence.relative_to(reports)).read_bytes() == evidence.read_bytes()
-    parent_findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    assert (
-        parent_findings[0]["writeup"]["reportPath"] == projected.relative_to(parent_dir).as_posix()
-    )
-    assert report.read_text() == "# Original report\n"
-    assert evidence.read_text() == "Synthetic supporting evidence\n"
-
-
-def recipe(target: Path, mode: str = "standard") -> dict:
-    return {
-        "repository": str(target),
-        "target": {"kind": "repository", "paths": []},
-        "mode": mode,
-        "config": {"model": "synthetic-model", "model_reasoning_effort": "high"},
-        **({"deepScan": {"maxDiscoveryRuns": 8}} if mode == "deep" else {}),
-    }
-
-
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700)
-    saved_recipe = recipe(target, mode)
-    if paths:
-        saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
-    return run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(directory),
-        "--registration-json-stdin",
-        *(("--parent-scan-id", parent) if parent else ()),
-        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
-    )
-
-
-def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
-    value = {
-        "version": 2,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "passes": list(passes),
-        "mergedScanIds": list(merged),
-        "aggregate": None,
-        "noNewStreak": 0,
-        "consecutiveErrors": 0,
-        **({"terminalReason": terminal} if terminal else {}),
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=json.dumps(value),
-    )
-    return value
 
 
 @pytest.mark.parametrize("accepted", [False, True])
@@ -281,9 +179,11 @@ def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monk
     )
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     stored = {"id": scan["scanId"], "scan_dir": scan["scanDir"]}
-    loaded = workbench_api["read_composition_checkpoint"](stored)
+    loaded = workbench_api["load_composition"].__globals__["read_composition_checkpoint"](stored)
     assert loaded == original
-    encoded = workbench_api["saved_results"].encode_composition_checkpoint(loaded)
+    encoded = json.dumps(
+        loaded, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode()
     assert json.loads(encoded) == original
     run_workbench(
         state,
@@ -294,7 +194,10 @@ def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monk
         CHECKPOINT,
         input_text=encoded.decode(),
     )
-    assert workbench_api["read_composition_checkpoint"](stored) == original
+    assert (
+        workbench_api["load_composition"].__globals__["read_composition_checkpoint"](stored)
+        == original
+    )
 
 
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
@@ -308,7 +211,7 @@ def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
     original = checkpoint(state, scan)
     updated = {**original, "noNewStreak": 1}
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
-    read_checkpoint = workbench_api["read_composition_checkpoint"]
+    read_checkpoint = workbench_api["load_composition"].__globals__["read_composition_checkpoint"]
     reading, release_read, thread_waiting, thread_acquired = (Event() for _ in range(4))
 
     def paused_read(scan_dir: Path, relative: str, context: str) -> dict:
@@ -589,9 +492,8 @@ def native_scan_completion(tmp_path: Path):
     return state, target, arguments, started, complete
 
 
-@pytest.mark.parametrize("during_retry", [False, True])
 def test_native_target_retry_reuses_completed_result(
-    native_scan_completion, workbench_api, monkeypatch, during_retry: bool
+    native_scan_completion,
 ) -> None:
     state, _, arguments, started, complete = native_scan_completion
     scan = started["scan"]
@@ -604,26 +506,8 @@ def test_native_target_retry_reuses_completed_result(
             (path, path.read_bytes()) for path in Path(scan["scanDir"]).rglob("*") if path.is_file()
         )
 
-    if during_retry:
-        history = workbench_api["scan_history"]
-        existing = history.existing_deep_scan_for_target
-
-        def complete_after_initial_lookup(connection, *identity):
-            if not connection.in_transaction:
-                # A concurrent first request can finish after this request's initial miss.
-                finish()
-                return None
-            return existing(connection, *identity)
-
-        monkeypatch.setattr(history, "existing_deep_scan_for_target", complete_after_initial_lookup)
-        monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
-        with mock.patch.object(sys, "argv", ["workbench", *arguments]):
-            args = workbench_api["parse_args"]("test")
-        with closing(workbench_api["connect"]()) as connection:
-            retry = workbench_api["begin_deep_scan"](connection, args)
-    else:
-        finish()
-        retry = run_workbench(state, *arguments)
+    finish()
+    retry = run_workbench(state, *arguments)
     assert retry["startDisposition"] == "joined"
     assert retry["scan"]["progress"]["status"] == "complete"
     for key in ("scanId", "scanDir", "handoffClaimToken", "cost", "findings"):
@@ -875,163 +759,6 @@ def test_native_parent_binds_once_and_keeps_native_claim(
     assert rejected["returncode"] != 0
 
 
-@pytest.mark.parametrize("target_entry", [False, True])
-@pytest.mark.parametrize("recipe_maximum", [None, 9])
-def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
-    tmp_path: Path, target_entry: bool, recipe_maximum: int | None
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
-    created = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "native-owner",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    assert "deepScanSettings" not in created
-    scan = created["scan"]
-    token = None if target_entry else scan["handoffClaimToken"]
-    if target_entry:
-        with sqlite3.connect(state / "workbench.sqlite3") as connection:
-            connection.execute(
-                "UPDATE scans SET handoff_claim_token = NULL, continuation_thread_id = NULL "
-                "WHERE id = ?",
-                (scan["scanId"],),
-            )
-    joined_args = (
-        "begin-deep-scan",
-        "--thread-id",
-        "native-owner",
-        *(
-            ("--target-path", str(target))
-            if target_entry
-            else ("--scan-id", scan["scanId"], "--claim-token", token)
-        ),
-    )
-    assert "deepScanSettings" not in run_workbench(state, *joined_args)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
-            "status, phase, workers, subagents, stop_after_no_new, "
-            "stop_after_consecutive_errors, max_discovery_runs, max_time_hours, "
-            "discovery_runs_dispatched, completion_sequence, consecutive_no_new, consecutive_errors, "
-            "created_at, updated_at) "
-            "VALUES (?, 1, 'synthetic-legacy', 'running', 'setup', 2, 0, 3, 4, 8, 0.5, 3, 2, 2, 1, ?, ?)",
-            (scan["scanId"], "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-        )
-        legacy = connection.execute("SELECT * FROM deep_scan_runs").fetchone()
-    for _ in range(2):
-        joined = run_workbench(state, *joined_args)
-        assert joined["startDisposition"] == "joined"
-        assert joined["scan"]["scanId"] == scan["scanId"]
-        assert joined["scan"]["scanDir"] == scan["scanDir"]
-        assert joined["scan"]["handoffClaimToken"] == token
-        assert joined["scan"]["progress"]["independentReviews"] == {
-            "active": 0,
-            "completed": 2,
-            "maximum": 8,
-            "consolidating": False,
-        }
-        assert joined["deepScanSettings"] == {
-            "workers": 2,
-            "subagents": 0,
-            "stopAfterNoNew": 3,
-            "stopAfterConsecutiveErrors": 4,
-            "maxDiscoveryRuns": 8,
-            "maxTimeHours": 0.5,
-        }
-    rejected = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--scan-id",
-        scan["scanId"],
-        "--thread-id",
-        "other-owner",
-        *(("--claim-token", token) if token else ()),
-        check=False,
-    )
-    assert "owning Codex thread" in rejected["stderr"]
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT * FROM deep_scan_runs").fetchone() == legacy
-        assert connection.execute(
-            "SELECT deep_scan_owner_thread_id, continuation_thread_id, handoff_claim_token FROM scans"
-        ).fetchall() == [("native-owner", None if target_entry else "native-owner", token)]
-    saved_recipe = recipe(target, "deep")
-    if recipe_maximum is None:
-        del saved_recipe["deepScan"]
-    else:
-        saved_recipe["deepScan"]["maxDiscoveryRuns"] = recipe_maximum
-    run_workbench(
-        state,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        scan["scanDir"],
-        "--registration-json-stdin",
-        input_text=json.dumps(
-            {
-                "recipe": saved_recipe,
-                "scanId": scan["scanId"],
-                "threadId": "native-owner",
-                "claimToken": token,
-            }
-        ),
-    )
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["scanId"] == scan["scanId"]
-    assert joined["recipe"] == saved_recipe
-    assert "deepScanSettings" not in joined
-    assert joined["compositionCheckpoint"]["legacy"]["originThreadId"] == "native-owner"
-    assert joined["compositionCheckpoint"]["legacy"]["discoveryRuns"] == 3
-    assert joined["compositionCheckpoint"]["noNewStreak"] == 2
-    assert joined["compositionCheckpoint"]["consecutiveErrors"] == 1
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 0,
-        "completed": 2,
-        "maximum": recipe_maximum or 8,
-        "consolidating": False,
-    }
-    scan_dir = Path(scan["scanDir"])
-    saved_checkpoint = json.loads((scan_dir / CHECKPOINT).read_text())
-    children = []
-    for index in range(1, 3):
-        directory = f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(
-            state, target, scan_dir / directory, parent=scan["scanId"], role="deep_pass"
-        )
-        children.append(child)
-        saved_checkpoint["passes"].append({"directory": directory, "scanId": child["scanId"]})
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        scan["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        *(("--claim-token", token) if token else ()),
-        input_text=json.dumps(saved_checkpoint),
-    )
-    child = children[0]
-    write_completed_contract(
-        Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
-    )
-    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    joined = run_workbench(state, *joined_args)
-    assert joined["scan"]["progress"]["independentReviews"] == {
-        "active": 1,
-        "completed": 3,
-        "maximum": recipe_maximum or 8,
-        "consolidating": True,
-    }
-
-
 @pytest.mark.parametrize(
     "legacy",
     [
@@ -1053,7 +780,9 @@ def test_scan_context_projects_composition_metadata_without_changing_checkpoint(
     state = tmp_path / "state"
     parent = register(state, target, tmp_path / "scan", mode="deep")
     assert (
-        run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["compositionCheckpoint"]
+        run_workbench(state, "get-cli-scan-resume", "--scan-id", parent["scanId"])[
+            "compositionCheckpoint"
+        ]
         is None
     )
     saved = checkpoint(state, parent)
@@ -1079,8 +808,8 @@ def test_scan_context_projects_composition_metadata_without_changing_checkpoint(
     full_checkpoint = checkpoint_path.read_bytes()
     expected = {key: value for key, value in saved.items() if key != "aggregate"}
     if isinstance(legacy, dict):
-        expected["legacy"] = {key: value for key, value in legacy.items() if key != "coverage"}
-    context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
+        expected["legacy"] = legacy
+    context = run_workbench(state, "get-cli-scan-resume", "--scan-id", parent["scanId"])
     assert context["compositionCheckpoint"] == expected
     assert checkpoint_path.read_bytes() == full_checkpoint
     assert json.loads(full_checkpoint) == saved
@@ -1167,15 +896,13 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     )
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
     assert context["scan"]["progress"]["phase"] == "discovery"
-    assert context["compositionCheckpoint"] == {
-        key: value for key, value in saved.items() if key != "aggregate"
-    }
+    assert "compositionCheckpoint" not in context
     assert context["scan"]["executionThreadIds"] == ["merge-thread", "child-thread"]
     assert context["scan"]["progress"]["independentReviews"] == {
         "active": 0,
         "completed": 1,
         "maximum": 8,
-        "consolidating": True,
+        "consolidating": False,
     }
     recovered = run_workbench(state, "list-scans", "--scan-root", str(directory))["scans"]
     assert [item["scanId"] for item in recovered] == [child["scanId"]]
@@ -1251,10 +978,9 @@ def test_get_scan_loads_one_composition_view(tmp_path: Path, workbench_api, monk
     with mock.patch.dict(load.__globals__, read_composition_checkpoint=mock.Mock(wraps=reader)):
         with workbench_api["connect"]() as connection:
             context = workbench_api["scan_context"](connection, parent["scanId"])
-        load.__globals__["read_composition_checkpoint"].assert_called_once()
+        load.__globals__["read_composition_checkpoint"].assert_not_called()
     assert context["scan"]["progress"]["independentReviews"]["active"] == 1
-    assert "aggregate" not in context["compositionCheckpoint"]
-    assert "coverage" not in context["compositionCheckpoint"]["legacy"]
+    assert "compositionCheckpoint" not in context
     assert json.loads(path.read_text()) == value
     assert child["scanId"] not in {
         scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]
@@ -1285,7 +1011,7 @@ def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
         rerun["scanId"],
     }
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
-    assert context["compositionCheckpoint"] is None
+    assert "compositionCheckpoint" not in context
     assert context["scan"]["progress"]["independentReviews"]["active"] == 1
     write_completed_contract(
         Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
@@ -1330,6 +1056,9 @@ def test_membership_migration_backfills_stored_paths_once(
     marker = parent_dir / "saved-output.txt"
     marker.write_bytes(b"Saved outputs must not change during migration.")
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP VIEW public_scans")
+        connection.execute("DROP INDEX scan_severity_reuse")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 44")
         connection.execute("DROP INDEX scans_by_composition_parent")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
         connection.execute("DELETE FROM schema_migrations WHERE version = 43")
@@ -1377,7 +1106,7 @@ def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
     metadata.parent.mkdir(parents=True, exist_ok=True)
     metadata.write_text(json.dumps(["failed-follow-up", "repeated-follow-up"]))
     context = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])
-    assert context["compositionCheckpoint"] is None
+    assert "compositionCheckpoint" not in context
     assert context["scan"]["continuationThreadId"] is None
     assert context["scan"]["progress"]["status"] == "failed"
     assert context["scan"]["threadIds"] == ["failed-follow-up", "repeated-follow-up"]
@@ -1457,7 +1186,7 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
     child = register(
         state, target, directory / child_path, parent=parent["scanId"], role="deep_pass"
     )
-    saved = checkpoint(state, parent, passes=[{"directory": child_path}])
+    checkpoint(state, parent, passes=[{"directory": child_path}])
     unrelated = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
     for scan in (child, unrelated):
         write_completed_contract(
@@ -1499,9 +1228,7 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
     assert archived_child["scan"]["findingCount"] == 1
     assert (archived / child_path / "scan-manifest.json").read_bytes() == child_manifest
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
-    assert context["compositionCheckpoint"] == {
-        key: value for key, value in saved.items() if key != "aggregate"
-    }
+    assert "compositionCheckpoint" not in context
     assert context["scan"]["progress"]["independentReviews"]["completed"] == 1
     assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
         parent["scanId"],
@@ -1679,56 +1406,6 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
             == "complete"
         )
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
-
-
-def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "app.py").write_text("print('fixture')\n")
-    state = tmp_path / "state"
-    parent = register(state, target, tmp_path / "scan", mode="deep")
-    parent_dir = Path(parent["scanDir"])
-    pass_directory = "artifacts/deep-scan/passes/pass-1"
-    child_dir = parent_dir / pass_directory
-    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
-    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
-    findings_path = child_dir / "findings.json"
-    findings = json.loads(findings_path.read_text())
-    findings["findings"][0]["writeup"] = {"reportPath": "findings/check/check.md"}
-    other = copy.deepcopy(findings["findings"][0])
-    other["identity"]["anchor"] = "another-finding"
-    other["writeup"]["reportPath"] = "findings/check-3/check-3.md"
-    findings["findings"].append(other)
-    findings_path.write_text(json.dumps(findings))
-    source = child_dir / "findings/check"
-    source.mkdir(parents=True)
-    base = f"{child['scanId']}-check"
-    evidence_name = f"{base}.MD".upper().replace("K", "\u212a")
-    evidence_directory = f"{base}-2.md"
-    report = f"# Validated finding\n\n[Evidence]({evidence_name})\n"
-    (source / "check.md").write_text(report)
-    (source / evidence_name).write_text("Supporting evidence.\n")
-    (source / evidence_directory).mkdir()
-    (source / evidence_directory / "trace.txt").write_text("Source trace.\n")
-    other_report = child_dir / "findings/check-3/check-3.md"
-    other_report.parent.mkdir()
-    other_report.write_text("# Another finding\n")
-    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    checkpoint(state, parent, passes=[{"directory": pass_directory, "scanId": child["scanId"]}])
-
-    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
-
-    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    assert len(retained) == 2
-    assert {finding["writeup"]["reportPath"] for finding in retained} == {
-        f"findings/{base}-4/{base}-4.md",
-        f"findings/{base}-3/{base}-3.md",
-    }
-    projected = parent_dir / f"findings/{base}-4"
-    assert (projected / f"{base}-4.md").read_text() == report
-    assert (projected / evidence_name).read_text() == "Supporting evidence.\n"
-    assert (projected / evidence_directory / "trace.txt").read_text() == "Source trace.\n"
-    assert (parent_dir / f"findings/{base}-3/{base}-3.md").read_text() == "# Another finding\n"
 
 
 @pytest.mark.parametrize("has_aggregate", [False, True])

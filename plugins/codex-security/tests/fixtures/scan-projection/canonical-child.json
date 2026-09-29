@@ -278,7 +278,7 @@
           "@CHILD@:0"
         ],
         "writeup": {
-          "reportPath": "findings/@CHILD@-check-4/@CHILD@-check-4.md"
+          "reportPath": "findings/@CHILD@/check/check.md"
         }
       },
       {
@@ -325,7 +325,7 @@
           "@CHILD@:2"
         ],
         "writeup": {
-          "reportPath": "findings/@CHILD@-check-3/@CHILD@-check-3.md"
+          "reportPath": "findings/@CHILD@/check-3/check-3.md"
         }
       }
     ],
@@ -376,10 +376,10 @@
       ]
     },
     "fileProjections": {
-      "findings/@CHILD@-check-4/@CHILD@-check-4.md": "findings/check/check.md",
-      "findings/@CHILD@-check-4/@CHILD@-CHECK.MD": "findings/check/@CHILD@-CHECK.MD",
-      "findings/@CHILD@-check-4/@CHILD@-check-2.md/trace.txt": "findings/check/@CHILD@-check-2.md/trace.txt",
-      "findings/@CHILD@-check-3/@CHILD@-check-3.md": "findings/check-3/check-3.md"
+      "findings/@CHILD@/check/check.md": "findings/check/check.md",
+      "findings/@CHILD@/check/@CHILD@-CHECK.MD": "findings/check/@CHILD@-CHECK.MD",
+      "findings/@CHILD@/check/@CHILD@-check-2.md/trace.txt": "findings/check/@CHILD@-check-2.md/trace.txt",
+      "findings/@CHILD@/check-3/check-3.md": "findings/check-3/check-3.md"
     }
   }
 }

@@ -56,9 +56,7 @@ from workbench.storage import (
 from workbench_cli import parse_args
 from workbench_composition import (
     CompositionView,
-    composition_children,
     load_composition,
-    read_composition_checkpoint,
 )
 from workbench_constants import (
     ARTIFACTS,
@@ -147,7 +145,9 @@ from workbench_validation import (
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
-FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+FINDING_WRITEUP_REPORT_PATH = re.compile(
+    r"^findings/(?:[a-z0-9][a-z0-9._-]*/)+[a-z0-9][a-z0-9._-]*\.md$"
+)
 
 
 def now() -> str:
@@ -854,26 +854,18 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
 
 def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     """Bind native Deep entry to the same registered scan used by the SDK host."""
-    claim_token = args.claim_token
     if args.scan_id is None:
-        target = require_target(args.target_path)
-        require_scannable_target(target)
-        scan = scan_history.existing_deep_scan_for_target(
-            connection, args.thread_id, str(target), require_scope(args.scope, "deep", target)
-        )
-        if scan is None:
-            return _start_prompt_driven_scan(connection, args, headless_standard=True)
-        claim_token = scan["handoff_claim_token"] if scan["handoff_status"] == "delivered" else None
-    else:
-        scan = require_scan(connection, args.scan_id)
-    return _join_deep_scan(connection, scan, args.thread_id, claim_token)
+        return _start_prompt_driven_scan(connection, args, headless_standard=True)
+    return _join_deep_scan(
+        connection, require_scan(connection, args.scan_id), args.thread_id, args.claim_token
+    )
 
 
 def _join_deep_scan(
     connection: sqlite3.Connection, scan: sqlite3.Row, thread_id: str, claim_token: str | None
 ) -> dict[str, Any]:
     workspace = require_workspace(connection, scan["workspace_id"])
-    owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
+    owner = handoff.owning_thread(scan, workspace, execution_fallback=False)
     if owner != thread_id or scan["mode"] != "deep":
         raise SystemExit("A Deep Scan can only be resumed by its owning Codex thread.")
     handoff.require_current_continuation(
@@ -881,21 +873,9 @@ def _join_deep_scan(
     )
     if scan["status"] == "running" and scan["canceled_at"] is None:
         require_scan_target_identity(scan)
-    context = scan_context(connection, scan["id"])
-    if scan["recipe_json"] is None:
-        legacy = connection.execute(
-            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone()
-        if legacy is not None:
-            context["deepScanSettings"] = {
-                "workers": legacy["workers"],
-                "subagents": legacy["subagents"],
-                "stopAfterNoNew": legacy["stop_after_no_new"],
-                "stopAfterConsecutiveErrors": legacy["stop_after_consecutive_errors"],
-                "maxDiscoveryRuns": legacy["max_discovery_runs"],
-                "maxTimeHours": legacy["max_time_hours"],
-            }
-    return {**context, "startDisposition": "joined"}
+    if scan["status"] == "running":
+        scan_history.require_current_deep_scan(connection, scan)
+    return {**scan_context(connection, scan["id"]), "startDisposition": "joined"}
 
 
 def start_prompt_only_scan(
@@ -1179,7 +1159,9 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
-        scan_history.require_composition_complete(connection, scan)
+        scan_history.require_composition_complete(
+            connection, scan, load_composition(connection, scan)
+        )
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
         manifest_scan = manifest.get("scan", {})
@@ -1243,7 +1225,8 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    scan_history.require_composition_complete(connection, scan)
+    composition = load_composition(connection, scan)
+    scan_history.require_composition_complete(connection, scan, composition)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1301,7 +1284,7 @@ def complete_scan_locked(
     try:
         documents = None
         if current_manifest_path is not None and not already_sealed:
-            checkpoint = read_composition_checkpoint(scan) if scan["mode"] == "deep" else None
+            checkpoint = composition.checkpoint
             if (
                 checkpoint is not None
                 and checkpoint.get("terminalReason") in {"capped", "saturated"}
@@ -1310,32 +1293,15 @@ def complete_scan_locked(
                     for item in checkpoint["passes"]
                 )
             ):
-                # A saved stopping condition can be reached before resumed children run again.
-                for child in composition_children(connection, scan):
-                    if (
-                        child["id"] not in checkpoint["mergedScanIds"]
-                        and child["status"] == "running"
-                    ):
-                        saved_results.fail_scan(
-                            _WORKBENCH_DB_CONTEXT,
-                            connection,
-                            argparse.Namespace(
-                                scan_id=child["id"],
-                                claim_token=child["handoff_claim_token"],
-                                cost_json=None,
-                                message="Parent Deep Scan reached its configured limit.",
-                            ),
-                        )
+                saved_results.stop_composition_children(
+                    _WORKBENCH_DB_CONTEXT, connection, composition
+                )
                 recovered = saved_results.save_composed_checkpoint(
-                    _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir
+                    _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
                 )
                 coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
                 coverage["completeness"] = "partial"
-                for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-                    rows = coverage.setdefault(field, [])
-                    for row in recovered["coverage"].get(field, []):
-                        if row not in rows:
-                            rows.append(row)
+                saved_results.merge_coverage_rows(coverage, recovered["coverage"])
                 documents = current_manifest, {"findings": recovered["findings"]}, coverage
             elif scan["mode"] != "deep":
                 documents = saved_results.merge_saved_results(
@@ -1394,6 +1360,7 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
+    cost_json = scan_usage.merge_scan_cost(scan["cost_json"], cost_json)
     cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
     if "usage" not in cost_fields and (
         cost_json is None or scan["deep_scan_owner_thread_id"] is not None
@@ -1414,7 +1381,7 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        scan_history.require_composition_complete(connection, scan)
+        scan_history.require_composition_complete(connection, scan, composition)
         handoff.require_current_continuation(
             scan,
             claim_token,
@@ -1488,8 +1455,9 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         scan_id = require_uuid(registration["scanId"], "scan-id")
         with scan_completion_lock(scan_id), connection:
             scan = require_scan(connection, scan_id)
+            scan_history.require_current_deep_scan(connection, scan)
             workspace = require_workspace(connection, scan["workspace_id"])
-            owner = scan["deep_scan_owner_thread_id"] or workspace["thread_id"]
+            owner = handoff.owning_thread(scan, workspace, execution_fallback=False)
             if owner != registration.get("threadId"):
                 raise SystemExit("Scan registration belongs to another Codex thread.")
             handoff.require_current_continuation(
@@ -1529,8 +1497,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                     (json.dumps(recipe, allow_nan=False), now(), scan_id),
                 )
             scan = require_scan(connection, scan_id)
-        with scan_completion_lock(scan_id):
-            scan = saved_results.migrate_legacy_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
         return scan_history.scan_registration(connection, scan, scan_contract)
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
@@ -1642,14 +1608,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         connection.rollback()
         raise
     scan = require_scan(connection, scan_id)
-    return {
-        "contract": scan_contract(scan),
-        "scanDir": str(scan_dir),
-        "scanId": scan_id,
-        "scopeFileCount": scope_file_count,
-        "targetId": target_id,
-        "targetRevision": scan["target_revision"],
-    }
+    return scan_history.scan_registration(connection, scan, scan_contract)
 
 
 def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -2567,7 +2526,7 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    composition = load_composition(connection, scan)
+    composition = load_composition(connection, scan, checkpoint=False)
     result = scan_result(connection, scan, occurrence_id=occurrence_id, composition=composition)
     workspace_result = (
         result if occurrence_id is None else scan_result(connection, scan, composition=composition)
@@ -2583,15 +2542,6 @@ def scan_context(
         "scan": result,
         "workspace": workspace,
     }
-    if scan["mode"] == "deep":
-        checkpoint = composition.checkpoint
-        if checkpoint is not None:
-            checkpoint = {key: value for key, value in checkpoint.items() if key != "aggregate"}
-            if isinstance(checkpoint.get("legacy"), dict):
-                checkpoint["legacy"] = {
-                    key: value for key, value in checkpoint["legacy"].items() if key != "coverage"
-                }
-        context["compositionCheckpoint"] = checkpoint
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
         context["recipe"] = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
@@ -2647,7 +2597,11 @@ def scan_result(
     occurrence_id: str | None = None,
     composition: CompositionView | None = None,
 ) -> dict[str, Any]:
-    composition = composition if composition is not None else load_composition(connection, scan)
+    composition = (
+        composition
+        if composition is not None
+        else load_composition(connection, scan, checkpoint=False)
+    )
     backfill_legacy_finding_details(connection, scan)
     progress = connection.execute(
         "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
@@ -3379,12 +3333,14 @@ def main() -> None:
                     workbench_completion_binding=workbench_completion_binding,
                     claim_token=args.claim_token,
                 )
-                if args.migrate and "sealedProducerVersion" not in result:
-                    with scan_completion_lock(scan["id"]):
-                        scan = saved_results.migrate_legacy_scan(
-                            _WORKBENCH_DB_CONTEXT, connection, scan
-                        )
-                    result = scan_history.scan_registration(connection, scan, scan_contract)
+                composition = load_composition(connection, scan)
+                result["scan"] = scan_result(connection, scan, composition=composition)
+                checkpoint = composition.checkpoint
+                result["compositionCheckpoint"] = (
+                    None
+                    if checkpoint is None
+                    else {key: value for key, value in checkpoint.items() if key != "aggregate"}
+                )
             except SystemExit as exc:
                 if not args.allow_unavailable:
                     raise

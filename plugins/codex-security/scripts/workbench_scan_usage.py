@@ -59,6 +59,14 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Replace a cost receipt while preserving separately measured usage."""
+    if incoming is None:
+        return existing
+    fields = {**stored_scan_cost_fields(existing), **stored_scan_cost_fields(incoming)}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
+
+
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -66,13 +74,7 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
-    if isinstance(existing, dict) and "usage" in existing:
-        cost_json = json.dumps(
-            {**existing, "cost": json.loads(cost_json)},
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+    cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(

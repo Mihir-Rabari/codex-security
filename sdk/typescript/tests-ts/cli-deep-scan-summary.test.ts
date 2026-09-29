@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ScanResult } from "../src/result.js";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
@@ -72,14 +76,27 @@ describe("deep scan completion summary", () => {
       null,
     ],
   ] as const)("explains %s", async (_name, overrides, reason, next) => {
-    const result = fakeResult(["high"], "partial");
+    const directory = await mkdtemp(join(tmpdir(), "deep-summary-"));
+    const result = new ScanResult({
+      ...fakeResult(["high"], "partial"),
+      scanDir: directory,
+    });
+    await mkdir(join(directory, "artifacts/deep-scan"), { recursive: true });
+    await writeFile(
+      join(directory, "artifacts/deep-scan/checkpoint.json"),
+      JSON.stringify({
+        version: 2,
+        aggregate: null,
+        ...cappedState,
+        ...overrides,
+      }),
+    );
     result.manifest.scan.completedAt = "2026-01-01T01:00:00Z";
     const text = await summary({
       result,
       onWorkbench: (args) => {
         expect(args).toEqual(["get-scan", "--scan-id", "scan"]);
         return {
-          compositionCheckpoint: { ...cappedState, ...overrides },
           recipe: {
             deepScan:
               "config" in overrides
@@ -93,6 +110,7 @@ describe("deep scan completion summary", () => {
     expect(text).toContain(reason);
     if (next !== null) expect(text).toContain(next);
     expect(text).not.toMatch(/saturat|merged|reducer/i);
+    await rm(directory, { recursive: true, force: true });
   });
 
   test("uses the overall cost limit even if discovery stopped earlier", async () => {

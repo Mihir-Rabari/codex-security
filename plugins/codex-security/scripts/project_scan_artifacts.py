@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import sys
-import unicodedata
 from os.path import normcase
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
@@ -46,10 +45,6 @@ class ProjectedScan(TypedDict):
     scanDir: str
     draft: dict[str, Any]
     sourceFindings: list[dict[str, Any]]
-
-
-def _collision_key(name: str) -> str:
-    return unicodedata.normalize("NFC", name).upper()
 
 
 def _scope_path(value: str) -> str:
@@ -91,18 +86,7 @@ def project_scan_artifacts(
     )
     # Merge the compatible view while retaining the exact sealed originals as provenance.
     projected = _legacy_sealed_findings_for_validation({"findings": originals})["findings"]
-    report_slugs: dict[str, str] = {}
-    reserved_slugs = {
-        _collision_key(f"{source_scan_id}-{Path(finding['writeup']['reportPath']).parent.name}")
-        for finding in projected
-        if isinstance(finding.get("writeup"), dict)
-    }
-
-    def report_slug(candidate: str) -> str:
-        # Report slugs are ASCII; the .md filename must fit a 255-byte component.
-        if len(candidate) + len(".md") > 255:
-            return f"{source_scan_id}-{hashlib.sha256(candidate.encode()).hexdigest()}"
-        return candidate
+    copied: set[Path] = set()
 
     def read(relative: str) -> bytes:
         with os.fdopen(
@@ -114,21 +98,6 @@ def project_scan_artifacts(
     def write(relative: str, payload: bytes) -> None:
         write_scan_local_bytes(parent_directory, relative, payload, expected_root_identity=identity)
 
-    def copy_evidence(directory: Path, report: Path, slug: str) -> None:
-        directories = [directory]
-        while directories:
-            with os.scandir(directories.pop()) as entries:
-                for entry in entries:
-                    path = Path(entry.path)
-                    if entry.is_dir(follow_symlinks=False):
-                        directories.append(path)
-                    elif path != source_directory / report:
-                        relative = path.relative_to(source_directory)
-                        destination = (
-                            f"findings/{slug}/{relative.relative_to(report.parent).as_posix()}"
-                        )
-                        write(destination, read(relative.as_posix()))
-
     for index, finding in enumerate(projected):
         for field in ("findingId", "occurrenceId", "fingerprints"):
             finding.pop(field, None)
@@ -136,31 +105,25 @@ def project_scan_artifacts(
         writeup = finding.get("writeup")
         if not isinstance(writeup, dict):
             continue
-        report_path = writeup["reportPath"]
-        report = Path(report_path)
-        slug = report_slugs.get(report_path)
-        if slug is None:
-            # Validate and read the report before enumerating its evidence directory.
-            payload = read(report_path)
-            directory = source_directory / report.parent
-            source_names = {
-                _collision_key(path.name)
-                for path in directory.iterdir()
-                if path.name != report.name
-            }
-            base_slug = f"{source_scan_id}-{report.parent.name}"
-            slug = report_slug(base_slug)
-            suffix = 2
-            while _collision_key(f"{slug}.md") in source_names or (
-                slug != base_slug and _collision_key(slug) in reserved_slugs
-            ):
-                slug = report_slug(f"{base_slug}-{suffix}")
-                suffix += 1
-            report_slugs[report_path] = slug
-            reserved_slugs.add(_collision_key(slug))
-            write(f"findings/{slug}/{slug}.md", payload)
-            copy_evidence(directory, report, slug)
-        writeup["reportPath"] = f"findings/{slug}/{slug}.md"
+        report = Path(writeup["reportPath"])
+        # Keep every source basename and relative evidence link in an isolated namespace.
+        destination = Path("findings") / source_scan_id
+        if report.parent not in copied:
+            read(report.as_posix())
+            directories = [source_directory / report.parent]
+            while directories:
+                with os.scandir(directories.pop()) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry.path))
+                        else:
+                            relative = Path(entry.path).relative_to(source_directory)
+                            write(
+                                (destination / relative.relative_to("findings")).as_posix(),
+                                read(relative.as_posix()),
+                            )
+            copied.add(report.parent)
+        writeup["reportPath"] = (destination / report.relative_to("findings")).as_posix()
 
     semantic_coverage = copy.deepcopy(coverage)
     for field in (
