@@ -986,7 +986,7 @@ def _start_prompt_driven_scan(
                 AND workspaces.diff_head_revision IS ? AND workspaces.diff_content_digest IS ?
                 AND workspaces.submitted = 1 AND scans.target_revision = ?
                 AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
-                AND scans.target_inode = ? AND scans.status = 'running'
+                AND scans.target_inode = ? AND scans.status IN ('running', ?)
                 AND scans.handoff_status = 'delivered'
                 AND (
                     (? = 0 AND scans.handoff_claim_token IS NULL)
@@ -1006,6 +1006,7 @@ def _start_prompt_driven_scan(
                 target_summary,
                 *diff_identity,
                 *target_identity,
+                "complete" if args.mode == "deep" else "running",
                 int(headless_standard),
                 int(headless_standard),
                 thread_id,
@@ -1013,6 +1014,10 @@ def _start_prompt_driven_scan(
         ).fetchone()
         if existing is not None:
             connection.commit()
+            if args.mode == "deep":
+                return _join_deep_scan(
+                    connection, existing, thread_id, existing["handoff_claim_token"]
+                )
             return {
                 **scan_context(connection, existing["id"]),
                 "startDisposition": "joined",
@@ -1389,14 +1394,17 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    if cost_json is None:
+    cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
+    if "usage" not in cost_fields and (
+        cost_json is None or scan["deep_scan_owner_thread_id"] is not None
+    ):
         measured_usage = scan_usage.collect_scan_usage(
             connection,
             scan,
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
-        cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
+        cost_json = parse_scan_cost(json.dumps({**cost_fields, "usage": measured_usage}))
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = manifest["scan"]["completedAt"]

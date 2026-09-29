@@ -58,12 +58,6 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
-def measured_scan_cost_json(usage: Mapping[str, Any]) -> str:
-    """Keep usage in the already-migrated scans.cost_json column."""
-
-    return json.dumps({"usage": dict(usage)}, separators=(",", ":"), allow_nan=False)
-
-
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,

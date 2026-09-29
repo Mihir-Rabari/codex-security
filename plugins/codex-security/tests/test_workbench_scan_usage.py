@@ -227,7 +227,7 @@ def _counts(
     }
 
 
-def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
+def _complete_scan(fixture: ScanFixture, *, cost: dict[str, Any] | None = None) -> dict[str, Any]:
     options: dict[str, Any] = {"relative_path": "app.py"}
     if fixture.mode == "diff":
         assert fixture.diff_target is not None
@@ -251,6 +251,7 @@ def _complete_scan(fixture: ScanFixture) -> dict[str, Any]:
         "complete-scan",
         "--scan-id",
         fixture.scan_id,
+        *(["--cost-json", json.dumps(cost)] if cost is not None else []),
         environment=fixture.environment,
     )
 
@@ -592,8 +593,14 @@ def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) 
     }
 
 
-def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_completion_preserves_explicit_legacy_cost(tmp_path: Path, mode: str) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    # Ordinary SDK registration has no native execution owner.
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
+        )
     counted = fixture.started_at + timedelta(microseconds=1)
     _state_graph(
         fixture.environment,
@@ -608,20 +615,63 @@ def test_completion_preserves_explicit_legacy_cost(tmp_path: Path) -> None:
         "outputTokens": 6,
         "estimatedUsd": 0.002,
     }
-    write_completed_contract(
-        fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
+    completed = _complete_scan(fixture, cost=cost)["scan"]
+    assert completed["cost"] == cost
+    assert "usage" not in completed
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_native_completion_retains_measured_usage_with_sdk_cost(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path, "scan-parent", [_token_event(counted, 15, 6, cached_input_tokens=4)]
+                )
+            },
+            [],
+        )
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 15,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    completed = _complete_scan(fixture, cost=cost)["scan"]
+    expected_usage = (
+        {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(15, 4, 6),
+            "threadCount": 1,
+        }
+        if readable_usage
+        else {
+            "coverage": "unavailable",
+            "source": "codex_rollout",
+            "threadCount": 0,
+            "warnings": ["codex_state_unavailable"],
+        }
     )
-    completed = run_workbench(
+    assert completed["cost"] == cost
+    assert completed["usage"] == expected_usage
+    assert completed["progress"]["status"] == "complete"
+    repeated = run_workbench(
         fixture.state_dir,
         "complete-scan",
         "--scan-id",
         fixture.scan_id,
-        "--cost-json",
-        json.dumps(cost),
         environment=fixture.environment,
     )["scan"]
-    assert completed["cost"] == cost
-    assert "usage" not in completed
+    assert repeated["cost"] == cost
+    assert repeated["usage"] == expected_usage
 
 
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:

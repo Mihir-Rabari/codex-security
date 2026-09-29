@@ -366,6 +366,167 @@ def test_native_parent_serializes_concurrent_starts_with_different_context(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
 
 
+@pytest.fixture
+def native_scan_completion(tmp_path: Path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    arguments = (
+        "begin-deep-scan",
+        "--thread-id",
+        "native-owner",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--user-context",
+        "Original optional context.",
+    )
+    started = run_workbench(state, *arguments)
+    scan = started["scan"]
+    token = scan["handoffClaimToken"]
+    run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        scan["scanDir"],
+        "--registration-json-stdin",
+        input_text=json.dumps(
+            {
+                "scanId": scan["scanId"],
+                "threadId": "native-owner",
+                "claimToken": token,
+                "recipe": recipe(target, "deep"),
+            }
+        ),
+    )
+    directory = Path(scan["scanDir"])
+    write_completed_contract(
+        directory, scan["scanId"], target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        "--claim-token",
+        token,
+        input_text=json.dumps(
+            {
+                "version": 2,
+                "startedAt": "2026-01-01T00:00:00Z",
+                "passes": [],
+                "mergedScanIds": [],
+                "aggregate": {
+                    "scanId": scan["scanId"],
+                    "findings": json.loads((directory / "findings.json").read_text())["findings"],
+                    "coverage": json.loads((directory / "coverage.json").read_text()),
+                },
+                "noNewStreak": 0,
+                "consecutiveErrors": 0,
+                "terminalReason": "saturated",
+            }
+        ),
+    )
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+
+    def complete():
+        return run_workbench(
+            state,
+            "complete-scan",
+            "--scan-id",
+            scan["scanId"],
+            "--claim-token",
+            token,
+            "--cost-json",
+            json.dumps(cost),
+        )["scan"]
+
+    return state, target, arguments, started, complete
+
+
+@pytest.mark.parametrize("during_retry", [False, True])
+def test_native_target_retry_reuses_completed_result(
+    native_scan_completion, workbench_api, monkeypatch, during_retry: bool
+) -> None:
+    state, _, arguments, started, complete = native_scan_completion
+    scan = started["scan"]
+    completed = []
+    artifacts = {}
+
+    def finish():
+        completed.append(complete())
+        artifacts.update(
+            (path, path.read_bytes()) for path in Path(scan["scanDir"]).rglob("*") if path.is_file()
+        )
+
+    if during_retry:
+        history = workbench_api["scan_history"]
+        existing = history.existing_deep_scan_for_target
+
+        def complete_after_initial_lookup(connection, *identity):
+            if not connection.in_transaction:
+                # A concurrent first request can finish after this request's initial miss.
+                finish()
+                return None
+            return existing(connection, *identity)
+
+        monkeypatch.setattr(history, "existing_deep_scan_for_target", complete_after_initial_lookup)
+        monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+        with mock.patch.object(sys, "argv", ["workbench", *arguments]):
+            args = workbench_api["parse_args"]("test")
+        with closing(workbench_api["connect"]()) as connection:
+            retry = workbench_api["begin_deep_scan"](connection, args)
+    else:
+        finish()
+        retry = run_workbench(state, *arguments)
+    assert retry["startDisposition"] == "joined"
+    assert retry["scan"]["progress"]["status"] == "complete"
+    for key in ("scanId", "scanDir", "handoffClaimToken", "cost", "findings"):
+        assert retry["scan"][key] == completed[0][key]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
+    assert {path: path.read_bytes() for path in artifacts} == artifacts
+    assert run_workbench(state, *arguments)["scan"]["scanId"] == scan["scanId"]
+    assert {path: path.read_bytes() for path in artifacts} == artifacts
+
+
+@pytest.mark.parametrize("change", ["context", "snapshot", "owner", "explicit_start"])
+def test_completed_native_result_does_not_prevent_new_scans(native_scan_completion, change):
+    state, target, arguments, started, complete = native_scan_completion
+    complete()
+    if change == "context":
+        arguments = (*arguments[:-1], "Different optional context.")
+    elif change == "snapshot":
+        (target / "app.py").write_text("print('changed')\n")
+    elif change == "owner":
+        arguments = tuple(
+            "another-owner" if value == "native-owner" else value for value in arguments
+        )
+    if change == "explicit_start":
+        created = run_workbench(state, "start-scan", "--workspace-id", started["workspace"]["id"])[
+            "results"
+        ]
+    else:
+        result = run_workbench(state, *arguments)
+        assert result["startDisposition"] == "created"
+        created = result["scan"]
+    assert created["scanId"] != started["scan"]["scanId"]
+    assert created["progress"]["status"] == "running"
+
+
 @pytest.mark.parametrize("rejoin_context", [None, "Different optional context."])
 def test_native_parent_binds_once_and_keeps_native_claim(
     tmp_path: Path, rejoin_context: str | None
