@@ -1123,7 +1123,7 @@ test.each([true, false])(
         const response = await runWorkbench(options, args, input);
         if (!savedMergeSession && args.includes(f.scanId)) {
           if (args[0] === "get-cli-scan-resume") response["threadId"] = null;
-          if (args[0] === "get-scan")
+          if (args[0] === "get-cli-scan-resume" || args[0] === "get-scan")
             (response["scan"] as JsonObject)["continuationThreadId"] = null;
         }
         return response;
@@ -1602,7 +1602,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
     const savedCheckpoint = (
-      await f.command(["get-scan", "--scan-id", f.scanId])
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
     )["compositionCheckpoint"];
     if (checkpoint === "v2")
       expect(savedCheckpoint).toMatchObject({ version: 2 });
@@ -1649,6 +1649,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     }
     let turns = 0;
     let brokenTracking = false;
+    let resumeReads = 0;
     const warnings: string[] = [];
     const commands: string[] = [];
     const client = resumeClient(
@@ -1671,9 +1672,14 @@ with sqlite3.connect(sys.argv[1]) as connection:
       async (options, args, input) => {
         commands.push(args[0]!);
         const result = await runWorkbench(options, args, input);
-        if (args[0] === "get-scan" && checkpoint === undefined)
+        if (args[0] === "get-cli-scan-resume") resumeReads++;
+        if (args[0] === "get-cli-scan-resume" && checkpoint === undefined)
           delete result["compositionCheckpoint"];
-        if (args[0] === "get-scan" && trackingFailure && !brokenTracking) {
+        if (
+          args[0] === "get-cli-scan-resume" &&
+          resumeReads === 2 &&
+          trackingFailure
+        ) {
           // Session identity was already checked; fail subsequent usage reads.
           brokenTracking = true;
           await rename(
