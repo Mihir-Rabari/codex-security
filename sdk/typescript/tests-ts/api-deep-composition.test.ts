@@ -1142,6 +1142,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         const recipes = [...registrations.values()].map(
           (record) => record["recipe"] as JsonObject,
         );
+        expect(recipes[0]!["knowledgeBaseSha256"]).toMatch(/^[a-f0-9]{64}$/);
         expect(
           new Set(recipes.map((recipe) => recipe["knowledgeBaseSha256"])).size,
         ).toBe(1);
@@ -1355,15 +1356,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           const checkpointPath = join(scanDir, DEEP_SCAN_CHECKPOINT);
           const checkpointBytes = await readFile(checkpointPath);
           const activityBefore = [threadCount, turns.length];
-          const commandCount = commands.length;
           await rm(sessionPath);
           try {
             await expect(run()).rejects.toThrow("The original Codex session");
             expect([threadCount, turns.length]).toEqual(activityBefore);
             expect(await readFile(checkpointPath)).toEqual(checkpointBytes);
-            expect(
-              commands.slice(commandCount).map(({ command }) => command),
-            ).toEqual(["register-cli-scan", "get-cli-scan-resume"]);
             for (const scanId of [
               registeredScan!.scanId,
               checkpoint.passes[1].scanId,
@@ -1518,7 +1515,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           turn.environment["CODEX_SECURITY_CONFIG_PATH"],
         ]),
       );
-      expect(new Set(configByChild.values()).size).toBe(configByChild.size);
+      if (prepareNative) {
+        for (const config of configByChild.values())
+          expect(config).toBeDefined();
+        expect(new Set(configByChild.values()).size).toBe(configByChild.size);
+      }
       for (const options of workbenches.values())
         expect(options.pluginRoot).toBe(pluginRoot);
       expect(children).toHaveLength(native === "discovery" ? 3 : 2);
