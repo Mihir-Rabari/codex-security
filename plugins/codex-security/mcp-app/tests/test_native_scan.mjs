@@ -144,12 +144,13 @@ function input(id = "parent") {
   };
 }
 
-test("native preparation requires an external executable for fresh and resumed clients", async () => {
+test("native preparation protects enclosing repositories for fresh and resumed clients", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-executable-selection-")),
   );
-  const repository = join(root, "repository");
-  const bin = join(repository, "bin");
+  const worktree = join(root, "repository");
+  const repository = join(worktree, "src");
+  const bin = join(worktree, "bin");
   const alias = join(root, "bin-alias");
   const executable = join(
     bin,
@@ -174,7 +175,11 @@ test("native preparation requires an external executable for fresh and resumed c
   ];
   const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
-    await mkdir(bin, { recursive: true });
+    await Promise.all([
+      mkdir(bin, { recursive: true }),
+      mkdir(repository, { recursive: true }),
+      mkdir(join(worktree, ".git"), { recursive: true }),
+    ]);
     await writeFile(executable, "inert executable fixture");
     await chmod(executable, 0o700);
     await mkdir(externalBin);
@@ -225,6 +230,8 @@ test("native preparation requires an external executable for fresh and resumed c
     process.env.CODEX_HOME = root;
     process.env.LOCALAPPDATA = root;
     for (const resumed of [false, true]) {
+      if (resumed)
+        await writeFile(join(repository, ".git"), "gitdir: ../.git\n");
       const request = {
         ...input(),
         scan: { ...input().scan, targetPath: repository },
@@ -740,8 +747,21 @@ if (process.argv.includes("app-server")) {
 );
 
 test("native launches snapshot safety identifiers and prefer saved recipes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "native-safety-identifier-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-safety-identifier-")),
+  );
+  const codexExecutable = await realpath(process.execPath);
+  const repositories = [join(root, "first"), join(root, "second")];
+  for (const repository of repositories) {
+    await mkdir(join(repository, "src"), { recursive: true });
+    await mkdir(join(repository, ".git"));
+    await mkdir(join(repository, "bin"));
+  }
+  const searchDirectories = repositories.map((repository) =>
+    join(repository, "bin"),
+  );
   const keys = [
+    "PATH",
     "CODEX_HOME",
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -752,7 +772,8 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
   try {
     Object.assign(process.env, {
       CODEX_HOME: root,
-      CODEX_CLI_PATH: process.execPath,
+      CODEX_CLI_PATH: codexExecutable,
+      PATH: searchDirectories.join(delimiter),
     });
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
@@ -772,18 +793,32 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     ].map(([ambient, recipe, expected], index) => {
       if (ambient === undefined) delete process.env.CODEX_SAFETY_IDENTIFIER;
       else process.env.CODEX_SAFETY_IDENTIFIER = ambient;
-      return prepareNativeScan({ ...input(`parent-${index}`), recipe }).then(
-        ({ client, options }) => {
-          assert.equal(options.safetyIdentifier, expected);
-          assert.equal(
-            client.dependencies.environment.CODEX_SAFETY_IDENTIFIER,
-            ambient,
-          );
+      return prepareNativeScan({
+        ...input(`parent-${index}`),
+        scan: {
+          ...input(`parent-${index}`).scan,
+          targetPath: join(repositories[index % 2], "src"),
         },
-      );
+        recipe,
+      }).then(({ client, options }) => {
+        assert.equal(
+          client.dependencies.environment.PATH,
+          searchDirectories[1 - (index % 2)],
+        );
+        assert.equal(
+          client.dependencies.environment.CODEX_CLI_PATH,
+          codexExecutable,
+        );
+        assert.equal(options.safetyIdentifier, expected);
+        assert.equal(
+          client.dependencies.environment.CODEX_SAFETY_IDENTIFIER,
+          ambient,
+        );
+      });
     });
     await Promise.all(launches);
     assert.equal(process.env.CODEX_SAFETY_IDENTIFIER, undefined);
+    assert.equal(process.env.PATH, searchDirectories.join(delimiter));
   } finally {
     for (const key of keys) {
       if (before[key] === undefined) delete process.env[key];
@@ -808,6 +843,20 @@ test(
     const executable = join(root, "codex");
     const capture = join(root, "capture.jsonl");
     const scenario = join(root, "scenario");
+    const repository = join(root, "repository");
+    const target = join(repository, "src");
+    const repositoryBin = join(repository, "bin");
+    const selectedTools = join(root, "selected tools");
+    const keys = [
+      "PATH",
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    ];
+    const before = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    );
     const fallback =
       "Configured value for `permission_profile` is disallowed by requirements; falling back from `codex_security_scan` to required value `:read-only`.";
     const observations = async () =>
@@ -825,6 +874,24 @@ test(
       return true;
     };
     try {
+      await mkdir(target, { recursive: true });
+      await Promise.all([
+        mkdir(repositoryBin),
+        mkdir(join(repository, ".git")),
+        mkdir(selectedTools),
+      ]);
+      await writeFile(
+        join(repositoryBin, "codex"),
+        "inert executable fixture",
+        { mode: 0o700 },
+      );
+      Object.assign(process.env, {
+        CODEX_HOME: root,
+        PATH: [repositoryBin, root, selectedTools].join(delimiter),
+      });
+      delete process.env.CODEX_CLI_PATH;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
       await writeFile(
         executable,
         `#!${process.execPath}
@@ -834,7 +901,7 @@ if (process.argv.includes("app-server")) {
   servePermissionProfiles();
 } else {
   const capture = (value) => fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
-  capture({ kind: "exec", argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
+  capture({ kind: "exec", executable: process.argv[1], argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-worker-thread" }));
@@ -882,18 +949,39 @@ if (process.argv.includes("app-server")) {
             `permissions.codex_security_comparison={extends=":read-only",filesystem={${JSON.stringify(join(root, "private"))}="deny"},network={enabled=false}}`,
           );
         }
+        const native =
+          role === "comparison"
+            ? undefined
+            : await prepareNativeScan({
+                ...input(),
+                scan: { ...input().scan, targetPath: target },
+                recipe: { auth: "api-key" },
+              });
+        const selectedEnvironment = native?.client.dependencies.environment;
+        if (selectedEnvironment) {
+          assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
+          assert.equal(
+            selectedEnvironment.PATH,
+            [root, selectedTools].join(delimiter),
+          );
+          assert.equal(
+            process.env.PATH,
+            [repositoryBin, root, selectedTools].join(delimiter),
+          );
+        }
         const gitEnvironment = {
-          PATH: join(root, "selected tools"),
+          PATH: selectedEnvironment?.PATH ?? selectedTools,
           CODEX_SECURITY_GIT: join(root, "selected tools", "git"),
           GIT_SSH_COMMAND: "synthetic-ssh --fixture",
           GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
         };
         const sdk = createPermissionCheckedCodex({
-          codexPathOverride: executable,
+          codexPathOverride: selectedEnvironment?.CODEX_CLI_PATH ?? executable,
           config: { ...config, default_permissions: ":read-only" },
           configOverrides,
           apiKey: "synthetic-final-key",
           env: {
+            ...selectedEnvironment,
             CODEX_HOME: root,
             CODEX_API_KEY: "synthetic-stale-key",
             NATIVE_PROFILE_CAPTURE: capture,
@@ -927,6 +1015,7 @@ if (process.argv.includes("app-server")) {
             (entry) => entry.kind === "preflight",
           );
           const executed = observed.find((entry) => entry.kind === "exec");
+          assert.equal(executed.executable, executable);
           assert.equal(preflight.cwd, cwd);
           assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
           assert.equal(executed.argv.includes("resume"), resumed);
@@ -1005,6 +1094,10 @@ if (process.argv.includes("app-server")) {
         }
       }
     } finally {
+      for (const key of keys) {
+        if (before[key] === undefined) delete process.env[key];
+        else process.env[key] = before[key];
+      }
       await rm(root, { recursive: true, force: true });
     }
   },

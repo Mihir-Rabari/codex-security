@@ -9,6 +9,7 @@ import {
   type DeepScanOptions,
 } from "../../../../sdk/typescript/src/scan-settings.js";
 import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
+import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
 import { ScanTransportClosedError } from "../../../../sdk/typescript/src/scan-execution.js";
@@ -117,7 +118,8 @@ export async function prepareNativeScan(
   const inheritedEnvironment = await snapshotNativeEnvironment();
   const codex = await resolveTrustedCodex(
     inheritedEnvironment,
-    input.scan.targetPath,
+    (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
+      input.scan.targetPath,
   );
   if (codex === null) {
     throw new CodexSecurityError(
