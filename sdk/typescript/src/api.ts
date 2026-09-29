@@ -6,6 +6,7 @@ import {
 /// <reference lib="esnext.disposable" preserve="true" />
 
 import { prepareScanSkill, scanPrompt } from "./scan-preparation.js";
+import { findScanSession } from "./scan-logs.js";
 
 import {
   scanAuthentication,
@@ -36,6 +37,7 @@ import {
   prepareAmbientRuntime,
   type AmbientExecution,
   type ExecutionSource,
+  prepareDiscoveryExecution,
   prepareMergeExecution,
   type PreparedRuntime,
   type PreparedExecution,
@@ -1485,6 +1487,18 @@ export class CodexSecurity {
         threadId: string,
         scanDirectory: string,
       ) => {
+        if (scanDirectory === scanDir) {
+          const saved = await findScanSession(runtime.codexHome, threadId);
+          const startedAt = Date.parse(String(registration["startedAt"]));
+          // Native owners can include earlier conversation work in the same directory.
+          if (
+            saved?.workingDirectory !== scanDir ||
+            saved.startedAt === null ||
+            !Number.isFinite(startedAt) ||
+            saved.startedAt < startedAt
+          )
+            return null;
+        }
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
@@ -1642,6 +1656,8 @@ export class CodexSecurity {
       const restorePriorAccounting = (
         checkpoint: DeepScanCheckpointSummary | null,
       ): void => {
+        if (checkpoint?.legacy)
+          accounting.record("legacy", checkpoint.legacy.cost ?? null);
         if (
           checkpoint?.costUnavailable ||
           (typeof resumeThreadId !== "string" &&
@@ -1690,6 +1706,14 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "The sealed scan has no saved execution session.",
           );
+        if (checkpoint?.legacy)
+          accounting.record(
+            "legacy",
+            checkpoint.legacy.cost ??
+              (checkpoint.legacy.originThreadId
+                ? await historicalCost(checkpoint.legacy.originThreadId)
+                : null),
+          );
         if (checkpoint != null) {
           const children = await workbench(workbenchOptions, [
             "list-scans",
@@ -1704,7 +1728,11 @@ export class CodexSecurity {
           }
         }
         if (mode === "deep" && checkpoint == null) {
-          accounting.completed = await historicalCost(sealedThreadId!);
+          accounting.completed =
+            (await historicalCost(sealedThreadId!)) ?? savedScan.cost ?? null;
+          accounting.record("legacy", accounting.completed);
+          // A retired origin is not a composed merge session.
+          resumeThreadId = null;
         }
         if (
           !accounting.has("previous-work") &&
@@ -1713,7 +1741,9 @@ export class CodexSecurity {
           accounting.completed ??= savedScan.cost ?? null;
         if (
           typeof resumeThreadId !== "string" &&
-          (emptyComposition || checkpoint?.mergeStarted === false)
+          (emptyComposition ||
+            checkpoint?.mergeStarted === false ||
+            checkpoint?.legacy)
         )
           accounting.completed ??= accounting.complete;
         if (
@@ -1895,7 +1925,7 @@ export class CodexSecurity {
               deepScanConfiguration.settings.subagents,
             )
           : options.deepScanPass === true
-            ? { ...session, checkPermissions: true }
+            ? prepareDiscoveryExecution(session)
             : session;
       const artifactWriter =
         mode === "deep"

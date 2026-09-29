@@ -532,6 +532,28 @@ export async function nativeScanConfiguration(
   return config;
 }
 
+function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
+  const config = structuredClone(sessionConfig);
+  config["mcp_servers"] = {
+    ...(isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {}),
+    // The SDK owns scan artifacts and lifecycle; workers use canonical files.
+    // A disabled server still needs a transport during plugin resolution.
+    "codex-security": { command: "node", enabled: false },
+  };
+  return config;
+}
+
+/** Standard passes retain inherited permissions while isolating workbench tools. */
+export function prepareDiscoveryExecution(
+  session: PreparedExecution,
+): PreparedExecution {
+  return {
+    ...session,
+    checkPermissions: true,
+    sessionConfig: deepWorkerConfig(session.sessionConfig),
+  };
+}
+
 /** The merge retains inherited permissions and applies its own subagent budget. */
 export function prepareMergeExecution(
   session: PreparedExecution,
@@ -540,7 +562,10 @@ export function prepareMergeExecution(
   return {
     ...session,
     checkPermissions: true,
-    sessionConfig: withScanSubagents(session.sessionConfig, subagents),
+    sessionConfig: withScanSubagents(
+      deepWorkerConfig(session.sessionConfig),
+      subagents,
+    ),
   };
 }
 

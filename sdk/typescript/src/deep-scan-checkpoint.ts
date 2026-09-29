@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { readScanFile } from "./contract.js";
 import type { SemanticScan } from "./semantic-models.js";
+import type { ScanCost } from "./cost.js";
 
 export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 
@@ -26,6 +27,12 @@ interface CompositionMetadata {
   mergeStarted?: boolean;
   /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
   costUnavailable?: true;
+  /** Retained coordinator accounting is read-only; live continuation is retired. */
+  legacy?: {
+    cost?: ScanCost;
+    originThreadId?: string;
+    [extension: string]: unknown;
+  };
   /** A discovery stop decision. Sealing and publication belong to the parent. */
   terminalReason?: "saturated" | "capped" | "failed" | "canceled";
   [extension: string]: unknown;
