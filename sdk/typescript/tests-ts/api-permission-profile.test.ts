@@ -10,6 +10,7 @@ import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { executablePathForSpawn } from "../src/runtime.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
+import { semanticFinding } from "./helpers/semantic-scan.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mockWorkbench, TEST_SNAPSHOT_DIGEST } from "./support/api-client.js";
 import {
@@ -189,7 +190,10 @@ async function fixture(
       target: {
         allowedKinds: ["directory_snapshot"],
         requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+        targetId: "target_sha256_example",
+        displayName: "Synthetic repository",
       },
+      scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
     },
   };
   const client = new CodexSecurity(
@@ -214,13 +218,24 @@ async function fixture(
       repositoryRevision: async () => null,
       prepareScanArtifactRestorer: async () => ({
         async projectChild(parentScanId, sourceScanId, sourceDirectory) {
+          const finding = semanticFinding({
+            locations: [{ path: "app.py", startLine: 1 }],
+          });
           return {
             scanId: sourceScanId,
             scanDir: sourceDirectory,
-            sourceFindings: [],
+            sourceFindings: [finding],
             draft: {
               scanId: parentScanId,
-              findings: [],
+              findings: [
+                {
+                  ...finding,
+                  provenance: {
+                    ...finding.provenance,
+                    sourceFindingIds: [`${sourceScanId}:0`],
+                  },
+                },
+              ],
               coverage: {
                 completeness: "complete",
                 surfaces: [],
