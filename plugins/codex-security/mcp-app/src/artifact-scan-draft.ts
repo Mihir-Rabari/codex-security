@@ -206,7 +206,10 @@ async function preserveScanDraft(
   const sources: ScanDraftInput[] = previous ? [previous, ...inputs] : inputs;
   if (input.complete === false) {
     const final = sources.find((source) => source.complete !== false);
-    if (final) result = structuredClone(final);
+    if (final) {
+      result = structuredClone(final);
+      sources.push(input);
+    }
   }
   const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(

@@ -1097,6 +1097,7 @@ try {
   const staleCheckpoint = {
     ...input,
     complete: false,
+    findings: [finding, interruptedFinding],
     coverage: {
       ...coverage,
       completeness: "partial",
@@ -1140,6 +1141,13 @@ try {
         );
       }
       assert.notEqual(staged.manifest.scan.complete, false);
+      assert.deepEqual(
+        staged.findings.findings.map((entry) => entry.provenance.candidateId),
+        [
+          finding.provenance.candidateId,
+          interruptedFinding.provenance.candidateId,
+        ],
+      );
       assert.deepEqual(
         staged.coverage.surfaces.map(({ id, disposition }) => ({
           id,
