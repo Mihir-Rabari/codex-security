@@ -3450,24 +3450,28 @@ export class CodexSecurity {
       }
       const result = await collectResult(
         {
-          status: "completed",
-          model,
-          usage,
-          mock: true,
-          finalResponse:
-            "Synthetic mock scan; no security analysis was performed.",
+          scanDir,
+          pluginRoot,
+          expectation: {
+            repository: local.repository,
+            repositoryRevision: revision,
+            target: local.target,
+            mode: local.mode,
+            pluginVersion: plugin.version,
+          },
+          signal,
         },
-        "",
-        scanDir,
-        pluginRoot,
         {
-          repository: local.repository,
-          repositoryRevision: revision,
-          target: local.target,
-          mode: local.mode,
-          pluginVersion: plugin.version,
+          threadId: "",
+          turnResult: {
+            status: "completed",
+            model,
+            usage,
+            mock: true,
+            finalResponse:
+              "Synthetic mock scan; no security analysis was performed.",
+          },
         },
-        signal,
         true,
       );
       // Stable fixture identities are indexed by complete-scan without model matching.

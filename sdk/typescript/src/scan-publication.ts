@@ -16,12 +16,15 @@ export interface CompletedScanTurn {
   turnResult: TurnResultMetadata;
 }
 
-export interface ScanPublicationContext {
-  scanId: string;
+interface ScanResultContext {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
   signal: AbortSignal;
+}
+
+export interface ScanPublicationContext extends ScanResultContext {
+  scanId: string;
   workbench: (args: readonly string[]) => Promise<JsonObject>;
 }
 
@@ -35,8 +38,7 @@ export async function publishScan(
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const { scanId, scanDir, pluginRoot, expectation, signal, workbench } =
-    context;
+  const { scanId, workbench } = context;
   let preparation: JsonObject = {};
   if (!sealed) {
     try {
@@ -63,15 +65,7 @@ export async function publishScan(
       throw error;
     }
   }
-  const result = await collectResult(
-    turn.turnResult,
-    turn.threadId,
-    scanDir,
-    pluginRoot,
-    expectation,
-    signal,
-    true,
-  );
+  const result = await collectResult(context, turn, true);
   const completion = await workbench([
     "complete-scan",
     "--scan-id",
@@ -83,25 +77,14 @@ export async function publishScan(
 
 /** Load a result that the workbench has already completed, without completing it again. */
 export async function loadPublishedScanResult(
-  context: Pick<
-    ScanPublicationContext,
-    "scanDir" | "pluginRoot" | "expectation" | "signal"
-  >,
+  context: ScanResultContext,
   turn: CompletedScanTurn,
   completion: JsonObject,
 ): Promise<{
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const result = await collectResult(
-    turn.turnResult,
-    turn.threadId,
-    context.scanDir,
-    context.pluginRoot,
-    context.expectation,
-    context.signal,
-    true,
-  );
+  const result = await collectResult(context, turn, true);
   return { result, warnings: publicationWarnings(completion) };
 }
 
@@ -133,14 +116,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string | null,
-  scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
-  signal: AbortSignal,
+  context: ScanResultContext,
+  turn: CompletedScanTurn,
   workbenchValidated = false,
 ): Promise<ScanResult> {
+  const { scanDir, pluginRoot, expectation, signal } = context;
+  const { threadId, turnResult } = turn;
   const required = [
     "scan-manifest.json",
     "findings.json",
@@ -206,7 +187,7 @@ export async function preservePublishedArtifacts(
   prepareRestorer: () => Promise<ScanArtifactRestorer>,
   run: () => Promise<void>,
 ): Promise<{ error: unknown } | undefined> {
-  const { result, pluginRoot, expectation, signal } = context;
+  const { result, signal } = context;
   const scanDir = result.scanDir;
   const artifacts = await Promise.all(
     [
@@ -242,15 +223,7 @@ export async function preservePublishedArtifacts(
       }
     }
     if (signal.aborted || error instanceof ScanPermissionError) throw error;
-    await collectResult(
-      result.turnResult,
-      result.threadId,
-      scanDir,
-      pluginRoot,
-      expectation,
-      signal,
-      true,
-    );
+    await collectResult({ ...context, scanDir }, result, true);
     return { error };
   }
 }
