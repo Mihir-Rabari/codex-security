@@ -1572,10 +1572,12 @@ def initialize_pending_checkpoints(scan_dir: Path) -> None:
     prepare_scan_local_directory(scan_dir, "checkpoints/pending")
     for name in _children(scan_dir, "checkpoints"):
         if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            _, contents = _read_scan_local_json_bytes(
+            # Recovery validates each checkpoint independently after preserving its bytes.
+            descriptor = open_scan_local_file_descriptor(
                 scan_dir, f"checkpoints/{name}", "Saved checkpoint"
             )
-            write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", contents)
+            with os.fdopen(descriptor, "rb") as checkpoint:
+                write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", checkpoint.read())
     write_scan_local_bytes(scan_dir, "checkpoints/pending/.initialized", b"")
 
 

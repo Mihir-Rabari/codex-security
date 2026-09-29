@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -119,3 +120,30 @@ def test_draft_acknowledges_only_reconciled_pending_checkpoints(tmp_path: Path) 
     assert conflict["returncode"] != 0
     assert "scan_draft_conflict" in conflict["stderr"]
     assert len(list(pending.glob("*.json"))) == 2
+
+
+def test_stopped_scan_preserves_parent_with_malformed_historical_checkpoint(tmp_path: Path) -> None:
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir, mode="deep")
+    write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
+    contents = b"{incomplete"
+    name = f"{hashlib.sha256(contents).hexdigest()}.json"
+    history = scan_dir / "checkpoints"
+    history.mkdir(mode=0o700)
+    (history / name).write_bytes(contents)
+
+    stopped = run_workbench(
+        state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop."
+    )["scan"]
+
+    assert stopped["findingCount"] == 1
+    assert stopped["reportAvailable"] is True
+    assert any("Preserved unreadable checkpoint" in warning for warning in stopped["warnings"])
+    assert (history / name).read_bytes() == contents
+    assert (history / "pending" / name).read_bytes() == contents
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert manifest["status"] == "failed"
+    assert manifest["sealedAt"]
+    assert f"checkpoints/pending/{name}" not in manifest["preservedSources"]
