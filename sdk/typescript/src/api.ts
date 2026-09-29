@@ -1688,8 +1688,11 @@ export class CodexSecurity {
         const checkpoint = compositionCheckpointFromWorkbench(registration);
         resumeThreadId = savedScan["continuationThreadId"];
         restorePriorAccounting(checkpoint);
+        // Keep the sealed origin identity without resuming its retired session.
         sealedThreadId =
-          typeof resumeThreadId === "string" ? resumeThreadId : null;
+          typeof resumeThreadId === "string"
+            ? resumeThreadId
+            : (checkpoint?.legacy?.originThreadId ?? null);
         scanThreadId = sealedThreadId ?? undefined;
         const emptyComposition =
           mode === "deep" &&

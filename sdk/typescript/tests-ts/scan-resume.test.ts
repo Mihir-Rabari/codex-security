@@ -1598,7 +1598,7 @@ test.each([
       noNewStreak: 0,
       consecutiveErrors: 0,
       terminalReason:
-        state === "failed" || state === "canceled" ? state : "capped",
+        state === "failed" || state === "canceled" ? state : "saturated",
       legacy: {
         originThreadId: f.threadId,
         discoveryRuns: 1,
@@ -1669,7 +1669,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
     });
     const client = resumeClient(f, () => ({
       startThread: () => unusedThread(null),
-      resumeThread: (id) => unusedThread(id),
+      resumeThread() {
+        throw new Error("Retired origins must not resume.");
+      },
     }))({ codexOverrides: f.recipe.config });
     try {
       const pending = client.run(f.repository, {
@@ -1696,6 +1698,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         );
       } else {
         const result = await pending;
+        expect(result.threadId).toBe(f.threadId);
         expect(result.cost).toEqual(
           origin === "dedicated"
             ? estimateScanCost("gpt-5.6-sol", usage)
