@@ -1649,7 +1649,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     }
     let turns = 0;
     let brokenTracking = false;
-    let resumeReads = 0;
     const warnings: string[] = [];
     const commands: string[] = [];
     const client = resumeClient(
@@ -1672,14 +1671,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
       async (options, args, input) => {
         commands.push(args[0]!);
         const result = await runWorkbench(options, args, input);
-        if (args[0] === "get-cli-scan-resume") resumeReads++;
         if (args[0] === "get-cli-scan-resume" && checkpoint === undefined)
           delete result["compositionCheckpoint"];
-        if (
-          args[0] === "get-cli-scan-resume" &&
-          resumeReads === 2 &&
-          trackingFailure
-        ) {
+        if (args[0] === "get-scan" && trackingFailure && !brokenTracking) {
           // Session identity was already checked; fail subsequent usage reads.
           brokenTracking = true;
           await rename(
