@@ -261,7 +261,6 @@ export async function readCodexTurn(options: {
     } else if (event.type === "turn.completed") {
       status = "completed";
       usage = event["usage"];
-      break;
     } else if (event.type === "turn.failed") {
       throw new CodexSecurityError(turnFailureMessage(event["error"]));
     } else if (event.type === "error" && typeof event["message"] === "string") {

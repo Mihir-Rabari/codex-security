@@ -480,7 +480,11 @@ describe("one-shot scan events", () => {
     async (finalUsage) => {
       const root = await temporaryDirectory();
       const scanDir = join(root, "scan");
-      const events = completedEvents();
+      let streamFinished = false;
+      const events = (async function* () {
+        yield* completedEvents();
+        streamFinished = true;
+      })();
       let finalized = false;
 
       const result = await runScanEvents({
@@ -503,6 +507,7 @@ describe("one-shot scan events", () => {
           pluginVersion: "0.1.0",
         },
         onFinalize: async (usage) => {
+          expect(streamFinished).toBe(true);
           expect(usage).toMatchObject({
             input_tokens: 10,
             cached_input_tokens: 2,
