@@ -1,3 +1,4 @@
+import { workbenchTimeout } from "./src/workbench-timeout.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -2600,27 +2601,7 @@ async function executeWorkbench(
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: [
-        "begin-deep-scan",
-        "complete-scan",
-        "export-findings",
-        "get-scan",
-        "get-workspace",
-        "inspect-setup",
-        "list-findings",
-        "preserve-scan-results",
-        "recover-scan-results",
-        "request-finding-remediation",
-        "request-finding-remediation-action",
-        "save-workspace",
-        "set-finding-triage",
-        "set-finding-remediation",
-        "start-headless-standard-scan",
-        "start-prompt-only-scan",
-        "start-scan",
-      ].includes(args[0] ?? "")
-        ? 300_000
-        : 30_000,
+      timeout: workbenchTimeout(args[0] ?? ""),
     },
   );
   if (workbenchInput !== undefined) {

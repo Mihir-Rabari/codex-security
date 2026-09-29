@@ -202,6 +202,51 @@ try {
   );
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
 
+  const unsupportedRoot = path.join(root, "unsupported-semantic-checkpoint");
+  await mkdir(path.join(unsupportedRoot, "checkpoints"), { recursive: true });
+  const oldContents = JSON.stringify({
+    ...input,
+    findings: [{ ...finding, validation: { assertions: "old scalar" } }],
+  });
+  const oldCheckpoint = path.join(unsupportedRoot, "checkpoints", "old.json");
+  await writeFile(oldCheckpoint, oldContents);
+  await assert.rejects(
+    recordCodexSecurityScanDraft({ ...context, root: unsupportedRoot }, input),
+    /unsupported semantic format.*Start a new scan/,
+  );
+  assert.equal(await readFile(oldCheckpoint, "utf8"), oldContents);
+
+  const pendingRoot = path.join(root, "pending-only-checkpoints");
+  await mkdir(pendingRoot);
+  await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
+  const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
+  await mkdir(pendingDirectory);
+  await writeFile(path.join(pendingDirectory, ".initialized"), "");
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "obsolete.json"),
+    "{old incompatible evidence",
+  );
+  const pendingInput = { ...input, findings: [interruptedFinding] };
+  await writeFile(
+    path.join(pendingDirectory, "pending.json"),
+    JSON.stringify(pendingInput),
+  );
+  await recordCodexSecurityScanDraft(
+    { ...context, root: pendingRoot },
+    { ...input, findings: [] },
+  );
+  assert.deepEqual(
+    new Set(
+      (await readJson(pendingRoot, "findings.json")).findings.map(
+        (item) => item.provenance.candidateId,
+      ),
+    ),
+    new Set([
+      finding.provenance.candidateId,
+      interruptedFinding.provenance.candidateId,
+    ]),
+  );
+
   const deepParentRoot = path.join(root, "accepted-deep-parent");
   await mkdir(deepParentRoot);
   const deepParentContext = {

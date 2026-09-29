@@ -1,3 +1,4 @@
+import { fixtureSpawn } from "./support/codex-process.js";
 import { expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -23,26 +24,15 @@ test("cancellation drains a preflight child that ignores graceful termination", 
   `,
   );
   const ready = Promise.withResolvers<void>();
-  const original = childProcess.spawn;
   let child: childProcess.ChildProcess | undefined;
-  const spawning = spyOn(childProcess, "spawn").mockImplementation(((
-    command,
-    args,
-    options,
-  ) => {
-    if (command !== executable)
-      throw new Error("Unexpected fixture executable");
-    const spawned = original(
-      process.execPath,
-      [script, ...(args as string[])],
-      options ?? {},
-    );
-    child = spawned;
-    spawned.stderr!.on("data", (bytes: Buffer) => {
-      if (bytes.toString().includes("ready")) ready.resolve();
-    });
-    return spawned;
-  }) as typeof childProcess.spawn);
+  const spawning = spyOn(childProcess, "spawn").mockImplementation(
+    fixtureSpawn(executable, script, (spawned) => {
+      child = spawned;
+      spawned.stderr!.on("data", (bytes: Buffer) => {
+        if (bytes.toString().includes("ready")) ready.resolve();
+      });
+    }),
+  );
   const controller = new AbortController();
   const codex = createPermissionCheckedCodex({
     codexPathOverride: executable,
@@ -95,30 +85,19 @@ test.each([false, true])(
       });
     `,
     );
-    const original = childProcess.spawn;
     let child: childProcess.ChildProcess | undefined;
     let descendantPid: number | undefined;
     let stderr = "";
-    const spawning = spyOn(childProcess, "spawn").mockImplementation(((
-      command,
-      args,
-      options,
-    ) => {
-      if (command !== executable)
-        throw new Error("Unexpected fixture executable");
-      const spawned = original(
-        process.execPath,
-        [script, ...(args as string[])],
-        options ?? {},
-      );
-      child = spawned;
-      spawned.stderr!.on("data", (bytes: Buffer) => {
-        stderr += bytes.toString();
-        const match = /descendant:(\d+)\n/u.exec(stderr);
-        if (match) descendantPid = Number(match[1]);
-      });
-      return spawned;
-    }) as typeof childProcess.spawn);
+    const spawning = spyOn(childProcess, "spawn").mockImplementation(
+      fixtureSpawn(executable, script, (spawned) => {
+        child = spawned;
+        spawned.stderr!.on("data", (bytes: Buffer) => {
+          stderr += bytes.toString();
+          const match = /descendant:(\d+)\n/u.exec(stderr);
+          if (match) descendantPid = Number(match[1]);
+        });
+      }),
+    );
     const codex = createPermissionCheckedCodex({
       codexPathOverride: executable,
       env: { PATH: process.env["PATH"] ?? "" },

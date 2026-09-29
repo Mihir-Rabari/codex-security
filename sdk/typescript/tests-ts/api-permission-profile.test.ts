@@ -1,3 +1,4 @@
+import { fixtureSpawn } from "./support/codex-process.js";
 import * as childProcess from "node:child_process";
 import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -36,6 +37,11 @@ async function fixture(
   const executable = join(root, "synthetic-codex.exe");
   const script = join(root, "synthetic-codex.cjs");
   const capture = join(root, "processes.jsonl");
+  const restore = async (path: string, contents: Uint8Array) => {
+    await mkdir(dirname(join(scanDir, path)), { recursive: true });
+    await writeFile(join(scanDir, path), contents);
+  };
+
   const scanId =
     role === "comparison" ? "scan_example_001" : "parent-permission-fixture";
   const threadId = "00000000-0000-4000-8000-000000000001";
@@ -227,9 +233,10 @@ async function fixture(
         async prepareDirectory(path) {
           await mkdir(join(scanDir, path), { recursive: true });
         },
-        async restore(path, contents) {
-          await mkdir(dirname(join(scanDir, path)), { recursive: true });
-          await writeFile(join(scanDir, path), contents);
+        restore,
+        async restoreMany(artifacts) {
+          for (const artifact of artifacts)
+            await restore(artifact.path, artifact.contents);
         },
         async remove(path) {
           await rm(join(scanDir, path), { force: true });
@@ -318,27 +325,25 @@ async function fixture(
     },
     { surface },
   );
-  const originalSpawn = childProcess.spawn;
   const children: childProcess.ChildProcess[] = [];
   const childSignals: { kind: string; signal: AbortSignal | undefined }[] = [];
-  const spawn = spyOn(childProcess, "spawn").mockImplementation(((
-    ...args: Parameters<typeof childProcess.spawn>
-  ) => {
-    const [command, argv, options] = args;
-    if (command !== executablePathForSpawn(executable) || !Array.isArray(argv))
-      return originalSpawn(...args);
-    const child = originalSpawn(process.execPath, [script, ...argv], options);
-    children.push(child);
-    childSignals.push({
-      kind: argv.includes("mcp")
-        ? "mcp"
-        : argv.includes("app-server")
-          ? "preflight"
-          : "exec",
-      signal: options?.signal,
-    });
-    return child;
-  }) as typeof childProcess.spawn);
+  const spawn = spyOn(childProcess, "spawn").mockImplementation(
+    fixtureSpawn(
+      executablePathForSpawn(executable),
+      script,
+      (child, argv, options) => {
+        children.push(child);
+        childSignals.push({
+          kind: argv.includes("mcp")
+            ? "mcp"
+            : argv.includes("app-server")
+              ? "preflight"
+              : "exec",
+          signal: options?.signal,
+        });
+      },
+    ),
+  );
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   const options: ScanOptions = {

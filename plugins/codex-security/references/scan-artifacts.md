@@ -34,9 +34,7 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
 
-Deep scans run ordinary SDK-owned Standard scans. Each child writes canonical findings and coverage, with optional scope and threat-model context, and the SDK validates and seals its completed results. Pending work and its evidence remain in child coverage. Saved ordinary scan records and the parent aggregate checkpoint support retries, cancellation, and continuation.
-
-The shared runner merges completed child findings and context while preserving their originals and coverage. It writes the parent scan's canonical `scan-manifest.json`, `findings.json`, and `coverage.json`, then finalizes them and generates `report.md` before reporting success. The caller does not submit another draft or call completion again. Unfinished children remain explicit partial coverage. See `scan-contract.md` for canonical field definitions.
+Deep child artifacts use the ordinary canonical JSON paths. The parent stores `scan-manifest.json`, `findings.json`, `coverage.json`, and the generated `report.md`; child evidence and unfinished coverage remain available. Follow the [Deep Scan lifecycle](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans) for retries, cancellation, and completion ownership, and [scan-contract.md](scan-contract.md) for field definitions.
 
 - A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.

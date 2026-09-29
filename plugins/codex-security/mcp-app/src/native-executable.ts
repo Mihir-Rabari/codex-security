@@ -65,8 +65,10 @@ export function resolveCodexPath(
   architecture: NodeJS.Architecture = process.arch,
   originalCwd: string = process.cwd(),
 ): string {
-  return codexPathCandidates(env, platform, architecture, originalCwd).next()
-    .value!;
+  return (
+    codexPathCandidates(env, platform, architecture, originalCwd).next()
+      .value ?? "codex"
+  );
 }
 
 function* codexPathCandidates(
@@ -88,6 +90,7 @@ function* codexPathCandidates(
         architecture,
         originalCwd,
       );
+      return;
     }
     yield isBareCommandName(configured)
       ? configured
@@ -118,8 +121,6 @@ function* codexPathCandidates(
     architecture,
     originalCwd,
   );
-
-  yield "codex";
 }
 
 function searchPathForPlatform(

@@ -13,6 +13,20 @@ const sdkRequire = createRequire(
 );
 const maxChunkBytes = 140_000;
 
+export const mcpBundleOptions = {
+  bundle: true,
+  banner: {
+    js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
+  },
+  define: { "import.meta.url": "__codexSecurityModuleUrl" },
+  external: ["fsevents"],
+  format: "cjs",
+  loader: { ".md": "text" },
+  logOverride: { "empty-import-meta": "silent" },
+  platform: "node",
+  target: "node20",
+};
+
 export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
     throw new Error("Native packaging must be universal or host.");
@@ -70,24 +84,14 @@ export async function buildMcpApp({ output, native = "universal" }) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     try {
       await build({
-        bundle: true,
-        banner: {
-          js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
-        },
-        define: { "import.meta.url": "__codexSecurityModuleUrl" },
+        ...mcpBundleOptions,
         entryPoints: [join(root, entryPoint)],
         inject:
           name === "server"
             ? [sdkRequire.resolve("pdfjs-dist/legacy/build/pdf.worker.mjs")]
             : [],
-        external: ["fsevents"],
-        format: "cjs",
-        loader: { ".md": "text" },
         logLevel: "info",
-        logOverride: { "empty-import-meta": "silent" },
         outfile: bundle,
-        platform: "node",
-        target: "node20",
       });
       const runtime = brotliCompressSync(await readFile(bundle), {
         params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 10 },

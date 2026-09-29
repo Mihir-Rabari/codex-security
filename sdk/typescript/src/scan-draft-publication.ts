@@ -80,7 +80,11 @@ export async function writePreparedScanDraft(
         try {
           await options.writer.remove(path);
         } catch (error) {
-          options.onCleanupError(error);
+          try {
+            options.onCleanupError(error);
+          } catch {
+            /* Publication owns the outcome. */
+          }
         }
       }),
     );

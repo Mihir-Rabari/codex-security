@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { build } from "esbuild";
+import { mcpBundleOptions } from "../scripts/build_mcp_app.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -33,18 +34,12 @@ try {
   await mkdir(repository);
   await writeFile(path.join(repository, "example.py"), "value = 1\n");
   await build({
-    bundle: true,
-    banner: {
-      js: "const __codexSecurityModuleUrl = require('node:url').pathToFileURL(__filename).href;",
-    },
+    ...mcpBundleOptions,
     define: {
+      ...mcpBundleOptions.define,
       __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__codexSecurityModuleUrl",
     },
     entryPoints: [path.join(applicationRoot, "main.ts")],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
     logLevel: "silent",
     outfile: bundle,
     platform: "node",
