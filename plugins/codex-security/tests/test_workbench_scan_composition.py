@@ -1078,20 +1078,40 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     assert completed["executionThreadIds"] == completed["threadIds"]
 
 
-def test_get_scan_loads_one_composition_view(tmp_path: Path, workbench_api, monkeypatch) -> None:
+@pytest.mark.parametrize("legacy_reviews", [0, 3])
+@pytest.mark.parametrize("with_child", [False, True])
+def test_get_scan_counts_saved_reviews_without_reading_composition_checkpoint(
+    tmp_path: Path, workbench_api, monkeypatch, legacy_reviews: int, with_child: bool
+) -> None:
     target = tmp_path / "target"
     target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
     state = tmp_path / "state"
     parent = register(state, target, tmp_path / "parent", mode="deep")
-    child = register(
-        state,
-        target,
-        tmp_path / "parent/artifacts/deep-scan/passes/pass-1",
-        parent=parent["scanId"],
-        role="deep_pass",
-    )
+    if with_child:
+        child = register(
+            state,
+            target,
+            tmp_path / "parent/artifacts/deep-scan/passes/pass-1",
+            parent=parent["scanId"],
+            role="deep_pass",
+        )
+        write_completed_contract(
+            Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
+        )
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
     value = checkpoint(state, parent, passes=[{"directory": "artifacts/deep-scan/passes/pass-1"}])
-    value["legacy"] = {"discoveryRuns": 1, "coverage": {"completeness": "partial"}}
+    if legacy_reviews:
+        value["legacy"] = {"discoveryRuns": legacy_reviews, "coverage": {"completeness": "partial"}}
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, "
+                "phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
+                "completion_sequence, created_at, updated_at) "
+                "SELECT id, 1, 'synthetic-legacy', 'succeeded', 'terminal', 1, 0, 3, 8, ?, "
+                "started_at, updated_at FROM scans WHERE id = ?",
+                (legacy_reviews, parent["scanId"]),
+            )
     path = Path(parent["scanDir"]) / CHECKPOINT
     path.write_text(json.dumps(value))
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
@@ -1101,11 +1121,16 @@ def test_get_scan_loads_one_composition_view(tmp_path: Path, workbench_api, monk
         with workbench_api["connect"]() as connection:
             context = workbench_api["scan_context"](connection, parent["scanId"])
         load.__globals__["read_composition_checkpoint"].assert_not_called()
-    assert context["scan"]["progress"]["independentReviews"]["active"] == 1
+    assert context["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": legacy_reviews + int(with_child),
+        "maximum": 8,
+        "consolidating": False,
+    }
     assert "compositionCheckpoint" not in context
     assert json.loads(path.read_text()) == value
-    assert child["scanId"] not in {
-        scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]
+    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
+        parent["scanId"]
     }
 
 

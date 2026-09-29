@@ -9237,7 +9237,10 @@ async function readDeepScanStop(
     { deepScan?: Required<DeepScanOptions> } | undefined;
   if (recipe?.deepScan === undefined) return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = recipe.deepScan;
-  if (state.passes.length >= maxDiscoveryRuns) {
+  if (
+    state.passes.length + (state.legacy?.discoveryRuns ?? 0) >=
+    maxDiscoveryRuns
+  ) {
     const stillFindingIssues =
       state.mergedScanIds.length > 0 && state.noNewStreak === 0;
     return {

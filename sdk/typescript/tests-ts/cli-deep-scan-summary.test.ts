@@ -43,6 +43,16 @@ describe("deep scan completion summary", () => {
       "--max-discovery-runs greater than 40",
     ],
     [
+      "saved reviews before current passes",
+      {
+        legacy: { discoveryRuns: 3, coverage: { completeness: "complete" } },
+        passes: [{}],
+        config: { maxDiscoveryRuns: 4, maxTimeHours: 96 },
+      },
+      "4 review rounds. The latest review still found new issues",
+      "--max-discovery-runs greater than 4",
+    ],
+    [
       "quiet round",
       { noNewStreak: 1 },
       "More issues may remain",
