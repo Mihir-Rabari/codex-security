@@ -327,9 +327,12 @@ export async function runDeepScans(
     }
     for (const [directory, cost] of costs) reportPassCost(directory, cost);
     let recoveredSuccess = false;
+    let recoveredFailure = false;
     for (const { record, pass } of passes) {
-      if (recoverOutcomes && record.progress.status === "failed")
+      if (recoverOutcomes && record.progress.status === "failed") {
+        recoveredFailure ||= !pass.failed;
         observePassFailure(state, pass, recoveredSuccess);
+      }
       if (
         record.progress.status === "complete" &&
         !completed.has(record.scanId)
@@ -342,7 +345,7 @@ export async function runDeepScans(
           recoveredSuccess = observePassCompletion(
             state,
             pass,
-            recoveredSuccess,
+            recoveredSuccess || recoveredFailure,
           );
         else pass.completed = true;
       }

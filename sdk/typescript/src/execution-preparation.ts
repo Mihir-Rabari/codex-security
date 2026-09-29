@@ -531,11 +531,26 @@ export async function nativeScanConfiguration(
   return config;
 }
 
+function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
+  const config = structuredClone(sessionConfig);
+  config["mcp_servers"] = {
+    ...(isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {}),
+    // The SDK owns scan artifacts and lifecycle; workers use canonical files.
+    // A disabled server still needs a transport during plugin resolution.
+    "codex-security": { command: "node", enabled: false },
+  };
+  return config;
+}
+
 /** A Standard pass preserves the caller's write and network policy. */
 export function prepareDiscoveryExecution(
   session: PreparedExecution,
 ): PreparedExecution {
-  return { ...session, policy: "discovery" };
+  return {
+    ...session,
+    policy: "discovery",
+    sessionConfig: deepWorkerConfig(session.sessionConfig),
+  };
 }
 
 /** The merge uses the same inherited policy while applying its subagent budget. */
@@ -543,13 +558,7 @@ export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,
 ): PreparedExecution {
-  const config = structuredClone(session.sessionConfig);
-  config["mcp_servers"] = {
-    ...(isRecord(config["mcp_servers"]) ? config["mcp_servers"] : {}),
-    // The host owns parent artifacts and lifecycle. A disabled server still
-    // needs a valid transport while Codex resolves plugin configuration.
-    "codex-security": { command: "node", enabled: false },
-  };
+  const config = deepWorkerConfig(session.sessionConfig);
   const features = isRecord(config["features"]) ? config["features"] : {};
   config["features"] = {
     ...features,

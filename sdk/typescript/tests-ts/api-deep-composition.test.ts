@@ -1628,12 +1628,10 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         const servers = (turn.config as JsonObject | undefined)?.[
           "mcp_servers"
         ] as JsonObject | undefined;
-        if (turn.mode === "deep")
-          expect(servers?.["codex-security"]).toEqual({
-            command: "node",
-            enabled: false,
-          });
-        else expect(servers?.["codex-security"]).toBeUndefined();
+        expect(servers?.["codex-security"]).toEqual({
+          command: "node",
+          enabled: false,
+        });
         if (prepareNative)
           expect(servers?.["synthetic"]).toEqual(
             nativeSettings.mcp_servers.synthetic,

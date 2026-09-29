@@ -424,10 +424,7 @@ test.each(["sdk", "cli"] as const)(
             if (executions.length) {
               expect(executions[0].args.includes("resume")).toBe(resumed);
               expect(executions[0].mcpServers).toEqual({
-                "codex-security":
-                  role === "merge"
-                    ? { command: "node", enabled: false }
-                    : { command: "synthetic-workbench", enabled: true },
+                "codex-security": { command: "node", enabled: false },
                 synthetic: {
                   command: "synthetic-mcp",
                   env: { SETTING: "inherited" },
@@ -482,6 +479,16 @@ test.each(["standard", "custom"] as const)(
       expect(observations.filter(({ kind }) => kind === "exec")).toHaveLength(
         role === "standard" ? 1 : 0,
       );
+      if (role === "standard")
+        expect(
+          observations.find(({ kind }) => kind === "exec").mcpServers,
+        ).toEqual({
+          "codex-security": { command: "synthetic-workbench", enabled: true },
+          synthetic: {
+            command: "synthetic-mcp",
+            env: { SETTING: "inherited" },
+          },
+        });
       expect(h.customCalls()).toBe(role === "custom" ? 1 : 0);
     } finally {
       await h.close();

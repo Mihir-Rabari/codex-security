@@ -1505,19 +1505,21 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test.each(
-    [2, 3].flatMap((limit) =>
+  test.each([
+    ...[2, 3].flatMap((limit) =>
       [false, true].flatMap((successLast) =>
         [false, true].map((failureSaved) => ({
           limit,
           successLast,
           failureSaved,
+          successSaved: false,
         })),
       ),
     ),
-  )(
+    { limit: 1, successLast: true, failureSaved: false, successSaved: true },
+  ])(
     "recovers terminal outcomes in completion order across repeated resumes (%j)",
-    async ({ limit, successLast, failureSaved }) => {
+    async ({ limit, successLast, failureSaved, successSaved }) => {
       const h = await harness({
         maxDiscoveryRuns: 3,
         stopAfterConsecutiveErrors: limit,
@@ -1561,7 +1563,11 @@ describe("ordinary scan composition", () => {
         startedAt: h.input.startedAt,
         passes: [
           { directory: "artifacts/deep-scan/passes/pass-1", failed: true },
-          { directory, scanId },
+          {
+            directory,
+            scanId,
+            ...(successSaved ? { completed: true as const } : {}),
+          },
           {
             directory: "artifacts/deep-scan/passes/pass-3",
             scanId: failedId,
@@ -1571,14 +1577,15 @@ describe("ordinary scan composition", () => {
         mergedScanIds: [],
         aggregate: null,
         noNewStreak: 0,
-        consecutiveErrors: failureSaved ? 2 : 1,
+        consecutiveErrors: successSaved ? 0 : failureSaved ? 2 : 1,
       });
       const workbench = h.input.workbench;
       h.input.workbench = async (args, contents) => {
         const result = await workbench(args, contents);
         if (
           args[0] === "save-scan-artifact" &&
-          JSON.parse(contents!).passes[1].completed
+          JSON.parse(contents!).passes[1].completed &&
+          JSON.parse(contents!).passes[2].failed
         )
           throw new ScanTransportClosedError(
             "Synthetic interruption after recovery",
@@ -1594,8 +1601,54 @@ describe("ordinary scan composition", () => {
         consecutiveErrors: successLast ? 0 : 1,
       });
       expect(h.calls).toEqual([]);
+      expect(h.mergeInputs).toEqual([1]);
+      expect(h.published[0]!.findings).toHaveLength(
+        exampleFindings.findings.length,
+      );
     },
   );
+
+  test("does not recount a saved failure after recovering an earlier failure", async () => {
+    const h = await harness({
+      maxDiscoveryRuns: 2,
+      stopAfterConsecutiveErrors: 3,
+    });
+    const passes = [1, 2].map((number) => ({
+      directory: `artifacts/deep-scan/passes/pass-${number}`,
+      scanId: randomUUID(),
+      ...(number === 2 ? { failed: true as const } : {}),
+    }));
+    for (const [index, pass] of passes.entries())
+      h.records.set(pass.scanId, {
+        scanId: pass.scanId,
+        scanDir: join(h.input.scanDir, pass.directory),
+        parentScanId: h.input.scanId,
+        targetPath: h.input.repository,
+        progress: { status: "failed" },
+        completedAt: `2026-01-01T00:00:0${index + 1}Z`,
+      });
+    await h.seed({
+      version: 2,
+      startedAt: h.input.startedAt,
+      passes,
+      mergedScanIds: [],
+      aggregate: null,
+      noNewStreak: 0,
+      consecutiveErrors: 1,
+    });
+
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      "every discovery run failed",
+    );
+    expect(await h.checkpoint()).toMatchObject({
+      terminalReason: "failed",
+      consecutiveErrors: 2,
+      passes: passes.map((pass) => ({ ...pass, failed: true })),
+    });
+    expect(h.calls).toEqual([]);
+    expect(h.mergeInputs).toEqual([]);
+    expect(h.published).toEqual([]);
+  });
 
   test.each(["none", "cancel", "cost"] as const)(
     "keeps the consecutive error limit when a sibling finishes after it (late stop: %s)",
