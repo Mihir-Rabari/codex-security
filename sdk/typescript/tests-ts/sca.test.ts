@@ -33,6 +33,14 @@ function scanner(outputDir: string, matched = true): OsvScanResult {
       name: "osv-scanner",
       version: "2.6.0",
       argv: [],
+      invocations: [
+        {
+          argv: ["scan", "source", "--", "package-lock.json"],
+          exitCode: matched ? 1 : 0,
+          rawOutputPath: join(outputDir, "osv-output.json"),
+          stderrPath: join(outputDir, "osv-stderr.log"),
+        },
+      ],
       startedAt: "2026-01-01T00:00:00Z",
       completedAt: "2026-01-01T00:00:01Z",
       exitCode: matched ? 1 : 0,

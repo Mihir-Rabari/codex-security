@@ -60,7 +60,7 @@ flowchart LR
 
 **OSV integration.** v2.6.0 is the initial compatibility target, not a reason to reject every other release with a compatible documented contract. Test the pinned binary and record the version used. [Release](https://github.com/google/osv-scanner/releases/tag/v2.6.0), [compatibility policy](https://google.github.io/osv-scanner/installation/#semver-adherence)
 
-The adapter's intended argument vector is:
+The adapter runs one selected lockfile at a time with this argument vector:
 
 ```text
 osv-scanner
@@ -69,9 +69,11 @@ scan source
 --all-packages
 --no-call-analysis=all
 --no-resolve
---lockfile=:/absolute/path/package-lock.json
---lockfile=:/absolute/path/pnpm-lock.yaml
+--
+/absolute/path/package-lock.json
 ```
+
+Positional file paths after `--` preserve literal commas. Sequential invocations avoid aggregate Windows command-line limits and make exclusion diagnostics attributable to a single lockfile. This MVP trades additional process and request overhead for straightforward source accounting. The scanner version is queried once; each invocation records its arguments, exit code, and verbatim output files. For multiple inputs, `scanner.rawOutputPath` contains aggregated source records and `scanner.argv` retains the first invocation; `scanner.invocations` records every actual call.
 
 These are arguments to the existing upstream executable, not new Codex Security flags. Use explicit input files and platform-aware paths. `--all-packages` includes packages without reported matches; `--no-resolve` avoids manifest resolution while preserving resolved transitives already in lockfiles; call analysis is separate from this MVP's matching stage. The pinned-binary contract harness verifies these arguments against synthetic offline inputs. [Pinned flag definitions](https://github.com/google/osv-scanner/blob/v2.6.0/cmd/osv-scanner/internal/helper/flags.go), [source scanning](https://github.com/google/osv-scanner/blob/v2.6.0/docs/scan-source.md)
 

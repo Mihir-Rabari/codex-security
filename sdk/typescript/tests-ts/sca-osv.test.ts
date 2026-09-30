@@ -252,15 +252,30 @@ describe("SCA input selection", () => {
   test.each([0, 130])(
     "retains all lockfile evidence after malformed nested configuration with exit %d",
     async (exitCode) => {
-      const raw = rawOutput("package-lock.json", [advisory("A")]);
-      raw.results.push(
-        ...rawOutput("nested/package-lock.json", [advisory("A")]).results,
-      );
-      const result = await scanFixture(
-        { stdout: JSON.stringify(raw), stderr: "", exitCode },
+      const { repository, output } = await setup();
+      await mkdir(join(repository, "nested"));
+      await Promise.all([
+        writeFile(join(repository, "package-lock.json"), npmLock()),
+        writeFile(join(repository, "nested", "package-lock.json"), npmLock()),
+        writeFile(
+          join(repository, "nested", "osv-scanner.toml"),
+          "IgnoredVulns = [",
+        ),
+      ]);
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
         {
-          "nested/package-lock.json": npmLock(),
-          "nested/osv-scanner.toml": "IgnoredVulns = [",
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+              : {
+                  stdout: JSON.stringify(
+                    rawOutput(argv.at(-1)!, [advisory("A")]),
+                  ),
+                  stderr: "",
+                  exitCode,
+                },
         },
       );
       expect(result.status).toBe("partial");
@@ -277,9 +292,15 @@ describe("SCA input selection", () => {
           ),
         ),
       ).toBe(true);
-      expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
-        JSON.stringify(raw),
-      );
+      expect(
+        JSON.parse(await readFile(result.scanner.rawOutputPath, "utf8"))
+          .results,
+      ).toHaveLength(2);
+      expect(result.scanner.invocations).toHaveLength(2);
+      for (const invocation of result.scanner.invocations!)
+        expect(await readFile(invocation.rawOutputPath, "utf8")).toBe(
+          JSON.stringify(rawOutput(invocation.argv.at(-1)!, [advisory("A")])),
+        );
     },
   );
   test.each(["packageoverrides", "PACKAGEOVERRIDES"])(
@@ -904,7 +925,8 @@ snapshots:
       "--all-packages",
       "--no-call-analysis=all",
       "--no-resolve",
-      `--lockfile=:${join(repository, "npm-shrinkwrap.json")}`,
+      "--",
+      join(repository, "npm-shrinkwrap.json"),
     ]);
     expect(calls[1]?.options.environment["SCA_SYNTHETIC_SETTING"]).toBe("one");
     expect(calls[1]?.options.environment["HTTPS_PROXY"]).toBe(

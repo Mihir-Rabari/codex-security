@@ -182,9 +182,11 @@ function npmLocalReferences(
 function uncountedLocalReferences(
   references: DependencyLocalReference[],
   components: ScaComponent[],
+  stderr = "",
 ): number {
   return references.filter(
     (reference) =>
+      !excludedLocalReference(reference, components, stderr) &&
       !components.some(
         (component) =>
           component.sourcePath === reference.sourcePath &&
@@ -198,6 +200,39 @@ function uncountedLocalReferences(
               reference.version.startsWith(`${component.version}(`))),
       ),
   ).length;
+}
+
+/** The scanner receipt already reflects config matching, groups, regexes, and expiry. */
+function excludedLocalReference(
+  reference: DependencyLocalReference,
+  components: ScaComponent[],
+  stderr: string,
+): boolean {
+  const referenceVersion = reference.version;
+  if (
+    referenceVersion === null ||
+    components.some(
+      (component) =>
+        component.sourcePath === reference.sourcePath &&
+        component.name === reference.name &&
+        component.version !== null &&
+        (component.version === referenceVersion ||
+          referenceVersion.startsWith(`${component.version}(`)),
+    )
+  )
+    return false;
+  const prefix = `Package npm/${reference.name}/`;
+  return stderr.split(/\r?\n/u).some((line) => {
+    if (!line.startsWith(prefix)) return false;
+    const end = line.indexOf(" has been filtered out because:", prefix.length);
+    if (end === -1) return false;
+    const version = line.slice(prefix.length, end);
+    return (
+      version !== "" &&
+      (referenceVersion === version ||
+        referenceVersion.startsWith(`${version}(`))
+    );
+  });
 }
 
 function caseInsensitiveField(
@@ -753,6 +788,7 @@ export async function runOsvScan(
     name: "osv-scanner",
     version: null,
     argv: [],
+    invocations: [],
     startedAt: now(),
     completedAt: "",
     exitCode: null,
@@ -782,9 +818,67 @@ export async function runOsvScan(
   ]);
   const environment = { ...(options.environment ?? process.env) };
   let localReferences: DependencyLocalReference[] = [];
+  let repository = options.repositoryPath;
+  let selected: ScaInput[] = [];
+  let pending: {
+    input: ScaInput;
+    invocation: NonNullable<ScaScanner["invocations"]>[number];
+  } | null = null;
+  const reconciledSources = new Set<string>();
+  const rawSources: unknown[] = [];
+  const stderrOutputs: string[] = [];
+  const emptyOutputPaths = new Set<string>();
+  let unresolvedPackages = 0;
+  const consumeOutput = (stdout: string, stderr: string, input: ScaInput) => {
+    const raw: unknown = JSON.parse(stdout);
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: repository,
+      inputs: [input],
+    });
+    result.components.push(...normalized.components);
+    result.matches.push(...normalized.matches);
+    result.diagnostics.push(...normalized.diagnostics);
+    unresolvedPackages +=
+      normalized.unresolvedPackages +
+      uncountedLocalReferences(
+        localReferences.filter(
+          (reference) => reference.sourcePath === input.path,
+        ),
+        normalized.components,
+        stderr,
+      );
+    reconciledSources.add(input.path);
+    result.coverage.unresolvedPackages =
+      unresolvedPackages +
+      localReferences.filter(
+        (reference) => !reconciledSources.has(reference.sourcePath),
+      ).length;
+    const sources =
+      record(raw) && Array.isArray(raw["results"]) ? raw["results"] : [];
+    rawSources.push(...sources);
+    return new Set(
+      sources.flatMap((entry) =>
+        record(entry) &&
+        record(entry["source"]) &&
+        typeof entry["source"]["path"] === "string"
+          ? [sourceRelativePath(repository, entry["source"]["path"])]
+          : [],
+      ),
+    );
+  };
+  const persistAggregate = async () => {
+    if (selected.length <= 1) return;
+    await Promise.all([
+      writeFile(
+        scanner.rawOutputPath,
+        JSON.stringify({ results: rawSources }, null, 2) + "\n",
+      ),
+      writeFile(scanner.stderrPath, stderrOutputs.join("\n")),
+    ]);
+  };
   try {
     options.signal?.throwIfAborted();
-    const repository = await normalizeRepository(
+    repository = await normalizeRepository(
       options.repositoryPath,
       options.signal,
     );
@@ -799,7 +893,7 @@ export async function runOsvScan(
     Object.assign(result.coverage, discovered);
     result.coverage.unresolvedPackages = localReferences.length;
     result.diagnostics.push(...diagnostics);
-    const selected = result.coverage.inputs.filter(
+    selected = result.coverage.inputs.filter(
       (input) => input.status === "scanned",
     );
     if (selected.length === 0) {
@@ -834,96 +928,141 @@ export async function runOsvScan(
         `OSV version check failed with exit code ${version.exitCode}: ${version.stderr}`,
       );
     scanner.version = version.stdout.trim() || null;
-    scanner.argv = [
-      "scan",
-      "source",
-      "--format=json",
-      "--all-packages",
-      "--no-call-analysis=all",
-      "--no-resolve",
-      ...selected.map((input) => `--lockfile=:${join(repository, input.path)}`),
-    ];
-    const output = await run(executable.executable, scanner.argv, {
-      ...processOptions,
-      stdoutPath: scanner.rawOutputPath,
-      stderrPath: scanner.stderrPath,
-    });
-    scanner.exitCode = output.exitCode;
-    await Promise.all([
-      writeFile(scanner.rawOutputPath, output.stdout),
-      writeFile(scanner.stderrPath, output.stderr),
-    ]);
-    result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
-    if (output.stdout.trim() !== "") {
-      const raw: unknown = JSON.parse(output.stdout);
-      const normalized = normalizeOsvOutput(raw, {
-        repositoryPath: repository,
-        inputs: selected,
+    for (const [index, input] of selected.entries()) {
+      options.signal?.throwIfAborted();
+      // Positional files remain literal; OSV's --lockfile StringSliceFlag splits commas.
+      // One file per process also avoids aggregate Windows command-line limits and
+      // attributes OSV package-exclusion receipts to exactly one source.
+      const invocation = {
+        argv: [
+          "scan",
+          "source",
+          "--format=json",
+          "--all-packages",
+          "--no-call-analysis=all",
+          "--no-resolve",
+          "--",
+          join(repository, input.path),
+        ],
+        exitCode: null as number | null,
+        rawOutputPath:
+          selected.length === 1
+            ? scanner.rawOutputPath
+            : join(options.outputDir, `osv-invocation-${index + 1}.json`),
+        stderrPath:
+          selected.length === 1
+            ? scanner.stderrPath
+            : join(options.outputDir, `osv-invocation-${index + 1}.stderr.log`),
+      };
+      await Promise.all([
+        writeFile(invocation.rawOutputPath, ""),
+        writeFile(invocation.stderrPath, ""),
+      ]);
+      scanner.invocations!.push(invocation);
+      if (index === 0) scanner.argv = invocation.argv;
+      pending = { input, invocation };
+      const output = await run(executable.executable, invocation.argv, {
+        ...processOptions,
+        stdoutPath: invocation.rawOutputPath,
+        stderrPath: invocation.stderrPath,
       });
-      const sources = new Set(
-        record(raw) && Array.isArray(raw["results"])
-          ? raw["results"].flatMap((entry) =>
-              record(entry) &&
-              record(entry["source"]) &&
-              typeof entry["source"]["path"] === "string"
-                ? [sourceRelativePath(repository, entry["source"]["path"])]
-                : [],
-            )
-          : [],
-      );
-      for (const input of selected) {
-        if (sources.has(input.path)) continue;
-        if (
-          output.stderr.includes(
-            `Scanned ${join(repository, input.path)} file and found 0 package`,
-          )
-        ) {
-          input.reason = "OSV extracted no packages from this lockfile.";
-        } else if (packageExclusionSources.includes(input.path)) {
-          input.reason =
-            "OSV returned no package tuples after applying configured package exclusions; suppressed counts are unavailable.";
-        } else {
-          input.status = "failed";
-          input.reason =
-            "The selected lockfile is absent from OSV output without evidence of an empty or excluded inventory.";
-          result.diagnostics.push(`${input.path}: ${input.reason}`);
-        }
+      invocation.exitCode = output.exitCode;
+      const emptyInput =
+        output.exitCode === 128 &&
+        output.stderr.includes(
+          `Scanned ${join(repository, input.path)} file and found 0 package`,
+        );
+      if (emptyInput) {
+        emptyOutputPaths.add(invocation.rawOutputPath);
+        input.reason = "OSV extracted no packages from this lockfile.";
       }
-      result.components = normalized.components;
-      result.matches = normalized.matches;
-      result.coverage.unresolvedPackages =
-        normalized.unresolvedPackages +
-        uncountedLocalReferences(localReferences, normalized.components);
-      result.diagnostics.push(...normalized.diagnostics);
-    } else if (output.exitCode !== 128)
-      result.diagnostics.push("OSV returned no JSON output.");
+      const effectiveCodes = scanner
+        .invocations!.filter(
+          (call) => !emptyOutputPaths.has(call.rawOutputPath),
+        )
+        .map((call) => call.exitCode);
+      const errorCode = effectiveCodes.find((code) => code !== 0 && code !== 1);
+      scanner.exitCode =
+        errorCode !== undefined
+          ? errorCode
+          : effectiveCodes.length === 0
+            ? 128
+            : effectiveCodes.includes(1)
+              ? 1
+              : 0;
+      await Promise.all([
+        writeFile(invocation.rawOutputPath, output.stdout),
+        writeFile(invocation.stderrPath, output.stderr),
+      ]);
+      stderrOutputs.push(output.stderr);
+      const diagnosticStart = result.diagnostics.length;
+      result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
+      const matchCount = result.matches.length;
+      if (output.stdout.trim() !== "") {
+        const sources = consumeOutput(output.stdout, output.stderr, input);
+        if (!sources.has(input.path)) {
+          if (
+            output.stderr.includes(
+              `Scanned ${join(repository, input.path)} file and found 0 package`,
+            )
+          ) {
+            input.reason = "OSV extracted no packages from this lockfile.";
+          } else if (packageExclusionSources.includes(input.path)) {
+            input.reason =
+              "OSV returned no package tuples after applying configured package exclusions; suppressed counts are unavailable.";
+          } else {
+            input.status = "failed";
+            input.reason =
+              "The selected lockfile is absent from OSV output without evidence of an empty or excluded inventory.";
+            result.diagnostics.push(`${input.path}: ${input.reason}`);
+          }
+        }
+      } else if (output.exitCode !== 128)
+        result.diagnostics.push("OSV returned no JSON output.");
+      pending = null;
+      await persistAggregate();
+      if (output.exitCode === 128 && !emptyInput)
+        result.diagnostics.push(
+          `${input.path}: OSV found no packages in the selected effective input; this is not a clean-repository result.`,
+        );
+      else if (output.exitCode !== 0 && output.exitCode !== 1 && !emptyInput)
+        result.diagnostics.push(
+          `${input.path}: OSV exited with code ${output.exitCode}. See ${invocation.stderrPath}.`,
+        );
+      if (output.exitCode === 1 && result.matches.length === matchCount)
+        result.diagnostics.push(
+          `${input.path}: OSV reported findings but no advisory matches could be normalized.`,
+        );
+      if (result.diagnostics.length > diagnosticStart) {
+        input.status = "failed";
+        input.reason =
+          "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
+      }
+    }
     try {
       const current = await discoverScaInputs(
         repository,
         environment,
         options.signal,
       );
-      if (inputProvenance(current) !== capturedProvenance)
+      if (inputProvenance(current) !== capturedProvenance) {
         result.diagnostics.push(
           "Dependency inputs or OSV configuration changed while matching; recorded digests describe discovery. Rerun against stable inputs.",
         );
+        for (const input of selected) {
+          input.status = "failed";
+          input.reason = "Dependency input provenance changed during matching.";
+        }
+      }
     } catch (error) {
       options.signal?.throwIfAborted();
       result.diagnostics.push(
         `Unable to verify dependency input provenance after matching: ${errorMessage(error)}`,
       );
     }
-    if (output.exitCode === 128)
+    if (scanner.exitCode === 128)
       result.diagnostics.push(
-        "OSV found no packages in the selected effective inputs; this is not a clean-repository result.",
-      );
-    else if (output.exitCode !== 0 && output.exitCode !== 1)
-      result.diagnostics.push(
-        `OSV exited with code ${output.exitCode}. See ${scanner.stderrPath}.`,
-      );
-    if (output.exitCode === 1 && result.matches.length === 0)
-      result.diagnostics.push(
-        "OSV reported findings but no advisory matches could be normalized.",
+        "OSV found no packages in any selected effective input; this is not a clean-repository result.",
       );
     if (result.coverage.unresolvedPackages > 0)
       result.coverage.limitations.push(
@@ -942,40 +1081,34 @@ export async function runOsvScan(
       : "completed";
     result.coverage.status =
       result.status === "completed" ? "complete" : result.status;
-    if (result.diagnostics.length > 0)
-      for (const input of selected) {
-        input.status = "failed";
-        input.reason =
-          "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
-      }
     return result;
   } catch (error) {
-    // Cancellation can occur after the complete scanner JSON reached disk.
-    // Preserve those facts even when the process promise rejects.
-    if (options.signal?.aborted && result.components.length === 0) {
-      const retained = await readFile(scanner.rawOutputPath, "utf8");
-      if (retained.trim()) {
+    // A later process may fail or be cancelled after writing valid JSON. Preserve
+    // those facts alongside every earlier invocation rather than overwriting them.
+    if (pending !== null) {
+      const retained = await readFile(pending.invocation.rawOutputPath, "utf8");
+      const stderr = await readFile(pending.invocation.stderrPath, "utf8");
+      if (!reconciledSources.has(pending.input.path) && retained.trim()) {
         try {
-          const normalized = normalizeOsvOutput(JSON.parse(retained), {
-            repositoryPath: options.repositoryPath,
-            inputs: result.coverage.inputs,
-          });
-          result.components = normalized.components;
-          result.matches = normalized.matches;
-          result.coverage.unresolvedPackages =
-            normalized.unresolvedPackages +
-            uncountedLocalReferences(localReferences, normalized.components);
-          result.diagnostics.push(...normalized.diagnostics);
+          consumeOutput(retained, stderr, pending.input);
         } catch {
-          // A truncated stream remains available as raw evidence, never a clean result.
+          // Truncated output remains available in this invocation's raw artifact.
         }
       }
+      if (pending.invocation.exitCode === null) {
+        scanner.exitCode = null;
+        stderrOutputs.push(stderr);
+      }
     }
+    await persistAggregate();
     result.diagnostics.push(errorMessage(error));
     result.status = result.components.length > 0 ? "partial" : "failed";
     result.coverage.status = result.status;
     for (const input of result.coverage.inputs)
-      if (input.status === "scanned") {
+      if (
+        input.status === "scanned" &&
+        (!reconciledSources.has(input.path) || pending?.input === input)
+      ) {
         input.status = "failed";
         input.reason = errorMessage(error);
       }
@@ -985,6 +1118,8 @@ export async function runOsvScan(
       });
     return result;
   } finally {
+    result.components.sort((a, b) => a.id.localeCompare(b.id));
+    result.matches.sort((a, b) => a.id.localeCompare(b.id));
     scanner.completedAt = now();
   }
 }

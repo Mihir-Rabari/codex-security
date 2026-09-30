@@ -13,8 +13,8 @@ Implementation and isolated PR checks completed on Linux on September 30, 2026:
 
 | Check                          | Observed result                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 121 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
-| Actual OSV-Scanner v2.6.0      | 25 offline synthetic contract cases passed under Node 24; 24 under Bun 1.3.14.                                     |
+| Focused SDK regressions        | 136 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
+| Actual OSV-Scanner v2.6.0      | 37 offline synthetic contract cases passed under Node 24; 36 under Bun 1.3.14.                                     |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                         |
@@ -55,7 +55,7 @@ separately. The deterministic suites need no model or network:
 ```sh
 pnpm --dir sdk/typescript run build:plugin
 cd sdk/typescript
-bun test --timeout 30000 tests-ts/sca.test.ts tests-ts/sca-osv.test.ts tests-ts/sca-report.test.ts tests-ts/sca-triage.test.ts
+bun test --timeout 30000 tests-ts/sca.test.ts tests-ts/sca-*.test.ts
 bun scripts/check-sca-osv-contract.mts /path/to/osv-scanner
 cd ../..
 node --test evals/triage-finding/sca/scripts/test-sca.js

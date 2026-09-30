@@ -93,6 +93,32 @@
         },
         "advisorySnapshotId": {
           "type": ["string", "null"]
+        },
+        "invocations": {
+          "type": "array",
+          "description": "Actual sequential OSV calls. argv retains the first call for compatibility; rawOutputPath aggregates source records when there is more than one invocation.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["argv", "exitCode", "rawOutputPath", "stderrPath"],
+            "properties": {
+              "argv": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exitCode": {
+                "type": ["integer", "null"]
+              },
+              "rawOutputPath": {
+                "type": "string"
+              },
+              "stderrPath": {
+                "type": "string"
+              }
+            }
+          }
         }
       },
       "title": "ScaScanner"

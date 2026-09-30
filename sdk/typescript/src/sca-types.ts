@@ -35,6 +35,15 @@ export interface ScaScanner {
   stderrPath: string;
   advisoryMode: "online" | "offline" | "unknown";
   advisorySnapshotId: string | null;
+  /**
+   * Actual sequential OSV calls. argv retains the first call for compatibility; rawOutputPath aggregates source records when there is more than one invocation.
+   */
+  invocations?: {
+    argv: string[];
+    exitCode: number | null;
+    rawOutputPath: string;
+    stderrPath: string;
+  }[];
 }
 export interface ScaCoverage {
   status: "complete" | "partial" | "failed";

@@ -2660,8 +2660,13 @@ Invalid arguments, cancellation, and exceeded budgets use the existing SDK
 errors; interruption errors include the directory containing partial output.
 
 The output directory contains `osv-output.json`, `osv-stderr.log`,
-`sca-result.json`, and `report.md`. Raw advisory matches and optional static
-assessments remain separate. A `not_actionable` assessment never removes a
+`sca-result.json`, and `report.md`. The adapter scans each selected lockfile
+sequentially. For multiple inputs it also preserves each invocation's verbatim
+JSON and stderr; `scanner.invocations` records their arguments, exit codes,
+and file paths. `osv-output.json` aggregates source records, while `scanner.argv`
+retains the first call. Per-file execution costs additional process and request
+overhead but preserves literal paths and source-specific exclusion evidence.
+Raw advisory matches and optional static assessments remain separate. A `not_actionable` assessment never removes a
 match, establishes VEX `not_affected`, or automatically changes merge policy.
 `needs_review` is a completed uncertain assessment; `failed` means an assessment
 was unavailable. The run's coverage status describes advisory matching, while
