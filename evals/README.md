@@ -7,6 +7,6 @@ being embedded in its source tree or shipped npm runtime.
   calibration, and SastBench. This suite owns its private package and lockfile.
 
 - [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
-  synthetic grouping quality checks and deterministic publication replay.
+  synthetic grouping quality checks and negative controls.
 
 Model runs are opt-in. CI still runs the deterministic triage helper checks.

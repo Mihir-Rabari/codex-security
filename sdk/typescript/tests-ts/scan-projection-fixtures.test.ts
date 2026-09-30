@@ -288,7 +288,7 @@ test.skipIf(process.platform === "win32")(
     ).rejects.toThrow("inside the scan directory");
     expect(
       existsSync(
-        join(h.parent, `findings/${fixture.sourceScanId}-check-4/unsafe.txt`),
+        join(h.parent, `findings/${fixture.sourceScanId}/check/unsafe.txt`),
       ),
     ).toBe(false);
   },

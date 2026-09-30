@@ -1,6 +1,6 @@
 # Artifact Storage
 
-Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy. Bound Deep workers keep their existing narrow artifact tools and read-only execution profile.
+Apply this policy to plugin-managed scans and standalone artifact-producing skills. An explicitly SDK-owned workflow keeps its SDK-provided directories and existing artifact-writing and completion behavior; follow its existing instructions instead of this policy.
 
 ## Scan ownership
 
