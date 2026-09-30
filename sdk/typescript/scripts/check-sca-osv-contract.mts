@@ -171,6 +171,68 @@ try {
     trackedIgnored.components.map((component) => component.sourcePath),
     ["ignored/package-lock.json"],
   );
+  const submodule = await scan(
+    "initialized-gitlink-coverage",
+    {
+      "package-lock.json": npmLock(3, "1.3.0"),
+      "vendor/library/package-lock.json": npmLock(3),
+    },
+    false,
+    undefined,
+    async (repository) => {
+      const git = async (cwd: string, args: string[]) => {
+        const result = await runOsvProcess(
+          "git",
+          [
+            "-c",
+            `core.hooksPath=${join(repository, ".git", "empty-hooks")}`,
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "user.name=Synthetic",
+            "-c",
+            "user.email=synthetic@example.test",
+            ...args,
+          ],
+          { cwd, environment: process.env },
+        );
+        assert.equal(result.exitCode, 0, result.stderr);
+        return result.stdout.trim();
+      };
+      await git(repository, ["init", "--quiet"]);
+      const nested = join(repository, "vendor/library");
+      await git(nested, ["init", "--quiet"]);
+      await git(nested, ["add", "package-lock.json"]);
+      await git(nested, [
+        "commit",
+        "--quiet",
+        "-m",
+        "Synthetic dependency fixture",
+      ]);
+      const revision = await git(nested, ["rev-parse", "HEAD"]);
+      await git(repository, [
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000",
+        revision,
+        "vendor/library",
+      ]);
+    },
+  );
+  assert.equal(submodule.status, "partial");
+  assert.equal(submodule.coverage.status, "partial");
+  assert.equal(submodule.matches.length, 0);
+  assert.equal(submodule.components.length, 1);
+  assert.deepEqual(
+    submodule.coverage.inputs.map((input) => input.path),
+    ["package-lock.json"],
+  );
+  assert.ok(
+    submodule.diagnostics.some((message) =>
+      message.includes("Git submodule vendor/library"),
+    ),
+  );
   const clean = await scan("fixed-version", {
     "package-lock.json": npmLock(3, "1.3.0"),
   });
@@ -241,22 +303,37 @@ try {
     ],
   );
   for (const version of [2, 3]) {
-    const localTarball = await scan(`npm-v${version}-local-tarball`, {
-      "package-lock.json": JSON.stringify({
-        lockfileVersion: version,
-        packages: {
-          "": { name: "synthetic-app", version: "1.0.0" },
-          "node_modules/synthetic-lib": {
-            version: "1.2.0",
-            resolved: "file:../local-lib.tgz",
+    for (const origin of ["local", "direct-url", "registry"]) {
+      const resolved =
+        origin === "local"
+          ? "file:../local-lib.tgz"
+          : "https://example.invalid/synthetic-lib.tgz";
+      const tarball = await scan(`npm-v${version}-${origin}-tarball`, {
+        "package-lock.json": JSON.stringify({
+          lockfileVersion: version,
+          packages: {
+            "": {
+              name: "synthetic-app",
+              version: "1.0.0",
+              dependencies: {
+                "synthetic-lib": origin === "registry" ? "^1.2.0" : resolved,
+              },
+            },
+            "node_modules/synthetic-lib": { version: "1.2.0", resolved },
           },
-        },
-      }),
-    });
-    assert.equal(localTarball.status, "partial");
-    assert.equal(localTarball.coverage.unresolvedPackages, 1);
-    assert.equal(localTarball.components[0]?.version, "1.2.0");
-    assert.equal(localTarball.matches.length, 1);
+        }),
+      });
+      assert.equal(
+        tarball.status,
+        origin === "registry" ? "completed" : "partial",
+      );
+      assert.equal(
+        tarball.coverage.unresolvedPackages,
+        origin === "registry" ? 0 : 1,
+      );
+      assert.equal(tarball.components[0]?.version, "1.2.0");
+      assert.equal(tarball.matches.length, 1);
+    }
   }
   const workspaceLink = await scan("npm-workspace-link", {
     "package-lock.json": JSON.stringify({
@@ -285,7 +362,7 @@ importers:
         version: '1.2.0(peer-lib@2.0.0)'
 packages:
   synthetic-lib@1.2.0:
-    resolution: {integrity: synthetic}
+    resolution: {integrity: synthetic, tarball: https://example.invalid/synthetic-lib.tgz}
   peer-lib@2.0.0:
     resolution: {integrity: synthetic}
 snapshots:
@@ -306,6 +383,7 @@ importers:
     dependencies:
       synthetic-lib: {specifier: '1.2.0', version: '1.2.0'}
       local-lib: {specifier: 'file:../local-lib', version: 'file:../local-lib'}
+      url-lib: {specifier: 'https://example.invalid/url-lib.tgz', version: 'https://example.invalid/url-lib.tgz'}
     devDependencies:
       linked-lib: {specifier: 'link:../linked-lib', version: 'link:../linked-lib'}
 packages:
@@ -317,7 +395,7 @@ snapshots:
 `,
   });
   assert.equal(pnpmLocal.status, "partial");
-  assert.equal(pnpmLocal.coverage.unresolvedPackages, 2);
+  assert.equal(pnpmLocal.coverage.unresolvedPackages, 3);
   assert.equal(pnpmLocal.matches.length, 1);
   assert.equal(
     pnpmLocal.components.find((component) => component.name === "local-lib")
@@ -329,65 +407,69 @@ snapshots:
       line.includes("linked-lib@link:../linked-lib"),
     ),
   );
-  for (const [layout, alias, packageKey, peer] of [
-    ["named", "synthetic-lib", "synthetic-lib@file:../synthetic-lib.tgz", ""],
-    [
-      "scoped-alias-peer",
-      "@synthetic/alias",
-      "@synthetic/alias@file:../synthetic-lib.tgz",
-      "(peer-lib@2.0.0)",
-    ],
-    ["bare-file", "local-alias", "file:../synthetic-lib.tgz", ""],
+  for (const [origin, resolution] of [
+    ["local", "file:../synthetic-lib.tgz"],
+    ["direct-url", "https://example.invalid/synthetic-lib.tgz"],
   ] as const) {
-    for (const excluded of [false, true]) {
-      const resolution = "file:../synthetic-lib.tgz";
-      const tarball = await scan(
-        `pnpm-local-tarball-${layout}-${excluded ? "excluded" : "retained"}`,
-        {
-          "pnpm-lock.yaml": JSON.stringify({
-            lockfileVersion: "9.0",
-            importers: {
-              ".": {
-                dependencies: {
-                  [alias]: {
-                    specifier: resolution,
-                    version: resolution + peer,
+    for (const [layout, alias, packageKey, peer] of [
+      ["named", "synthetic-lib", `synthetic-lib@${resolution}`, ""],
+      [
+        "scoped-alias-peer",
+        "@synthetic/alias",
+        `@synthetic/alias@${resolution}`,
+        "(peer-lib@2.0.0)",
+      ],
+      ["bare-reference", "local-alias", resolution, ""],
+    ] as const) {
+      for (const excluded of [false, true]) {
+        const tarball = await scan(
+          `pnpm-${origin}-tarball-${layout}-${excluded ? "excluded" : "retained"}`,
+          {
+            "pnpm-lock.yaml": JSON.stringify({
+              lockfileVersion: "9.0",
+              importers: {
+                ".": {
+                  dependencies: {
+                    [alias]: {
+                      specifier: resolution,
+                      version: resolution + peer,
+                    },
                   },
                 },
               },
-            },
-            packages: {
-              [packageKey]: {
-                ...(layout === "named" ? {} : { name: "synthetic-lib" }),
-                version: "1.2.0",
-                resolution: { tarball: resolution },
+              packages: {
+                [packageKey]: {
+                  ...(layout === "named" ? {} : { name: "synthetic-lib" }),
+                  version: "1.2.0",
+                  resolution: { tarball: resolution },
+                },
+                "synthetic-registry@2.0.0": {},
               },
-              "synthetic-registry@2.0.0": {},
-            },
-            snapshots: {
-              [packageKey + peer]: {},
-              "synthetic-registry@2.0.0": {},
-            },
-          }),
-          ...(excluded
-            ? {
-                "osv-scanner.toml":
-                  '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
-              }
-            : {}),
-        },
-      );
-      assert.equal(tarball.status, excluded ? "completed" : "partial");
-      assert.equal(tarball.coverage.unresolvedPackages, excluded ? 0 : 1);
-      assert.equal(tarball.components.length, excluded ? 1 : 2);
-      assert.equal(tarball.matches.length, excluded ? 0 : 1);
-      if (!excluded)
-        assert.equal(
-          tarball.components.find(
-            (component) => component.name === "synthetic-lib",
-          )?.version,
-          "1.2.0",
+              snapshots: {
+                [packageKey + peer]: {},
+                "synthetic-registry@2.0.0": {},
+              },
+            }),
+            ...(excluded
+              ? {
+                  "osv-scanner.toml":
+                    '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+                }
+              : {}),
+          },
         );
+        assert.equal(tarball.status, excluded ? "completed" : "partial");
+        assert.equal(tarball.coverage.unresolvedPackages, excluded ? 0 : 1);
+        assert.equal(tarball.components.length, excluded ? 1 : 2);
+        assert.equal(tarball.matches.length, excluded ? 0 : 1);
+        if (!excluded)
+          assert.equal(
+            tarball.components.find(
+              (component) => component.name === "synthetic-lib",
+            )?.version,
+            "1.2.0",
+          );
+      }
     }
   }
   const alias = await scan("npm-alias-scoped-multiple", {

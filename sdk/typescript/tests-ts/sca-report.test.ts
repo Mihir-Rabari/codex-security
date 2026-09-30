@@ -371,6 +371,30 @@ describe("SCA comparison", () => {
     ]);
   });
 
+  test("does not call a conditionally excluded match resolved under unchanged configuration", () => {
+    const base = fixture();
+    const head = fixture();
+    // The same PackageOverrides dev-group rule can start excluding the package
+    // when its lockfile group changes; suppressed identities are not recorded.
+    base.components[0]!.dependencyGroups = [];
+    for (const result of [base, head])
+      result.coverage.configFiles = [
+        { path: "osv-scanner.toml", sha256: "unchanged-dev-group-rule" },
+      ];
+    head.coverage.inputs[0]!.sha256 = "package-moved-to-dev-group";
+    head.components = [];
+    head.matches = [];
+    head.scanner.exitCode = 0;
+    const comparison = compareScaResults(base, head);
+    expect(comparison.comparable).toBe(false);
+    expect(
+      comparison.reasons.some((reason) => reason.includes("exclusions")),
+    ).toBe(true);
+    expect(comparison.noLongerObserved).toEqual([
+      { matchId: "match-1", resolved: false },
+    ]);
+  });
+
   test.each([
     [
       "incomplete coverage",

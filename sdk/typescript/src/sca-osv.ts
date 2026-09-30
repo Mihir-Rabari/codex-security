@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import {
@@ -109,7 +110,7 @@ interface DependencyLocalReference {
   resolution: string;
 }
 
-/** OSV omits pnpm links and cannot match directory references as registry versions. */
+/** OSV omits pnpm links and loses direct URL provenance from declared versions. */
 function pnpmLocalReferences(
   parsed: Record<string, unknown>,
   sourcePath: string,
@@ -126,11 +127,12 @@ function pnpmLocalReferences(
         "@",
         packageKey.startsWith("@") ? 1 : 0,
       );
+      const directReference = /^(?:file:|https?:\/\/)/u.test(packageKey);
       const keyName =
-        packageKey.startsWith("file:") || separator === -1
+        directReference || separator === -1
           ? ""
           : packageKey.slice(0, separator);
-      const keyVersion = packageKey.startsWith("file:")
+      const keyVersion = directReference
         ? packageKey
         : separator === -1
           ? ""
@@ -138,7 +140,9 @@ function pnpmLocalReferences(
       const tarball = record(entry["resolution"])
         ? entry["resolution"]["tarball"]
         : null;
-      const resolution = /^(?:file|link):/u.test(keyVersion)
+      // Registry packages may also have tarball URLs; the package key records
+      // whether the dependency identity itself is a direct URL.
+      const resolution = /^(?:file:|link:|https?:\/\/)/u.test(keyVersion)
         ? keyVersion
         : typeof tarball === "string" && /^(?:file|link):/u.test(tarball)
           ? tarball
@@ -178,7 +182,10 @@ function pnpmLocalReferences(
           const version = record(dependency)
             ? dependency["version"]
             : dependency;
-          if (typeof version !== "string" || !/^(?:file|link):/u.test(version))
+          if (
+            typeof version !== "string" ||
+            !/^(?:file:|link:|https?:\/\/)/u.test(version)
+          )
             continue;
           if (
             packageReferences.some(
@@ -208,13 +215,31 @@ function npmLocalReferences(
 ): DependencyLocalReference[] {
   const packages = parsed["packages"];
   if (!record(packages)) return [];
+  // A resolved URL alone also describes normal registry distribution. A matching
+  // dependency specifier records the explicit direct URL origin in npm v2/v3.
+  const directUrls = new Set<string>();
+  for (const dependency of Object.values(packages)) {
+    if (!record(dependency)) continue;
+    for (const group of [
+      "dependencies",
+      "devDependencies",
+      "optionalDependencies",
+    ]) {
+      const specifiers = dependency[group];
+      if (!record(specifiers)) continue;
+      for (const specifier of Object.values(specifiers))
+        if (typeof specifier === "string" && /^https?:\/\//u.test(specifier))
+          directUrls.add(specifier);
+    }
+  }
   const references = new Map<string, DependencyLocalReference>();
   for (const [path, dependency] of Object.entries(packages)) {
     if (!path || !record(dependency)) continue;
     const resolved = dependency["resolved"];
     if (
       dependency["link"] !== true &&
-      (typeof resolved !== "string" || !/^(?:file|link):/u.test(resolved))
+      (typeof resolved !== "string" ||
+        (!/^(?:file|link):/u.test(resolved) && !directUrls.has(resolved)))
     )
       continue;
     const name =
@@ -299,7 +324,7 @@ function caseInsensitiveField(
 }
 
 function inputProvenance(
-  coverage: Pick<ScaCoverage, "inputs" | "configFiles">,
+  coverage: Pick<ScaCoverage, "inputs" | "configFiles" | "limitations">,
 ): string {
   return JSON.stringify({
     inputs: coverage.inputs.map(({ path, sha256, format, status }) => ({
@@ -309,6 +334,7 @@ function inputProvenance(
       status,
     })),
     configFiles: coverage.configFiles,
+    limitations: coverage.limitations,
   });
 }
 
@@ -317,8 +343,9 @@ async function repositoryFiles(
   repository: string,
   environment: Record<string, string | undefined>,
   signal?: AbortSignal,
-): Promise<string[]> {
-  if (await enclosingGitWorktreeRoot(repository, signal)) {
+): Promise<{ files: string[]; submodules: string[] }> {
+  const worktree = await enclosingGitWorktreeRoot(repository, signal);
+  if (worktree !== null) {
     validatedGitEnvironment(environment);
     const git = await resolveTrustedExecutable(
       "git",
@@ -329,28 +356,73 @@ async function repositoryFiles(
       throw new Error(
         "Git is required to enumerate dependency inputs in this repository.",
       );
-    const { stdout } = await execFile(
-      git.executable,
-      [
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        repository,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "--deduplicate",
-        "-z",
-        "--",
-        ".",
-      ],
-      { env: git.environment, signal, maxBuffer: Infinity },
-    );
-    return stdout
-      .split("\0")
-      .filter(Boolean)
-      .filter((path) => !path.split("/").includes("node_modules"));
+    const listing = (args: string[]) =>
+      execFile(
+        git.executable,
+        [
+          "-c",
+          "core.fsmonitor=false",
+          "-C",
+          worktree,
+          "ls-files",
+          ...args,
+          "-z",
+          "--",
+          ".",
+        ],
+        { env: git.environment, signal, maxBuffer: Infinity },
+      );
+    const [listed, staged] = await Promise.all([
+      listing(["--cached", "--others", "--exclude-standard", "--deduplicate"]),
+      listing(["--stage"]),
+    ]);
+    const scope = relative(worktree, repository);
+    const depth = scope === "" ? 0 : scope.split(sep).length;
+    const metadata =
+      depth === 0 ? null : await stat(repository, { bigint: true });
+    const prefixes = new Map<string, boolean>();
+    const inScope = async (path: string): Promise<string | null> => {
+      const parts = path.split("/");
+      if (parts.length <= depth || parts.slice(depth).includes("node_modules"))
+        return null;
+      if (depth === 0) return path;
+      const prefix = parts.slice(0, depth).join("/");
+      if (!prefixes.has(prefix)) {
+        const candidate = await stat(join(worktree, prefix), {
+          bigint: true,
+        }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        });
+        // Index spelling can differ after a case-only rename. Filesystem identity
+        // also keeps distinct case-sensitive directories from sharing inventory.
+        prefixes.set(
+          prefix,
+          candidate !== null &&
+            candidate.dev === metadata!.dev &&
+            candidate.ino === metadata!.ino,
+        );
+      }
+      return prefixes.get(prefix) ? parts.slice(depth).join("/") : null;
+    };
+    const selected = async (paths: string[]) => {
+      const result: string[] = [];
+      for (const path of paths) {
+        signal?.throwIfAborted();
+        const scoped = await inScope(path);
+        if (scoped !== null) result.push(scoped);
+      }
+      return unique(result);
+    };
+    return {
+      files: await selected(listed.stdout.split("\0").filter(Boolean)),
+      submodules: await selected(
+        staged.stdout
+          .split("\0")
+          .filter((entry) => entry.startsWith("160000 "))
+          .map((entry) => entry.slice(entry.indexOf("\t") + 1)),
+      ),
+    };
   }
   const files: string[] = [];
   const pending = [repository];
@@ -364,7 +436,7 @@ async function repositoryFiles(
       else files.push(relative(repository, path));
     }
   }
-  return files;
+  return { files, submodules: [] };
 }
 
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
@@ -380,17 +452,26 @@ export async function discoverScaInputs(
   }
 > {
   const repository = await normalizeRepository(repositoryPath, signal);
-  const candidates = (await repositoryFiles(repository, environment, signal))
+  const { files, submodules } = await repositoryFiles(
+    repository,
+    environment,
+    signal,
+  );
+  const candidates = files
     .filter((path) => lockNames.has(basename(path)))
     .map(slash)
     .sort();
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
   const localReferences: DependencyLocalReference[] = [];
-  const diagnostics: string[] = [];
+  const diagnostics = submodules.map(
+    (path) =>
+      `Git submodule ${path} is not inspected by dependency inventory; coverage is incomplete.`,
+  );
   const packageExclusions = new Map<string, boolean>();
   const limitations: string[] = [
     "Inventory covers observed package tuples in npm v2/v3 and pnpm v9 lockfiles, not every installed instance or a complete dependency graph.",
+    ...diagnostics,
   ];
   for (const candidate of candidates) {
     signal?.throwIfAborted();
@@ -470,7 +551,7 @@ export async function discoverScaInputs(
         localReferences.push(...references);
         if (references.length > 0)
           limitations.push(
-            `${input.path} includes local dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.resolution}`).join(", ")}.`,
+            `${input.path} includes local or direct URL dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.resolution}`).join(", ")}.`,
           );
       }
     } catch (error) {

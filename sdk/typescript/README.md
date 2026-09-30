@@ -2678,12 +2678,18 @@ and the existing read-only, offline tool permission profile. It executes no
 application code or vulnerability reproductions. OSV configuration exclusions
 remain effective and are reported; exact suppressed counts and dependency
 introduction chains are unavailable. Unsupported lockfiles and unresolved
-local/Git identities leave coverage incomplete.
+local/Git/direct URL identities leave coverage incomplete. Git submodules are
+reported as uninspected and leave coverage incomplete; select an initialized
+submodule directly to assess its supported lockfiles.
 
 `compareScaResults(base, head)` returns alias-aware changes with conservative
 resolution semantics. Live OSV runs have no atomic database snapshot, so a
-disappeared match remains “no longer observed.” `createScaUpdateHandoff(result,
-matchIds, checks)` builds an explicit update request from advisory fixed-version
+disappeared match remains “no longer observed.” Recorded OSV configuration also
+prevents resolution claims, even with identical hashes and a frozen database:
+a group-based exclusion can start applying when a dependency changes groups.
+Results store configuration digests rather than effective exclusions, so this
+conservative rule also applies to configurations without exclusion rules.
+`createScaUpdateHandoff(result, matchIds, checks)` builds an explicit update request from advisory fixed-version
 candidates for the existing `patch` workflow. Ordinary dependency resolution
 and build/test checks are still required before calling an update verified.
 

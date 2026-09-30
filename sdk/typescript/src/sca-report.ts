@@ -208,6 +208,10 @@ function comparabilityReasons(base: ScaResult, head: ScaResult): string[] {
     );
   if (configuration(base) !== configuration(head))
     reasons.push("OSV configuration changed; exclusions may differ.");
+  else if (head.coverage.configFiles.length > 0)
+    reasons.push(
+      "OSV configuration is present; effective exclusions may change even when its contents do not.",
+    );
   if (
     !base.scanner.version ||
     base.scanner.version !== head.scanner.version ||

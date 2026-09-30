@@ -13,8 +13,8 @@ Implementation and isolated PR checks completed on Linux on September 30, 2026:
 
 | Check                          | Observed result                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 150 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
-| Actual OSV-Scanner v2.6.0      | 43 offline synthetic contract cases passed under Node 24; 42 under Bun 1.3.14.                                     |
+| Focused SDK regressions        | 166 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
+| Actual OSV-Scanner v2.6.0      | 54 offline synthetic contract cases passed under Node 24; 53 under Bun 1.3.14.                                     |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                         |
@@ -45,7 +45,11 @@ assessment.
 
 Actual OSV failure cases included exit 127 with retained inventory for a missing
 local database and exit 130 with retained matches for invalid configuration.
-Both remain incomplete. Nested-source tests also verify that unused root
+Both remain incomplete. Git submodule inventory is explicitly incomplete;
+case-only directory aliases preserve tracked lockfiles. Local and direct URL
+origins remain unresolved while ordinary registry tarball URLs retain registry
+matching. Unchanged OSV configuration cannot turn conditional exclusions into
+resolution claims. Nested-source tests also verify that unused root
 configuration cannot abort matching or hide missing inventory. An exit-zero
 matching failure was not reproduced;
 a deterministic regression covers inconsistent diagnostics and exit status.

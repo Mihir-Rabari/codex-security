@@ -116,6 +116,48 @@ async function scanFixture(
   );
 }
 
+async function initializedSubmodule(
+  repository: string,
+  path = "vendor/library",
+) {
+  const git = async (cwd: string, args: string[]) =>
+    execFile("git", [
+      "-c",
+      `core.hooksPath=${join(repository, ".git", "empty-hooks")}`,
+      "-c",
+      "commit.gpgSign=false",
+      "-c",
+      "user.name=Synthetic",
+      "-c",
+      "user.email=synthetic@example.test",
+      "-C",
+      cwd,
+      ...args,
+    ]);
+  await git(repository, ["init", "--quiet"]);
+  const nested = join(repository, path);
+  await mkdir(nested, { recursive: true });
+  await git(nested, ["init", "--quiet"]);
+  await writeFile(join(nested, "package-lock.json"), npmLock());
+  await git(nested, ["add", "package-lock.json"]);
+  await git(nested, [
+    "commit",
+    "--quiet",
+    "-m",
+    "Synthetic dependency fixture",
+  ]);
+  const revision = (await git(nested, ["rev-parse", "HEAD"])).stdout.trim();
+  await git(repository, [
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    "160000",
+    revision,
+    path,
+  ]);
+  return nested;
+}
+
 describe("SCA input selection", () => {
   test("selects npm v2/v3 and pnpm v9 across nested workspaces, excluding installed trees", async () => {
     const { repository } = await setup();
@@ -142,6 +184,99 @@ describe("SCA input selection", () => {
     expect(
       discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
     ).toBe(true);
+  });
+  test.each([true, false])(
+    "gitlink coverage remains incomplete when initialized: %s",
+    async (initialized) => {
+      const { repository, output } = await setup();
+      await writeFile(join(repository, "package-lock.json"), npmLock());
+      const nested = await initializedSubmodule(repository);
+      if (!initialized) await rm(nested, { recursive: true });
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+              : {
+                  stdout: JSON.stringify(rawOutput("package-lock.json")),
+                  stderr: "",
+                  exitCode: 0,
+                },
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.status).toBe("partial");
+      expect(result.coverage.inputs.map((item) => item.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.components).toHaveLength(1);
+      expect(result.matches).toEqual([]);
+      expect(result.diagnostics.join("\n")).toContain(
+        "Git submodule vendor/library",
+      );
+      expect(result.coverage.limitations.join("\n")).toContain(
+        "coverage is incomplete",
+      );
+    },
+  );
+  test("selected directory inventory does not include sibling files or gitlinks", async () => {
+    const { repository, output } = await setup();
+    await initializedSubmodule(repository);
+    const selected = join(repository, "packages", "selected");
+    const sibling = join(repository, "packages", "sibling");
+    await mkdir(selected, { recursive: true });
+    await mkdir(sibling, { recursive: true });
+    await writeFile(join(selected, "package-lock.json"), npmLock());
+    await writeFile(
+      join(sibling, "pnpm-lock.yaml"),
+      "lockfileVersion: '9.0'\n",
+    );
+    await execFile("git", ["-C", repository, "add", "packages"]);
+    const result = await runOsvScan(
+      { repositoryPath: selected, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) =>
+          argv[0] === "--version"
+            ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+            : {
+                stdout: JSON.stringify(rawOutput("package-lock.json")),
+                stderr: "",
+                exitCode: 0,
+              },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.coverage.inputs.map((item) => item.path)).toEqual([
+      "package-lock.json",
+    ]);
+    expect(result.diagnostics).toEqual([]);
+  });
+  test("a gitlink added during matching invalidates captured inventory scope", async () => {
+    const { repository, output } = await setup();
+    await execFile("git", ["init", repository]);
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) => {
+          if (argv[0] === "--version")
+            return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+          await initializedSubmodule(repository);
+          return {
+            stdout: JSON.stringify(rawOutput("package-lock.json")),
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    );
+    expect(result.status).toBe("partial");
+    expect(result.components).toHaveLength(1);
+    expect(result.diagnostics.join("\n")).toContain("changed while matching");
   });
   test("prefers shrinkwrap without invoking a competing package-lock", async () => {
     const { repository } = await setup();
@@ -741,6 +876,37 @@ describe("SCA scanner execution", () => {
       ).toBe(true);
     },
   );
+  test.each(["dependencies", "devDependencies", "optionalDependencies"])(
+    "preserves npm direct URL provenance recorded in %s without changing registry tarballs",
+    async (group) => {
+      const resolved = "https://example.invalid/synthetic-lib.tgz";
+      for (const direct of [false, true]) {
+        const result = await scanFixture(
+          {
+            stdout: JSON.stringify(
+              rawOutput("package-lock.json", [advisory("A")]),
+            ),
+            stderr: "",
+            exitCode: 1,
+          },
+          {
+            "package-lock.json": JSON.stringify({
+              lockfileVersion: 3,
+              packages: {
+                "": {
+                  [group]: { "synthetic-lib": direct ? resolved : "^1.2.0" },
+                },
+                "node_modules/synthetic-lib": { version: "1.2.0", resolved },
+              },
+            }),
+          },
+        );
+        expect(result.status).toBe(direct ? "partial" : "completed");
+        expect(result.coverage.unresolvedPackages).toBe(direct ? 1 : 0);
+        expect(result.matches).toHaveLength(1);
+      }
+    },
+  );
   test.each([true, false])(
     "counts npm workspace links once when an unresolved tuple is emitted: %s",
     async (emitted) => {
@@ -777,7 +943,7 @@ describe("SCA scanner execution", () => {
     },
   );
   test.each([true, false])(
-    "accounts for pnpm local references when file tuples are emitted: %s",
+    "accounts for pnpm local and direct URL references when file tuples are emitted: %s",
     async (emitted) => {
       const raw = rawOutput("package-lock.json");
       const pnpm = rawOutput("pnpm-lock.yaml", [advisory("A")]);
@@ -801,6 +967,7 @@ importers:
     dependencies:
       synthetic-lib: {specifier: '1.2.0', version: '1.2.0'}
       local-lib: {specifier: 'file:../local-lib', version: 'file:../local-lib'}
+      url-lib: {specifier: 'https://example.invalid/url-lib.tgz', version: 'https://example.invalid/url-lib.tgz'}
     devDependencies:
       linked-lib: {specifier: 'link:../linked-lib', version: 'link:../linked-lib'}
 packages:
@@ -816,7 +983,7 @@ snapshots:
       );
       expect(result.status).toBe("partial");
       expect(result.coverage.status).toBe("partial");
-      expect(result.coverage.unresolvedPackages).toBe(2);
+      expect(result.coverage.unresolvedPackages).toBe(3);
       expect(result.matches).toHaveLength(1);
       expect(
         result.coverage.limitations.some((line) =>
