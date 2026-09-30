@@ -205,6 +205,20 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
   return resolved;
 }
 
+/** Remove generated plugin registration before reusing user configuration. */
+export function removeManagedPluginRegistration(config: JsonObject): void {
+  const profiles = config["profiles"];
+  for (const value of [
+    config,
+    ...(isObject(profiles) ? Object.values(profiles) : []),
+  ]) {
+    if (!isObject(value)) continue;
+    delete value["plugins"];
+    delete value["marketplaces"];
+    if (isObject(value["features"])) delete value["features"]["plugins"];
+  }
+}
+
 /** Apply a worker budget to a config owned by this scan. */
 export function setScanSubagentBudget(
   config: JsonObject,
@@ -225,10 +239,8 @@ export function scanCompositionOverrides(
   subagents: number,
 ): JsonObject {
   const result = resolveCodexProfile(config);
-  delete result["plugins"];
-  delete result["marketplaces"];
   setScanSubagentBudget(result, subagents);
-  delete (result["features"] as JsonObject)["plugins"];
+  removeManagedPluginRegistration(result);
   if (isObject(result["agents"])) delete result["agents"]["max_threads"];
   return result;
 }

@@ -181,7 +181,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     (
       await query(
         environment,
-        "SELECT finding_id FROM finding_severity_assessments",
+        "SELECT finding_id FROM scan_severity_assessments",
       )
     ).map((row) => row["finding_id"]),
   ).toEqual([findings[0]!.findingId]);
@@ -205,7 +205,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   ).toEqual(assessment);
   const rows = await query(
     environment,
-    "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
   calls.length = 0;
   expect(
@@ -215,7 +215,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(rows);
 
@@ -230,7 +230,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(revised.assessments[0]!.decision).toBe("excluded");
   const revisedRows = await query(
     environment,
-    "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
   expect(revisedRows).toHaveLength(2);
   expect(
@@ -258,7 +258,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(revisedRows);
 });
@@ -338,6 +338,10 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
   const { scanId, ...classification } = await classifyScanDirectorySeverity(
     first.scanDirectory,
     { environment },
+  );
+  await query(
+    environment,
+    "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DELETE FROM schema_migrations WHERE version = 42");
@@ -671,6 +675,10 @@ test("migrates existing databases without changing findings and reads older stat
   const original = await query(
     environment,
     "SELECT * FROM findings ORDER BY id",
+  );
+  await query(
+    environment,
+    "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DROP TABLE finding_severity_assessments");

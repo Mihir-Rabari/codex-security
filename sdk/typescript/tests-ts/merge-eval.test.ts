@@ -1,42 +1,23 @@
-import { beforeAll, expect, test } from "bun:test";
-import { fileURLToPath } from "node:url";
-import { createScanMergeValidator } from "../src/scan-merge.js";
+import { expect, test } from "bun:test";
+import { validateScanMerge } from "../src/scan-merge.js";
 import { mergeFixtures } from "../scripts/merge-eval/fixtures.js";
 import { gradeMerge } from "../scripts/merge-eval/grade.js";
-
-let validate: Awaited<ReturnType<typeof createScanMergeValidator>>;
-beforeAll(async () => {
-  validate = await createScanMergeValidator(
-    fileURLToPath(new URL("../../../plugins/codex-security/", import.meta.url)),
-  );
-});
 
 test.each(mergeFixtures())("merge quality oracle: $name", (fixture) => {
   expect(gradeMerge(fixture.reference, fixture.expected)).toEqual([]);
   expect(() =>
-    validate(fixture.reference, fixture.inputs, fixture.previous),
+    validateScanMerge(fixture.reference, fixture.inputs, fixture.previous),
   ).not.toThrow();
-  if (!fixture.reference.findings.length) return;
-  for (const field of [
-    "remediation",
-    "remediationTests",
-    "preventiveControls",
-    "severity",
-  ]) {
-    const bad = structuredClone(fixture.reference);
-    bad.findings[0]![field] = field === "severity" ? { level: "critical" } : [];
-    // Full originals in provenance must not satisfy a canonical repair requirement.
-    (bad.findings[0]!["provenance"] as Record<string, unknown>)[
-      "sourceFindings"
-    ] = fixture.reference.findings;
-    expect(gradeMerge(bad, fixture.expected).length).toBeGreaterThan(0);
-  }
+  if (!fixture.reference.groups.length) return;
   const omitted = structuredClone(fixture.reference);
-  omitted.findings.pop();
+  omitted.groups.pop();
   expect(gradeMerge(omitted, fixture.expected).length).toBeGreaterThan(0);
   const duplicate = structuredClone(fixture.reference);
-  duplicate.findings.push(duplicate.findings[0]!);
+  duplicate.groups.push(duplicate.groups[0]!);
   expect(gradeMerge(duplicate, fixture.expected).length).toBeGreaterThan(0);
+  const unknown = structuredClone(fixture.reference);
+  unknown.groups[0]!.canonicalSourceFindingId = "unknown:0";
+  expect(gradeMerge(unknown, fixture.expected).length).toBeGreaterThan(0);
 });
 
 test("accounting for every source does not excuse collapsing independent findings", () => {
@@ -44,29 +25,26 @@ test("accounting for every source does not excuse collapsing independent finding
     (value) => value.name === "independent-similar-titles",
   )!;
   const collapsed = structuredClone(fixture.reference);
-  collapsed.findings.splice(1);
-  (collapsed.findings[0]!["provenance"] as Record<string, unknown>)[
-    "sourceFindingIds"
-  ] = fixture.expected.flatMap((group) => group.refs);
+  collapsed.groups.splice(1);
+  collapsed.groups[0]!.sourceFindingIds = fixture.expected.flatMap(
+    (group) => group.refs,
+  );
   expect(() =>
-    validate(collapsed, fixture.inputs, fixture.previous),
+    validateScanMerge(collapsed, fixture.inputs, fixture.previous),
   ).not.toThrow();
   expect(gradeMerge(collapsed, fixture.expected).length).toBeGreaterThan(0);
 });
 
-test("merge quality requires complete repair, test and control identifiers", () => {
+test("canonical selection must reflect the supported severity assessment", () => {
   const fixture = mergeFixtures().find(
-    (value) => value.name === "independent-similar-titles",
+    (value) => value.name === "conflicting-severity",
   )!;
-  for (const [field, wrong] of [
-    ["remediation", "Correct configuration repair-10."],
-    ["remediationTests", ["Verify repair-1-test-other."]],
-    ["preventiveControls", ["Maintain other-repair-1-control."]],
-  ] as const) {
-    const bad = structuredClone(fixture.reference);
-    Object.assign(bad.findings[1]!, { [field]: wrong });
-    expect(gradeMerge(bad, fixture.expected)).toEqual([
-      `Missing canonical ${field} fact ${fixture.expected[1]!.facts[field]![0]}: ["wide:1"].`,
-    ]);
-  }
+  const wrong = structuredClone(fixture.reference);
+  wrong.groups[0]!.canonicalSourceFindingId = "lower:0";
+  expect(() =>
+    validateScanMerge(wrong, fixture.inputs, fixture.previous),
+  ).not.toThrow();
+  expect(gradeMerge(wrong, fixture.expected)).toEqual([
+    'Wrong canonical source: ["higher:0","lower:0"].',
+  ]);
 });

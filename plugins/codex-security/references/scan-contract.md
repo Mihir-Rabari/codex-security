@@ -106,9 +106,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-Deep Scan repeats ordinary Standard scans and merges their completed results. The host combines their reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. Parent coverage stays partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+For the [Deep Scan lifecycle](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans), the host combines their reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. Parent coverage stays partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
 
-Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage or perform another discovery scan.
+Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage.
 
 For Standard and diff scans, record:
 

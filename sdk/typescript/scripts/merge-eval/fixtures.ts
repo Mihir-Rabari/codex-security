@@ -1,4 +1,8 @@
-import type { ScanAggregate, ScanMergeInput } from "../../src/scan-merge.js";
+import type {
+  ScanAggregate,
+  ScanMergeInput,
+  ScanMergeGroups,
+} from "../../src/scan-merge.js";
 import type { SemanticFinding } from "../../src/semantic-models.js";
 import { semanticCoverage } from "../../tests-ts/helpers/semantic-scan.js";
 
@@ -6,8 +10,7 @@ export const parentId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
 export interface ExpectedGroup {
   refs: string[];
-  severity: SemanticFinding["severity"]["level"];
-  facts: Record<string, string[]>;
+  canonicalSourceFindingIds: string[];
 }
 
 export interface MergeFixture {
@@ -15,7 +18,7 @@ export interface MergeFixture {
   inputs: ScanMergeInput[];
   previous: ScanAggregate | null;
   expected: ExpectedGroup[];
-  reference: ScanAggregate;
+  reference: ScanMergeGroups;
 }
 
 // Completed, synthetic observations only. No source code or reproduction steps.
@@ -64,18 +67,9 @@ function input(scanId: string, findings: SemanticFinding[]): ScanMergeInput {
 
 function group(
   refs: string[],
-  repairs: string[],
-  severity: SemanticFinding["severity"]["level"] = "medium",
+  canonicalSourceFindingIds = refs,
 ): ExpectedGroup {
-  return {
-    refs,
-    severity,
-    facts: {
-      remediation: repairs,
-      remediationTests: repairs.map((repair) => `${repair}-test`),
-      preventiveControls: repairs.map((repair) => `${repair}-control`),
-    },
-  };
+  return { refs, canonicalSourceFindingIds };
 }
 
 function fixture(
@@ -84,32 +78,11 @@ function fixture(
   expected: ExpectedGroup[],
   previous: ScanAggregate | null = null,
 ): MergeFixture {
-  const byRef = new Map<string, SemanticFinding>();
-  for (const finding of previous?.findings ?? []) {
-    for (const ref of finding.provenance.sourceFindingIds ?? [])
-      byRef.set(ref, finding);
-  }
-  for (const child of inputs)
-    child.draft.findings.forEach((finding, index) =>
-      byRef.set(`${child.scanId}:${index}`, finding),
-    );
   const reference = {
     scanId: parentId,
-    findings: expected.map((expectedGroup) => ({
-      ...structuredClone(byRef.get(expectedGroup.refs[0]!)!),
-      severity: {
-        level: expectedGroup.severity,
-        rationale:
-          "Retained the completed assessment of the shared configuration.",
-        changeConditions: "Reassess if deployment isolation changes.",
-      },
-      remediation: expectedGroup.facts["remediation"]!.join("; "),
-      remediationTests: expectedGroup.facts["remediationTests"],
-      preventiveControls: expectedGroup.facts["preventiveControls"],
-      provenance: {
-        source: "local_plugin",
-        sourceFindingIds: expectedGroup.refs,
-      },
+    groups: expected.map((group) => ({
+      sourceFindingIds: group.refs,
+      canonicalSourceFindingId: group.canonicalSourceFindingIds[0]!,
     })),
   };
   return { name, inputs, previous, expected, reference };
@@ -187,35 +160,28 @@ export function mergeFixtures(): MergeFixture[] {
     fixture(
       "independent-similar-titles",
       [input("wide", independent)],
-      independent.map((_, index) =>
-        group([`wide:${index}`], [`repair-${index}`]),
-      ),
+      independent.map((_, index) => group([`wide:${index}`])),
     ),
     fixture(
       "duplicate-with-distinct-repairs",
       [input("a", [complementary[0]!]), input("b", [complementary[1]!])],
-      [group(["a:0", "b:0"], ["first-repair", "second-repair"])],
+      [group(["a:0", "b:0"])],
     ),
     fixture(
       "accepted-alias-convergence",
       [input("new", [corroboration])],
-      [
-        group(
-          ["old:0", "old:1", "new:0"],
-          ["primary-repair", "secondary-repair"],
-        ),
-      ],
+      [group(["old:0", "old:1", "new:0"], ["old:0", "old:1", "new:0"])],
       previous,
     ),
     fixture(
       "conflicting-severity",
       [input("lower", [lower]), input("higher", [higher])],
-      [group(["lower:0", "higher:0"], ["shared-repair"], "high")],
+      [group(["lower:0", "higher:0"], ["higher:0"])],
     ),
     fixture(
       "large-field-and-nested-history",
       [input("current", [historic])],
-      [group(["history:0", "current:0"], ["visible-repair", "tail-repair"])],
+      [group(["history:0", "current:0"])],
       history,
     ),
   ];

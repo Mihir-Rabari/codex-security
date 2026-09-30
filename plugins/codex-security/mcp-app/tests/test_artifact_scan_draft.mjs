@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -300,6 +301,88 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     input.scope.summary,
   );
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
+
+  const hostSnapshotRoot = path.join(root, "host-canonical-checkpoint");
+  await mkdir(hostSnapshotRoot);
+  await saveScanDraftCheckpoint(
+    { ...context, root: hostSnapshotRoot },
+    {
+      scanId,
+      scope: carriedParentManifest.scan.scope,
+      threatModel: carriedParentManifest.scan.threatModel,
+      findings: (
+        await readJson(parentCheckpointRoot, "findings.json")
+      ).findings.map((entry) => ({
+        ...entry,
+        findingId: "generated",
+        occurrenceId: "generated",
+      })),
+      coverage: {
+        ...(await readJson(parentCheckpointRoot, "coverage.json")),
+        documentType: "codex-security.coverage",
+        schemaVersion: "1.0",
+        scanId,
+      },
+    },
+  );
+  await recordCodexSecurityScanDraft(
+    { ...context, root: hostSnapshotRoot },
+    { ...input, findings: [] },
+  );
+  assert.deepEqual(
+    (await readJson(hostSnapshotRoot, "findings.json")).findings,
+    (await readJson(parentCheckpointRoot, "findings.json")).findings,
+  );
+  assert.equal(
+    (await readJson(hostSnapshotRoot, "scan-manifest.json")).scan.scope.summary,
+    input.scope.summary,
+  );
+
+  const pendingRoot = path.join(root, "pending-only-checkpoints");
+  await mkdir(pendingRoot);
+  await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
+  const pendingDirectory = path.join(pendingRoot, "checkpoints", "pending");
+  await mkdir(pendingDirectory);
+  await writeFile(path.join(pendingDirectory, ".initialized"), "");
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "obsolete.json"),
+    "{old incompatible evidence",
+  );
+  const pendingInput = { ...input, findings: [interruptedFinding] };
+  await writeFile(
+    path.join(pendingDirectory, "pending.json"),
+    JSON.stringify(pendingInput),
+  );
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "pending.json"),
+    JSON.stringify(pendingInput),
+  );
+  const originalReaddir = fs.readdir;
+  fs.readdir = async (...args) => {
+    const entries = await originalReaddir(...args);
+    if (args[0] === pendingDirectory)
+      await rm(path.join(pendingDirectory, "pending.json"));
+    return entries;
+  };
+  try {
+    await recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    );
+  } finally {
+    fs.readdir = originalReaddir;
+  }
+  assert.deepEqual(
+    new Set(
+      (await readJson(pendingRoot, "findings.json")).findings.map(
+        (item) => item.provenance.candidateId,
+      ),
+    ),
+    new Set([
+      finding.provenance.candidateId,
+      interruptedFinding.provenance.candidateId,
+    ]),
+  );
 
   const deepParentRoot = path.join(root, "accepted-deep-parent");
   await mkdir(deepParentRoot);
@@ -1099,6 +1182,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const staleCheckpoint = {
     ...input,
     complete: false,
+    findings: [finding, interruptedFinding],
     coverage: {
       ...coverage,
       completeness: "partial",
@@ -1142,6 +1226,13 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         );
       }
       assert.notEqual(staged.manifest.scan.complete, false);
+      assert.deepEqual(
+        staged.findings.findings.map((entry) => entry.provenance.candidateId),
+        [
+          finding.provenance.candidateId,
+          interruptedFinding.provenance.candidateId,
+        ],
+      );
       assert.deepEqual(
         staged.coverage.surfaces.map(({ id, disposition }) => ({
           id,
@@ -1201,6 +1292,33 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     );
     assert.equal(saved.deferred.length, terminal ? 0 : 1);
   }
+  const extensionRoot = path.join(root, "current-extension-candidate");
+  await mkdir(extensionRoot);
+  const extensionContext = { ...context, root: extensionRoot };
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [
+        {
+          candidateId: finding.extensions.candidateId,
+          reason: "Review pending.",
+        },
+      ],
+    },
+  });
+  await recordCodexSecurityScanDraft(extensionContext, {
+    ...input,
+    findings: [{ ...finding, provenance: { source: "local_plugin" } }],
+  });
+  assert.deepEqual(
+    (await readJson(extensionRoot, "coverage.json")).deferred,
+    [],
+  );
+
   const surfaceRoot = path.join(root, "explicit-surface-resolution");
   await mkdir(surfaceRoot);
   const surfaceContext = { ...context, root: surfaceRoot };
@@ -1245,8 +1363,6 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
 
   for (const [name, candidate] of [
     ["candidate-id", { candidateId: "candidate-still-pending" }],
-    ["historical-surface", { id: "candidate-still-pending" }],
-    ["historical-surface-slash", { id: "worker/observation" }],
     [
       "original-candidate",
       {
@@ -1276,9 +1392,6 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         ...surfaceDraft.coverage,
         surfaces: surfaceDraft.coverage.surfaces.map((surface) => ({
           ...surface,
-          ...(name.startsWith("historical-surface")
-            ? { candidateId: candidate.id }
-            : {}),
         })),
         deferred: [unresolved],
       },
@@ -1308,47 +1421,9 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     const retainedCandidate = {
       ...unresolved,
       id: candidate.candidateId ?? candidate.id,
-      ...(name.startsWith("historical-surface")
-        ? { candidateScoped: true }
-        : {}),
     };
     assert.deepEqual(retainedCoverage.deferred, [retainedCandidate]);
-    if (name.startsWith("historical-surface")) {
-      for (const [index, association] of [
-        undefined,
-        undefined,
-        "other-candidate",
-        candidate.id,
-      ].entries()) {
-        // Recovery may only retain the canonical documents. The association
-        // must survive without relying on an older checkpoint's surface row.
-        await rm(path.join(sharedSurfaceRoot, "checkpoints"), {
-          recursive: true,
-          force: true,
-        });
-        await recordCodexSecurityScanDraft(sharedSurfaceContext, {
-          ...resolvedSurfaceDraft,
-          coverage: {
-            ...resolvedSurfaceDraft.coverage,
-            completeness: index === 0 ? "partial" : "complete",
-            deferred: index === 0 ? [unresolved] : [],
-            surfaces: [
-              {
-                ...surfaceDraft.coverage.surfaces[0],
-                disposition:
-                  association === candidate.id ? "reported" : "rejected",
-                ...(association === undefined
-                  ? {}
-                  : { candidateId: association }),
-              },
-            ],
-          },
-        });
-        const retained = await readJson(sharedSurfaceRoot, "coverage.json");
-        assert.equal(retained.completeness, "partial");
-        assert.deepEqual(retained.deferred, [retainedCandidate]);
-      }
-    }
+
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...resolvedSurfaceDraft,
       coverage: {

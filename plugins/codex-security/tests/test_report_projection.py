@@ -670,16 +670,20 @@ def test_projection_keeps_standard_findings_table_unchanged() -> None:
     assert "[Parser boundary \\[SCAN-001-parser\\]](#finding-1)" in markdown
 
 
-def test_projection_rejects_unsafe_detailed_writeup_path() -> None:
+@pytest.mark.parametrize("report_path", ["../outside.md", "findings/one/../../outside.md"])
+def test_projection_rejects_unsafe_detailed_writeup_path(report_path: str) -> None:
     manifest, findings, coverage = canonical_documents()
-    findings["findings"][0]["writeup"] = {"reportPath": "../outside.md"}
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
 
     with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
         PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    findings["findings"][0]["writeup"] = {"reportPath": "findings/one/two.md"}
-    with pytest.raises(PROJECTION.ReportProjectionError, match="invalid reportPath"):
-        PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+@pytest.mark.parametrize("report_path", ["findings/one/two.md", "findings/source-scan/one/two.md"])
+def test_projection_preserves_original_report_names(report_path: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["writeup"] = {"reportPath": report_path}
+    assert report_path in PROJECTION.build_report_markdown(manifest, findings, coverage)
 
 
 def test_projection_rejects_duplicate_detailed_writeup_paths() -> None:

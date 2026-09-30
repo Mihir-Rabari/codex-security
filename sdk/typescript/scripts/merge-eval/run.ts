@@ -1,12 +1,8 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
-import {
-  createScanMergeValidator,
-  scanMergePrompt,
-} from "../../src/scan-merge.js";
+import { validateScanMerge, scanMergePrompt } from "../../src/scan-merge.js";
 import { mergeFixtures, parentId } from "./fixtures.js";
 import { gradeMerge } from "./grade.js";
 import { disabledMcpServers } from "../../src/scan-comparison.js";
@@ -28,10 +24,6 @@ if (
   );
 const output = resolve(destination);
 await mkdir(output, { recursive: true });
-const pluginRoot = fileURLToPath(
-  new URL("../../../../plugins/codex-security/", import.meta.url),
-);
-const validate = await createScanMergeValidator(pluginRoot);
 const environment = Object.fromEntries(
   Object.entries(process.env).filter(
     (entry): entry is [string, string] => entry[1] !== undefined,
@@ -64,6 +56,10 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), bytes);
       },
+      async restoreMany(artifacts: { path: string; contents: Buffer }[]) {
+        for (const { path, contents } of artifacts)
+          await this.restore(path, contents);
+      },
     };
     const prompt = await scanMergePrompt(
       parentId,
@@ -94,7 +90,7 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
       record["output"] = turn.finalResponse;
       const raw: unknown = JSON.parse(turn.finalResponse);
       record["qualityErrors"] = gradeMerge(raw, fixture.expected);
-      validate(raw, fixture.inputs, fixture.previous);
+      validateScanMerge(raw, fixture.inputs, fixture.previous);
       record["hostValid"] = true;
     } catch (error) {
       record["error"] = String(error);

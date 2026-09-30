@@ -4675,6 +4675,12 @@ describe("CodexSecurity orchestration", () => {
             },
             async prepareDirectory() {},
             async remove() {},
+            async restoreMany(artifacts) {
+              if (scenario === "restore failure")
+                throw new Error("write failed");
+              for (const { path, contents } of artifacts)
+                await writeFile(join(scanDir, path), contents);
+            },
             restore: async (name, contents) => {
               if (scenario === "restore failure")
                 throw new Error("write failed");

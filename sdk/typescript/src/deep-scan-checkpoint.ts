@@ -1,8 +1,8 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { readScanFile } from "./contract.js";
+import type { SemanticScan } from "./semantic-models.js";
 import type { ScanCost } from "./cost.js";
-import type { SemanticCoverage, SemanticScan } from "./semantic-models.js";
 
 export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 
@@ -23,30 +23,29 @@ interface CompositionMetadata {
   noNewStreak: number;
   consecutiveErrors: number;
   mergeFailures?: number;
+  /** Missing in older checkpoints; false proves no model merge has started. */
+  mergeStarted?: boolean;
   /** Prior session accounting was lost; later sessions cannot reconstruct its cost. */
   costUnavailable?: true;
+  /** Retained coordinator accounting is read-only; live continuation is retired. */
+  legacy?: {
+    cost?: ScanCost;
+    originThreadId?: string;
+    [extension: string]: unknown;
+  };
   /** A discovery stop decision. Sealing and publication belong to the parent. */
   terminalReason?: "saturated" | "capped" | "failed" | "canceled";
-  [extension: string]: unknown;
-}
-
-interface LegacyCompositionMetadata {
-  discoveryRuns: number;
-  cost?: ScanCost;
-  originThreadId?: string | null;
   [extension: string]: unknown;
 }
 
 /** Version 2 is shared with workbench_composition.py; flags are not scan status. */
 export interface DeepScanCheckpoint extends CompositionMetadata {
   aggregate: SemanticScan | null;
-  legacy?: LegacyCompositionMetadata & { coverage: SemanticCoverage };
 }
 
 /** get-scan intentionally omits finding and coverage payloads from its response. */
 export interface DeepScanCheckpointSummary extends CompositionMetadata {
   aggregate?: never;
-  legacy?: LegacyCompositionMetadata & { coverage?: never };
 }
 
 export function newDeepScanCheckpoint(startedAt: string): DeepScanCheckpoint {
@@ -56,12 +55,13 @@ export function newDeepScanCheckpoint(startedAt: string): DeepScanCheckpoint {
     passes: [],
     mergedScanIds: [],
     aggregate: null,
+    mergeStarted: false,
     noNewStreak: 0,
     consecutiveErrors: 0,
   };
 }
 
-/** The local workbench owns this document, including legacy coordinator conversion. */
+/** The local workbench owns this document; preserve historical extension fields. */
 export function decodeDeepScanCheckpoint(value: unknown): DeepScanCheckpoint {
   const checkpoint = value as DeepScanCheckpoint;
   requireCheckpointVersion(checkpoint);

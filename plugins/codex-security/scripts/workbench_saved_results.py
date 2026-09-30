@@ -34,14 +34,15 @@ from finalize_scan_contract import (
     finalize_scan,
     finding_candidate_id,
     open_scan_local_file_descriptor,
+    prepare_scan_local_directory,
     write_scan_local_bytes,
 )
 from project_scan_artifacts import merge_coverage, project_scan_artifacts
 from report_projection import retained_findings
 from workbench_composition import (
     COMPOSITION_CHECKPOINT,
-    composition_children,
-    read_composition_checkpoint,
+    CompositionView,
+    load_composition,
 )
 from workbench_constants import PHASES
 from workbench_scan_usage import merge_scan_cost
@@ -115,9 +116,14 @@ def _children(scan_dir: Path, relative: str) -> list[str]:
 
 
 def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
-    for name in _children(scan_dir, "checkpoints"):
+    directory = (
+        "checkpoints/pending"
+        if (scan_dir / "checkpoints/pending/.initialized").is_file()
+        else "checkpoints"
+    )
+    for name in _children(scan_dir, directory):
         if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            yield f"checkpoints/{name}"
+            yield f"{directory}/{name}"
 
 
 def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dict[str, Any], str]:
@@ -208,7 +214,10 @@ def _saved_results_changed(db: Any, scan: Any) -> bool:
         current_sources = dict(published_sources)
         for path in paths:
             try:
-                _, current_sources[path] = _read_saved_result(scan_dir, path, scan["id"])
+                _, digest = _read_saved_result(scan_dir, path, scan["id"])
+                # Migration can copy an already published archive into pending checkpoints.
+                if path in published_sources or digest not in published_sources.values():
+                    current_sources[path] = digest
             except (ContractError, OSError, ValueError):
                 continue
         return current_sources != published_sources
@@ -216,7 +225,9 @@ def _saved_results_changed(db: Any, scan: Any) -> bool:
         return False
 
 
-def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[str, str], bool]:
+def _recovery_source_digests(
+    db: Any, connection: Any, scan: Any, composition: CompositionView
+) -> tuple[dict[str, str], bool]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
     include_parent = True
@@ -255,7 +266,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
                 include_parent = True
 
     if frozen_sources is None:
-        save_composed_checkpoint(db, connection, scan, scan_dir)
+        save_composed_checkpoint(db, connection, scan, scan_dir, composition)
 
     paths = set(_saved_result_paths(scan_dir))
     recovery_sources = dict(frozen_sources or {})
@@ -269,13 +280,17 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
 
     for relative in paths - recovery_sources.keys():
         try:
-            _, recovery_sources[relative] = _read_saved_result(scan_dir, relative, scan["id"])
+            _, digest = _read_saved_result(scan_dir, relative, scan["id"])
+            if digest not in recovery_sources.values():
+                recovery_sources[relative] = digest
         except (ContractError, OSError, ValueError):
             continue
     return recovery_sources, include_parent
 
 
-def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
+def scan_results_recovery_needed(
+    db: Any, connection: Any, scan: Any, composition: CompositionView
+) -> bool:
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False
     warnings = json.loads(scan["completion_warnings_json"])
@@ -389,8 +404,9 @@ def merge_saved_results(
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
                 payload = _encoded(parent)
                 parent_digest = hashlib.sha256(payload).hexdigest()
-                parent_checkpoint = f"checkpoints/{parent_digest}.json"
-                write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
+                parent_checkpoint = (
+                    f"checkpoints/pending/{save_pending_checkpoint(scan_dir, payload)}"
+                )
                 if frozen_source_digests is not None:
                     frozen_source_digests = {
                         **frozen_source_digests,
@@ -407,6 +423,7 @@ def merge_saved_results(
             source_digests.update(parent_preserved_sources)
     paths = list(_saved_result_paths(scan_dir))
     if frozen_source_digests is not None:
+        paths = list(dict.fromkeys([*paths, *frozen_source_digests]))
         paths = [relative for relative in paths if relative in frozen_source_digests]
 
     for relative in paths:
@@ -868,12 +885,32 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
     return {"findings": draft["findings"], "coverage": draft["coverage"]}
 
 
+def stop_composition_children(db: Any, connection: Any, composition: CompositionView) -> None:
+    merged = set(composition.checkpoint["mergedScanIds"]) if composition.checkpoint else set()
+    for child in composition.children:
+        if child["id"] not in merged and child["status"] == "running":
+            fail_scan(
+                db,
+                connection,
+                argparse.Namespace(
+                    scan_id=child["id"],
+                    claim_token=child["handoff_claim_token"],
+                    cost_json=None,
+                    message="Parent Deep Scan stopped.",
+                ),
+            )
+
+
 def save_composed_checkpoint(
-    db: Any, connection: Any, scan: Any, scan_dir: Path
+    db: Any, connection: Any, scan: Any, scan_dir: Path, composition: CompositionView | None = None
 ) -> dict[str, Any] | None:
     """Retain accepted progress and unmerged ordinary child observations."""
-    checkpoint = read_composition_checkpoint(scan)
-    children = {child["scan_dir"]: child for child in composition_children(connection, scan)}
+    composition = composition if composition is not None else load_composition(connection, scan)
+    checkpoint = composition.checkpoint
+    children = {
+        child["scan_dir"]: db.require_scan(connection, child["id"])
+        for child in composition.children
+    }
     if checkpoint is None and not children:
         return None
     merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
@@ -930,9 +967,7 @@ def save_composed_checkpoint(
         if note not in deferred:
             deferred.append(note)
     payload = _encoded(aggregate)
-    write_scan_local_bytes(
-        scan_dir, f"checkpoints/{hashlib.sha256(payload).hexdigest()}.json", payload
-    )
+    save_pending_checkpoint(scan_dir, payload)
     return aggregate
 
 
@@ -943,11 +978,13 @@ def preserve_scan_results_locked(
     *,
     recovery_source_digests: dict[str, str] | None = None,
     include_parent_with_recovery: bool = False,
+    composition: CompositionView | None = None,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
     if scan["status"] != "failed":
         return False
+    composition = composition if composition is not None else load_composition(connection, scan)
     frozen_source_digests: dict[str, str] | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
     if recovery_source_digests is not None:
@@ -958,7 +995,7 @@ def preserve_scan_results_locked(
         )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     if frozen_source_digests is None:
-        save_composed_checkpoint(db, connection, scan, scan_dir)
+        save_composed_checkpoint(db, connection, scan, scan_dir, composition)
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -966,9 +1003,7 @@ def preserve_scan_results_locked(
         "canceled"
         if scan["canceled_at"]
         else "interrupted"
-        if deep_run
-        and deep_run["status"] == "interrupted"
-        and read_composition_checkpoint(scan) is None
+        if deep_run and deep_run["status"] == "interrupted" and composition.checkpoint is None
         else "failed"
     )
     stored_warnings = json.loads(scan["completion_warnings_json"])
@@ -1146,13 +1181,17 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
-        recovery_source_digests, include_parent = _recovery_source_digests(db, connection, scan)
+        composition = load_composition(connection, scan)
+        recovery_source_digests, include_parent = _recovery_source_digests(
+            db, connection, scan, composition
+        )
         if not preserve_scan_results_locked(
             db,
             connection,
             scan_id,
             recovery_source_digests=recovery_source_digests,
             include_parent_with_recovery=include_parent,
+            composition=composition,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
         clear_legacy_publication_error(connection, scan_id)
@@ -1167,7 +1206,7 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot preserve new results.")
         workspace = db.require_workspace(connection, scan["workspace_id"])
-        owner = db.handoff.durable_owner_thread_id(scan, workspace)
+        owner = db.handoff.owning_thread(scan, workspace)
         if args.thread_id is not None and args.thread_id != owner:
             raise SystemExit("Saved results can only be published from the owning Codex thread.")
         # The app can cancel before a continuation has claimed the scan.
@@ -1246,6 +1285,29 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def initialize_pending_checkpoints(scan_dir: Path) -> None:
+    if (scan_dir / "checkpoints/pending/.initialized").is_file():
+        return
+    prepare_scan_local_directory(scan_dir, "checkpoints/pending")
+    for name in _children(scan_dir, "checkpoints"):
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name):
+            # Recovery validates each checkpoint independently after preserving its bytes.
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, f"checkpoints/{name}", "Saved checkpoint"
+            )
+            with os.fdopen(descriptor, "rb") as checkpoint:
+                write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", checkpoint.read())
+    write_scan_local_bytes(scan_dir, "checkpoints/pending/.initialized", b"")
+
+
+def save_pending_checkpoint(scan_dir: Path, payload: bytes) -> str:
+    initialize_pending_checkpoints(scan_dir)
+    name = f"{hashlib.sha256(payload).hexdigest()}.json"
+    write_scan_local_bytes(scan_dir, f"checkpoints/{name}", payload)
+    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", payload)
+    return name
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -1258,6 +1320,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        initialize_pending_checkpoints(scan_dir)
+        acknowledged = set()
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -1274,12 +1338,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
-            checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
-            write_scan_local_bytes(
-                scan_dir,
-                f"checkpoints/{checkpoint_digest}.json",
-                checkpoint_contents,
-            )
+            acknowledged.add(save_pending_checkpoint(scan_dir, checkpoint_contents))
         if (
             args.expected_draft_digest is not None
             and args.expected_draft_digest != _scan_draft_digest(scan_dir)
@@ -1296,6 +1355,13 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
+        reconciled = draft.get("reconciledCheckpointIds", [])
+        if not isinstance(reconciled, list) or any(
+            not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name)
+            for name in reconciled
+        ):
+            raise SystemExit("Reconciled checkpoint IDs must be saved checkpoint filenames.")
+        acknowledged.update(reconciled)
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
@@ -1312,6 +1378,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        for name in acknowledged:
+            _remove_scan_local_file_if_exists(scan_dir, f"checkpoints/pending/{name}")
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
         if scan["mode"] == "standard":
@@ -1432,11 +1500,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         workspace = db.require_workspace(connection, scan["workspace_id"])
-        owning_thread_id = (
-            scan["deep_scan_owner_thread_id"]
-            or scan["continuation_thread_id"]
-            or workspace["thread_id"]
-        )
+        owning_thread_id = db.handoff.owning_thread(scan, workspace)
         if thread_id is not None and owning_thread_id != thread_id:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
@@ -1473,22 +1537,11 @@ def preserve_stopped_results_after_transition(
     db: Any, connection: Any, scan_id: str, *, stop_children: bool = False
 ) -> None:
     try:
+        scan = db.require_scan(connection, scan_id)
+        composition = load_composition(connection, scan)
         if stop_children:
-            scan = db.require_scan(connection, scan_id)
-            children = composition_children(connection, scan) if scan["mode"] == "deep" else []
-            for child in children:
-                if child["status"] == "running":
-                    fail_scan(
-                        db,
-                        connection,
-                        argparse.Namespace(
-                            scan_id=child["id"],
-                            claim_token=child["handoff_claim_token"],
-                            cost_json=None,
-                            message="Parent Deep Scan stopped.",
-                        ),
-                    )
-        if preserve_scan_results_locked(db, connection, scan_id):
+            stop_composition_children(db, connection, composition)
+        if preserve_scan_results_locked(db, connection, scan_id, composition=composition):
             clear_legacy_publication_error(connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:
         scan = db.require_scan(connection, scan_id)

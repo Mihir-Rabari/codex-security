@@ -32,7 +32,7 @@ export async function registerScan(options: {
     workbench,
   } = options;
   const repo = expectation.repository;
-  let registration =
+  const registration =
     scanOptions.resumeScanId !== undefined &&
     scanOptions.registeredScan === undefined
       ? await workbench([
@@ -76,13 +76,6 @@ export async function registerScan(options: {
               : { workflowId: scanOptions.workflowId }),
           }),
         );
-  if (scanOptions.registeredScan !== undefined) {
-    registration = await workbench([
-      "get-cli-scan-resume",
-      "--scan-id",
-      scanOptions.registeredScan.scanId,
-    ]);
-  }
   const scanId = registration["scanId"];
   const resumeThreadId =
     scanOptions.resumeScanId === undefined &&

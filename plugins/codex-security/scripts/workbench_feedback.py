@@ -39,7 +39,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 ) AS decision_rank
             FROM finding_occurrences AS occurrences
             JOIN findings ON findings.id = occurrences.finding_id
-            JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
+            JOIN public_scans AS source_scans ON source_scans.id = occurrences.scan_id
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
             JOIN finding_locations AS locations ON locations.id = (
                 SELECT candidate.id
@@ -52,7 +52,6 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
-                AND source_scans.parent_scan_role IS NOT 'deep_pass'
         )
         SELECT *
         FROM ranked_decisions

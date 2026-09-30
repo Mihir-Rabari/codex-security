@@ -11,7 +11,8 @@ import {
 import type { DeepScanOptions } from "./scan-settings.js";
 import {
   combineScanCoverage,
-  createScanMergeValidator,
+  validateScanMerge,
+  unchangedScanGroups,
   scanMergePrompt,
   type ScanMergeInput,
 } from "./scan-merge.js";
@@ -180,20 +181,23 @@ export async function runDeepScans(
     return queued.pending;
   };
   await save();
-  const validateMerge = await createScanMergeValidator(input.pluginRoot);
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
+  const coverage = new Map<
+    string,
+    { draft: { coverage: SemanticScan["coverage"] } }
+  >();
   const updateAggregateCoverage = (): void => {
     if (state.aggregate === null) return;
     const merged = new Set(state.mergedScanIds);
     state.aggregate = {
       ...state.aggregate,
       coverage: combineScanCoverage(
-        [...completed.values()].filter((pass) => merged.has(pass.scanId)),
+        [...coverage].filter(([id]) => merged.has(id)).map(([, pass]) => pass),
         state.passes
           .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
           .map((pass) => pass.directory),
-        state.mergedScanIds.some((id) => !completed.has(id))
+        state.mergedScanIds.some((id) => !coverage.has(id))
           ? state.aggregate.coverage
           : undefined,
       ),
@@ -258,12 +262,18 @@ export async function runDeepScans(
       }
       if (
         record.progress.status === "complete" &&
-        !completed.has(record.scanId)
+        !coverage.has(record.scanId)
       ) {
-        completed.set(
+        const projected = await input.projectChild(
           record.scanId,
-          await input.projectChild(record.scanId, record.scanDir, signal),
+          record.scanDir,
+          signal,
         );
+        coverage.set(record.scanId, {
+          draft: { coverage: projected.draft.coverage },
+        });
+        if (!state.mergedScanIds.includes(record.scanId))
+          completed.set(record.scanId, projected);
         if (recoverOutcomes)
           recoveredSuccess = observePassCompletion(
             state,
@@ -330,32 +340,41 @@ export async function runDeepScans(
     if (!pending.length && (!allowEmpty || state.aggregate !== null)) return;
     if (!pending.length) {
       state.aggregate = {
-        ...validateMerge({ scanId, findings: [] }, [], null).aggregate,
+        ...validateScanMerge({ scanId, groups: [] }, [], null).aggregate,
         coverage: combineScanCoverage([]),
       };
       await save();
       return;
     }
-    const prompt = await scanMergePrompt(
-      scanId,
-      pending,
-      state.aggregate,
-      scanDir,
-      input.writer,
-    );
-    let merged: ReturnType<typeof validateMerge>;
+    const clean = pending.every((input) => input.draft.findings.length === 0);
+    const prompt = clean
+      ? ""
+      : await scanMergePrompt(
+          scanId,
+          pending,
+          state.aggregate,
+          scanDir,
+          input.writer,
+        );
+    if (!clean && state.mergeStarted !== true) {
+      state.mergeStarted = true;
+      await save();
+    }
+    let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
     for (;;) {
       executionSignal.throwIfAborted();
       try {
-        const response = await input.merge(
-          validationError === undefined
-            ? prompt
-            : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
-          executionSignal,
-        );
+        const response = clean
+          ? unchangedScanGroups(scanId, state.aggregate)
+          : await input.merge(
+              validationError === undefined
+                ? prompt
+                : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
+              executionSignal,
+            );
         try {
-          merged = validateMerge(response, pending, state.aggregate);
+          merged = validateScanMerge(response, pending, state.aggregate);
         } catch (error) {
           validationError = error;
           throw error;
@@ -380,10 +399,10 @@ export async function runDeepScans(
       state,
       merged,
       pending.map((result) => result.scanId),
-      combineScanCoverage([...completed.values()]),
+      combineScanCoverage([...coverage.values()]),
     );
     await save();
-    await input.publish(state.aggregate!);
+    for (const result of pending) completed.delete(result.scanId);
   };
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
@@ -430,14 +449,15 @@ export async function runDeepScans(
               input.onCost(pass.directory, cost);
             },
           });
-          completed.set(
+          const projected = await input.projectChild(
             result.manifest.scan.id,
-            await input.projectChild(
-              result.manifest.scan.id,
-              result.scanDir,
-              signal,
-            ),
+            result.scanDir,
+            signal,
           );
+          completed.set(result.manifest.scan.id, projected);
+          coverage.set(result.manifest.scan.id, {
+            draft: { coverage: projected.draft.coverage },
+          });
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
           observePassCompletion(state, pass);
@@ -489,7 +509,7 @@ export async function runDeepScans(
     await refreshPasses(
       state.terminalReason === undefined && Date.now() < deadline,
     );
-    if (state.mergedScanIds.some((id) => !completed.has(id))) {
+    if (state.mergedScanIds.some((id) => !coverage.has(id))) {
       throw new Error(
         "An accepted merge input is no longer a sealed child scan.",
       );
@@ -498,6 +518,7 @@ export async function runDeepScans(
       throw consecutiveErrorLimit;
     while (state.terminalReason === undefined) {
       executionSignal.throwIfAborted();
+      const previousAggregate = state.aggregate;
       await mergePending();
       const discoveryDeadlineReached =
         deadlineController.signal.aborted || Date.now() >= deadline;
@@ -526,6 +547,8 @@ export async function runDeepScans(
         stopDiscovery(state, stop);
         break;
       }
+      if (state.aggregate !== null && state.aggregate !== previousAggregate)
+        await input.publish(state.aggregate);
       const batch = unfinished.slice(0, settings.workers);
       while (
         batch.length < settings.workers &&

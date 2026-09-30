@@ -1294,7 +1294,6 @@ describe("Deep worker terminal lifecycle", () => {
       policy,
       source,
       runtime: preparedRuntime(codexHome),
-      environment,
       runtimeHome: codexHome,
       effectiveConfig: {},
       preflightConfig: {},

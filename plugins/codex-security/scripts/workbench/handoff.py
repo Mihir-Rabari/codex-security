@@ -12,11 +12,12 @@ from workbench_validation import optional_text, require_uuid
 RECOVERY_HANDOFF_TOKEN_PREFIX = "recovery_"
 
 
-def durable_owner_thread_id(scan: sqlite3.Row, workspace: sqlite3.Row) -> str | None:
-    """Keep the native owner when a separate execution session has been recorded."""
+def owning_thread(
+    scan: sqlite3.Row, workspace: sqlite3.Row, *, execution_fallback: bool = True
+) -> str | None:
     return (
         scan["deep_scan_owner_thread_id"]
-        or scan["continuation_thread_id"]
+        or (scan["continuation_thread_id"] if execution_fallback else None)
         or workspace["thread_id"]
     )
 
@@ -205,7 +206,7 @@ def mark_handoff_delivered(
         if thread_id is not None:
             workspace = require_workspace(connection, scan["workspace_id"])
             validate_handoff_delivery_thread(
-                durable_owner_thread_id(scan, workspace),
+                owning_thread(scan, workspace),
                 thread_id,
                 claim_token,
             )

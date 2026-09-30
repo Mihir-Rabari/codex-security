@@ -66,19 +66,29 @@ def checkpoint(
                     payload["knowledgeBaseSha256"],
                 ),
             )
-            # Cache hits are not saved again by the classifier. Copy them once,
-            # without replacing assessments this scan already owns.
-            connection.execute(
-                """INSERT INTO scan_severity_assessments
-                SELECT ?, assessment.* FROM json_each(?) AS selected
-                JOIN finding_severity_assessments AS assessment
-                    ON assessment.finding_id = selected.value
-                WHERE true
-                ON CONFLICT(scan_id, finding_id) DO NOTHING""",
-                (payload["scanId"], json.dumps(payload["findingIds"])),
+            rows = connection.execute(
+                """SELECT * FROM (
+                    SELECT assessment.*, selected.key AS finding_order,
+                        ROW_NUMBER() OVER (PARTITION BY assessment.finding_id
+                            ORDER BY (assessment.scan_id = ?) DESC, assessment.assessed_at DESC, assessment.scan_id) AS rank
+                    FROM json_each(?) AS selected
+                    JOIN scan_severity_assessments AS assessment
+                        ON assessment.finding_id = selected.key
+                        AND assessment.input_sha256 = selected.value
+                    WHERE assessment.rubric_sha256 IS ?
+                        AND assessment.knowledge_base_sha256 IS ?
+                ) WHERE rank = 1 ORDER BY finding_order""",
+                (
+                    payload["scanId"],
+                    json.dumps(payload["inputs"]),
+                    payload["rubricSha256"],
+                    payload["knowledgeBaseSha256"],
+                ),
             )
             return {
-                "assessments": assessments(connection, payload["findingIds"], payload["scanId"])
+                "assessments": [
+                    {key: row[column] for key, column in FIELDS.items()} for row in rows
+                ]
             }
     if payload["action"] != "save":
         raise SystemExit("Unknown severity checkpoint action.")
@@ -93,23 +103,24 @@ def checkpoint(
             is None
         ):
             upsert_finding(connection, finding, timestamp)
-        values = {column: assessment[key] for key, column in FIELDS.items()}
-        for table, key, row in (
-            ("finding_severity_assessments", "finding_id", values),
-            (
-                "scan_severity_assessments",
-                "scan_id, finding_id",
-                {"scan_id": payload["scanId"], **values},
-            ),
-        ):
-            columns = ", ".join(row)
-            parameters = ", ".join("?" for _ in row)
-            updates = ", ".join(f"{column} = excluded.{column}" for column in row)
-            connection.execute(
-                f"""INSERT INTO {table} ({columns}) VALUES ({parameters})
-                ON CONFLICT({key}) DO UPDATE SET {updates}""",
-                tuple(row.values()),
+        row = {
+            "scan_id": payload["scanId"],
+            **{column: assessment[key] for key, column in FIELDS.items()},
+        }
+        columns = ", ".join(row)
+        parameters = ", ".join("?" for _ in row)
+        updates = ", ".join(f"{column} = excluded.{column}" for column in row)
+        conflict = f"DO UPDATE SET {updates}"
+        if payload.get("reused"):
+            conflict += " WHERE " + " OR ".join(
+                f"scan_severity_assessments.{column} IS NOT excluded.{column}"
+                for column in ("input_sha256", "rubric_sha256", "knowledge_base_sha256")
             )
+        connection.execute(
+            f"INSERT INTO scan_severity_assessments ({columns}) VALUES ({parameters}) "
+            f"ON CONFLICT(scan_id, finding_id) {conflict}",
+            tuple(row.values()),
+        )
     return {}
 
 

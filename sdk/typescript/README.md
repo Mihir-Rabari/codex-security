@@ -960,6 +960,11 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
 
+Native plugin startup resolves `CODEX_HOME` to its physical directory before
+starting workers, preserving literal directory names and `symlink/..` traversal.
+Windows native startup uses an explicit `CODEX_CLI_PATH`, the managed npm package,
+or `PATH`; it does not guess a relocated desktop executable from cache timestamps.
+
 ### Progress and cost
 
 Interactive scans show full-screen progress; CI, redirected output, and

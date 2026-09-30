@@ -40,8 +40,8 @@ await fs.writeFile(path.join(repository, "example.py"), "value = 1\n");
 await build({
   ...mcpBundleOptions,
   define: {
-    __dirname: JSON.stringify(applicationRoot),
     ...mcpBundleOptions.define,
+    __dirname: JSON.stringify(applicationRoot),
   },
   entryPoints: [path.join(applicationRoot, "main.ts")],
   logLevel: "silent",

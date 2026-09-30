@@ -385,7 +385,11 @@ test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
 );
 
 test("CLI merge failure retains accepted ordinary scans and the original thread", async () => {
-  const f = await interruptedScan();
+  const f = await interruptedScan("deep", false, {}, false, true, {
+    findings: [
+      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+    ],
+  });
   const checkpoint = JSON.parse(
     await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
   ) as DeepScanCheckpoint;
@@ -920,7 +924,7 @@ test.each([true, false])(
         const response = await runWorkbench(options, args, input);
         if (!savedMergeSession && args.includes(f.scanId)) {
           if (args[0] === "get-cli-scan-resume") response["threadId"] = null;
-          if (args[0] === "get-scan")
+          if (args[0] === "get-cli-scan-resume" || args[0] === "get-scan")
             (response["scan"] as JsonObject)["continuationThreadId"] = null;
         }
         return response;
@@ -1032,7 +1036,7 @@ test.each([
         ? null
         : {
             cost: cost(100, 10),
-            findings: phase === "accepted" ? [finding] : [],
+            findings: [finding],
           },
     );
     const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
@@ -1048,6 +1052,8 @@ test.each([
             consecutiveErrors: 0,
           }
         : JSON.parse(await readFile(checkpointPath, "utf8"));
+    // Merge input publication can survive a crash before the checkpoint flips.
+    if (phase === "in-flight") checkpoint.mergeStarted = false;
     if (phase === "completed-before-merge") {
       checkpoint.passes[0]!.completed = true;
       const directory = "artifacts/deep-scan/passes/pass-2";
@@ -1230,7 +1236,12 @@ test.each([
                         ...event.item,
                         text: JSON.stringify({
                           scanId: f.scanId,
-                          findings: [],
+                          groups: [
+                            {
+                              sourceFindingIds: [`${f.childId}:0`],
+                              canonicalSourceFindingId: `${f.childId}:0`,
+                            },
+                          ],
                         }),
                       },
                     };
@@ -1743,7 +1754,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
     });
     const client = resumeClient(f, () => ({
       startThread: () => unusedThread(null),
-      resumeThread: (id) => unusedThread(id),
+      resumeThread() {
+        throw new Error("Retired origins must not resume.");
+      },
     }))({ codexOverrides: f.recipe.config });
     try {
       const pending = client.run(f.repository, {
@@ -1760,6 +1773,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         );
       } else {
         const result = await pending;
+        expect(result.threadId).toBe(f.threadId);
         expect(result.cost).toEqual(
           origin === "dedicated"
             ? estimateScanCost("gpt-5.6-sol", usage)
@@ -1867,8 +1881,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
-    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const savedCheckpoint = saved["compositionCheckpoint"];
+    const savedCheckpoint = (
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+    )["compositionCheckpoint"];
     if (checkpoint === "v2")
       expect(savedCheckpoint).toMatchObject({ version: 2 });
     else expect(savedCheckpoint).toBeNull();
@@ -1914,6 +1929,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       f,
       () => ({
         startThread() {
+          expect(checkpoint).not.toBe("v2");
           return {
             id: null,
             async runStreamed() {
@@ -1928,7 +1944,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
             id: threadId,
             async runStreamed() {
               turns++;
-              throw new Error("Sealed legacy discovery needs no model turn.");
+              throw new Error("A sealed scan needs no model turn.");
             },
           };
         },
@@ -1936,7 +1952,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       async (options, args, input) => {
         commands.push(args[0]!);
         const result = await runWorkbench(options, args, input);
-        if (args[0] === "get-scan" && checkpoint === undefined)
+        if (args[0] === "get-cli-scan-resume" && checkpoint === undefined)
           delete result["compositionCheckpoint"];
         if (args[0] === "get-scan" && trackingFailure && !brokenTracking) {
           // Session identity was already checked; fail subsequent usage reads.
@@ -2105,7 +2121,11 @@ test.each([
 );
 
 test("bulk recovery merges a sealed child when the parent stopped before its first merge thread", async () => {
-  const f = await interruptedScan("deep", true, {}, false, false);
+  const f = await interruptedScan("deep", true, {}, false, false, {
+    findings: [
+      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+    ],
+  });
   const before = await readFile(join(f.childDir!, "findings.json"));
   const stderr = capture();
   const stdout = capture();
@@ -2141,7 +2161,12 @@ test("bulk recovery merges a sealed child when the parent stopped before its fir
                         ...event.item,
                         text: JSON.stringify({
                           scanId: f.scanId,
-                          findings: [],
+                          groups: [
+                            {
+                              sourceFindingIds: [`${f.childId}:0`],
+                              canonicalSourceFindingId: `${f.childId}:0`,
+                            },
+                          ],
                         }),
                       },
                     };
@@ -2670,3 +2695,75 @@ test("resume requires an explicit scan ID", async () => {
   expect(code).toBe(2);
   expect(stderr.text()).toContain("scanId");
 });
+
+test.each(
+  [false, true].flatMap((sealed) =>
+    [false, true].map((requiredCost) => ({ sealed, requiredCost })),
+  ),
+)(
+  "clean accepted composition needs no merge session (sealed: $sealed, required cost: $requiredCost)",
+  async ({ sealed, requiredCost }) => {
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 100,
+      output_tokens: 10,
+    })!;
+    const f = await interruptedScan("deep", false, {}, true, false, { cost });
+    const path = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
+    const checkpoint = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as DeepScanCheckpoint;
+    checkpoint.mergeStarted = false;
+    checkpoint.mergedScanIds = [f.childId!];
+    checkpoint.aggregate = {
+      scanId: f.scanId,
+      findings: [],
+      coverage: semanticCoverage({ completeness: "partial" }),
+    };
+    checkpoint.terminalReason = "capped";
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+    if (sealed)
+      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const before = await readFile(path);
+    let turns = 0;
+    const client = resumeClient(f, () => ({
+      startThread() {
+        return {
+          id: null,
+          async runStreamed() {
+            turns++;
+            throw new Error("A clean composition has no model merge.");
+          },
+        };
+      },
+      resumeThread() {
+        throw new Error("A clean composition has no saved model session.");
+      },
+    }))({ codexOverrides: f.recipe.config });
+    try {
+      const result = await client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+        ...(requiredCost ? { maxCostUsd: 1 } : {}),
+      });
+      expect(result.cost).toEqual(cost);
+      expect(result.threadId).toBeNull();
+      expect(result.findings.findings).toEqual([]);
+      expect(turns).toBe(0);
+      if (sealed) expect(await readFile(path)).toEqual(before);
+    } finally {
+      await client.close();
+    }
+  },
+);

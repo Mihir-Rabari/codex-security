@@ -21,10 +21,7 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
-import {
-  combineScanCoverage,
-  createScanMergeValidator,
-} from "../src/scan-merge.js";
+import { combineScanCoverage, validateScanMerge } from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -207,9 +204,17 @@ test("normalizes sealed legacy findings for merging while retaining exact source
       (index) => legacy.findings[index]!,
     ),
   );
-  const merge = await createScanMergeValidator(PLUGIN_ROOT);
-  const { coverage: _coverage, ...draft } = projected.draft;
-  const result = merge(draft, [projected], null);
+  const result = validateScanMerge(
+    {
+      scanId: fixture.parentScanId,
+      groups: projected.draft.findings.map((finding) => ({
+        sourceFindingIds: finding.provenance.sourceFindingIds!,
+        canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
+      })),
+    },
+    [projected],
+    null,
+  );
   expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
     { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
   ]);
@@ -322,7 +327,7 @@ test.skipIf(process.platform === "win32")(
     for (const { name, bytes } of files) {
       expect(
         await readFile(
-          join(h.parent, `findings/${fixture.sourceScanId}-check-4/many`, name),
+          join(h.parent, `findings/${fixture.sourceScanId}/check/many`, name),
         ),
       ).toEqual(bytes);
     }
@@ -367,36 +372,27 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test.each([false, true])(
-  "does not overwrite a projected report with colliding evidence (uppercase: %p)",
-  async (uppercase) => {
-    const h = await canonicalChild();
-    const base = `${fixture.sourceScanId}-check-3`;
-    const name = uppercase ? `${base}.md`.toUpperCase() : `${base}.md`;
-    await writeFile(
-      join(h.source, "findings/check-3", name),
-      "Supporting evidence",
+test("preserves report and evidence basenames under the child namespace", async () => {
+  const h = await canonicalChild();
+  const evidence = `${fixture.sourceScanId}-check-3.md`;
+  await writeFile(
+    join(h.source, "findings/check-3", evidence),
+    "Supporting evidence",
+  );
+  const writer = await prepareScanArtifactRestorer(h.options, h.parent);
+  const projected = await writer.projectChild(
+    fixture.parentScanId,
+    fixture.sourceScanId,
+    h.source,
+  );
+  const directory = `findings/${fixture.sourceScanId}/check-3`;
+  expect(
+    projected.draft.findings.some(
+      (finding) => finding.writeup?.reportPath === `${directory}/check-3.md`,
+    ),
+  ).toBe(true);
+  for (const name of ["check-3.md", evidence])
+    expect(await readFile(join(h.parent, directory, name))).toEqual(
+      await readFile(join(h.source, "findings/check-3", name)),
     );
-    const writer = await prepareScanArtifactRestorer(h.options, h.parent);
-    const projected = await writer.projectChild(
-      fixture.parentScanId,
-      fixture.sourceScanId,
-      h.source,
-    );
-    const reportPath = `findings/${base}-2/${base}-2.md`;
-    expect(
-      projected.draft.findings.some(
-        (finding) => finding.writeup?.reportPath === reportPath,
-      ),
-    ).toBe(true);
-    expect(await readFile(join(h.parent, reportPath))).toEqual(
-      await readFile(join(h.source, "findings/check-3/check-3.md")),
-    );
-    expect(
-      await readFile(join(h.parent, `findings/${base}-2/${name}`), "utf8"),
-    ).toBe("Supporting evidence");
-    expect(
-      await readFile(join(h.source, "findings/check-3", name), "utf8"),
-    ).toBe("Supporting evidence");
-  },
-);
+});

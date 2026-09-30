@@ -92,8 +92,7 @@ export function discoveryStopReason(
   if (
     input.deadlineReached ||
     (!input.hasUnfinishedPasses &&
-      (state.legacy?.discoveryRuns ?? 0) + state.passes.length >=
-        input.maxDiscoveryRuns)
+      state.passes.length >= input.maxDiscoveryRuns)
   )
     return "capped";
   return undefined;

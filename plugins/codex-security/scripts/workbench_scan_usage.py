@@ -17,12 +17,7 @@ from typing import Any, Mapping
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from workbench_composition import (
-    CompositionView,
-    composition_children,
-    composition_execution_threads,
-    load_composition,
-)
+from workbench_composition import CompositionView, load_composition
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -68,15 +63,11 @@ def reconcile_completed_scan_cost(
 
     cost_json = merge_scan_cost(scan["cost_json"], cost_json)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def merge_scan_cost(stored: str | None, incoming: str | None) -> str | None:
@@ -121,7 +112,11 @@ def collect_scan_usage(
             checkpoint.get("costUnavailable")
             or (
                 not scan["continuation_thread_id"]
-                and (checkpoint["mergedScanIds"] or _merge_was_prepared(scan["scan_dir"]))
+                and (
+                    checkpoint.get("mergeStarted") is True
+                    or (checkpoint.get("mergeStarted") is not False and checkpoint["mergedScanIds"])
+                    or _merge_was_prepared(scan["scan_dir"])
+                )
             )
         )
     ) or any(not child["continuation_thread_id"] for child in composition.children):
@@ -206,8 +201,8 @@ def _scan_root_thread_ids(
     scan: sqlite3.Row,
     supplied_thread_id: str | None,
     *,
+    composition: CompositionView,
     include_owner_threads: bool = True,
-    composition: CompositionView | None = None,
 ) -> list[str]:
     candidates: list[str | None] = [supplied_thread_id]
     if include_owner_threads:
@@ -222,17 +217,8 @@ def _scan_root_thread_ids(
         if workspace is not None:
             candidates.append(workspace["thread_id"])
     if scan["mode"] == "deep":
-        candidates.extend(
-            composition.execution_threads
-            if composition is not None
-            else composition_execution_threads(scan)
-        )
-        children = (
-            composition.children
-            if composition is not None
-            else composition_children(connection, scan)
-        )
-        candidates.extend(child["continuation_thread_id"] for child in children)
+        candidates.extend(composition.execution_threads)
+        candidates.extend(child["continuation_thread_id"] for child in composition.children)
         candidates.extend(
             row["sdk_thread_id"]
             for row in connection.execute(
@@ -255,7 +241,7 @@ def _scan_root_thread_ids(
 
 
 def _scan_execution_thread_ids(
-    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView | None = None
+    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView
 ) -> list[str]:
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
     return _scan_root_thread_ids(

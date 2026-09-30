@@ -14,15 +14,10 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
-from workbench_composition import (
-    CompositionView,
-    load_composition,
-    read_composition_checkpoint,
-)
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
+from workbench_composition import CompositionView
+from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
@@ -59,10 +54,7 @@ def cli_scan_resume(
     *,
     parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-    require_scan_directory: Callable[[Path], Path],
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
+    sealed_producer_version: Callable[[sqlite3.Row], str | None],
     claim_token: str | None = None,
 ) -> dict[str, Any]:
     if scan["recipe_json"] is None:
@@ -88,59 +80,23 @@ def cli_scan_resume(
     ):
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = parse_scan_recipe(scan["recipe_json"], repository)
-    scan_dir = require_scan_directory(Path(scan["scan_dir"]))
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
-    sealed_version = sealed_scan_producer_version(
-        scan,
-        scan_dir,
-        artifact_path=artifact_path,
-        read_json_object=read_json_object,
-        workbench_completion_binding=workbench_completion_binding,
-    )
-    if sealed_version is None:
-        require_current_deep_runtime(connection, scan)
+    producer_version = sealed_producer_version(scan)
+    if producer_version is None:
+        require_current_deep_scan(connection, scan)
     else:
-        result["sealedProducerVersion"] = sealed_version
+        result["sealedProducerVersion"] = producer_version
     return result
 
 
-def sealed_scan_producer_version(
-    scan: sqlite3.Row,
-    scan_dir: Path,
-    *,
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
-) -> str | None:
-    # A process can stop after sealing files but before committing completion.
-    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    if manifest_path is None:
-        return None
-    manifest = read_json_object(manifest_path)
-    manifest_scan = manifest.get("scan")
-    if not isinstance(manifest_scan, dict) or (
-        manifest_scan.get("sealedAt") is None and manifest_scan.get("artifacts") in (None, [])
-    ):
-        return None
-    try:
-        binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-        _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=binding["coverageMode"],
-            completion_binding=binding,
-        )
-        return manifest_scan["producer"]["version"]
-    except ContractError as exc:
-        raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
-
-
-def require_current_deep_runtime(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+def require_current_deep_scan(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
     if (
         scan["mode"] == "deep"
         and connection.execute(
             "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
         ).fetchone()
+        is not None
     ):
         raise SystemExit("This Deep Scan uses a retired runtime. Start a fresh scan.")
 
@@ -168,51 +124,34 @@ def scan_registration(
     }
 
 
-def require_composition_complete(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+def require_composition_complete(scan: sqlite3.Row, composition: CompositionView) -> None:
     if scan["mode"] != "deep":
         return
-    checkpoint = read_composition_checkpoint(scan)
+    checkpoint = composition.checkpoint
     if checkpoint is not None:
         if checkpoint.get("terminalReason") in {"saturated", "capped"}:
             return
     else:
-        legacy = connection.execute(
-            "SELECT status, manifest_path FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone()
+        legacy = composition.legacy_run
         if legacy is not None and legacy["status"] == "succeeded" and legacy["manifest_path"]:
             return
     raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
 
 
 def independent_review_progress(
-    connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    composition: CompositionView | None = None,
+    composition: CompositionView,
 ) -> dict[str, Any] | None:
-    composition = composition if composition is not None else load_composition(connection, scan)
     run = composition.legacy_run
-    checkpoint = composition.checkpoint
-    if checkpoint is not None or composition.children:
-        children = composition.children
+    children = composition.children
+    if children or scan["recipe_json"] is not None:
         recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
-        legacy = run if checkpoint is not None and checkpoint.get("legacy") is not None else None
         return {
             "active": sum(child["status"] == "running" for child in children),
-            "completed": sum(child["status"] == "complete" for child in children)
-            + (legacy["completion_sequence"] if legacy is not None else 0),
-            "maximum": recipe.get("deepScan", {}).get(
-                "maxDiscoveryRuns",
-                legacy["max_discovery_runs"]
-                if legacy is not None
-                else len(checkpoint["passes"])
-                if checkpoint is not None
-                else len(children),
-            ),
-            "consolidating": any(
-                child["status"] == "complete"
-                and (checkpoint is None or child["id"] not in checkpoint["mergedScanIds"])
-                for child in children
-            ),
+            "completed": sum(child["status"] == "complete" for child in children),
+            "maximum": recipe.get("deepScan", {}).get("maxDiscoveryRuns", len(children)),
+            "consolidating": scan["status"] == "running"
+            and scan["phase"] in {"validation", "reporting"},
             "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
         }
     if run is None:
@@ -328,8 +267,7 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
-    if args is None or not args.scan_root:
-        clauses.append("scans.parent_scan_role IS NOT 'deep_pass'")
+    table = "scans" if args is not None and args.scan_root else "public_scans"
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -412,7 +350,7 @@ def list_scans(
                 FROM finding_occurrences AS occurrences
                 WHERE occurrences.scan_id = scans.id
             ) AS finding_count
-        FROM scans
+        FROM {table} AS scans
         JOIN scan_progress AS progress ON progress.scan_id = scans.id
         {where}
         ORDER BY
@@ -495,8 +433,7 @@ def list_unmatched_scan_pairs(
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' "
-            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
+            "SELECT * FROM public_scans WHERE status = 'complete' ORDER BY started_at, id"
         )
         if _same_repository(scan, requested)
     ]
@@ -1081,17 +1018,19 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        JOIN scans ON scans.id = matches.after_scan_id
         WHERE matches.before_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+            AND (occurrences.scan_id = ? OR EXISTS (
+                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
+            ))
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        JOIN scans ON scans.id = matches.before_scan_id
         WHERE matches.after_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+            AND (occurrences.scan_id = ? OR EXISTS (
+                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
+            ))
         ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, scan_id, occurrence_id, scan_id),
@@ -1099,15 +1038,16 @@ def finding_matches(
     linked_rows = list(
         connection.execute(
             f"""
-            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
+            {_LINKED_FINDINGS_SQL}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
                 scans.started_at, scans.id AS scan_id
             FROM linked
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
-            """,
+            WHERE EXISTS (SELECT 1 FROM public_scans WHERE public_scans.id = scans.id)
+                OR scans.id = ?
+            """.format(placeholders="?"),
             (occurrence_id, scan_id),
         )
     )

@@ -167,7 +167,6 @@ export interface PreparedExecution {
   inheritedPermissions?: ScanPermissions;
   safetyIdentifier?: string;
   readonly runtime: PreparedRuntime;
-  readonly environment: Record<string, string>;
   runtimeHome: string;
   effectiveConfig: JsonObject;
   preflightConfig: JsonObject;
@@ -477,6 +476,7 @@ export async function prepareAmbientExecution(
 export async function prepareAmbientRuntime(
   execution: AmbientExecution,
   signal?: AbortSignal,
+  preparedPlugin?: PluginInstall,
 ): Promise<PreparedRuntime> {
   const codexHome = await realpath(
     execution.environment["CODEX_HOME"] ||
@@ -484,11 +484,13 @@ export async function prepareAmbientRuntime(
   );
   const bootstrapWorkspace = await createIsolatedHome();
   try {
-    const marketplaceRoot = await createMarketplace(
-      bootstrapWorkspace,
-      execution.pluginRoot,
-      signal,
-    );
+    const marketplaceRoot =
+      preparedPlugin?.marketplaceRoot ??
+      (await createMarketplace(
+        bootstrapWorkspace,
+        execution.pluginRoot,
+        signal,
+      ));
     const pluginRoot = join(marketplaceRoot, "plugins", PLUGIN_NAME);
     return {
       codexHome,
@@ -501,7 +503,7 @@ export async function prepareAmbientRuntime(
         CODEX_HOME: codexHome,
       },
       credentialsAvailable: false,
-      plugin: {
+      plugin: preparedPlugin ?? {
         pluginRoot,
         installedRoot: pluginRoot,
         marketplaceRoot,
@@ -564,7 +566,7 @@ function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
   return config;
 }
 
-/** A Standard pass preserves the caller's write and network policy. */
+/** Standard passes retain inherited permissions while isolating workbench tools. */
 export function prepareDiscoveryExecution(
   session: PreparedExecution,
 ): PreparedExecution {
@@ -575,7 +577,7 @@ export function prepareDiscoveryExecution(
   };
 }
 
-/** The merge uses the same inherited policy while applying its subagent budget. */
+/** The merge retains inherited permissions and applies its own subagent budget. */
 export function prepareMergeExecution(
   session: PreparedExecution,
   subagents: number,

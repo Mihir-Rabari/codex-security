@@ -57,6 +57,50 @@ interface ScanEventRunOptions {
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
+export function reportScanActivities(
+  event: ScanEvent,
+  repository: string,
+  options: Pick<ScanEventRunOptions, "onActivity" | "onObserverError">,
+): void {
+  for (const activity of scanActivitiesFromEvent(event, repository)) {
+    notifyObserver(
+      "onActivity",
+      options.onActivity,
+      options.onObserverError,
+      activity,
+    );
+  }
+}
+
+export function scanReconnectObserver(
+  options: Pick<ScanEventRunOptions, "onReconnect" | "onObserverError">,
+) {
+  return (message: string, attempts: [number, number]): void =>
+    notifyObserver(
+      "onReconnect",
+      options.onReconnect,
+      options.onObserverError,
+      ...attempts,
+      reconnectDetails(message),
+    );
+}
+
+function throwScanFailure(
+  error: unknown,
+  options: Pick<ScanEventRunOptions, "signal" | "scanDir">,
+): never {
+  if (options.signal.reason instanceof ScanCostLimitExceededError)
+    throw options.signal.reason;
+  if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
+    throw new ScanInterruptedError(
+      `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+      options.scanDir,
+      { cause: error },
+    );
+  }
+  throw error;
+}
+
 /** @internal */
 export async function runScanEvents(
   options: ScanEventRunOptions,
@@ -64,28 +108,14 @@ export async function runScanEvents(
   try {
     const completed = await runScanTurn(options);
     const result = await collectResult(
-      completed.turnResult,
-      completed.threadId,
-      options.scanDir,
-      options.pluginRoot,
-      options.expectation,
-      options.signal,
+      options,
+      completed,
       options.workbenchValidated,
     );
     throwIfAborted(options.signal, options.scanDir);
     return result;
   } catch (error) {
-    if (options.signal.reason instanceof ScanCostLimitExceededError) {
-      throw options.signal.reason;
-    }
-    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-        { cause: error },
-      );
-    }
-    throw error;
+    throwScanFailure(error, options);
   }
 }
 /** @internal */
@@ -119,17 +149,7 @@ export async function runScanTurn(
             }
           }
         }
-        for (const activity of scanActivitiesFromEvent(
-          event,
-          options.expectation.repository,
-        )) {
-          notifyObserver(
-            "onActivity",
-            options.onActivity,
-            options.onObserverError,
-            activity,
-          );
-        }
+        reportScanActivities(event, options.expectation.repository, options);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
           if (
             options.expectedFilesTotal !== undefined &&
@@ -168,15 +188,7 @@ export async function runScanTurn(
           }
         }
       },
-      onReconnect: (message, reconnect) => {
-        notifyObserver(
-          "onReconnect",
-          options.onReconnect,
-          options.onObserverError,
-          ...reconnect,
-          reconnectDetails(message),
-        );
-      },
+      onReconnect: scanReconnectObserver(options),
     });
     const { status, threadId, finalResponse, lastStreamError } = turn;
     let { usage } = turn;
@@ -212,17 +224,7 @@ export async function runScanTurn(
       },
     };
   } catch (error) {
-    if (options.signal.reason instanceof ScanCostLimitExceededError) {
-      throw options.signal.reason;
-    }
-    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-        { cause: error },
-      );
-    }
-    throw error;
+    throwScanFailure(error, options);
   }
 }
 

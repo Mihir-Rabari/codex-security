@@ -57,6 +57,7 @@ class _CheckpointState(TypedDict):
 
 class CompositionCheckpoint(_CheckpointState, total=False):
     mergeFailures: int
+    mergeStarted: bool
     costUnavailable: Literal[True]
     legacy: LegacyComposition
     terminalReason: Literal["saturated", "capped", "failed", "canceled"]
@@ -110,11 +111,13 @@ def composition_execution_threads(scan: sqlite3.Row) -> tuple[str, ...]:
     return tuple(additional)
 
 
-def load_composition(connection: sqlite3.Connection, scan: sqlite3.Row) -> CompositionView:
+def load_composition(
+    connection: sqlite3.Connection, scan: sqlite3.Row, *, checkpoint: bool = True
+) -> CompositionView:
     if scan["mode"] != "deep":
         return CompositionView(None, (), (), None)
     return CompositionView(
-        read_composition_checkpoint(scan),
+        read_composition_checkpoint(scan) if checkpoint else None,
         tuple(composition_children(connection, scan)),
         composition_execution_threads(scan),
         connection.execute(

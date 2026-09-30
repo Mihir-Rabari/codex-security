@@ -130,13 +130,11 @@ def archive_scan(
         (previous_scan["id"],),
     ).fetchall()
     scans = [scan for scan in scans if Path(scan["scan_dir"]).is_relative_to(scan_dir)]
-    artifacts = [
-        artifact
-        for scan in scans
-        for artifact in connection.execute(
-            "SELECT scan_id, kind, path FROM scan_artifacts WHERE scan_id = ?", (scan["id"],)
-        )
-    ]
+    artifacts = connection.execute(
+        "SELECT scan_id, kind, path FROM scan_artifacts "
+        "WHERE scan_id IN (SELECT value FROM json_each(?))",
+        (json.dumps([scan["id"] for scan in scans]),),
+    ).fetchall()
     if archived_scan_dir is None:
         if artifacts:
             raise SystemExit(

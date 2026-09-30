@@ -578,6 +578,10 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
         (False, True, "prepared"),
         (False, True, "not-started"),
         (True, True, "not-started"),
+        (False, True, "accepted-without-merge"),
+        (False, True, "accepted-with-prepared-merge"),
+        (False, True, "started"),
+        (True, True, "accepted-without-merge"),
     ],
 )
 def test_completion_counts_ordinary_child_scans_and_descendants(
@@ -649,9 +653,13 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
             environment=environment,
         )
         document["passes"][0]["completed"] = True
-        if merge_state == "merged":
+        if merge_state in {"merged", "accepted-without-merge", "accepted-with-prepared-merge"}:
             document["mergedScanIds"] = [child["scanId"]]
-        elif merge_state == "prepared":
+        if merge_state in {"accepted-without-merge", "accepted-with-prepared-merge"}:
+            document["mergeStarted"] = False
+        elif merge_state == "started":
+            document["mergeStarted"] = True
+        if merge_state in {"prepared", "accepted-with-prepared-merge"}:
             # Preparation is durable before launch; interrupted contents still record intent.
             (checkpoint.parent / "merge-inputs.json").write_text("{")
         with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
@@ -679,7 +687,7 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
     incomplete = (
         prior_session_unavailable
         or not child_session_saved
-        or merge_state in {"merged", "prepared"}
+        or merge_state in {"merged", "prepared", "accepted-with-prepared-merge", "started"}
     )
     assert usage == {
         "coverage": "partial" if incomplete else "complete",

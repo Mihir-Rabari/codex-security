@@ -36,8 +36,8 @@ try {
   await build({
     ...mcpBundleOptions,
     define: {
-      __dirname: JSON.stringify(applicationRoot),
       ...mcpBundleOptions.define,
+      __dirname: JSON.stringify(applicationRoot),
     },
     entryPoints: [path.join(applicationRoot, "main.ts")],
     logLevel: "silent",

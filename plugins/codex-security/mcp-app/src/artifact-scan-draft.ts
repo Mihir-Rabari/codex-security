@@ -14,7 +14,8 @@ import {
   type SemanticScan,
   type SemanticCoverage,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draft-publication.js";
 import { promises as fs } from "node:fs";
 import { join, sep } from "node:path";
 import type * as z from "zod/v4";
@@ -26,7 +27,7 @@ import {
   artifactDestination,
   readArtifactJsonObject,
   readArtifactText,
-  replaceArtifactJson,
+  replaceArtifactText,
 } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
@@ -61,6 +62,7 @@ type PublishScanDraft = (
   draft: PreparedScanDraft,
   expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
+  reconciledCheckpointIds: readonly string[],
 ) => Promise<void>;
 
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
@@ -93,13 +95,18 @@ export async function recordCodexSecurityScanDraft(
     // checkpoints into them.
     const preserved =
       context.mode === "deep" && parsed.complete !== false
-        ? { input: parsed, previousDigest: undefined }
+        ? { input: parsed, previousDigest: undefined, checkpointIds: [] }
         : await preserveScanDraft(context, parsed);
     const reconciled = preserved.input;
     const hardening = await readExistingHardeningPortfolio(context);
     const draft = prepareSemanticScanDraft(context, reconciled, hardening);
     try {
-      await publishDraft(draft, preserved.previousDigest, parsed);
+      await publishDraft(
+        draft,
+        preserved.previousDigest,
+        parsed,
+        preserved.checkpointIds,
+      );
       return {
         scanId: reconciled.scanId,
         findingCount: draft.findings.findings.length,
@@ -124,54 +131,50 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   return recordCodexSecurityScanDraft(
     context,
     input,
-    async (draft, expectedDigest, checkpoint) => {
-      const checkpointPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.checkpoint.json`],
-        "staged scan checkpoint",
-      );
-      const draftPath = await artifactDestination(
-        context,
-        ["drafts", `${randomUUID()}.json`],
-        "staged scan draft",
-      );
+    async (draft, expectedDigest, checkpoint, reconciledCheckpointIds) => {
       try {
-        const { handoffClaimToken: _claim, ...snapshot } = checkpoint;
-        await Promise.all([
-          replaceArtifactJson(checkpointPath, snapshot),
-          replaceArtifactJson(draftPath, draft),
-        ]);
-        const arguments_ = [
-          "write-scan-draft",
-          "--scan-id",
-          input.scanId,
-          "--draft-path",
-          draftPath,
-          "--checkpoint-path",
-          checkpointPath,
-        ];
-        if (expectedDigest !== undefined) {
-          arguments_.push("--expected-draft-digest", expectedDigest);
-        }
-        if (context.handoffClaimToken) {
-          arguments_.push("--claim-token", context.handoffClaimToken);
-        }
-        try {
-          await runWorkbench(arguments_);
-        } catch (error) {
-          if (!workbenchScanDraftConflict(error)) throw error;
-          throw Object.assign(
-            new Error(
-              "The canonical scan draft changed while this checkpoint was being reconciled.",
-            ),
-            { code: "scan_draft_conflict" },
-          );
-        }
-      } finally {
-        await Promise.all([
-          fs.rm(checkpointPath, { force: true }),
-          fs.rm(draftPath, { force: true }),
-        ]);
+        await writePreparedScanDraft(
+          {
+            scanDir: context.root,
+            expectedDigest,
+            reconciledCheckpointIds,
+            claimToken: context.handoffClaimToken,
+            writer: {
+              restore: async (relative, contents) => {
+                const path = await artifactDestination(
+                  context,
+                  relative.split("/"),
+                  "staged scan draft",
+                );
+                await replaceArtifactText(
+                  path,
+                  Buffer.from(contents).toString("utf8"),
+                );
+              },
+              remove: async (relative) => {
+                const path = await artifactDestination(
+                  context,
+                  relative.split("/"),
+                  "staged scan draft",
+                );
+                await fs.rm(path, { force: true });
+              },
+            },
+            workbench: (args) => runWorkbench([...args]),
+            onCleanupError: (error) =>
+              console.warn("Could not remove staged scan draft:", error),
+          },
+          checkpoint,
+          draft,
+        );
+      } catch (error) {
+        if (!workbenchScanDraftConflict(error)) throw error;
+        throw Object.assign(
+          new Error(
+            "The canonical scan draft changed while this checkpoint was being reconciled.",
+          ),
+          { code: "scan_draft_conflict" },
+        );
       }
     },
     signal,
@@ -181,7 +184,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  checkpointIds: string[];
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   let result = structuredClone(input);
   const previousState = await readPreviousScanDraft(context);
@@ -191,28 +198,15 @@ async function preserveScanDraft(
       "scan checkpoint: saved result belongs to a different scan.",
     );
   const current = await readCurrentCheckpoints(context, currentCheckpointName);
-  const sources: ScanDraftInput[] = previous ? [previous, ...current] : current;
+  const inputs = current.map(({ input }) => input);
+  const sources: ScanDraftInput[] = previous ? [previous, ...inputs] : inputs;
   if (input.complete === false) {
     const final = sources.find((source) => source.complete !== false);
-    if (final) result = structuredClone(final);
+    if (final) {
+      result = structuredClone(final);
+      sources.push(input);
+    }
   }
-  // Older drafts used the deferred row's id as a candidate alias. Keep its
-  // scope without promoting legacy IDs into the stricter candidateId field.
-  const historicalCandidateIds = new Set(
-    sources.flatMap((source) =>
-      source.coverage.surfaces.flatMap((surface) =>
-        typeof surface.candidateId === "string" ? [surface.candidateId] : [],
-      ),
-    ),
-  );
-  for (const scan of [result, ...sources])
-    for (const row of scan.coverage.deferred)
-      if (
-        row.candidateId === undefined &&
-        typeof row.id === "string" &&
-        historicalCandidateIds.has(row.id)
-      )
-        row.candidateScoped = true;
   const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
@@ -378,55 +372,47 @@ async function preserveScanDraft(
     };
     result.coverage = preserveScanCoverage(result.coverage, previousCoverage);
   }
-  return { input: result, previousDigest: previousState.digest };
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    checkpointIds: current.map(({ name }) => name),
+  };
 }
 
 async function readCurrentCheckpoints(
   context: ArtifactContext,
   excludedCheckpoint: string,
-): Promise<ScanDraftInput[]> {
-  const checkpointRoot = join(context.root, "checkpoints");
-  const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
-  if (checkpointRootMetadata === undefined) return [];
-  if (
-    checkpointRootMetadata.isSymbolicLink() ||
-    !checkpointRootMetadata.isDirectory()
-  ) {
+): Promise<Array<{ name: string; input: ScanDraftInput }>> {
+  // A scan created before the pending-directory boundary is imported once by
+  // the locked writer. Historical files remain available as evidence afterward.
+  const components = (await lstatIfExists(
+    join(context.root, "checkpoints", "pending", ".initialized"),
+  ))
+    ? ["checkpoints", "pending"]
+    : ["checkpoints"];
+  const root = join(context.root, ...components);
+  const metadata = await lstatIfExists(root);
+  if (metadata === undefined) return [];
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new Error(
       "scan checkpoint: current checkpoint set is not a safe directory.",
     );
   }
   const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
     fs.realpath(context.root),
-    fs.realpath(checkpointRoot),
+    fs.realpath(root),
   ]);
   if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
     throw new Error(
       "scan checkpoint: current checkpoint set escaped its artifact directory.",
     );
   }
-
-  const checkpoints: Array<{
-    input: ScanDraftInput;
-    modifiedMs: number;
-    name: string;
-  }> = [];
-  for (const entry of await fs.readdir(canonicalCheckpointRoot, {
-    withFileTypes: true,
-  })) {
-    if (
-      !entry.isFile() ||
-      !entry.name.endsWith(".json") ||
-      entry.name === excludedCheckpoint
-    )
+  const checkpoints: Array<{ name: string; input: ScanDraftInput }> = [];
+  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json") || entry.name === excludedCheckpoint)
       continue;
-    const checkpointPath = join(canonicalCheckpointRoot, entry.name);
-    const checkpointMetadata = await fs.lstat(checkpointPath);
-    if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
-      throw new Error(
-        "scan checkpoint: current checkpoint is not a safe file.",
-      );
-    }
+    // Publication can acknowledge a pending entry while we read; its immutable
+    // evidence remains in the history directory.
     const input = parsePersistedScanDraft(
       parseJsonObject(
         await readArtifactText(
@@ -437,22 +423,13 @@ async function readCurrentCheckpoints(
         "current scan checkpoint",
       ),
     );
-    if (input.scanId !== context.scanId) {
+    if (input.scanId !== context.scanId)
       throw new Error(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
-    }
-    checkpoints.push({
-      input,
-      modifiedMs: Number(checkpointMetadata.mtimeMs),
-      name: entry.name,
-    });
+    checkpoints.push({ name: entry.name, input });
   }
-  checkpoints.sort(
-    (left, right) =>
-      right.modifiedMs - left.modifiedMs || right.name.localeCompare(left.name),
-  );
-  return checkpoints.map(({ input }) => input);
+  return checkpoints;
 }
 
 function scanDraftCheckpointName(input: ScanDraftInput): string {
@@ -711,22 +688,10 @@ function coverageHasOutstandingWork(coverage: SemanticCoverage): boolean {
 }
 
 function findingCandidateId(finding: JsonObject): string | undefined {
-  const provenance = finding.provenance;
-  if (
-    isObject(provenance) &&
-    typeof provenance.candidateId === "string" &&
-    provenance.candidateId.trim()
-  ) {
-    return provenance.candidateId;
-  }
-  const extensions = finding.extensions;
-  if (isObject(extensions)) {
-    for (const field of ["candidateId", "reportId", "ledgerRowId"] as const) {
-      const value = extensions[field];
-      if (typeof value === "string" && value.trim()) return value;
-    }
-  }
-  return undefined;
+  return [
+    isObject(finding.provenance) ? finding.provenance.candidateId : undefined,
+    isObject(finding.extensions) ? finding.extensions.candidateId : undefined,
+  ].find((id): id is string => typeof id === "string" && id.trim().length > 0);
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */

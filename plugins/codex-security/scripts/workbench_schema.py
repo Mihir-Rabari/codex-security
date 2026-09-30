@@ -915,6 +915,22 @@ MIGRATIONS = (
             WHERE parent_scan_role = 'deep_pass';
         """,
     ),
+    (
+        44,
+        "reuse scan assessments and centralize public scan visibility",
+        """
+        CREATE VIEW public_scans AS SELECT * FROM scans WHERE parent_scan_role IS NOT 'deep_pass';
+        CREATE INDEX scan_severity_reuse ON scan_severity_assessments
+            (finding_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at DESC);
+        UPDATE scans SET status = 'failed',
+            failure_message = 'The retired Deep Scan coordinator cannot continue. Saved results remain available.',
+            completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE status = 'running' AND id IN (SELECT scan_id FROM deep_scan_runs WHERE status = 'running');
+        UPDATE deep_scan_runs SET status = 'interrupted', phase = 'terminal', cancel_requested = 1
+        WHERE status = 'running';
+        """,
+    ),
 )
 
 

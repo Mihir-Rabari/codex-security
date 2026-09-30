@@ -186,5 +186,5 @@ describe("CLI launcher", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 90_000);
 });

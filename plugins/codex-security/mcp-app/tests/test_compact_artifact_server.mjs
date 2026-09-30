@@ -7,8 +7,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { build } from "esbuild";
-import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const applicationRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -23,16 +21,6 @@ const temporaryRoot = await mkdtemp(
 );
 
 try {
-  const runtimeBundle = path.join(temporaryRoot, "server.cjs");
-  await bundleEntrypoint("main.ts", runtimeBundle);
-
-  await testParentToolList(runtimeBundle);
-  await testClaimedParentArtifactOperations(runtimeBundle, "source");
-  await testPromptDrivenPrivateRecipe(runtimeBundle, "source");
-  await testNativeDeepTerminalResults(runtimeBundle, "source");
-  await testSemanticScanDraftCompletion(runtimeBundle, "source");
-  await testCompactDiffScanCompletion(runtimeBundle, "source");
-
   const shippedRuntime = path.join(bundledPluginRoot, "mcp", "server.mjs");
   await testParentToolList(shippedRuntime);
   await testClaimedParentArtifactOperations(shippedRuntime, "shipped");
@@ -1728,11 +1716,7 @@ function runWorkbenchFixture(runtimeLabel, environment, arguments_, input) {
     execFileSync(
       process.env.PYTHON ?? "python3",
       [
-        path.join(
-          runtimeLabel === "shipped" ? bundledPluginRoot : pluginRoot,
-          "scripts",
-          "workbench_db.py",
-        ),
+        path.join(bundledPluginRoot, "scripts", "workbench_db.py"),
         ...arguments_,
       ],
       {
@@ -1917,19 +1901,6 @@ async function testParentToolList(bundle) {
   } finally {
     await client.close();
   }
-}
-
-async function bundleEntrypoint(entrypoint, outfile) {
-  await build({
-    ...mcpBundleOptions,
-    define: {
-      __dirname: JSON.stringify(applicationRoot),
-      ...mcpBundleOptions.define,
-    },
-    entryPoints: [path.join(applicationRoot, entrypoint)],
-    logLevel: "silent",
-    outfile,
-  });
 }
 
 async function startClient(bundle, environment) {

@@ -281,7 +281,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(frozenSources).toHaveLength(1);
   const [checkpointPath, checkpointDigest] = frozenSources[0]!;
   expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
-  expect(checkpointPath).toBe(`checkpoints/${checkpointDigest}.json`);
+  expect(checkpointPath).toBe(`checkpoints/pending/${checkpointDigest}.json`);
 }, 30_000);
 
 test("preserves distinct instances from one ordinary scan candidate", () => {

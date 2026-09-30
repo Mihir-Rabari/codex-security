@@ -1,14 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  prepareSemanticScanDraft,
-  type SemanticScan,
-} from "./scan-semantics.js";
-import type {
-  ScanArtifactRestorer,
-  prepareScanArtifactRestorer,
-} from "./runtime.js";
+import type { ScanArtifactRestorer } from "./runtime.js";
+import { ScanAccounting } from "./scan-accounting.js";
 import {
   loadContract,
   readScanFile,
@@ -22,17 +15,9 @@ import {
 } from "./errors.js";
 import { ScanPermissionError } from "./scan-execution.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
-import {
-  addScanCosts,
-  scanCostUsage,
-  ScanCostTracker,
-  type ScanCost,
-} from "./cost.js";
+import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
-import {
-  compositionCheckpointFromWorkbench,
-  type DeepScanCheckpointSummary,
-} from "./deep-scan-checkpoint.js";
+import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import type { SavedScanRecord } from "./workbench-types.js";
 import { throwIfAborted } from "./scan-events.js";
 import type { JsonObject } from "./config.js";
@@ -43,12 +28,15 @@ export interface CompletedScanTurn {
   turnResult: TurnResultMetadata;
 }
 
-export interface ScanPublicationContext {
-  scanId: string;
+interface ScanResultContext {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
   signal: AbortSignal;
+}
+
+export interface ScanPublicationContext extends ScanResultContext {
+  scanId: string;
   workbench: (args: readonly string[]) => Promise<JsonObject>;
 }
 
@@ -88,18 +76,21 @@ export async function hasSealedScanArtifacts(
 
 /** Missing continuation metadata does not establish zero prior work. */
 export async function restorePriorScanCosts(
-  costs: Map<string, Readonly<ScanCost> | null>,
+  costs: ScanAccounting,
   checkpoint: DeepScanCheckpointSummary | null,
   resumeThreadId: unknown,
   scanDir: string,
   maxCostUsd?: number,
 ): Promise<void> {
-  if (checkpoint?.legacy) costs.set("legacy", checkpoint.legacy.cost ?? null);
+  if (checkpoint?.legacy)
+    costs.record("legacy", checkpoint.legacy.cost ?? null);
   if (
     checkpoint?.costUnavailable ||
     (typeof resumeThreadId !== "string" &&
       checkpoint !== null &&
-      (checkpoint.mergedScanIds.length > 0 ||
+      (checkpoint.mergeStarted === true ||
+        (checkpoint.mergeStarted !== false &&
+          checkpoint.mergedScanIds.length > 0) ||
         // The host saves merge inputs before launching a merge. A completed
         // discovery alone can still be waiting for the rest of its batch.
         (await lstat(
@@ -112,7 +103,7 @@ export async function restorePriorScanCosts(
           },
         ))))
   ) {
-    costs.set("previous-work", null);
+    costs.record("previous-work", null);
     if (maxCostUsd !== undefined)
       throw new ScanCostTrackingError(
         "A prior scan session is unavailable; its cost limit cannot be verified.",
@@ -127,6 +118,7 @@ export async function readSealedScanTurn(
     codexHome: string;
     model: string;
     startedAt: unknown;
+    checkpoint: DeepScanCheckpointSummary | null;
     maxCostUsd?: number;
     onTrackingError(error: unknown): void;
     onCost(cost: Readonly<ScanCost>): void;
@@ -137,14 +129,7 @@ export async function readSealedScanTurn(
   const { scanId, scanDir, expectation, model, codexHome, workbench, signal } =
     context;
   const mode = expectation.mode;
-  const costs = new Map<string, Readonly<ScanCost> | null>();
-  const completeCost = (current: Readonly<ScanCost> | null): ScanCost | null =>
-    [...costs.values()].includes(null)
-      ? null
-      : [...costs.values()].reduce<ScanCost | null>(
-          (total, cost) => (cost === null ? total : addScanCosts(total, cost)),
-          current === null ? null : { ...current },
-        );
+  const costs = new ScanAccounting();
   const measure = async (threadId: string | null, directory: string) => {
     const tracker = new ScanCostTracker({
       codexHome,
@@ -162,7 +147,7 @@ export async function readSealedScanTurn(
   };
   const saved = await workbench(["get-scan", "--scan-id", scanId]);
   const savedScan = saved["scan"] as SavedScanRecord;
-  const checkpoint = compositionCheckpointFromWorkbench(saved);
+  const checkpoint = context.checkpoint;
   let resumeThreadId = savedScan.continuationThreadId;
   const historicalCost = async (threadId: string) => {
     const session = await findScanSession(codexHome, threadId).catch(
@@ -203,12 +188,17 @@ export async function readSealedScanTurn(
     checkpoint.mergedScanIds.length === 0 &&
     Array.isArray(savedScan["findings"]) &&
     savedScan["findings"].length === 0;
-  if (threadId === null && !emptyComposition && !costs.has("previous-work"))
+  if (
+    threadId === null &&
+    !emptyComposition &&
+    checkpoint?.mergeStarted !== false &&
+    !costs.has("previous-work")
+  )
     throw new CodexSecurityError(
       "The sealed scan has no saved execution session.",
     );
   if (checkpoint?.legacy)
-    costs.set(
+    costs.record(
       "legacy",
       checkpoint.legacy.cost ??
         (checkpoint.legacy.originThreadId
@@ -223,32 +213,29 @@ export async function readSealedScanTurn(
     ]);
     for (const child of children["scans"] as SavedScanRecord[]) {
       if (child.parentScanId === scanId)
-        costs.set(child.scanId, child.cost ?? null);
+        costs.record(child.scanId, child.cost ?? null);
     }
   }
   let cost: ScanCost | null = null;
   if (mode === "deep" && checkpoint === null) {
     cost = (await historicalCost(threadId!)) ?? savedScan.cost ?? null;
-    costs.set("legacy", cost);
+    costs.record("legacy", cost);
     // This retired origin was measured above; it is not a composed merge session.
     resumeThreadId = null;
   }
   if (
     !costs.has("previous-work") &&
-    (savedScan.progress.status === "complete" ||
-      ![...costs.values()].includes(null))
+    (savedScan.progress.status === "complete" || !costs.hasUnknown)
   )
     cost ??= savedScan.cost ?? null;
   if (
     typeof resumeThreadId !== "string" &&
-    (emptyComposition || checkpoint?.legacy)
+    (emptyComposition ||
+      checkpoint?.mergeStarted === false ||
+      checkpoint?.legacy)
   )
-    cost ??= completeCost(null);
-  if (
-    cost === null &&
-    context.maxCostUsd !== undefined &&
-    [...costs.values()].includes(null)
-  )
+    cost ??= costs.complete;
+  if (cost === null && context.maxCostUsd !== undefined && costs.hasUnknown)
     throw new ScanCostTrackingError(
       "The saved child scan cost is unavailable; its cost limit cannot be verified.",
       scanDir,
@@ -259,8 +246,8 @@ export async function readSealedScanTurn(
       ? join(scanDir, "artifacts", "deep-scan", "merge")
       : scanDir,
   );
-  const measuredCost =
-    snapshot.cost === null ? null : completeCost(snapshot.cost);
+  if (snapshot.cost !== null) costs.record("merge", snapshot.cost);
+  const measuredCost = snapshot.cost === null ? null : costs.complete;
   if (measuredCost && (!cost || measuredCost.estimatedUsd > cost.estimatedUsd))
     cost = measuredCost;
   if (cost !== null) context.onCost(cost);
@@ -291,8 +278,7 @@ export async function publishScan(
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
 }> {
-  const { scanId, scanDir, pluginRoot, expectation, signal, workbench } =
-    context;
+  const { scanId, workbench } = context;
   let preparation: JsonObject = {};
   if (!sealed) {
     try {
@@ -319,35 +305,44 @@ export async function publishScan(
       throw error;
     }
   }
-  const result = await collectResult(
-    turn.turnResult,
-    turn.threadId,
-    scanDir,
-    pluginRoot,
-    expectation,
-    signal,
-    true,
-  );
+  const result = await collectResult(context, turn, true);
   const completion = await workbench([
     "complete-scan",
     "--scan-id",
     scanId,
     ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
   ]);
+  return { result, warnings: publicationWarnings(completion, preparation) };
+}
+
+/** Load a result that the workbench has already completed, without completing it again. */
+export async function loadPublishedScanResult(
+  context: ScanResultContext,
+  turn: CompletedScanTurn,
+  completion: JsonObject,
+): Promise<{
+  result: ScanResult;
+  warnings: { message: string; targetChanged: boolean }[];
+}> {
+  const result = await collectResult(context, turn, true);
+  return { result, warnings: publicationWarnings(completion) };
+}
+
+function publicationWarnings(
+  completion: JsonObject,
+  preparation: JsonObject = {},
+) {
   const targetWarnings = new Set([
     ...strings(preparation["targetWarnings"]),
     ...strings(completion["targetWarnings"]),
   ]);
   const scan = completion["scan"];
-  return {
-    result,
-    warnings: strings(isRecord(scan) ? scan["warnings"] : undefined).map(
-      (message) => ({
-        message,
-        targetChanged: targetWarnings.has(message),
-      }),
-    ),
-  };
+  return strings(isRecord(scan) ? scan["warnings"] : undefined).map(
+    (message) => ({
+      message,
+      targetChanged: targetWarnings.has(message),
+    }),
+  );
 }
 
 function strings(value: unknown): string[] {
@@ -361,14 +356,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string | null,
-  scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
-  signal: AbortSignal,
+  context: ScanResultContext,
+  turn: CompletedScanTurn,
   workbenchValidated = false,
 ): Promise<ScanResult> {
+  const { scanDir, pluginRoot, expectation, signal } = context;
+  const { threadId, turnResult } = turn;
   const required = [
     "scan-manifest.json",
     "findings.json",
@@ -417,56 +410,10 @@ export async function collectResult(
   });
 }
 
-/** Stage the draft and its checkpoint under the existing atomic workbench publication. */
-export async function writeSemanticScanDraft(
-  options: {
-    scanDir: string;
-    contract: Parameters<typeof prepareSemanticScanDraft>[0];
-    writer: Pick<
-      Awaited<ReturnType<typeof prepareScanArtifactRestorer>>,
-      "restore" | "remove"
-    >;
-    workbench: (args: readonly string[]) => Promise<unknown>;
-    onCleanupError: (error: unknown) => void;
-  },
-  draft: SemanticScan,
-): Promise<void> {
-  const documents = prepareSemanticScanDraft(options.contract, draft);
-  const draftPath = `drafts/${randomUUID()}.json`;
-  const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
-  const staged: string[] = [];
-  try {
-    await options.writer.restore(
-      draftPath,
-      Buffer.from(JSON.stringify(documents)),
-    );
-    staged.push(draftPath);
-    await options.writer.restore(
-      checkpointPath,
-      Buffer.from(JSON.stringify(draft)),
-    );
-    staged.push(checkpointPath);
-    await options.workbench([
-      "write-scan-draft",
-      "--scan-id",
-      draft.scanId,
-      "--draft-path",
-      join(options.scanDir, draftPath),
-      "--checkpoint-path",
-      join(options.scanDir, checkpointPath),
-    ]);
-  } finally {
-    await Promise.all(
-      staged.map(async (path) => {
-        try {
-          await options.writer.remove(path);
-        } catch (error) {
-          options.onCleanupError(error);
-        }
-      }),
-    );
-  }
-}
+export {
+  writeSemanticScanDraft,
+  writePreparedScanDraft,
+} from "./scan-draft-publication.js";
 
 /** Optional post-scan work may fail, but cannot replace the completed artifacts. */
 export async function preservePublishedArtifacts(
@@ -480,7 +427,7 @@ export async function preservePublishedArtifacts(
   prepareRestorer: () => Promise<ScanArtifactRestorer>,
   run: () => Promise<void>,
 ): Promise<{ error: unknown } | undefined> {
-  const { result, pluginRoot, expectation, signal } = context;
+  const { result, signal } = context;
   const scanDir = result.scanDir;
   const artifacts = await Promise.all(
     [
@@ -516,15 +463,7 @@ export async function preservePublishedArtifacts(
       }
     }
     if (signal.aborted || error instanceof ScanPermissionError) throw error;
-    await collectResult(
-      result.turnResult,
-      result.threadId,
-      scanDir,
-      pluginRoot,
-      expectation,
-      signal,
-      true,
-    );
+    await collectResult({ ...context, scanDir }, result, true);
     return { error };
   }
 }

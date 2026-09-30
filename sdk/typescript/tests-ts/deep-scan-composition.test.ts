@@ -266,36 +266,47 @@ async function harness(
       throw new Error(`Unexpected workbench operation ${args[0]}`);
     },
     async merge(prompt) {
+      expect(
+        JSON.parse(await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"))
+          .mergeStarted,
+      ).toBe(true);
       const path = join(scanDir, "artifacts/deep-scan/merge-inputs.json");
       expect(prompt).toContain(JSON.stringify(path));
       const payload = JSON.parse(await readFile(path, "utf8")) as {
-        scans: SemanticScan[];
-        previous: SemanticScan | null;
+        findings: SemanticScan["findings"];
       };
-      mergeInputs.push(payload.scans.length);
-      const findings = structuredClone(payload.previous?.findings ?? []);
-      for (const source of payload.scans.flatMap((scan) => scan.findings)) {
-        const existing = findings.find(
-          (finding) =>
-            scanFindingIdentity(finding) === scanFindingIdentity(source),
-        );
-        if (!existing) findings.push(source);
+      const checkpoint = checkpoints.at(-1)!;
+      mergeInputs.push(
+        checkpoint.passes.filter(
+          (pass) =>
+            pass.completed && !checkpoint.mergedScanIds.includes(pass.scanId!),
+        ).length,
+      );
+      const byIdentity = new Map<
+        string,
+        { sourceFindingIds: string[]; canonicalSourceFindingId: string }
+      >();
+      for (const source of payload.findings) {
+        const identity = scanFindingIdentity(source);
+        const ids = source.provenance.sourceFindingIds!;
+        const existing = byIdentity.get(identity);
+        if (existing) existing.sourceFindingIds.push(...ids);
         else
-          (existing["provenance"] as JsonObject)["sourceFindingIds"] = [
-            ...((existing["provenance"] as JsonObject)[
-              "sourceFindingIds"
-            ] as string[]),
-            ...((source["provenance"] as JsonObject)[
-              "sourceFindingIds"
-            ] as string[]),
-          ];
+          byIdentity.set(identity, {
+            sourceFindingIds: [...ids],
+            canonicalSourceFindingId: ids[0]!,
+          });
       }
-      return { scanId, findings };
+      return { scanId, groups: [...byIdentity.values()] };
     },
     writer: {
       async restore(path, contents) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), contents);
+      },
+      async restoreMany(artifacts) {
+        for (const { path, contents } of artifacts)
+          await this.restore(path, contents);
       },
     },
     async publish(draft) {
@@ -328,6 +339,113 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
+  test.each([false, true])(
+    "coalesces durable repeated registrations and retries a shared failure (%p)",
+    async (failFirst) => {
+      const h = await harness({
+        workers: 3,
+        maxDiscoveryRuns: 3,
+        stopAfterNoNew: 4,
+      });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const failure = new Error("Synthetic shared checkpoint failure.");
+      let registered = 0;
+      let arrived = 0;
+      const allArrived = Promise.withResolvers<void>();
+      let attempts = 0;
+      let writing = 0;
+      let maximumWriting = 0;
+      const createClient = h.input.createClient;
+      h.input.createClient = () => {
+        const client = createClient();
+        return {
+          ...client,
+          run(repository, options = {}) {
+            return client.run(repository, {
+              ...options,
+              async onRegisteredScan(registration) {
+                if (++arrived === 3) allArrived.resolve();
+                await allArrived.promise;
+                const outcomes = await Promise.allSettled([
+                  options.onRegisteredScan!(registration),
+                  options.onRegisteredScan!(registration),
+                ]);
+                if (failFirst) {
+                  expect(outcomes).toEqual([
+                    { status: "rejected", reason: failure },
+                    { status: "rejected", reason: failure },
+                  ]);
+                  await options.onRegisteredScan!(registration);
+                } else
+                  expect(outcomes.map((outcome) => outcome.status)).toEqual([
+                    "fulfilled",
+                    "fulfilled",
+                  ]);
+                registered++;
+                expect(
+                  (await h.checkpoint()).passes.some(
+                    (pass) => pass.scanId === registration["scanId"],
+                  ),
+                ).toBe(true);
+                await options.onRegisteredScan!(registration);
+              },
+            });
+          },
+        };
+      };
+      const workbench = h.input.workbench;
+      h.input.workbench = async (args, contents) => {
+        if (args[0] !== "save-scan-artifact") return workbench(args, contents);
+        writing++;
+        maximumWriting = Math.max(maximumWriting, writing);
+        try {
+          const state = JSON.parse(contents!) as DeepScanCheckpoint;
+          if (
+            state.passes.some((pass) => pass.scanId) &&
+            state.passes.every((pass) => !pass.completed)
+          ) {
+            expect(state.passes.every((pass) => pass.scanId)).toBe(true);
+            if (++attempts === 1) {
+              entered.resolve();
+              await release.promise;
+              if (failFirst) throw failure;
+            }
+          }
+          return await workbench(args, contents);
+        } finally {
+          writing--;
+        }
+      };
+      h.input.publish = async (draft) => {
+        expect((await h.checkpoint()).aggregate).toEqual(draft);
+      };
+      const pending = runDeepScans(h.input);
+      try {
+        await Promise.race([entered.promise, pending]);
+        expect(registered).toBe(0);
+      } finally {
+        release.resolve();
+      }
+      const state = await pending;
+      expect(attempts).toBe(failFirst ? 2 : 1);
+      expect(maximumWriting).toBe(1);
+      expect(h.metrics().closed).toBe(3);
+      expect(state.mergedScanIds).toHaveLength(3);
+      expect(state.passes.every((pass) => pass.completed)).toBe(true);
+      expect(state.terminalReason).toBe("capped");
+      expect(await h.checkpoint()).toEqual(state);
+      expect(
+        h.checkpoints.every(
+          (snapshot, index) =>
+            index === 0 ||
+            JSON.stringify(snapshot) !==
+              JSON.stringify(h.checkpoints[index - 1]),
+        ),
+      ).toBe(true);
+    },
+  );
+
   test("preserves a checkpoint write failure and still saves terminal state", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
     const workbench = h.input.workbench;
@@ -354,7 +472,8 @@ describe("ordinary scan composition", () => {
     const state = await h.checkpoint();
     expect(h.calls).toHaveLength(4);
     expect(h.metrics()).toEqual({ closed: 4, maximumActive: 2 });
-    expect(h.mergeInputs).toEqual([2, 2]);
+    expect(h.mergeInputs).toEqual([]);
+    expect(h.published).toHaveLength(2);
     expect(state.noNewStreak).toBe(4);
     expect(state.terminalReason).toBe("saturated");
     expect(new Set(h.published.map((draft) => draft.scanId))).toEqual(
@@ -619,7 +738,7 @@ describe("ordinary scan composition", () => {
   });
 
   test.each([
-    ["missing field", "rationale"],
+    ["missing field", "canonicalSourceFindingId"],
     ["unexpected field", "cyber_policy"],
     ["JSON syntax", "cyber_policy"],
   ])(
@@ -636,10 +755,10 @@ describe("ordinary scan composition", () => {
         const output = await merge(prompt, signal);
         if (prompts.length !== 1) return output;
         if (kind === "JSON syntax") return JSON.parse("cyber_policy");
-        const invalid = structuredClone(output) as { findings: JsonObject[] };
+        const invalid = structuredClone(output) as { groups: JsonObject[] };
         if (kind === "unexpected field")
           return { ...invalid, cyber_policy: false };
-        delete (invalid.findings[0]!["confidence"] as JsonObject)["rationale"];
+        delete invalid.groups[0]!["canonicalSourceFindingId"];
         return invalid;
       };
 
@@ -696,6 +815,9 @@ describe("ordinary scan composition", () => {
     "retries a merge after a %s diagnostic containing policy-like data",
     async (kind) => {
       const h = await harness({ maxDiscoveryRuns: 1 });
+      h.setRun(async (options) =>
+        result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+      );
       const failure = await diagnosticError(kind);
       const merge = h.input.merge;
       let attempts = 0;
@@ -831,18 +953,30 @@ describe("ordinary scan composition", () => {
           scanDir,
           budget === "exhausted" ? "retained-issue" : undefined,
         );
+        const draft = semanticScanDraft(
+          h.input.scanId,
+          completed.manifest.scan,
+          completed.findings.findings,
+          {
+            ...completed.coverage,
+            deferred: [{ reason: "Retained accepted coverage." }],
+          },
+        );
+        for (const [index, finding] of draft.findings.entries())
+          finding.provenance = {
+            ...finding.provenance,
+            sourceFindingIds: [`${scanId}:${index}`],
+            sourceFindings: [
+              {
+                id: `${scanId}:${index}`,
+                finding: completed.findings.findings[index]!,
+              },
+            ],
+          };
         return {
           scanId,
           scanDir,
-          draft: semanticScanDraft(
-            h.input.scanId,
-            completed.manifest.scan,
-            completed.findings.findings,
-            {
-              ...completed.coverage,
-              deferred: [{ reason: "Retained accepted coverage." }],
-            },
-          ),
+          draft,
           sourceFindings: completed.findings.findings,
         };
       };
@@ -955,11 +1089,13 @@ describe("ordinary scan composition", () => {
         costs.set(key, cost);
         if (cost !== null) reportCost(cost);
       };
-      const costsBeforeMerge: Array<Readonly<ScanCost> | null | undefined> = [];
-      const merge = h.input.merge;
-      h.input.merge = async (...args) => {
-        costsBeforeMerge.push(costs.get(directory));
-        return merge(...args);
+      const costsBeforePublication: Array<
+        Readonly<ScanCost> | null | undefined
+      > = [];
+      const publish = h.input.publish;
+      h.input.publish = async (...args) => {
+        costsBeforePublication.push(costs.get(directory));
+        return publish(...args);
       };
       const expectedReceipt =
         status !== "running" && savedCost
@@ -992,8 +1128,8 @@ describe("ordinary scan composition", () => {
         } else expect(h.published).toEqual([]);
       } else {
         await runDeepScans(h.input);
-        expect(h.mergeInputs).toEqual([1]);
-        expect(costsBeforeMerge).toEqual([expectedReceipt]);
+        expect(h.mergeInputs).toEqual([]);
+        expect(costsBeforePublication).toEqual([expectedReceipt]);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toEqual([]);
@@ -1193,7 +1329,7 @@ describe("ordinary scan composition", () => {
       expect(state.passes).toHaveLength(1);
       expect(state.noNewStreak).toBe(1);
       expect(state.mergedScanIds).toHaveLength(1);
-      expect(h.mergeInputs).toEqual([1]);
+      expect(h.mergeInputs).toEqual([]);
     },
   );
 
@@ -1792,7 +1928,7 @@ describe("ordinary scan composition", () => {
       expect(h.calls).toHaveLength(
         (resumed ? 0 : requireCost && !executed ? 2 : 4) + (stopped ? 0 : 1),
       );
-      expect(h.mergeInputs).toEqual(stopped ? [] : [1]);
+      expect(h.mergeInputs).toEqual([]);
       expect(costs.get(failedDirectory)).toBeNull();
       expect([...costs.values()].some((cost) => cost !== null)).toBe(!stopped);
     },
@@ -1827,7 +1963,7 @@ describe("ordinary scan composition", () => {
         });
       } else {
         await runDeepScans(h.input);
-        expect(h.mergeInputs).toEqual([1]);
+        expect(h.mergeInputs).toEqual([]);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
       expect(h.calls).toHaveLength(1);
@@ -2034,10 +2170,10 @@ describe("ordinary scan composition", () => {
 
   test("reports the original deadline when the final merge reaches saturation late", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
-    const merge = h.input.merge;
+    const project = h.input.projectChild;
     const clock = spyOn(Date, "now");
-    h.input.merge = async (...args) => {
-      const merged = await merge(...args);
+    h.input.projectChild = async (...args) => {
+      const merged = await project(...args);
       clock.mockReturnValue(Date.parse(h.input.startedAt) + 3_600_001);
       return merged;
     };
@@ -2049,7 +2185,7 @@ describe("ordinary scan composition", () => {
         terminalReason: "capped",
       });
       expect(h.calls).toHaveLength(1);
-      expect(h.mergeInputs).toEqual([1]);
+      expect(h.mergeInputs).toEqual([]);
       expect(h.published.at(-1)!.findings).toEqual([]);
     } finally {
       clock.mockRestore();
@@ -2180,7 +2316,7 @@ describe("ordinary scan composition", () => {
           mergeFailures: 0,
           terminalReason: "capped",
         });
-        expect(h.mergeInputs).toEqual([1]);
+        expect(h.mergeInputs).toEqual([]);
         expect(h.metrics()).toEqual({ closed: 2, maximumActive: 1 });
         expect(await readFile(childCheckpoint)).toEqual(childBytes);
       } finally {

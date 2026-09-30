@@ -265,10 +265,11 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
     late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
-    write_checkpoint(
-        scan_dir / "checkpoints",
-        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
-    )
+    for directory in ("checkpoints", "checkpoints/pending"):
+        write_checkpoint(
+            scan_dir / directory,
+            {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+        )
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
 
     manifest = json.loads(manifest_path.read_text())

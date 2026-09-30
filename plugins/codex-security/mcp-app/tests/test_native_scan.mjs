@@ -1,3 +1,4 @@
+import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import {
   chmod,
@@ -172,7 +173,7 @@ test("native preparation protects enclosing repositories for fresh and resumed c
       ...Object.keys(process.env).filter((key) => key.toUpperCase() === "PATH"),
     ]),
   ];
-  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const restoreEnvironment = captureEnvironment(keys);
   try {
     await Promise.all([
       mkdir(bin, { recursive: true }),
@@ -260,10 +261,7 @@ test("native preparation protects enclosing repositories for fresh and resumed c
       assert.equal(process.env.PATH, originalPath);
     }
   } finally {
-    for (const [key, value] of Object.entries(before)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    restoreEnvironment();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -442,7 +440,6 @@ test("native scans preserve selected Codex homes and saved settings", async () =
   );
   const defaultHome = join(root, ".codex");
   const explicitHome = join(root, "explicit");
-  const spacedHome = join(root, "explicit ");
   const pluginRoot = join(root, "plugin");
   const keys = [
     "HOME",
@@ -452,7 +449,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
   ];
-  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const restoreEnvironment = captureEnvironment(keys);
   try {
     Object.assign(process.env, {
       HOME: root,
@@ -469,9 +466,6 @@ test("native scans preserve selected Codex homes and saved settings", async () =
     const homes = [
       [defaultHome, "synthetic-default", 2],
       [explicitHome, "synthetic-explicit", 4],
-      ...(process.platform === "win32"
-        ? []
-        : [[spacedHome, "synthetic-spaced", 3]]),
     ];
     for (const [home, model, workers] of homes) {
       await mkdir(join(home, "codex-security"), { recursive: true });
@@ -490,17 +484,15 @@ test("native scans preserve selected Codex homes and saved settings", async () =
       process.platform === "win32" ? "junction" : "dir",
     );
     const linkedHome = `${link}${sep}..`;
-    const physicalHome = await realpath(linkedHome);
-    const linkedSettings = homes.find(([home]) => home === physicalHome);
+    const linkedSettings = homes.find(([home]) => home === defaultHome);
     assert.ok(linkedSettings);
     for (const [override, home, model, workers] of [
       [undefined, defaultHome, "synthetic-default", 2],
       ["", defaultHome, "synthetic-default", 2],
       [" \t\n", defaultHome, "synthetic-default", 2],
       [explicitHome, explicitHome, "synthetic-explicit", 4],
-      ...(process.platform === "win32"
-        ? []
-        : [[spacedHome, spacedHome, "synthetic-spaced", 3]]),
+      [`  ${explicitHome}  `, explicitHome, "synthetic-explicit", 4],
+      ["~/explicit", explicitHome, "synthetic-explicit", 4],
       [linkedHome, ...linkedSettings],
     ]) {
       if (override === undefined) delete process.env.CODEX_HOME;
@@ -541,10 +533,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
       }
     }
   } finally {
-    for (const key of keys) {
-      if (before[key] === undefined) delete process.env[key];
-      else process.env[key] = before[key];
-    }
+    restoreEnvironment();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -577,9 +566,7 @@ test(
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     ];
-    const before = Object.fromEntries(
-      keys.map((key) => [key, process.env[key]]),
-    );
+    const restoreEnvironment = captureEnvironment(keys);
     try {
       await Promise.all([
         mkdir(join(home, "codex-security"), { recursive: true }),
@@ -703,10 +690,7 @@ if (process.argv.includes("app-server")) {
         }
       }
     } finally {
-      for (const key of keys) {
-        if (before[key] === undefined) delete process.env[key];
-        else process.env[key] = before[key];
-      }
+      restoreEnvironment();
       await rm(root, { recursive: true, force: true });
     }
   },
@@ -734,7 +718,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SAFETY_IDENTIFIER",
   ];
-  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const restoreEnvironment = captureEnvironment(keys);
   try {
     Object.assign(process.env, {
       CODEX_HOME: root,
@@ -786,10 +770,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     assert.equal(process.env.CODEX_SAFETY_IDENTIFIER, undefined);
     assert.equal(process.env.PATH, searchDirectories.join(delimiter));
   } finally {
-    for (const key of keys) {
-      if (before[key] === undefined) delete process.env[key];
-      else process.env[key] = before[key];
-    }
+    restoreEnvironment();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -986,9 +967,7 @@ test(
       "CODEX_API_KEY",
       "OPENAI_API_KEY",
     ];
-    const before = Object.fromEntries(
-      keys.map((key) => [key, process.env[key]]),
-    );
+    const restoreEnvironment = captureEnvironment(keys);
     try {
       await writeFile(
         executable,
@@ -1340,10 +1319,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         code: "ENOENT",
       });
     } finally {
-      for (const key of keys) {
-        if (before[key] === undefined) delete process.env[key];
-        else process.env[key] = before[key];
-      }
+      restoreEnvironment();
       await rm(root, { recursive: true, force: true });
     }
   },
@@ -1361,7 +1337,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
     "OPENROUTER_API_KEY",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
   ];
-  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const restoreEnvironment = captureEnvironment(keys);
   try {
     await writeFile(
       join(root, "config.toml"),
@@ -1564,10 +1540,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       );
     }
   } finally {
-    for (const [key, value] of Object.entries(before)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    restoreEnvironment();
     await rm(root, { recursive: true, force: true });
   }
 });
