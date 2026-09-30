@@ -725,9 +725,15 @@ def merge_saved_results(
         return bool(document["findings"])
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
-    current_drafts = ([(None, parent)] if parent else []) + [
+    current_drafts = [
         (worker_id, draft) for relative, draft, worker_id in sources if relative in current_results
     ]
+    if parent:
+        if stopped_parent_seal and not parent_preserved_sources:
+            # A legacy stopped parent predates newly recovered worker decisions.
+            current_drafts.append((None, parent))
+        else:
+            current_drafts.insert(0, (None, parent))
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         for finding in draft["findings"]:
@@ -747,7 +753,7 @@ def merge_saved_results(
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
-                    and item.get("disposition") in {"reported", "rejected", "not_applicable"}
+                    and item.get("disposition") in {"rejected", "not_applicable"}
                 ):
                     resolved.setdefault(
                         (owner or item.get("sourceWorkerId"), item["candidateId"]),

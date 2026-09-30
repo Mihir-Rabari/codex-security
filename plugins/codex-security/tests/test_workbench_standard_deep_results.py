@@ -514,6 +514,130 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     }
 
 
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize("same_worker", [True, False])
+def test_legacy_stopped_parent_yields_to_current_worker_resolution(
+    tmp_path: Path, disposition: str, same_worker: bool
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    current = json.loads(result_path.read_text())
+    result_path.unlink()
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(
+        contract_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = contract_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["provenance"].update(
+        candidateId="candidate-one", workerId=worker_id if same_worker else str(uuid.uuid4())
+    )
+    findings_path.write_text(json.dumps(findings))
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    subprocess.run(
+        [
+            sys.executable,
+            str(scripts_dir / "finalize_scan_contract.py"),
+            "--scan-dir",
+            str(contract_dir),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for filename in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / filename).write_bytes((contract_dir / filename).read_bytes())
+    sealed_manifest = (scan_dir / "scan-manifest.json").read_bytes()
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
+            (f"sha256:{hashlib.sha256(sealed_manifest).hexdigest()}", scan_id),
+        )
+    environment = {"CODEX_HOME": str(codex_home)}
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Worker stopped.",
+        environment=environment,
+    )
+    assert (
+        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"] == {}
+    )
+    current["coverage"]["surfaces"] = [
+        {
+            "label": "Reviewed candidate",
+            "candidateId": "candidate-one",
+            "disposition": disposition,
+            "notes": "Current worker validation resolved this candidate.",
+        }
+    ]
+    result_path.write_text(json.dumps(current))
+
+    recovered = run_workbench(
+        state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
+    )["scan"]
+
+    assert recovered["findingCount"] == (0 if same_worker else 1)
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    resolution = next(
+        item for item in coverage["surfaces"] if item.get("candidateId") == "candidate-one"
+    )
+    assert resolution["disposition"] == disposition
+    assert resolution["sourceWorkerId"] == worker_id
+    assert len(resolution.get("previousFindings", [])) == (1 if same_worker else 0)
+
+
+@pytest.mark.parametrize("pending_candidate_id", ["candidate-one", "candidate-two"])
+def test_stopped_recovery_resolves_reported_candidates_from_findings(
+    tmp_path: Path, pending_candidate_id: str
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract_dir / "findings.json").read_text())["findings"][0]
+    finding["provenance"]["candidateId"] = "candidate-two"
+    current = json.loads(result_path.read_text())
+    current["findings"] = [finding]
+    current["coverage"]["deferred"] = [
+        {"candidateId": pending_candidate_id, "reason": "This candidate still needs validation."}
+    ]
+    current["coverage"]["surfaces"] = [
+        {
+            "label": "Shared candidate surface",
+            "candidateId": pending_candidate_id,
+            "disposition": "reported",
+            "notes": "The surface contains a reported candidate and unfinished validation.",
+        }
+    ]
+    result_path.write_text(json.dumps(current))
+
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Worker stopped.",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    pending = [item for item in coverage["deferred"] if item.get("candidateId")]
+    assert [item["candidateId"] for item in pending] == (
+        ["candidate-one"] if pending_candidate_id == "candidate-one" else []
+    )
+    findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["provenance"]["candidateId"] == "candidate-two"
+
+
 @pytest.mark.parametrize(
     "published_sources",
     [None, {}],

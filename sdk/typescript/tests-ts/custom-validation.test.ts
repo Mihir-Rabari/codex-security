@@ -243,6 +243,40 @@ describe("custom validation", () => {
     },
   );
 
+  test("retains a deferred candidate when another finding reports their shared surface", async () => {
+    const f = await fixture(2);
+    for (const [index, finding] of f.findings.findings.entries()) {
+      finding.provenance["candidateId"] = `source-${index}`;
+      finding.extensions!["customValidationSurfaceIds"] = ["surface-0"];
+    }
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    coverage.surfaces = [{ ...coverage.surfaces[0]!, candidateId: "source-0" }];
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () => JSON.stringify(result("deferred", "reportable")),
+    });
+    const saved = new ScanResult({
+      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
+      findings: await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+      coverage: await json<CoverageDocument>(join(f.scanDir, "coverage.json")),
+      scanDir: f.scanDir,
+      threadId: "synthetic-custom-validation",
+      turnResult: {},
+      sarifPath: null,
+    });
+    expect(saved.findings.findings).toHaveLength(1);
+    expect(saved.coverage.surfaces[0]!.disposition).toBe("reported");
+    expect(saved.unconfirmedCandidateCount).toBe(1);
+    expect(saved.unconfirmedCandidates[0]).toMatchObject({
+      candidateId: "source-0",
+      candidate: f.findings.findings[0],
+    });
+  });
+
   test("allocates fallback identities outside existing finding and coverage IDs", async () => {
     const f = await fixture(4);
     f.findings.findings[0]!.provenance["candidateId"] =

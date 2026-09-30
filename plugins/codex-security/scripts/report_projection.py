@@ -72,7 +72,7 @@ def unconfirmed_candidates(
     for field in ("surfaces", "explicitExclusions"):
         for item in objects(coverage.get(field)):
             if (
-                item.get("disposition") in ("reported", "rejected", "not_applicable")
+                item.get("disposition") in ("rejected", "not_applicable")
                 and (key := identity(item.get("candidateId"), item.get("sourceWorkerId")))
                 is not None
             ):

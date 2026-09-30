@@ -76,9 +76,7 @@ export function discoveryReductionInput(
       ...(coverage.explicitExclusions as Record<string, unknown>[]),
     ]
       .filter((item) =>
-        ["reported", "rejected", "not_applicable"].includes(
-          item.disposition as string,
-        ),
+        ["rejected", "not_applicable"].includes(item.disposition as string),
       )
       .map((item) => item.candidateId),
   ]);

@@ -139,14 +139,14 @@ export class ScanResult {
         );
       }
     }
+    // A reported surface can cover multiple candidates; findings confirm identities.
     for (const surface of [
       ...this.coverage.surfaces,
       ...this.coverage.explicitExclusions,
     ]) {
       if (
         typeof surface["candidateId"] === "string" &&
-        (surface["disposition"] === "reported" ||
-          surface["disposition"] === "rejected" ||
+        (surface["disposition"] === "rejected" ||
           surface["disposition"] === "not_applicable")
       ) {
         resolved.add(

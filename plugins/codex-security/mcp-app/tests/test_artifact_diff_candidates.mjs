@@ -92,7 +92,7 @@ async function fixture(t, candidates) {
   };
 }
 
-test("diff outcomes retain unresolved candidates and exclude terminal decisions", async (t) => {
+test("diff outcomes retain unresolved candidates and exclude terminal dismissals", async (t) => {
   const outcomes = [
     [undefined, undefined, true],
     ["reportable", undefined, true],
@@ -102,7 +102,7 @@ test("diff outcomes retain unresolved candidates and exclude terminal decisions"
     ["deferred", "ignore", true],
     ["suppressed", "deferred", true],
     ["not_applicable", "deferred", true],
-    ["reportable", "reportable", false],
+    ["reportable", "reportable", true],
     ["reportable", "ignore", false],
     ["suppressed", undefined, false],
     ["not_applicable", undefined, false],
@@ -138,7 +138,7 @@ test("diff reconciliation enriches pending records and retains general coverage 
   const context = await fixture(t, [
     pending,
     candidate("rejected", "suppressed"),
-    candidate("undefined", "reportable", "reportable"),
+    candidate("ignored", "reportable", "ignore"),
   ]);
   const general = { reason: "A source directory still needs review." };
   const result = await preserveUnconfirmedDiffCandidates(
@@ -325,5 +325,128 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.equal(retained.completeness, "complete");
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.surfaces, resolved.surfaces);
+  });
+}
+
+test("reportable diff ledger rows remain pending until a finding is saved", async (t) => {
+  const pending = candidate("reportable-review");
+  const context = await fixture(t, [pending]);
+  await recordCodexSecurityScanDraft(context, { ...draft(), complete: false });
+  const ledgerPath = path.join(
+    context.root,
+    "artifacts",
+    "02_discovery",
+    "candidate_ledger.jsonl",
+  );
+  const reportable = candidate(
+    pending.candidate_id,
+    "reportable",
+    "reportable",
+  );
+  await writeFile(ledgerPath, JSON.stringify(reportable));
+  await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+  const coveragePath = path.join(context.root, "coverage.json");
+  const missingFinding = JSON.parse(await readFile(coveragePath, "utf8"));
+  assert.equal(missingFinding.completeness, "partial");
+  assert.equal(missingFinding.deferred.length, 1);
+  assert.equal(missingFinding.deferred[0].candidateId, pending.candidate_id);
+  assert.deepEqual(missingFinding.deferred[0].candidate, reportable);
+  assert.match(missingFinding.deferred[0].reason, /no saved finding/u);
+
+  const finalDraft = { ...draft(), complete: true };
+  finalDraft.findings.push({
+    ruleId: "synthetic-review",
+    title: "Synthetic reviewed finding",
+    summary: "The synthetic review has reached a final finding.",
+    severity: { level: "low" },
+    confidence: { level: "high", rationale: "Synthetic review evidence." },
+    taxonomy: { category: "synthetic", cwe: [] },
+    locations: [{ path: "src/handler.ts", startLine: 1 }],
+    remediation: "Apply the synthetic remediation.",
+    provenance: { source: "local_plugin", candidateId: pending.candidate_id },
+  });
+  await recordCodexSecurityScanDraft(context, finalDraft);
+  const saved = JSON.parse(await readFile(coveragePath, "utf8"));
+  assert.equal(saved.completeness, "complete");
+  assert.deepEqual(saved.deferred, []);
+  await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+  const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+  assert.equal(retained.completeness, "complete");
+  assert.deepEqual(retained.deferred, []);
+  const findings = JSON.parse(
+    await readFile(path.join(context.root, "findings.json"), "utf8"),
+  );
+  assert.equal(findings.findings.length, 1);
+  assert.equal(
+    findings.findings[0].provenance.candidateId,
+    pending.candidate_id,
+  );
+});
+
+for (const authored of [false, true]) {
+  test(`diff checkpoints refresh ledger evidence and ${authored ? "retain authored" : "update generated"} reasons`, async (t) => {
+    const pending = candidate("updated-review");
+    const context = await fixture(t, [pending]);
+    const checkpoint = { ...draft(), complete: false };
+    const authoredReason = "Retain the analyst's specific follow-up request.";
+    const authoredNote = "Keep the analyst's candidate annotation.";
+    if (authored) {
+      checkpoint.coverage.completeness = "partial";
+      checkpoint.coverage.deferred.push({
+        candidateId: pending.candidate_id,
+        reason: authoredReason,
+        candidate: { ...pending, analystNote: authoredNote },
+        notes: "A coverage annotation must also survive.",
+      });
+    }
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    const ledgerPath = path.join(
+      context.root,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    const coveragePath = path.join(context.root, "coverage.json");
+    const validation = {
+      ...pending,
+      evidence: "Updated source evidence after validation.",
+      validation: {
+        disposition: "deferred",
+        counterevidence_or_proof_gap:
+          "A synthetic validation input is missing.",
+      },
+    };
+    const attackPath = {
+      ...validation,
+      evidence: "Updated source evidence after attack-path review.",
+      attack_path: {
+        decision: "deferred",
+        proof_gap: "A synthetic deployment adapter is missing.",
+      },
+    };
+    for (const reviewed of [validation, attackPath]) {
+      await writeFile(ledgerPath, JSON.stringify(reviewed));
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      const saved = JSON.parse(await readFile(coveragePath, "utf8"));
+      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.deferred.length, 1);
+      const item = saved.deferred[0];
+      assert.deepEqual(
+        item.candidate,
+        authored ? { ...reviewed, analystNote: authoredNote } : reviewed,
+      );
+      assert.equal(
+        item.reason,
+        authored
+          ? authoredReason
+          : (reviewed.attack_path?.proof_gap ??
+              reviewed.validation.counterevidence_or_proof_gap),
+      );
+      if (authored)
+        assert.equal(item.notes, checkpoint.coverage.deferred[0].notes);
+    }
   });
 }

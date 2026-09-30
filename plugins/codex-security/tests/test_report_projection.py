@@ -149,6 +149,30 @@ def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:
     assert "| rejected | worker-one |" not in markdown
 
 
+def test_reported_shared_surface_does_not_resolve_an_explicit_deferred_candidate() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["provenance"] = {"candidateId": "confirmed"}
+    coverage["completeness"] = "partial"
+    coverage["surfaces"] = [
+        {
+            "id": "shared-surface",
+            "label": "Shared source review",
+            "candidateId": "pending",
+            "disposition": "reported",
+            "receiptRefs": [],
+        }
+    ]
+    coverage["deferred"] = [
+        {"candidateId": candidate_id, "reason": "Candidate validation needs evidence."}
+        for candidate_id in ["pending", "confirmed"]
+    ]
+
+    pending = PROJECTION.unconfirmed_candidates(coverage, findings["findings"])
+    assert [item["candidateId"] for item in pending] == ["pending"]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "| Saved unconfirmed candidates | 1 |" in markdown
+
+
 def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["completeness"] = "partial"

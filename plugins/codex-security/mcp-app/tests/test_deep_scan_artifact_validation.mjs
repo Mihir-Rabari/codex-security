@@ -66,6 +66,11 @@ async function testUnconfirmedCandidates(root) {
       completeness: "partial",
       surfaces: [
         {
+          label: "Shared review surface",
+          candidateId: "candidate-review",
+          disposition: "reported",
+        },
+        {
           label: "Reviewed candidate",
           candidateId: "rejected",
           disposition: "rejected",

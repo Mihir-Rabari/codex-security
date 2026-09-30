@@ -26,7 +26,7 @@ async function readDiffCandidates(context: ArtifactContext) {
   }
 }
 
-/** Resolve historical checkpoints before their pending work downgrades coverage. */
+/** Resolve dismissed historical candidates before their pending work downgrades coverage. */
 export async function resolvedDiffCandidateIds(
   context: ArtifactContext,
 ): Promise<string[]> {
@@ -89,10 +89,15 @@ export async function preserveUnconfirmedDiffCandidates(
       const candidate =
         typeof candidateId === "string" ? pending.get(candidateId) : undefined;
       if (!candidate) return item;
+      const previous = object(item.candidate);
       return {
         ...item,
         candidateId: candidate.candidate_id,
-        candidate: item.candidate ?? candidate,
+        candidate: { ...previous, ...candidate },
+        reason:
+          item.reason === candidateReason(previous ?? candidate)
+            ? candidateReason(candidate)
+            : item.reason,
       };
     });
   const recordedIds = new Set(
@@ -100,16 +105,10 @@ export async function preserveUnconfirmedDiffCandidates(
   );
   for (const candidate of pending.values()) {
     if (recordedIds.has(candidate.candidate_id)) continue;
-    const validation = object(candidate.validation);
-    const attackPath = object(candidate.attack_path);
     deferred.push({
       candidateId: candidate.candidate_id,
       candidate,
-      reason:
-        attackPath?.proof_gap ||
-        validation?.counterevidence_or_proof_gap ||
-        validation?.remaining_uncertainty ||
-        `Candidate review is incomplete: ${candidate.summary}`,
+      reason: candidateReason(candidate),
       paths: [...new Set(candidate.locations.map((location) => location.path))],
     });
   }
@@ -126,12 +125,29 @@ export async function preserveUnconfirmedDiffCandidates(
 function isUnconfirmed(candidate: JsonObject): boolean {
   const validation = object(candidate.validation)?.disposition;
   const attackPath = object(candidate.attack_path)?.decision;
-  if (validation === "reportable" && attackPath === "reportable") return false;
+  // Reportable ledger phases still need a matching saved finding.
   if (validation === "deferred" || attackPath === "deferred") return true;
   return (
     validation !== "not_applicable" &&
     validation !== "suppressed" &&
     attackPath !== "ignore"
+  );
+}
+
+function candidateReason(candidate: JsonObject): unknown {
+  const validation = object(candidate.validation);
+  const attackPath = object(candidate.attack_path);
+  if (
+    validation?.disposition === "reportable" &&
+    attackPath?.decision === "reportable"
+  ) {
+    return `A reportable candidate has no saved finding: ${candidate.summary}`;
+  }
+  return (
+    attackPath?.proof_gap ||
+    validation?.counterevidence_or_proof_gap ||
+    validation?.remaining_uncertainty ||
+    `Candidate review is incomplete: ${candidate.summary}`
   );
 }
 
