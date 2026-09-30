@@ -466,7 +466,7 @@ jobs:
       - name: Test native executable discovery
         run: node --test plugins/codex-security/mcp-app/tests/test_native_executable.mjs
       - name: Test native scan preparation
-        run: node --test --test-name-pattern="native preparation requires" plugins/codex-security/mcp-app/tests/test_native_scan.mjs
+        run: node --test --test-name-pattern="native preparation" plugins/codex-security/mcp-app/tests/test_native_scan.mjs
 
   plugin-source:
     name: plugin source contracts

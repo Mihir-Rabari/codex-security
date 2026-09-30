@@ -119,9 +119,14 @@ test.each([false, true])(
       5_000,
     );
     try {
-      await expect(
-        Promise.race([pending, watchdog.promise]),
-      ).rejects.toBeInstanceOf(ScanPermissionError);
+      const failure = await Promise.race([pending, watchdog.promise]).catch(
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(ScanPermissionError);
+      expect(failure).toMatchObject({
+        message: "Codex permission preflight ended before its response.",
+      });
       expect(child!.exitCode).toBe(1);
       expect(child!.stdout!.destroyed).toBe(true);
       expect(descendantPid).toBeDefined();

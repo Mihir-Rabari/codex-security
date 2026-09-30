@@ -1,4 +1,6 @@
 import { semanticCoverage } from "./helpers/semantic-scan.js";
+import { fixtureSpawn } from "./support/codex-process.js";
+import * as childProcess from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   cp,
@@ -28,6 +30,7 @@ import {
 } from "../src/cost.js";
 import { createScanCostReporter } from "../src/scan-monitoring.js";
 import { readCodexTurn } from "../src/scan-events.js";
+import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
   runDeepScans,
@@ -335,6 +338,114 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
+  test.each(
+    (["discovery", "merge"] as const).flatMap((role) =>
+      [false, true].flatMap((resumed) =>
+        ["exit", "rpc"].map((failure) => ({ role, resumed, failure })),
+      ),
+    ),
+  )(
+    "retries a transient permission preflight before executing the worker: %j",
+    async ({ role, resumed, failure }) => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ maxDiscoveryRuns: 1 });
+      const executable = join(h.input.scanDir, "synthetic-codex.exe");
+      const script = join(h.input.scanDir, "preflight.cjs");
+      const attempted = join(h.input.scanDir, "preflight-attempted");
+      const config = {
+        default_permissions: "fixture",
+        permissions: {
+          fixture: {
+            filesystem: { ":root": "read" },
+            network: { enabled: false },
+          },
+        },
+      };
+      await writeFile(
+        script,
+        `
+        const fs = require("node:fs");
+        if (process.argv.includes("app-server")) {
+          const first = !fs.existsSync(${JSON.stringify(attempted)});
+          fs.writeFileSync(${JSON.stringify(attempted)}, "attempted");
+          require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
+            const request = JSON.parse(line);
+            if (request.id === undefined) return;
+            if (first && request.method === "config/read") {
+              if (${JSON.stringify(failure)} === "exit") process.exit(1);
+              console.log(JSON.stringify({ id: request.id, error: { code: -32603, message: "Synthetic transient error" } }));
+              return;
+            }
+            const result = request.method === "initialize" ? {}
+              : request.method === "config/read" ? { config: ${JSON.stringify(config)} }
+              : { data: [{ id: "fixture", allowed: true }], nextCursor: null };
+            console.log(JSON.stringify({ id: request.id, result }));
+          });
+        } else {
+          process.stdin.resume();
+          process.stdin.on("end", () => {
+            console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+            console.log(JSON.stringify({ type: "turn.completed", usage: null }));
+          });
+        }
+        `,
+      );
+      const launches: string[][] = [];
+      const spawning = spyOn(childProcess, "spawn").mockImplementation(
+        fixtureSpawn(executable, script, (_child, args) => launches.push(args)),
+      );
+      const codex = createPermissionCheckedCodex({
+        codexPathOverride: executable,
+        env: { PATH: process.env["PATH"] ?? "" },
+        config,
+      });
+      const threadOptions = { workingDirectory: h.input.scanDir };
+      const thread = resumed
+        ? codex.resumeThread("synthetic-thread", threadOptions)
+        : codex.startThread(threadOptions);
+      const execute = async (signal: AbortSignal) =>
+        readCodexTurn({
+          thread,
+          events: (await thread.runStreamed("Inert fixture.", { signal }))
+            .events,
+        });
+      h.setRun(async (options) => {
+        if (role === "discovery") await execute(options.signal!);
+        return result(
+          options.resumeScanId!,
+          options.outputDir!,
+          role === "merge" ? "supported-issue" : undefined,
+        );
+      });
+      const merge = h.input.merge;
+      h.input.merge = async (prompt, signal) => {
+        await execute(signal);
+        return merge(prompt, signal);
+      };
+      try {
+        const state = await runDeepScans(h.input);
+        expect(launches.map((args) => args.includes("app-server"))).toEqual([
+          true,
+          true,
+          false,
+        ]);
+        expect(launches[2]!.includes("resume")).toBe(resumed);
+        expect(h.calls).toHaveLength(role === "discovery" ? 2 : 1);
+        expect(state.passes).toHaveLength(1);
+        expect(state.mergedScanIds).toHaveLength(1);
+        expect(state.consecutiveErrors).toBe(0);
+        expect(state.mergeFailures ?? 0).toBe(0);
+        expect(h.published.at(-1)!.findings).toHaveLength(
+          role === "merge" ? 1 : 0,
+        );
+      } finally {
+        spawning.mockRestore();
+      }
+    },
+  );
+
   test("preserves a checkpoint write failure and still saves terminal state", async () => {
     const h = await harness({ stopAfterNoNew: 1 });
     const workbench = h.input.workbench;

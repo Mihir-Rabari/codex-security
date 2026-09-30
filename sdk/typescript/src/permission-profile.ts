@@ -280,10 +280,8 @@ async function verifyPermissionProfile(options: {
     }
   } catch (error) {
     options.signal.throwIfAborted();
-    if (error instanceof ScanPermissionError) throw error;
-    throw new ScanPermissionError("Scan permissions could not be verified.", {
-      cause: error,
-    });
+    // A failed transport does not establish a permission incompatibility.
+    throw error;
   } finally {
     lines.close();
     child.kill();
