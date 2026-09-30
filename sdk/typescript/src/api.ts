@@ -2014,9 +2014,11 @@ export class CodexSecurity {
         }
         thread = codex.resumeThread(resumeThreadId, threadOptions);
         if (!sealed) {
-          tracker.start(resumeThreadId);
           if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
-          await tracker.refresh().catch(reportTrackingError);
+          if (mode !== "deep") {
+            tracker.start(resumeThreadId);
+            await tracker.refresh().catch(reportTrackingError);
+          }
         }
         checkOpen();
       } else {
@@ -2261,6 +2263,11 @@ export class CodexSecurity {
                   onObserverError: options.onObserverError,
                 },
                 historicalCost,
+                restoreMergeCost: async () => {
+                  if (typeof resumeThreadId !== "string") return;
+                  tracker.start(resumeThreadId);
+                  await tracker.refresh().catch(reportTrackingError);
+                },
                 onCost: (key, cost) => {
                   accounting.record(key, cost);
                   if (cost === null) return;

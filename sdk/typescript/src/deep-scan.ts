@@ -78,6 +78,7 @@ export interface DeepScanComposition {
     threadId: string,
     scanDirectory?: string,
   ): Promise<ScanCost | null>;
+  restoreMergeCost?(): Promise<void>;
   costUnavailable?: boolean;
 }
 
@@ -211,7 +212,10 @@ export async function runDeepScans(
         scanDir,
       );
   };
-  const refreshPasses = async (recoverOutcomes = false): Promise<void> => {
+  const refreshPasses = async (
+    recoverOutcomes = false,
+    restoreMergeCost?: () => Promise<void>,
+  ): Promise<void> => {
     const listed = await workbench([
       "list-scans",
       "--scan-root",
@@ -248,11 +252,14 @@ export async function runDeepScans(
           )) ?? null,
         );
     }
-    if (state.costUnavailable) {
-      await save();
-      reportPassCost("previous-work", null);
-    }
-    for (const [directory, cost] of costs) reportPassCost(directory, cost);
+    if (state.costUnavailable) await save();
+    // Merge polling may stop the budget; every child receipt must be ready first.
+    await restoreMergeCost?.();
+    for (const [directory, cost] of costs)
+      if (cost !== null) reportPassCost(directory, cost);
+    if (state.costUnavailable) reportPassCost("previous-work", null);
+    for (const [directory, cost] of costs)
+      if (cost === null) reportPassCost(directory, cost);
     let recoveredSuccess = false;
     let recoveredFailure = false;
     for (const { record, pass } of passes) {
@@ -508,6 +515,7 @@ export async function runDeepScans(
   try {
     await refreshPasses(
       state.terminalReason === undefined && Date.now() < deadline,
+      input.restoreMergeCost,
     );
     if (state.mergedScanIds.some((id) => !coverage.has(id))) {
       throw new Error(

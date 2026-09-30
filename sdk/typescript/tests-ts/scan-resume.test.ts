@@ -21,6 +21,7 @@ import type { ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { loadContract } from "../src/contract.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import { ScanInterruptedError } from "../src/errors.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   ScanCostTrackingError,
@@ -778,9 +779,14 @@ test.each([
   },
 );
 
-test.each([true, false])(
-  "resume preserves accepted results when recovered child costs exhaust the budget (saved merge session: %p)",
-  async (savedMergeSession) => {
+test.each([
+  { savedMergeSession: true, mergeExhausted: false, unknownChild: false },
+  { savedMergeSession: false, mergeExhausted: false, unknownChild: false },
+  { savedMergeSession: true, mergeExhausted: true, unknownChild: false },
+  { savedMergeSession: true, mergeExhausted: true, unknownChild: true },
+])(
+  "resume restores all discovery receipts before enforcing its saved merge budget: %j",
+  async ({ savedMergeSession, mergeExhausted, unknownChild }) => {
     const cost = (input_tokens: number, output_tokens: number) =>
       estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
     const coverage = semanticCoverage({
@@ -805,6 +811,7 @@ test.each([true, false])(
       await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.startedAt = new Date().toISOString();
+    if (mergeExhausted) checkpoint.terminalReason = "capped";
     const acceptedChild = await readFile(join(f.childDir!, "findings.json"));
     const writeUsage = async (
       threadId: string,
@@ -836,8 +843,8 @@ test.each([true, false])(
     await writeUsage(
       f.threadId,
       join(f.scanDir, "artifacts/deep-scan/merge"),
-      10,
-      1,
+      mergeExhausted ? 40_000 : 10,
+      mergeExhausted ? 4_000 : 1,
     );
     for (const [index, input, output] of [
       [2, 10_000, 1_000],
@@ -871,7 +878,8 @@ test.each([true, false])(
         "--thread-id",
         threadId,
       ]);
-      await writeUsage(threadId, scanDir, input, output);
+      if (!unknownChild || index !== 2)
+        await writeUsage(threadId, scanDir, input, output);
       checkpoint.passes.push({ directory, scanId });
     }
     await f.command(
@@ -891,6 +899,7 @@ test.each([true, false])(
       checkpoint.aggregate!,
     );
     let turns = 0;
+    const commands: string[] = [];
     const client = resumeClient(
       f,
       () => ({
@@ -921,6 +930,7 @@ test.each([true, false])(
         },
       }),
       async (options, args, input) => {
+        commands.push(args[0]!);
         const response = await runWorkbench(options, args, input);
         if (!savedMergeSession && args.includes(f.scanId)) {
           if (args[0] === "get-cli-scan-resume") response["threadId"] = null;
@@ -951,8 +961,42 @@ test.each([true, false])(
         );
         return;
       }
+      if (unknownChild) {
+        let failure: unknown;
+        await expect(
+          pending.catch((error: unknown) => {
+            failure = error;
+            throw error;
+          }),
+        ).rejects.toBeInstanceOf(ScanInterruptedError);
+        expect(failure).toMatchObject({
+          cost: { inputTokens: 60_100, outputTokens: 6_010 },
+        });
+        const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+          "scan"
+        ] as JsonObject;
+        expect(saved).toMatchObject({ progress: { status: "failed" } });
+        expect(saved["cost"]).toBeUndefined();
+        expect(commands).not.toContain("complete-budget-exhausted-scan");
+        expect(turns).toBe(0);
+        expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
+          acceptedChild,
+        );
+        const retained = await loadContract(f.scanDir, {
+          pluginRoot: PLUGIN_ROOT,
+        });
+        expect(retained.findings.findings).toHaveLength(1);
+        expect(retained.findings.findings[0]).toMatchObject({
+          title: finding.title,
+          locations: finding.locations,
+        });
+        expect(retained.coverage.completeness).toBe("partial");
+        return;
+      }
       const result = await pending;
-      const expectedCost = cost(30_110, 3_011);
+      const expectedCost = mergeExhausted
+        ? cost(70_100, 7_010)
+        : cost(30_110, 3_011);
       expect(turns).toBe(0);
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
@@ -990,7 +1034,10 @@ test.each([true, false])(
         (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
       ).toMatchObject({
         progress: { status: "complete" },
-        cost: { inputTokens: 30_110, outputTokens: 3_011 },
+        cost: {
+          inputTokens: expectedCost.inputTokens,
+          outputTokens: expectedCost.outputTokens,
+        },
       });
       expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
         acceptedChild,
@@ -1856,6 +1903,12 @@ with sqlite3.connect(sys.argv[1]) as connection:
         JSON.stringify(cost),
       ]);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const savedCheckpoint = (
+      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+    )["compositionCheckpoint"];
+    if (checkpoint === "v2")
+      expect(savedCheckpoint).toMatchObject({ version: 2 });
+    else expect(savedCheckpoint).toBeNull();
     if (checkpoint === "native-unbound") {
       execFileSync(f.python, [
         "-c",
@@ -1881,12 +1934,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
-    const savedCheckpoint = (
-      await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
-    )["compositionCheckpoint"];
-    if (checkpoint === "v2")
-      expect(savedCheckpoint).toMatchObject({ version: 2 });
-    else expect(savedCheckpoint).toBeNull();
     for (const [threadId, cwd, inputTokens, outputTokens, timestamp] of [
       [f.threadId, f.scanDir, 1000, 10, sessionStartedAt],
       [
