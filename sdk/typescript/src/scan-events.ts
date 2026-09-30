@@ -11,7 +11,11 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { ScanPermissionError } from "./scan-execution.js";
+import {
+  ScanPermissionError,
+  ScanTransportClosedError,
+} from "./scan-execution.js";
+import { ScanCostTrackingError } from "./deep-scan.js";
 import type { ScanExpectation } from "./contract.js";
 import type { ScanResult } from "./result.js";
 import { collectResult, type CompletedScanTurn } from "./scan-publication.js";
@@ -487,7 +491,9 @@ export function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   if (!signal?.aborted) return;
   if (
     signal.reason instanceof ScanCostLimitExceededError ||
-    signal.reason instanceof ScanPermissionError
+    signal.reason instanceof ScanCostTrackingError ||
+    signal.reason instanceof ScanPermissionError ||
+    signal.reason instanceof ScanTransportClosedError
   )
     throw signal.reason;
   const message = scanDir
