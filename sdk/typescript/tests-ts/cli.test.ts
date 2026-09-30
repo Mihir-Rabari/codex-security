@@ -227,10 +227,13 @@ describe("CLI", () => {
             currentDirectory: await realpath(tmpdir()),
           }),
         ),
-      ).toBe(2);
-      expect(JSON.parse(stdout.text())).toMatchObject({
-        validation: { status: "failed" },
-      });
+      ).toBe(0);
+      const output = JSON.parse(stdout.text());
+      expect(output).toMatchObject({ validation: { status: "complete" } });
+      expect(output.validation.reportPath).not.toBe(reportPath);
+      expect(await readFile(output.validation.reportPath, "utf8")).toContain(
+        "Additional evidence is needed.",
+      );
       expect(await readFile(reportPath, "utf8")).toBe("keep");
       expect(await readFile(outsidePath, "utf8")).toBe("keep");
     } finally {
@@ -240,25 +243,30 @@ describe("CLI", () => {
   });
 
   test("retains a completed scan when follow-up validation fails", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
     const stdout = capture();
-    expect(
-      await main(
-        ["scan", ".", "--validate", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          result: fakeResult(["high"]),
-          currentDirectory: await realpath(tmpdir()),
-          onValidate: async () => {
-            throw new Error("validation failed");
-          },
-        }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      manifest: { scan: { status: "completed" } },
-      validation: { status: "failed", message: "validation failed" },
-    });
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: await realpath(tmpdir()),
+            onValidate: async () => {
+              throw new Error("validation failed");
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { status: "completed" } },
+        validation: { status: "failed", message: "validation failed" },
+      });
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
   });
 
   test("skips standalone model calls when the scan has no findings", async () => {
@@ -313,7 +321,7 @@ describe("CLI", () => {
         manifest: { scan: { status: "completed" } },
         validation: { status: "failed" },
       });
-      await expect(stat(join(scanDir, "validation.md"))).rejects.toThrow();
+      expect(await readFile(join(scanDir, "validation.md"), "utf8")).toBe("");
     } finally {
       await rm(scanDir, { recursive: true, force: true });
     }
@@ -372,46 +380,127 @@ describe("CLI", () => {
     },
   );
 
-  test.each(["SIGINT", "SIGTERM"])(
-    "retains scan output and stops patching after validation receives %s",
+  test.each(["failure", "SIGINT", "SIGTERM"])(
+    "retains completed assessments and stops patching after validation %s",
     async (signal) => {
+      const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
       const signals = new FakeSignals();
       const stdout = capture();
       let validations = 0;
       let commands = 0;
-      expect(
-        await main(
-          ["scan", ".", "--validate", "--patch", "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            signals,
-            result: fakeResult(["high"]),
-            currentDirectory: await realpath(tmpdir()),
-            onValidate: async ({ signal: abort }) => {
-              validations += 1;
-              signals.emit(signal);
-              abort!.throwIfAborted();
-              throw new Error("unreachable");
-            },
-            onCodex: () => {
-              commands += 1;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(signal === "SIGINT" ? 130 : 143);
-      expect(validations).toBe(1);
-      expect(commands).toBe(0);
-      expect(JSON.parse(stdout.text())).toMatchObject({
-        manifest: { scan: { status: "completed" } },
-        validation: {
-          status: "failed",
-          exitCode: signal === "SIGINT" ? 130 : 143,
-        },
-      });
+      const exitCode =
+        signal === "failure" ? 2 : signal === "SIGINT" ? 130 : 143;
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--patch", "--json"],
+            stdout.stream,
+            capture().stream,
+            dependencies({
+              signals,
+              result: scanResultAt(scanDir, ["high", "low"]),
+              currentDirectory: repository,
+              onValidate: async ({ signal: abort }) => {
+                validations += 1;
+                if (validations === 1) {
+                  return {
+                    disposition: "reportable",
+                    report: "Completed first assessment.",
+                    outputDir: join(root, "first-evidence"),
+                    threadId: "first",
+                  };
+                }
+                expect(
+                  await readFile(join(scanDir, "validation.md"), "utf8"),
+                ).toContain("Completed first assessment.");
+                if (signal === "failure")
+                  throw new Error("Second assessment failed.");
+                signals.emit(signal);
+                abort!.throwIfAborted();
+                throw new Error("unreachable");
+              },
+              onCodex: () => {
+                commands += 1;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(exitCode);
+        expect(validations).toBe(2);
+        expect(commands).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { status: "completed" } },
+          validation: {
+            status: "failed",
+            findings: 1,
+            reportPath: join(scanDir, "validation.md"),
+            ...(signal === "failure" ? {} : { exitCode }),
+          },
+        });
+        const report = await readFile(join(scanDir, "validation.md"), "utf8");
+        expect(report).toContain("Completed first assessment.");
+        expect(report).toContain(join(root, "first-evidence"));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     },
   );
+
+  test("keeps earlier reports when retrying validation for a completed workflow scan", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scan-validation-retry-"));
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    const paths: string[] = [];
+    const deps = dependencies({
+      result: scanResultAt(scanDir, ["high"]),
+      currentDirectory: repository,
+      onValidate: async (options) => {
+        expect(options.workflowId).toBe("validation-retry");
+        return {
+          disposition: "deferred",
+          report: "Saved assessment.",
+          outputDir: join(root, "evidence"),
+          threadId: "validation",
+        };
+      },
+    });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const stdout = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--workflow-id",
+              "validation-retry",
+              "--validate",
+              "--json",
+            ],
+            stdout.stream,
+            capture().stream,
+            deps,
+          ),
+        ).toBe(0);
+        const output = JSON.parse(stdout.text());
+        expect(output.validation.status).toBe("complete");
+        paths.push(output.validation.reportPath);
+      }
+      expect(paths[0]).toBe(join(scanDir, "validation.md"));
+      expect(paths[1]).not.toBe(paths[0]);
+      expect(await readFile(paths[0]!, "utf8")).toBe(
+        await readFile(paths[1]!, "utf8"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   test("rejects a cost limit the standalone validator cannot enforce", async () => {
     let started = false;

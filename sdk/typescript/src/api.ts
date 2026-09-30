@@ -319,6 +319,8 @@ export interface ValidationOptions extends Pick<
   finding: string | object;
   /** @internal Verify the recorded target for CLI post-scan validation. */
   scanId?: string;
+  /** @internal Reuse completed CLI validation assessments on workflow retries. */
+  workflowId?: string;
 }
 
 const VALIDATION_DISPOSITIONS = [
@@ -341,6 +343,11 @@ export interface ValidationResult {
   outputDir: string;
   threadId: string | null;
 }
+
+const validationResultSchema = validationResponseSchema.extend({
+  outputDir: z.string(),
+  threadId: z.string().nullable(),
+});
 
 export type ScanAuthentication =
   | { method: "command"; verified: false }
@@ -663,21 +670,25 @@ export class CodexSecurity {
         temporaryRoot,
       );
       const { runtime, approvalPolicy } = session;
+      const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python: session.python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...runtime.environment,
+          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not verify or save the validation assessment",
+      };
       const checkTarget = async (): Promise<void> => {
         if (options.scanId === undefined) return;
-        const context = await (this.#dependencies.runWorkbench ?? runWorkbench)(
-          {
-            python: session.python,
-            pluginRoot: runtime.plugin.pluginRoot,
-            environment: {
-              ...runtime.environment,
-              CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
-            },
-            signal,
-            failureMessage: "Could not verify the scan target",
-          },
-          ["get-scan", "--scan-id", options.scanId, "--check-target"],
-        );
+        const context = await workbench(workbenchOptions, [
+          "get-scan",
+          "--scan-id",
+          options.scanId,
+          "--check-target",
+        ]);
         const scan = context["scan"];
         if (!isRecord(scan) || scan["targetPath"] !== inputs.repository) {
           throw new CodexSecurityError(
@@ -686,6 +697,46 @@ export class CodexSecurity {
         }
       };
       await checkTarget();
+      const outputSchema = z.toJSONSchema(validationResponseSchema, {
+        target: "openapi-3.0",
+      });
+      let checkpoint:
+        | { workflow: FindingWorkflow; binding: JsonObject; key: string }
+        | undefined;
+      if (options.workflowId !== undefined) {
+        const workflow = new FindingWorkflow(
+          options.workflowId,
+          this.#dependencies.environment,
+          workbench,
+          session.python,
+          workbenchOptions,
+        );
+        const source = await workflow.sourceSnapshot(inputs.repository);
+        const model = scanModelConfiguration(session.effectiveConfig);
+        const binding = {
+          // Increment when the standalone validation prompt or execution contract changes.
+          version: 1,
+          codexVersion: CODEX_EXECUTABLE_VERSION,
+          source,
+          scope: {},
+          scanId: options.scanId ?? null,
+          stage: "scan-validation",
+          model: model.model,
+          effort: model.reasoningEffort,
+          settingsDigest: workflowDigest({
+            configuration: session.effectiveConfig,
+            baseUrl: environmentValue(runtime.environment, "OPENAI_BASE_URL"),
+            command: this.#codexCommand(),
+            pluginVersion: runtime.plugin.version,
+          }),
+          promptDigest: workflowDigest(finding),
+          contractDigest: workflowDigest(outputSchema),
+        };
+        const reviewKey = workflowDigest(binding);
+        const saved = await workflow.getReview(reviewKey);
+        if (saved !== null) return validationResultSchema.parse(saved);
+        checkpoint = { workflow, binding, key: reviewKey };
+      }
       const outputRoot =
         inputs.outputDir === null
           ? await preparePersistentOutputRoot(
@@ -731,9 +782,7 @@ export class CodexSecurity {
       ].join("\n");
       const { events } = await thread.runStreamed(prompt, {
         signal,
-        outputSchema: z.toJSONSchema(validationResponseSchema, {
-          target: "openapi-3.0",
-        }),
+        outputSchema,
       });
       const { status, finalResponse, threadId } = await readCodexTurn({
         thread,
@@ -753,7 +802,16 @@ export class CodexSecurity {
         );
       }
       await checkTarget();
-      return { ...result, outputDir, threadId };
+      const assessment = { ...result, outputDir, threadId };
+      if (checkpoint !== undefined) {
+        const { workflow, binding, key } = checkpoint;
+        const current = await workflow.sourceSnapshot(inputs.repository);
+        if (workflowDigest(current) !== workflowDigest(binding["source"])) {
+          throw new CodexSecurityError("Repository changed during validation.");
+        }
+        await workflow.saveReview(key, binding, assessment);
+      }
+      return assessment;
     } catch (error) {
       if (this.#closed) this.#requireOpen();
       throwIfAborted(signal, outputDir);

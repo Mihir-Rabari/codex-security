@@ -5,7 +5,7 @@ import {
   execFileSync,
   spawn,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants,
@@ -20,6 +20,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -8736,25 +8737,41 @@ async function executeScan(
             progress?.stage(`Validating ${findings.length} scan findings`);
           } catch {}
           try {
-            const reports: string[] = [];
-            for (const finding of findings) {
-              const assessment = await security.validate({
-                repositoryPath: repository,
-                scanId: result.manifest.scan.id,
-                finding,
-                auth,
-                safetyIdentifier: arguments_.safetyIdentifier,
-                signal: preparationAbortController.signal,
-              });
-              reports.push(
-                `## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}`,
-              );
+            const scanDirectory = result.scanDir;
+            let reportPath = join(scanDirectory, "validation.md");
+            const report = await open(reportPath, "wx", 0o600).catch(
+              async (error: unknown) => {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+                  throw error;
+                reportPath = join(
+                  scanDirectory,
+                  `validation-${randomUUID()}.md`,
+                );
+                return await open(reportPath, "wx", 0o600);
+              },
+            );
+            validation = { status: "failed", findings: 0, reportPath };
+            let completed = 0;
+            try {
+              for (const finding of findings) {
+                const assessment = await security.validate({
+                  repositoryPath: repository,
+                  scanId: result.manifest.scan.id,
+                  workflowId: arguments_.workflowId,
+                  finding,
+                  auth,
+                  safetyIdentifier: arguments_.safetyIdentifier,
+                  signal: preparationAbortController.signal,
+                });
+                await report.writeFile(
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                );
+                completed += 1;
+                validation = { ...validation, findings: completed };
+              }
+            } finally {
+              await report.close();
             }
-            const reportPath = join(result.scanDir, "validation.md");
-            await writeFile(reportPath, `${reports.join("\n\n---\n\n")}\n`, {
-              flag: "wx",
-              mode: 0o600,
-            });
             validation = {
               status: "complete",
               findings: findings.length,
@@ -8766,10 +8783,15 @@ async function executeScan(
           } catch (error) {
             validationExitCode = 2;
             const message = safeErrorMessage(error);
-            validation = { status: "failed", message };
+            validation = { ...validation, status: "failed", message };
             errorOutput.write(
               `codex-security: Validation failed: ${message}\n`,
             );
+            if (validation["reportPath"] !== undefined) {
+              errorOutput.write(
+                `Partial validation report: ${validation["reportPath"]}\n`,
+              );
+            }
           }
         }
       }
