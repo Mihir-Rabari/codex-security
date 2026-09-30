@@ -123,6 +123,17 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
     expected,
   );
   assert.equal(result.coverage.completeness, "partial");
+  assert.deepEqual(
+    result.coverage.surfaces,
+    expected.map((item) => ({
+      candidateId: item.candidate_id,
+      label: item.summary,
+      disposition: "needs_follow_up",
+      notes: result.coverage.deferred.find(
+        (pending) => pending.candidateId === item.candidate_id,
+      ).reason,
+    })),
+  );
   assert.deepEqual(input, draft());
   assert.deepEqual(
     await preserveUnconfirmedDiffCandidates(context, result),
@@ -183,6 +194,53 @@ test("final findings and explicit candidate resolutions are not reopened", async
   );
 });
 
+test("pending diff candidates retain their authored follow-up surfaces", async (t) => {
+  const pending = candidate("pending-review", "deferred");
+  const context = await fixture(t, [pending]);
+  const input = draft();
+  input.coverage.surfaces = [
+    {
+      candidateId: pending.candidate_id,
+      label: "Authored review boundary",
+      disposition: "needs_follow_up",
+      notes: "Keep the analyst's coverage evidence.",
+    },
+  ];
+  const result = await preserveUnconfirmedDiffCandidates(context, input);
+  assert.deepEqual(result.coverage.surfaces, input.coverage.surfaces);
+  assert.equal(result.coverage.deferred.length, 1);
+});
+
+for (const mapping of ["candidateId", "surfaceIds"]) {
+  test(`pending diff candidates preserve a shared reported surface linked by ${mapping}`, async (t) => {
+    const pending = candidate("pending-review", "deferred");
+    const context = await fixture(t, [pending]);
+    const input = draft([
+      {
+        candidateId: pending.candidate_id,
+        reason: "The second candidate still needs validation.",
+        ...(mapping === "surfaceIds" ? { surfaceIds: ["shared-surface"] } : {}),
+      },
+    ]);
+    input.findings = [{ provenance: { candidateId: "confirmed-review" } }];
+    input.coverage.surfaces = [
+      {
+        id: "shared-surface",
+        ...(mapping === "candidateId"
+          ? { candidateId: pending.candidate_id }
+          : {}),
+        label: "Shared review boundary",
+        disposition: "reported",
+        notes: "The shared surface contains a retained finding.",
+      },
+    ];
+    const result = await preserveUnconfirmedDiffCandidates(context, input);
+    assert.deepEqual(result.coverage.surfaces, input.coverage.surfaces);
+    assert.equal(result.coverage.deferred.length, 1);
+    assert.equal(result.coverage.completeness, "partial");
+  });
+}
+
 test("legacy diff drafts without a ledger and other modes retain their behavior", async (t) => {
   const context = await fixture(t);
   const input = draft();
@@ -224,6 +282,13 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
         (item) => item.candidateId === pending.candidate_id,
       ),
     );
+    assert.ok(
+      savedCheckpoint.surfaces.some(
+        (item) =>
+          item.candidateId === pending.candidate_id &&
+          item.disposition === "needs_follow_up",
+      ),
+    );
 
     await writeFile(
       path.join(
@@ -247,6 +312,10 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
     );
     assert.equal(
       saved.deferred.some((item) => item.candidateId === pending.candidate_id),
+      false,
+    );
+    assert.equal(
+      saved.surfaces.some((item) => item.candidateId === pending.candidate_id),
       false,
     );
     if (remaining === "deferred") assert.equal(saved.deferred.length, 1);

@@ -88,7 +88,8 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
-  if (!publishDraft) await saveScanDraftCheckpoint(context, parsed);
+  const checkpoint = await preserveUnconfirmedDiffCandidates(context, parsed);
+  if (!publishDraft) await saveScanDraftCheckpoint(context, checkpoint);
 
   for (;;) {
     signal?.throwIfAborted();
@@ -97,7 +98,12 @@ export async function recordCodexSecurityScanDraft(
     const preserved =
       context.mode === "deep" && parsed.complete !== false
         ? { input: parsed, previousDigest: undefined }
-        : await preserveScanDraft(context, parsed, false);
+        : await preserveScanDraft(
+            context,
+            parsed,
+            false,
+            scanDraftCheckpointName(checkpoint),
+          );
     const reconciled = await preserveUnconfirmedDiffCandidates(
       context,
       preserved.input,
@@ -142,7 +148,7 @@ export async function recordCodexSecurityScanDraft(
         manifest: { scan: manifestScan },
       };
       if (publishDraft) {
-        await publishDraft(draft, preserved.previousDigest, parsed);
+        await publishDraft(draft, preserved.previousDigest, checkpoint);
       } else {
         const destinations = await Promise.all([
           artifactDestination(
@@ -328,8 +334,8 @@ async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
   saveCheckpoint = true,
+  currentCheckpointName = scanDraftCheckpointName(input),
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
-  const currentCheckpointName = scanDraftCheckpointName(input);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
   const previousState = await readPreviousScanDraft(context);

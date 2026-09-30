@@ -1706,6 +1706,151 @@ try {
   );
   assert.equal(abortedConflictAttempts, 1);
 
+  for (const publication of ["direct", "workbench"]) {
+    const interruptedRoot = path.join(root, `diff-${publication}-interrupted`);
+    const discoveryRoot = path.join(
+      interruptedRoot,
+      "artifacts",
+      "02_discovery",
+    );
+    await mkdir(discoveryRoot, { recursive: true });
+    const interruptedContext = {
+      ...context,
+      root: interruptedRoot,
+      mode: "diff",
+      targetContract: {
+        target: {
+          allowedKinds: ["git_diff"],
+          targetId: "target_diff",
+          displayName: "synthetic-repository",
+        },
+        scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+        diffTarget: {
+          kind: "range",
+          baseRevision: "base123",
+          headRevision: "head456",
+        },
+      },
+    };
+    const pending = {
+      candidate_id: "pending-diff-review",
+      cwe_ids: [],
+      locations: [
+        {
+          path: "src/handler.ts",
+          start_line: 1,
+          end_line: 2,
+          role: "evidence",
+        },
+      ],
+      summary: "A synthetic candidate still needs review.",
+      evidence: "Synthetic candidate evidence.",
+      validation: {
+        disposition: "deferred",
+        remaining_uncertainty: "A synthetic check remains unfinished.",
+      },
+    };
+    const ledgerPath = path.join(discoveryRoot, "candidate_ledger.jsonl");
+    await writeFile(ledgerPath, `${JSON.stringify(pending)}\n`);
+    const currentInput = {
+      scanId,
+      handoffClaimToken: claimToken,
+      complete: false,
+      findings: [],
+      coverage: {
+        completeness: "complete",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    if (publication === "direct") {
+      const canceled = new AbortController();
+      canceled.abort(new Error("draft publication canceled"));
+      await assert.rejects(
+        recordCodexSecurityScanDraft(
+          interruptedContext,
+          currentInput,
+          undefined,
+          canceled.signal,
+        ),
+        /draft publication canceled/,
+      );
+    } else {
+      const historicalWork = { reason: "An earlier source review remains." };
+      await saveScanDraftCheckpoint(interruptedContext, {
+        ...currentInput,
+        coverage: {
+          ...currentInput.coverage,
+          completeness: "partial",
+          deferred: [historicalWork],
+        },
+      });
+      await assert.rejects(
+        recordCodexSecurityScanDraftViaWorkbench(
+          interruptedContext,
+          currentInput,
+          async (arguments_) => {
+            const staged = JSON.parse(
+              await readFile(
+                arguments_[arguments_.indexOf("--draft-path") + 1],
+                "utf8",
+              ),
+            );
+            const snapshot = JSON.parse(
+              await readFile(
+                arguments_[arguments_.indexOf("--checkpoint-path") + 1],
+                "utf8",
+              ),
+            );
+            assert.ok(
+              staged.coverage.deferred.some(
+                (item) => item.reason === historicalWork.reason,
+              ),
+            );
+            assert.deepEqual(
+              snapshot.coverage.deferred.map((item) => item.candidateId),
+              [pending.candidate_id],
+              "the current checkpoint includes enrichment without merged history",
+            );
+            await saveScanDraftCheckpoint(interruptedContext, snapshot);
+            throw new Error("publication failed after checkpoint retention");
+          },
+        ),
+        /publication failed after checkpoint retention/,
+      );
+    }
+    const checkpoints = await Promise.all(
+      (await readdir(path.join(interruptedRoot, "checkpoints"))).map((name) =>
+        readJson(path.join(interruptedRoot, "checkpoints"), name),
+      ),
+    );
+    const savedPending = checkpoints
+      .flatMap((snapshot) => snapshot.coverage.deferred)
+      .filter((item) => item.candidateId === pending.candidate_id);
+    assert.equal(savedPending.length, 1);
+    assert.deepEqual(savedPending[0].candidate, pending);
+    assert.equal(
+      savedPending[0].reason,
+      pending.validation.remaining_uncertainty,
+    );
+    assert.deepEqual(currentInput.coverage.deferred, []);
+    for (const name of ["scan-manifest.json", "findings.json", "coverage.json"])
+      await assert.rejects(readFile(path.join(interruptedRoot, name)), {
+        code: "ENOENT",
+      });
+    await rm(ledgerPath);
+    await recordCodexSecurityScanDraft(interruptedContext, currentInput);
+    const restored = await readJson(interruptedRoot, "coverage.json");
+    assert.deepEqual(
+      restored.deferred
+        .filter((item) => item.candidateId === pending.candidate_id)
+        .map((item) => item.candidate),
+      [pending],
+      "pending evidence restores from its checkpoint without rereading the ledger",
+    );
+  }
+
   const monotonicRoot = path.join(root, "monotonic-final-draft");
   await mkdir(monotonicRoot);
   const monotonicContext = { ...context, root: monotonicRoot };

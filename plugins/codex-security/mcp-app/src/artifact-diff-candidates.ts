@@ -112,12 +112,34 @@ export async function preserveUnconfirmedDiffCandidates(
       paths: [...new Set(candidate.locations.map((location) => location.path))],
     });
   }
+  const surfaces = [...(input.coverage.surfaces as JsonObject[])];
+  for (const item of deferred) {
+    if (typeof item.candidateId !== "string") continue;
+    const candidate = pending.get(item.candidateId);
+    if (!candidate) continue;
+    const surfaceIds = Array.isArray(item.surfaceIds) ? item.surfaceIds : [];
+    if (
+      surfaces.some(
+        (surface) =>
+          surface.candidateId === item.candidateId ||
+          surfaceIds.includes(surface.id),
+      )
+    )
+      continue;
+    surfaces.push({
+      candidateId: item.candidateId,
+      label: candidate.summary,
+      disposition: "needs_follow_up",
+      notes: item.reason,
+    });
+  }
   return {
     ...input,
     coverage: {
       ...input.coverage,
       ...(deferred.length > 0 ? { completeness: "partial" } : {}),
       deferred,
+      surfaces,
     },
   };
 }
