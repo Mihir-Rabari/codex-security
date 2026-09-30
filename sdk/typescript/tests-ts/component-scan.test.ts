@@ -56,11 +56,13 @@ const noMatches: ScanComparisonResult = { matches: [], uncertain: [] };
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
 afterEach(async () => {
+  console.error("[diagnostic] component-cleanup: start");
   await Promise.all(
     temporary
       .splice(0)
       .map((path) => rm(path, { recursive: true, force: true })),
   );
+  console.error("[diagnostic] component-cleanup: end");
 });
 
 async function fixture() {
@@ -1010,11 +1012,14 @@ test("does not start another automatic planning call after cancellation", async 
 });
 
 test("keeps scoped inventories and plans aligned after a case-only Git rename", async () => {
+  console.error("[diagnostic] case-rename: entered");
   const paths = await fixture();
+  console.error("[diagnostic] case-rename: fixture-ready");
   const source = "src";
   const uppercase = source.toUpperCase();
-  const git = (...args: string[]) =>
-    execFileSync(
+  const git = (...args: string[]) => {
+    console.error("[diagnostic] case-rename: git-start");
+    const result = execFileSync(
       "git",
       [
         "-C",
@@ -1039,6 +1044,9 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
         },
       },
     ).trim();
+    console.error("[diagnostic] case-rename: git-end");
+    return result;
+  };
   await mkdir(join(paths.repository, source, "nested"), { recursive: true });
   await writeFile(join(paths.repository, source, "app.ts"), "export {};\n");
   await writeFile(
@@ -1060,6 +1068,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
     source + "/build/tracked.ts",
     source + "/nested/util.ts",
   ];
+  console.error("[diagnostic] case-rename: initial-inventory-start");
   expect(await scopedInventory(paths, source)).toEqual({
     paths: ordinaryPaths,
     count: 3,
@@ -1068,6 +1077,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
       { pathspec: ":(icase,literal)" + source, count: 3 },
     ],
   });
+  console.error("[diagnostic] case-rename: initial-inventory-end");
   git("switch", "-c", "case-rename");
   git("mv", source, "renaming");
   git("mv", "renaming", uppercase);
@@ -1085,7 +1095,9 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(entries).toContain(uppercase);
 
   const inventory = async (scope: string) => {
+    console.error("[diagnostic] case-rename: scoped-inventory-start");
     const { queries, ...selected } = await scopedInventory(paths, scope);
+    console.error("[diagnostic] case-rename: scoped-inventory-end");
     const pathspec = scope === "." ? "." : ":(icase,literal)" + scope;
     expect(queries.map((query) => query.pathspec)).toEqual([
       pathspec,
@@ -1127,6 +1139,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
     paths: [...expectedInventory.paths, scope + "/untracked.ts"].sort(),
     count: 4,
   };
+  console.error("[diagnostic] case-rename: mixed-inventory-start");
   expect(await scopedInventory(paths, scope)).toEqual({
     ...mixedInventory,
     queries: [
@@ -1134,6 +1147,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
       { pathspec: ":(icase,literal)" + scope, count: 4 },
     ],
   });
+  console.error("[diagnostic] case-rename: mixed-inventory-end");
   const repositoryInventory = {
     paths: [
       ".gitignore",
