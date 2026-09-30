@@ -115,6 +115,54 @@ function pnpmLocalReferences(
   sourcePath: string,
 ): DependencyLocalReference[] {
   const references = new Map<string, DependencyLocalReference>();
+  // The pinned extractor emits packages-entry identities, not importer aliases or
+  // file references. Explicit name/version fields override the v9 package key.
+  const packages = parsed["packages"];
+  if (record(packages))
+    for (const [key, entry] of Object.entries(packages)) {
+      if (!record(entry)) continue;
+      const packageKey = key.replace(/^'+|'+$/gu, "");
+      const separator = packageKey.indexOf(
+        "@",
+        packageKey.startsWith("@") ? 1 : 0,
+      );
+      const keyName =
+        packageKey.startsWith("file:") || separator === -1
+          ? ""
+          : packageKey.slice(0, separator);
+      const keyVersion = packageKey.startsWith("file:")
+        ? packageKey
+        : separator === -1
+          ? ""
+          : packageKey.slice(separator + 1);
+      const tarball = record(entry["resolution"])
+        ? entry["resolution"]["tarball"]
+        : null;
+      const resolution = /^(?:file|link):/u.test(keyVersion)
+        ? keyVersion
+        : typeof tarball === "string" && /^(?:file|link):/u.test(tarball)
+          ? tarball
+          : null;
+      if (resolution === null) continue;
+      const name =
+        typeof entry["name"] === "string" && entry["name"] !== ""
+          ? entry["name"]
+          : keyName;
+      const version =
+        typeof entry["version"] === "string" && entry["version"] !== ""
+          ? entry["version"]
+          : packageKey.startsWith("file:")
+            ? ""
+            : keyVersion;
+      if (!name || !version) continue;
+      references.set(JSON.stringify([name, version, resolution]), {
+        sourcePath,
+        name,
+        version,
+        resolution,
+      });
+    }
+  const packageReferences = [...references.values()];
   for (const section of [parsed["importers"], parsed["snapshots"]]) {
     if (!record(section)) continue;
     for (const project of Object.values(section)) {
@@ -132,7 +180,15 @@ function pnpmLocalReferences(
             : dependency;
           if (typeof version !== "string" || !/^(?:file|link):/u.test(version))
             continue;
-          references.set(JSON.stringify([name, version]), {
+          if (
+            packageReferences.some(
+              (reference) =>
+                reference.resolution === version ||
+                version.startsWith(`${reference.resolution}(`),
+            )
+          )
+            continue;
+          references.set(JSON.stringify([name, version, version]), {
             sourcePath,
             name,
             version,

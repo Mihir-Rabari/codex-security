@@ -329,6 +329,67 @@ snapshots:
       line.includes("linked-lib@link:../linked-lib"),
     ),
   );
+  for (const [layout, alias, packageKey, peer] of [
+    ["named", "synthetic-lib", "synthetic-lib@file:../synthetic-lib.tgz", ""],
+    [
+      "scoped-alias-peer",
+      "@synthetic/alias",
+      "@synthetic/alias@file:../synthetic-lib.tgz",
+      "(peer-lib@2.0.0)",
+    ],
+    ["bare-file", "local-alias", "file:../synthetic-lib.tgz", ""],
+  ] as const) {
+    for (const excluded of [false, true]) {
+      const resolution = "file:../synthetic-lib.tgz";
+      const tarball = await scan(
+        `pnpm-local-tarball-${layout}-${excluded ? "excluded" : "retained"}`,
+        {
+          "pnpm-lock.yaml": JSON.stringify({
+            lockfileVersion: "9.0",
+            importers: {
+              ".": {
+                dependencies: {
+                  [alias]: {
+                    specifier: resolution,
+                    version: resolution + peer,
+                  },
+                },
+              },
+            },
+            packages: {
+              [packageKey]: {
+                ...(layout === "named" ? {} : { name: "synthetic-lib" }),
+                version: "1.2.0",
+                resolution: { tarball: resolution },
+              },
+              "synthetic-registry@2.0.0": {},
+            },
+            snapshots: {
+              [packageKey + peer]: {},
+              "synthetic-registry@2.0.0": {},
+            },
+          }),
+          ...(excluded
+            ? {
+                "osv-scanner.toml":
+                  '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+              }
+            : {}),
+        },
+      );
+      assert.equal(tarball.status, excluded ? "completed" : "partial");
+      assert.equal(tarball.coverage.unresolvedPackages, excluded ? 0 : 1);
+      assert.equal(tarball.components.length, excluded ? 1 : 2);
+      assert.equal(tarball.matches.length, excluded ? 0 : 1);
+      if (!excluded)
+        assert.equal(
+          tarball.components.find(
+            (component) => component.name === "synthetic-lib",
+          )?.version,
+          "1.2.0",
+        );
+    }
+  }
   const alias = await scan("npm-alias-scoped-multiple", {
     "package-lock.json": JSON.stringify({
       lockfileVersion: 3,

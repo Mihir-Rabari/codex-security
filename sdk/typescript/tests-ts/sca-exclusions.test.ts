@@ -143,3 +143,107 @@ test("a retained local tuple remains unresolved when another occurrence was excl
   expect(result.coverage.unresolvedPackages).toBe(1);
   expect(result.status).toBe("partial");
 });
+
+for (const [layout, alias, packageKey, peer] of [
+  ["named", "synthetic-lib", "synthetic-lib@file:../synthetic-lib.tgz", ""],
+  [
+    "scoped-alias-peer",
+    "@synthetic/alias",
+    "@synthetic/alias@file:../synthetic-lib.tgz",
+    "(peer-lib@2.0.0)",
+  ],
+  ["bare-file", "local-alias", "file:../synthetic-lib.tgz", ""],
+] as const) {
+  test.each([false, true])(
+    `pnpm ${layout} tarball uses the emitted identity while retained: %s`,
+    async (retained) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "sca-pnpm-exclusion-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      const resolution = "file:../synthetic-lib.tgz";
+      await writeFile(
+        join(repository, "pnpm-lock.yaml"),
+        JSON.stringify({
+          lockfileVersion: "9.0",
+          importers: {
+            ".": {
+              dependencies: {
+                [alias]: { specifier: resolution, version: resolution + peer },
+              },
+            },
+          },
+          packages: {
+            [packageKey]: {
+              ...(layout === "named" ? {} : { name: "synthetic-lib" }),
+              version: "1.2.0",
+              resolution: { tarball: resolution },
+            },
+            "synthetic-registry@2.0.0": {},
+          },
+          snapshots: {
+            [packageKey + peer]: {},
+            "synthetic-registry@2.0.0": {},
+          },
+        }),
+      );
+      await writeFile(
+        join(repository, "osv-scanner.toml"),
+        '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+      );
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: join(root, "output") },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? {
+                  stdout: "osv-scanner version: 2.6.0",
+                  stderr: "",
+                  exitCode: 0,
+                }
+              : {
+                  stdout: JSON.stringify({
+                    results: [
+                      {
+                        source: { path: "pnpm-lock.yaml" },
+                        packages: [
+                          {
+                            package: {
+                              name: "synthetic-registry",
+                              version: "2.0.0",
+                              ecosystem: "npm",
+                            },
+                          },
+                          ...(retained
+                            ? [
+                                {
+                                  package: {
+                                    name: "synthetic-lib",
+                                    version: "1.2.0",
+                                    ecosystem: "npm",
+                                  },
+                                },
+                              ]
+                            : []),
+                        ],
+                      },
+                    ],
+                  }),
+                  stderr:
+                    "Package npm/synthetic-lib/1.2.0 has been filtered out because: synthetic exclusion\n",
+                  exitCode: 0,
+                },
+        },
+      );
+      expect(result.status).toBe(retained ? "partial" : "completed");
+      expect(result.coverage.unresolvedPackages).toBe(retained ? 1 : 0);
+      expect(result.components).toHaveLength(retained ? 2 : 1);
+      expect(
+        result.coverage.limitations.some((line) => line.includes(resolution)),
+      ).toBe(true);
+    },
+  );
+}

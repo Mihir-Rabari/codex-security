@@ -13,8 +13,8 @@ Implementation and isolated PR checks completed on Linux on September 30, 2026:
 
 | Check                          | Observed result                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 136 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
-| Actual OSV-Scanner v2.6.0      | 37 offline synthetic contract cases passed under Node 24; 36 under Bun 1.3.14.                                     |
+| Focused SDK regressions        | 142 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
+| Actual OSV-Scanner v2.6.0      | 43 offline synthetic contract cases passed under Node 24; 42 under Bun 1.3.14.                                     |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                         |
