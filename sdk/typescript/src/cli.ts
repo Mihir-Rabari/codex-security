@@ -4713,18 +4713,15 @@ export async function main(
                       );
                       return undefined;
                     }
-                    const session =
-                      typeof saved["threadId"] === "string"
-                        ? await findScanSession(
-                            codexSecurityCredentialHome(
-                              dependencies.environment,
-                            ),
-                            saved["threadId"],
-                          )
-                        : null;
                     if (
+                      typeof saved["sealedProducerVersion"] !== "string" &&
                       typeof saved["threadId"] === "string" &&
-                      session?.workingDirectory !==
+                      (
+                        await findScanSession(
+                          codexSecurityCredentialHome(dependencies.environment),
+                          saved["threadId"],
+                        )
+                      )?.workingDirectory !==
                         join(scanDir, "artifacts/deep-scan/merge")
                     ) {
                       errorOutput.write(

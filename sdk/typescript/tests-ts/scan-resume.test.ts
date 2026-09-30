@@ -634,6 +634,146 @@ test.each(["failed", "canceled"] as const)(
   },
 );
 
+test("bulk recovery completes a sealed legacy attempt without another scan", async () => {
+  const f = await interruptedScan("deep", true, {}, false, true, null);
+  const startedAt = (
+    await f.command(["get-cli-scan-resume", "--scan-id", f.scanId])
+  )["startedAt"] as string;
+  const cost = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    output_tokens: 100,
+  })!;
+  await writeFile(
+    f.sessionPath,
+    [
+      {
+        type: "session_meta",
+        payload: { id: f.threadId, cwd: f.scanDir, timestamp: startedAt },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 1000, output_tokens: 100 },
+          },
+        },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n") + "\n",
+  );
+  await publishDraft(f.command, f.registration, "deep", {
+    scanId: f.scanId,
+    findings: [semanticFinding({ identity: { anchor: "retained-legacy" } })],
+    coverage: semanticCoverage({ completeness: "partial" }),
+  });
+  execFileSync(f.python, [
+    "-c",
+    `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, "
+        "status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, "
+        "manifest_path, terminal_reason, created_at, updated_at, completed_at) "
+        "VALUES (?, 1, 'recovery-test', 'succeeded', 'terminal', 1, 0, 1, 1, "
+        "?, 'saturated', ?, ?, ?)",
+        (sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[4], sys.argv[4]),
+    )
+`,
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    f.scanId,
+    join(f.scanDir, "scan-manifest.json"),
+    startedAt,
+  ]);
+  // A retired runtime is eligible only after its artifacts have been sealed.
+  await expect(
+    f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).rejects.toThrow("retired runtime");
+  await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+  expect(
+    await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).toMatchObject({
+    sealedProducerVersion: expect.any(String),
+    threadId: f.threadId,
+    compositionCheckpoint: null,
+  });
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+    "report.md",
+  ];
+  const before = await Promise.all(
+    names.map((name) => readFile(join(f.scanDir, name))),
+  );
+  let turns = 0;
+  const createClient = resumeClient(f, () => ({
+    startThread() {
+      return {
+        id: null,
+        async runStreamed() {
+          turns++;
+          throw new Error("Sealed recovery needs no model turn.");
+        },
+      };
+    },
+    resumeThread() {
+      throw new Error("A retired origin must not resume.");
+    },
+  }));
+  const requests: (string | undefined)[] = [];
+  const stdout = capture();
+  const stderr = capture();
+  const code = await main(
+    ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      runWorkbench: f.command,
+      createSecurity(config) {
+        const client = createClient(config);
+        return {
+          preflight: (options) => client.preflight(options),
+          close: () => client.close(),
+          async run(repository, options = {}) {
+            requests.push(options.resumeScanId);
+            expect(options.resumeScanId).toBe(f.scanId);
+            expect(options.outputDir).toBe(f.scanDir);
+            return client.run(repository, options);
+          },
+        };
+      },
+    },
+  );
+  expect(requests, stderr.text()).toEqual([f.scanId]);
+  expect(code, stderr.text()).toBe(2);
+  expect(turns).toBe(0);
+  const result = JSON.parse(stdout.text());
+  expect(result).toMatchObject({ incomplete: 1, failed: 0 });
+  const receipts = (await readFile(result.resultsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(receipts).toHaveLength(2);
+  expect(receipts[1]).toMatchObject({
+    attempt: 1,
+    outputDir: f.scanDir,
+    status: "completed_with_incomplete_coverage",
+    cost,
+  });
+  expect(
+    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+  ).toMatchObject({ progress: { status: "complete" }, cost, findingCount: 1 });
+  expect(
+    (await f.command(["list-scans", "--repository", f.repository]))["scans"],
+  ).toHaveLength(1);
+  expect(
+    await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+  ).toEqual(before);
+});
+
 test.each([
   [false, false],
   [true, false],
