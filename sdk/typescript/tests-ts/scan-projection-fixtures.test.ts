@@ -21,6 +21,7 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
+import { combineScanCoverage, validateScanMerge } from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -132,6 +133,9 @@ test("completed projection follows the shared canonical child fixture", async ()
       ...("writeup" in expected ? { writeup: expected.writeup } : {}),
     });
   }
+  expect<unknown>(combineScanCoverage([projected.draft.coverage])).toEqual(
+    fixture.expected.coverage,
+  );
   expect(
     await writer.projectChild(
       fixture.parentScanId,
@@ -229,6 +233,20 @@ with connect() as connection:
       (index) => legacy.findings[index]!,
     ),
   );
+  const result = validateScanMerge(
+    {
+      scanId: fixture.parentScanId,
+      groups: projected.draft.findings.map((finding) => ({
+        sourceFindingIds: finding.provenance.sourceFindingIds!,
+        canonicalSourceFindingId: finding.provenance.sourceFindingIds![0]!,
+      })),
+    },
+    [projected],
+    null,
+  );
+  expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
+    { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
+  ]);
   expect(await readFile(findingsPath, "utf8")).toBe(sourceBytes);
 });
 
