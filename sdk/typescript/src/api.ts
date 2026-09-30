@@ -21,6 +21,8 @@ import {
   prepareExecutionSource,
   createExecutionCodex,
   lockExecutionConfiguration,
+  prepareAmbientRuntime,
+  type AmbientExecution,
   SCAN_PERMISSION_PROFILE,
   type ScanPermissions,
   type PreparedRuntime,
@@ -246,6 +248,13 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal Bind the normal execution lifecycle to a claimed native scan. */
+  registeredScan?: {
+    scanId: string;
+    scanDir: string;
+    threadId: string;
+    handoffClaimToken?: string;
+  };
   /** @internal Explicit restrictions inherited by a prepared worker. */
   inheritedPermissions?: ScanPermissions;
   /** @internal Retain an invoking native provider environment. */
@@ -394,6 +403,8 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
+  ambientExecution?: AmbientExecution;
+  inheritedPermissions?: ScanPermissions;
   createCodex?(options: CodexOptions): CodexClientLike;
   environment: ProcessEnvironment;
   prepareRuntime?: (
@@ -2397,7 +2408,10 @@ export class CodexSecurity {
       } = source;
       const commandAuth = hasCommandAuth(source.configuration);
       let authentication = source.authentication;
-      if (this.#dependencies.prepareRuntime === undefined) {
+      if (
+        this.#dependencies.prepareRuntime === undefined &&
+        this.#dependencies.ambientExecution === undefined
+      ) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
           (path) =>
@@ -2418,7 +2432,8 @@ export class CodexSecurity {
       );
       if (
         runtime === previousRuntime &&
-        this.#dependencies.prepareRuntime === undefined
+        this.#dependencies.prepareRuntime === undefined &&
+        this.#dependencies.ambientExecution === undefined
       ) {
         await this.#refreshPersistentRuntime(runtime, source, signal);
       }
@@ -2433,7 +2448,7 @@ export class CodexSecurity {
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       const inheritedPermissions = structuredClone(
-        options.inheritedPermissions,
+        options.inheritedPermissions ?? this.#dependencies.inheritedPermissions,
       );
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
@@ -2481,6 +2496,7 @@ export class CodexSecurity {
           source.command,
           runtime.environment,
           signal,
+          runtime.preserveCodexHomeConfig ? effectiveConfig : undefined,
         );
         runtime.credentialsAvailable = status.authenticated;
         this.#runtimeCredentialSource = status.authenticated
@@ -2598,6 +2614,7 @@ export class CodexSecurity {
 
   #codexCommand(): CodexCommand {
     return (
+      this.#dependencies.ambientExecution?.command ??
       this.#dependencies.resolveCodexCommand?.() ??
       resolveCodexCommand(this.#dependencies.environment)
     );
@@ -3055,6 +3072,8 @@ export class CodexSecurity {
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
   ): Promise<PreparedRuntime> {
+    if (this.#dependencies.ambientExecution !== undefined)
+      return prepareAmbientRuntime(this.#dependencies.ambientExecution, signal);
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
