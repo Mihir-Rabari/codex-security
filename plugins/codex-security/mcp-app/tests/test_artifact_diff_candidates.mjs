@@ -479,6 +479,94 @@ for (const remaining of [
   });
 }
 
+for (const resolution of ["finding", "exclusion"]) {
+  test(`mixed ledger and current ${resolution} resolutions clear linked follow-ups`, async (t) => {
+    const automatic = candidate("automatic-review");
+    const linked = candidate("linked-review");
+    const context = await fixture(t, [automatic, linked]);
+    const checkpoint = {
+      ...draft([
+        {
+          candidateId: linked.candidate_id,
+          reason: "Validate the linked candidate.",
+          surfaceIds: ["linked-boundary"],
+        },
+      ]),
+      complete: false,
+    };
+    checkpoint.coverage.completeness = "partial";
+    checkpoint.coverage.surfaces.push({
+      id: "linked-boundary",
+      label: "Synthetic review boundary",
+      disposition: "needs_follow_up",
+    });
+    await recordCodexSecurityScanDraft(context, checkpoint);
+
+    const resolved = { ...draft(), complete: false };
+    if (resolution === "finding") {
+      resolved.findings.push({
+        ruleId: "synthetic-review",
+        title: "Synthetic reviewed finding",
+        summary: "The synthetic review has reached a final finding.",
+        severity: { level: "low" },
+        confidence: { level: "high", rationale: "Synthetic review evidence." },
+        taxonomy: { category: "synthetic", cwe: [] },
+        locations: [{ path: "src/handler.ts", startLine: 1 }],
+        remediation: "Apply the synthetic remediation.",
+        provenance: {
+          source: "local_plugin",
+          candidateId: linked.candidate_id,
+        },
+      });
+    } else {
+      resolved.coverage.explicitExclusions.push({
+        candidateId: linked.candidate_id,
+        disposition: "rejected",
+        pattern: "src/handler.ts",
+        reason: "Synthetic review resolved this candidate.",
+      });
+    }
+    await recordCodexSecurityScanDraft(context, resolved);
+    await writeFile(
+      path.join(
+        context.root,
+        "artifacts",
+        "02_discovery",
+        "candidate_ledger.jsonl",
+      ),
+      [{ ...automatic, validation: { disposition: "suppressed" } }, linked]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, {
+        ...resolved,
+        complete: true,
+      });
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "coverage.json"), "utf8"),
+      );
+      assert.equal(saved.completeness, "complete");
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(saved.surfaces, []);
+      if (resolution === "exclusion") {
+        assert.equal(
+          saved.explicitExclusions[0].candidateId,
+          linked.candidate_id,
+        );
+      } else {
+        const findings = JSON.parse(
+          await readFile(path.join(context.root, "findings.json"), "utf8"),
+        );
+        assert.equal(
+          findings.findings[0].provenance.candidateId,
+          linked.candidate_id,
+        );
+      }
+    }
+  });
+}
+
 for (const disposition of ["rejected", "not_applicable"]) {
   test(`explicit ${disposition} exclusions resolve diff candidates through later drafts`, async (t) => {
     const pending = candidate("excluded-review");

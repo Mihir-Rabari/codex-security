@@ -387,26 +387,19 @@ async function preserveScanDraft(
         .map((surface) => surface.candidateId),
     ].filter((value): value is string => typeof value === "string"),
   );
-  const diffResolvedSurfaceIds = new Set<string>();
+  const resolvedSurfaceIds = new Set<string>();
   const pendingSurfaceIds = new Set<string>();
   const pendingCandidateIds = new Set<string>();
   for (const source of [result, ...sources]) {
     for (const item of source.coverage.deferred as JsonObject[]) {
       const candidateId = item.candidateId ?? item.id;
-      const resolvedByLedger =
+      const resolved =
         typeof candidateId === "string" &&
-        diffResolvedCandidateIds.has(candidateId);
-      if (
-        !resolvedByLedger &&
-        typeof candidateId === "string" &&
-        resolvedCandidateIds.has(candidateId)
-      )
-        continue;
-      if (!resolvedByLedger && typeof candidateId === "string")
+        (diffResolvedCandidateIds.has(candidateId) ||
+          resolvedCandidateIds.has(candidateId));
+      if (!resolved && typeof candidateId === "string")
         pendingCandidateIds.add(candidateId);
-      const surfaceIds = resolvedByLedger
-        ? diffResolvedSurfaceIds
-        : pendingSurfaceIds;
+      const surfaceIds = resolved ? resolvedSurfaceIds : pendingSurfaceIds;
       for (const id of Array.isArray(item.surfaceIds) ? item.surfaceIds : []) {
         if (typeof id === "string") surfaceIds.add(id);
       }
@@ -524,7 +517,7 @@ async function preserveScanDraft(
             ((typeof candidateId === "string" &&
               diffResolvedCandidateIds.has(candidateId)) ||
               (typeof surface.id === "string" &&
-                diffResolvedSurfaceIds.has(surface.id))) &&
+                resolvedSurfaceIds.has(surface.id))) &&
             !(
               typeof candidateId === "string" &&
               pendingCandidateIds.has(candidateId)
