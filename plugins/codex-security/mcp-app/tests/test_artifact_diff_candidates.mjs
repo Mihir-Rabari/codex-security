@@ -68,7 +68,28 @@ async function fixture(t, candidates) {
       candidates.map((row) => JSON.stringify(row)).join("\n"),
     );
   }
-  return { root, repoRoot: root, layout: "scan", mode: "diff" };
+  return {
+    root,
+    repoRoot: root,
+    layout: "scan",
+    mode: "diff",
+    scanId: draft().scanId,
+    status: "running",
+    scope: ".",
+    targetContract: {
+      target: {
+        allowedKinds: ["git_diff"],
+        targetId: "target_diff",
+        displayName: "synthetic-repository",
+      },
+      scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+      diffTarget: {
+        kind: "range",
+        baseRevision: "base123",
+        headRevision: "head456",
+      },
+    },
+  };
 }
 
 test("diff outcomes retain unresolved candidates and exclude terminal decisions", async (t) => {
@@ -179,24 +200,6 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
   test(`terminal diff decisions close a saved checkpoint with ${remaining} remaining`, async (t) => {
     const pending = candidate("pending-review");
     const context = await fixture(t, [pending]);
-    Object.assign(context, {
-      scanId: draft().scanId,
-      status: "running",
-      scope: ".",
-      targetContract: {
-        target: {
-          allowedKinds: ["git_diff"],
-          targetId: "target_diff",
-          displayName: "synthetic-repository",
-        },
-        scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
-        diffTarget: {
-          kind: "range",
-          baseRevision: "base123",
-          headRevision: "head456",
-        },
-      },
-    });
     const checkpoint = { ...draft(), complete: false };
     if (remaining === "deferred") {
       checkpoint.coverage.completeness = "partial";
@@ -248,5 +251,79 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
     );
     if (remaining === "deferred") assert.equal(saved.deferred.length, 1);
     if (remaining === "surface") assert.equal(saved.surfaces.length, 1);
+  });
+}
+
+for (const disposition of ["rejected", "not_applicable"]) {
+  test(`explicit ${disposition} exclusions resolve diff candidates through later drafts`, async (t) => {
+    const pending = candidate("excluded-review");
+    const context = await fixture(t, [pending]);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: false,
+    });
+    const finalDraft = { ...draft(), complete: true };
+    finalDraft.coverage.explicitExclusions.push({
+      candidateId: pending.candidate_id,
+      disposition,
+      pattern: "src/handler.ts",
+      reason: "The synthetic candidate was resolved during source review.",
+    });
+    await recordCodexSecurityScanDraft(context, finalDraft);
+    const coveragePath = path.join(context.root, "coverage.json");
+    const resolved = JSON.parse(await readFile(coveragePath, "utf8"));
+    assert.equal(resolved.completeness, "complete");
+    assert.deepEqual(resolved.deferred, []);
+    assert.deepEqual(resolved.explicitExclusions[0].candidate, pending);
+    assert.equal(resolved.explicitExclusions[0].disposition, disposition);
+
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+    assert.equal(retained.completeness, "complete");
+    assert.deepEqual(retained.deferred, []);
+    assert.deepEqual(retained.explicitExclusions, resolved.explicitExclusions);
+  });
+
+  test(`terminal diff ledger resolution retains saved ${disposition} surface rationale`, async (t) => {
+    const pending = candidate("resolved-review");
+    const context = await fixture(t, [pending]);
+    const checkpoint = { ...draft(), complete: false };
+    checkpoint.coverage.completeness = "partial";
+    checkpoint.coverage.surfaces.push({
+      candidateId: pending.candidate_id,
+      label: "Synthetic candidate review",
+      disposition: "needs_follow_up",
+    });
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    await writeFile(
+      path.join(
+        context.root,
+        "artifacts",
+        "02_discovery",
+        "candidate_ledger.jsonl",
+      ),
+      JSON.stringify({ ...pending, validation: { disposition: "suppressed" } }),
+    );
+    const finalDraft = { ...draft(), complete: true };
+    finalDraft.coverage.surfaces.push({
+      candidateId: pending.candidate_id,
+      label: "Synthetic candidate review",
+      disposition,
+      notes: "Source review established the candidate's terminal disposition.",
+    });
+    await recordCodexSecurityScanDraft(context, finalDraft);
+    const coveragePath = path.join(context.root, "coverage.json");
+    const resolved = JSON.parse(await readFile(coveragePath, "utf8"));
+    assert.equal(resolved.completeness, "complete");
+    assert.deepEqual(resolved.deferred, []);
+    assert.equal(resolved.surfaces.length, 1);
+    assert.equal(resolved.surfaces[0].disposition, disposition);
+    assert.deepEqual(resolved.surfaces[0].candidate, pending);
+
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+    assert.equal(retained.completeness, "complete");
+    assert.deepEqual(retained.deferred, []);
+    assert.deepEqual(retained.surfaces, resolved.surfaces);
   });
 }

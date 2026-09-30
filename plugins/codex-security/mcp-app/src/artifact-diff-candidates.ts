@@ -56,7 +56,10 @@ export async function preserveUnconfirmedDiffCandidates(
     ].find((value) => typeof value === "string" && value.trim());
     if (typeof candidateId === "string") resolvedIds.add(candidateId);
   }
-  for (const surface of input.coverage.surfaces as JsonObject[]) {
+  for (const surface of [
+    ...(input.coverage.surfaces as JsonObject[]),
+    ...(input.coverage.explicitExclusions as JsonObject[]),
+  ]) {
     if (
       (surface.disposition === "rejected" ||
         surface.disposition === "not_applicable") &&

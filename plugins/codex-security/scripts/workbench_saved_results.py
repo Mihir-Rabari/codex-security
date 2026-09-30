@@ -670,23 +670,20 @@ def merge_saved_results(
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
-    coverage = (
-        copy.deepcopy(parent["coverage"])
-        if parent and parent["coverage"]
-        else {
-            "completeness": "partial",
-            "mode": binding["coverageMode"],
-            "inventoryStrategy": "diff"
-            if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
-            else "scoped_path"
-            if binding["coverageMode"] == "scoped_path"
-            else "repository",
-            **binding["scope"],
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
-        }
-    )
+    coverage = {
+        "completeness": "partial",
+        "mode": binding["coverageMode"],
+        "inventoryStrategy": "diff"
+        if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
+        else "scoped_path"
+        if binding["coverageMode"] == "scoped_path"
+        else "repository",
+        **binding["scope"],
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        **(copy.deepcopy(parent["coverage"]) if parent else {}),
+    }
     if isinstance(coverage.get("openQuestions"), list):
         coverage["openQuestions"] = [
             {"question": item.strip()} if isinstance(item, str) else item

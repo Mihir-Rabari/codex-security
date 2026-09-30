@@ -363,11 +363,16 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  const diffResolvedCandidateIds = await resolvedDiffCandidateIds(context);
+  const diffResolvedCandidateIds = new Set(
+    await resolvedDiffCandidateIds(context),
+  );
   const resolvedCandidateIds = new Set(
     [
       ...result.findings.map(findingCandidateId),
-      ...(result.coverage.surfaces as JsonObject[])
+      ...[
+        ...(result.coverage.surfaces as JsonObject[]),
+        ...(result.coverage.explicitExclusions as JsonObject[]),
+      ]
         .filter(
           (surface) =>
             surface.disposition === "rejected" ||
@@ -396,7 +401,10 @@ async function preserveScanDraft(
 
   for (const source of sources) {
     const deferred = result.coverage.deferred as JsonObject[];
-    const dispositions = (result.coverage.surfaces as JsonObject[]).filter(
+    const dispositions = [
+      ...(result.coverage.surfaces as JsonObject[]),
+      ...(result.coverage.explicitExclusions as JsonObject[]),
+    ].filter(
       (surface) =>
         (surface.disposition === "rejected" ||
           surface.disposition === "not_applicable") &&
@@ -461,7 +469,6 @@ async function preserveScanDraft(
     }
     const resolvedIds = new Set(
       [
-        ...diffResolvedCandidateIds,
         ...result.findings.map(findingCandidateId),
         ...candidateRows.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
@@ -471,14 +478,21 @@ async function preserveScanDraft(
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (typeof candidateId !== "string" ||
+            (!resolvedIds.has(candidateId) &&
+              !diffResolvedCandidateIds.has(candidateId))) &&
           !coverageEntryPresent(result.coverage.deferred as unknown[], item)
         );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
         const candidateId = surface.candidateId ?? surface.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (typeof candidateId !== "string" ||
+            (!resolvedIds.has(candidateId) &&
+              !(
+                surface.disposition === "needs_follow_up" &&
+                diffResolvedCandidateIds.has(candidateId)
+              ))) &&
           !coverageEntryPresent(
             result.coverage.surfaces as unknown[],
             surface,
