@@ -372,13 +372,10 @@ async function preserveScanDraft(
   const diffResolvedCandidateIds = new Set(
     await resolvedDiffCandidateIds(context),
   );
-  const resolvedCandidateIds = new Set(
+  const resolvedFollowUpCandidateIds = new Set(
     [
       ...result.findings.map(findingCandidateId),
-      ...[
-        ...(result.coverage.surfaces as JsonObject[]),
-        ...(result.coverage.explicitExclusions as JsonObject[]),
-      ]
+      ...(result.coverage.surfaces as JsonObject[])
         .filter(
           (surface) =>
             surface.disposition === "rejected" ||
@@ -387,8 +384,17 @@ async function preserveScanDraft(
         .map((surface) => surface.candidateId),
     ].filter((value): value is string => typeof value === "string"),
   );
+  const resolvedCandidateIds = new Set(resolvedFollowUpCandidateIds);
+  for (const exclusion of result.coverage.explicitExclusions as JsonObject[]) {
+    if (
+      (exclusion.disposition === "rejected" ||
+        exclusion.disposition === "not_applicable") &&
+      typeof exclusion.candidateId === "string"
+    )
+      resolvedCandidateIds.add(exclusion.candidateId);
+  }
   const resolvedSurfaceIds = new Set<string>();
-  const pendingSurfaceIds = new Set<string>();
+  const pendingSurfaceCandidates = new Map<string, Set<string | undefined>>();
   const pendingCandidateIds = new Set<string>();
   for (const source of [result, ...sources]) {
     for (const item of source.coverage.deferred as JsonObject[]) {
@@ -399,9 +405,17 @@ async function preserveScanDraft(
           resolvedCandidateIds.has(candidateId));
       if (!resolved && typeof candidateId === "string")
         pendingCandidateIds.add(candidateId);
-      const surfaceIds = resolved ? resolvedSurfaceIds : pendingSurfaceIds;
       for (const id of Array.isArray(item.surfaceIds) ? item.surfaceIds : []) {
-        if (typeof id === "string") surfaceIds.add(id);
+        if (typeof id !== "string") continue;
+        if (resolved) {
+          resolvedSurfaceIds.add(id);
+        } else {
+          const candidates = pendingSurfaceCandidates.get(id) ?? new Set();
+          candidates.add(
+            typeof candidateId === "string" ? candidateId : undefined,
+          );
+          pendingSurfaceCandidates.set(id, candidates);
+        }
       }
     }
   }
@@ -413,7 +427,7 @@ async function preserveScanDraft(
         const candidateId = item.candidateId ?? item.id;
         return (
           typeof candidateId !== "string" ||
-          !resolvedCandidateIds.has(candidateId)
+          !resolvedFollowUpCandidateIds.has(candidateId)
         );
       })
     )
@@ -491,6 +505,13 @@ async function preserveScanDraft(
           result.findings.push(structuredClone(finding));
       }
     }
+    for (const candidateId of [
+      ...result.findings.map(findingCandidateId),
+      ...dispositions.map((item) => item.candidateId ?? item.id),
+    ]) {
+      if (typeof candidateId === "string")
+        resolvedCandidateIds.add(candidateId);
+    }
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
@@ -510,6 +531,18 @@ async function preserveScanDraft(
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
         const candidateId = surface.candidateId ?? surface.id;
+        if (
+          coverageEntryPresent(result.coverage.surfaces as unknown[], surface)
+        )
+          return false;
+        if (
+          surface.disposition === "needs_follow_up" &&
+          typeof surface.id === "string" &&
+          [...(pendingSurfaceCandidates.get(surface.id) ?? [])].some(
+            (id) => id === undefined || !resolvedCandidateIds.has(id),
+          )
+        )
+          return true;
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
           !(
@@ -521,15 +554,7 @@ async function preserveScanDraft(
             !(
               typeof candidateId === "string" &&
               pendingCandidateIds.has(candidateId)
-            ) &&
-            !(
-              typeof surface.id === "string" &&
-              pendingSurfaceIds.has(surface.id)
             )
-          ) &&
-          !coverageEntryPresent(
-            result.coverage.surfaces as unknown[],
-            surface,
           ) &&
           !(
             surface.disposition === "needs_follow_up" &&

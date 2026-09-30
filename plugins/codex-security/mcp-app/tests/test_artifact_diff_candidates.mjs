@@ -567,6 +567,173 @@ for (const resolution of ["finding", "exclusion"]) {
   });
 }
 
+for (const resolution of ["finding", "exclusion"]) {
+  test(`retained ${resolution} decisions keep historical references resolved on an empty final save`, async (t) => {
+    const context = await fixture(t);
+    const checkpoint = {
+      ...draft([
+        {
+          candidateId: "resolved-review",
+          reason: "Validate the linked candidate.",
+          surfaceIds: ["linked-boundary"],
+        },
+      ]),
+      complete: false,
+    };
+    checkpoint.coverage.completeness = "partial";
+    checkpoint.coverage.surfaces.push({
+      id: "linked-boundary",
+      candidateId: "resolved-review",
+      label: "Synthetic review boundary",
+      disposition: "needs_follow_up",
+    });
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    const finalDraft = { ...draft(), complete: true };
+    if (resolution === "finding") {
+      finalDraft.findings.push({
+        ruleId: "synthetic-review",
+        title: "Synthetic reviewed finding",
+        summary: "The synthetic review has reached a final finding.",
+        severity: { level: "low" },
+        confidence: { level: "high", rationale: "Synthetic review evidence." },
+        taxonomy: { category: "synthetic", cwe: [] },
+        locations: [{ path: "src/handler.ts", startLine: 1 }],
+        remediation: "Apply the synthetic remediation.",
+        provenance: { source: "local_plugin", candidateId: "resolved-review" },
+      });
+    } else {
+      finalDraft.coverage.explicitExclusions.push({
+        candidateId: "resolved-review",
+        disposition: "rejected",
+        pattern: "src/handler.ts",
+        reason: "The synthetic review resolved this candidate.",
+      });
+    }
+    await recordCodexSecurityScanDraft(context, finalDraft);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "coverage.json"), "utf8"),
+      );
+      assert.equal(saved.completeness, "complete");
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(saved.surfaces, []);
+    }
+  });
+}
+
+for (const disposition of ["rejected", "not_applicable"]) {
+  test(`a current ${disposition} exclusion preserves unrelated historical follow-ups`, async (t) => {
+    const context = await fixture(t);
+    const checkpoint = {
+      ...draft([
+        { candidateId: "resolved-review", reason: "Candidate review." },
+      ]),
+      complete: false,
+    };
+    const unrelated = {
+      id: "generic-boundary",
+      label: "Independent source review",
+      disposition: "needs_follow_up",
+      notes: "This review remains unfinished after the candidate is resolved.",
+      receiptRefs: ["artifacts/review/evidence.json"],
+    };
+    checkpoint.coverage.completeness = "partial";
+    checkpoint.coverage.surfaces.push(unrelated);
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    const finalDraft = { ...draft(), complete: true };
+    finalDraft.coverage.explicitExclusions.push({
+      candidateId: "resolved-review",
+      disposition,
+      pattern: "src/handler.ts",
+      reason: "The synthetic candidate is resolved.",
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, finalDraft);
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "coverage.json"), "utf8"),
+      );
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(saved.deferred, []);
+      assert.deepEqual(saved.surfaces, [unrelated]);
+    }
+  });
+}
+
+for (const mapping of ["surfaceIds", "candidateId"]) {
+  for (const currentSurface of [false, true]) {
+    test(`pending ${mapping} links retain ${currentSurface ? "current" : "historical"} shared surface evidence after exclusion`, async (t) => {
+      const context = await fixture(t);
+      const shared = {
+        id: "shared-boundary",
+        label: "Shared review boundary",
+        disposition: "needs_follow_up",
+        notes: "Shared source evidence remains relevant to the pending review.",
+        receiptRefs: ["artifacts/review/evidence.json"],
+        ...(mapping === "candidateId"
+          ? { candidateId: "resolved-review" }
+          : {}),
+      };
+      const checkpoint = {
+        ...draft([
+          {
+            candidateId: "resolved-review",
+            reason: "Validate this synthetic candidate.",
+            surfaceIds: [shared.id],
+          },
+        ]),
+        complete: false,
+      };
+      checkpoint.coverage.completeness = "partial";
+      checkpoint.coverage.surfaces.push(shared);
+      await recordCodexSecurityScanDraft(context, checkpoint);
+      const finalDraft = {
+        ...draft([
+          {
+            candidateId: "pending-review",
+            reason:
+              "Another candidate still requires the shared review evidence.",
+            surfaceIds: [shared.id],
+          },
+        ]),
+        complete: true,
+      };
+      finalDraft.coverage.completeness = "partial";
+      finalDraft.coverage.explicitExclusions.push({
+        candidateId: "resolved-review",
+        disposition: "rejected",
+        pattern: "src/handler.ts",
+        reason: "This candidate is resolved, while the other remains pending.",
+      });
+      const expectedSurface = currentSurface
+        ? {
+            ...shared,
+            notes: "The current draft supplies updated review evidence.",
+          }
+        : shared;
+      if (currentSurface) finalDraft.coverage.surfaces.push(expectedSurface);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await recordCodexSecurityScanDraft(context, finalDraft);
+        const saved = JSON.parse(
+          await readFile(path.join(context.root, "coverage.json"), "utf8"),
+        );
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(
+          saved.deferred,
+          finalDraft.coverage.deferred.map((item) => ({
+            ...item,
+            id: item.candidateId,
+          })),
+        );
+        assert.deepEqual(saved.surfaces, [expectedSurface]);
+      }
+    });
+  }
+}
+
 for (const disposition of ["rejected", "not_applicable"]) {
   test(`explicit ${disposition} exclusions resolve diff candidates through later drafts`, async (t) => {
     const pending = candidate("excluded-review");
