@@ -16,6 +16,7 @@ import {
 } from "../src/custom-validation-prompt.js";
 import {
   DiffTarget,
+  ScanResult,
   type CoverageDocument,
   type FindingsDocument,
   type ScanManifest,
@@ -202,6 +203,89 @@ async function* responseEvents(
 }
 
 describe("custom validation", () => {
+  test.each(["provenance", "candidateId", "reportId", "ledgerRowId"])(
+    "keeps deferred candidates distinct from confirmed findings using %s identity",
+    async (field) => {
+      const f = await fixture(2);
+      for (const [index, finding] of f.findings.findings.entries()) {
+        const source =
+          field === "provenance" ? finding.provenance : finding.extensions!;
+        source[field === "provenance" ? "candidateId" : field] =
+          `candidate-${2 - index}`;
+        if (field === "provenance")
+          finding.extensions!.candidateId = `candidate-${index + 1}`;
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result("reportable", "deferred")),
+      });
+      const saved = new ScanResult({
+        manifest: await json<ScanManifest>(
+          join(f.scanDir, "scan-manifest.json"),
+        ),
+        findings: await json<FindingsDocument>(
+          join(f.scanDir, "findings.json"),
+        ),
+        coverage: await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        ),
+        scanDir: f.scanDir,
+        threadId: "synthetic-custom-validation",
+        turnResult: {},
+        sarifPath: null,
+      });
+      expect(saved.unconfirmedCandidateCount).toBe(1);
+      expect(saved.unconfirmedCandidates[0]).toMatchObject({
+        candidateId: "candidate-1",
+        candidate: f.findings.findings[1],
+      });
+    },
+  );
+
+  test("allocates fallback identities outside existing finding and coverage IDs", async () => {
+    const f = await fixture(4);
+    f.findings.findings[0]!.provenance["candidateId"] =
+      "custom-validation-candidate-4";
+    f.findings.findings[1]!.extensions!.reportId =
+      "custom-validation-candidate-4-2";
+    f.findings.findings[2]!.extensions!.ledgerRowId =
+      "custom-validation-candidate-4-3";
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    coverage.completeness = "partial";
+    coverage.deferred.push({
+      id: "custom-validation-candidate-4-4",
+      reason: "Unrelated source review remains unfinished.",
+    });
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () =>
+        JSON.stringify(
+          result("reportable", "reportable", "reportable", "deferred"),
+        ),
+    });
+    const saved = new ScanResult({
+      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
+      findings: await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+      coverage: await json<CoverageDocument>(join(f.scanDir, "coverage.json")),
+      scanDir: f.scanDir,
+      threadId: "synthetic-custom-validation",
+      turnResult: {},
+      sarifPath: null,
+    });
+    expect(saved.unconfirmedCandidateCount).toBe(1);
+    expect(saved.unconfirmedCandidates[0]).toMatchObject({
+      id: "custom-validation-candidate-4-5",
+      candidateId: "custom-validation-candidate-4-5",
+      candidate: f.findings.findings[3],
+    });
+    expect(saved.coverage.deferred).toHaveLength(2);
+  });
+
   test("applies dispositions and assessments without changing source identity", async () => {
     const f = await fixture(4);
     const output = result(
@@ -280,7 +364,7 @@ describe("custom validation", () => {
     expect(coverage.deferred).toHaveLength(1);
     expect(coverage.deferred[0]).toMatchObject({
       id: "custom-validation-candidate-4",
-      candidateId: "candidate-4",
+      candidateId: "custom-validation-candidate-4",
       candidate: f.findings.findings[3],
     });
     expect(await json(join(f.scanDir, resultName))).toMatchObject({

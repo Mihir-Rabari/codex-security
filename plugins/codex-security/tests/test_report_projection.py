@@ -161,6 +161,39 @@ def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> No
     assert "A saved question." in markdown
 
 
+@pytest.mark.parametrize(
+    ("provenance", "extensions", "resolved_id"),
+    [
+        ({"candidateId": "provenance-id"}, {"candidateId": "extension-id"}, "provenance-id"),
+        ({"candidateId": " "}, {"candidateId": "extension-id"}, "extension-id"),
+        ({}, {"candidateId": "extension-id", "reportId": "report-id"}, "extension-id"),
+        ({}, {"reportId": "report-id", "ledgerRowId": "ledger-id"}, "report-id"),
+        ({}, {"ledgerRowId": "ledger-id"}, "ledger-id"),
+    ],
+)
+def test_projection_resolves_saved_candidates_using_existing_finding_identity_order(
+    provenance: dict[str, str], extensions: dict[str, str], resolved_id: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0].update(provenance=provenance, extensions=extensions)
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [
+        {"id": value, "candidateId": value, "reason": "Earlier saved candidate."}
+        for value in ("provenance-id", "extension-id", "report-id", "ledger-id")
+    ]
+
+    remaining = PROJECTION.unconfirmed_candidates(coverage, findings["findings"])
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert {row["candidateId"] for row in remaining} == {
+        "provenance-id",
+        "extension-id",
+        "report-id",
+        "ledger-id",
+    } - {resolved_id}
+    assert "| Saved unconfirmed candidates | 3 |" in markdown
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]

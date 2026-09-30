@@ -25,6 +25,7 @@ type Finding = Pick<
   | "validation"
   | "attackPath"
   | "extensions"
+  | "provenance"
 > &
   Record<string, unknown>;
 type Disposition = "reportable" | "suppressed" | "not_applicable" | "deferred";
@@ -58,6 +59,19 @@ const DOCUMENTS = [
   "findings.json",
   "coverage.json",
 ] as const;
+
+function candidateIdentities(finding: Finding): string[] {
+  return [
+    finding.provenance["candidateId"],
+    finding.extensions?.candidateId,
+    finding.extensions?.reportId,
+    finding.extensions?.ledgerRowId,
+  ].filter(
+    (value): value is string =>
+      typeof value === "string" && value.trim() !== "",
+  );
+}
+
 interface Schema {
   $id?: string;
   $defs?: Record<string, Schema>;
@@ -373,6 +387,18 @@ export async function runCustomValidation(options: {
   );
   const decisions = new Map<string, CustomValidationResult["validations"]>();
   const reported: Finding[] = [];
+  const reservedIds = new Set([
+    ...findings.flatMap(candidateIdentities),
+    ...[
+      ...coverage.deferred,
+      ...coverage.surfaces,
+      ...coverage.explicitExclusions,
+    ].flatMap((item) =>
+      [item["id"], item["candidateId"]].filter(
+        (value): value is string => typeof value === "string",
+      ),
+    ),
+  ]);
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
@@ -383,9 +409,14 @@ export async function runCustomValidation(options: {
     }
     if (validation.disposition === "deferred") {
       coverage.completeness = "partial";
+      const baseId = `custom-validation-${candidate.candidateId}`;
+      let deferredId = baseId;
+      let suffix = 2;
+      while (reservedIds.has(deferredId)) deferredId = `${baseId}-${suffix++}`;
+      reservedIds.add(deferredId);
       coverage.deferred.push({
-        id: `custom-validation-${candidate.candidateId}`,
-        candidateId: candidate.candidateId,
+        id: deferredId,
+        candidateId: candidateIdentities(candidate.finding)[0] ?? deferredId,
         candidate: candidate.finding,
         reason:
           validation.counterevidence_or_proof_gap ||

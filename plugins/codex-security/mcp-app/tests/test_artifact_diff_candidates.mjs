@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,18 @@ const bundle = await build({
 });
 const { preserveUnconfirmedDiffCandidates } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+);
+const draftBundle = await build({
+  bundle: true,
+  entryPoints: [
+    new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+  ],
+  format: "esm",
+  platform: "node",
+  write: false,
+});
+const { recordCodexSecurityScanDraft } = await import(
+  `data:text/javascript;base64,${Buffer.from(draftBundle.outputFiles[0].contents).toString("base64")}`
 );
 
 function candidate(candidateId, validation, attackPath) {
@@ -162,3 +174,79 @@ test("legacy diff drafts without a ledger and other modes retain their behavior"
     input,
   );
 });
+
+for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
+  test(`terminal diff decisions close a saved checkpoint with ${remaining} remaining`, async (t) => {
+    const pending = candidate("pending-review");
+    const context = await fixture(t, [pending]);
+    Object.assign(context, {
+      scanId: draft().scanId,
+      status: "running",
+      scope: ".",
+      targetContract: {
+        target: {
+          allowedKinds: ["git_diff"],
+          targetId: "target_diff",
+          displayName: "synthetic-repository",
+        },
+        scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
+        diffTarget: {
+          kind: "range",
+          baseRevision: "base123",
+          headRevision: "head456",
+        },
+      },
+    });
+    const checkpoint = { ...draft(), complete: false };
+    if (remaining === "deferred") {
+      checkpoint.coverage.completeness = "partial";
+      checkpoint.coverage.deferred.push({
+        reason: "An unrelated source review remains unfinished.",
+      });
+    }
+    if (remaining === "surface") {
+      checkpoint.coverage.completeness = "partial";
+      checkpoint.coverage.surfaces.push({
+        label: "Unrelated source review",
+        disposition: "needs_follow_up",
+      });
+    }
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    const savedCheckpoint = JSON.parse(
+      await readFile(path.join(context.root, "coverage.json"), "utf8"),
+    );
+    assert.equal(savedCheckpoint.completeness, "partial");
+    assert.ok(
+      savedCheckpoint.deferred.some(
+        (item) => item.candidateId === pending.candidate_id,
+      ),
+    );
+
+    await writeFile(
+      path.join(
+        context.root,
+        "artifacts",
+        "02_discovery",
+        "candidate_ledger.jsonl",
+      ),
+      JSON.stringify({ ...pending, validation: { disposition: "suppressed" } }),
+    );
+    const finalDraft = { ...draft(), complete: true };
+    if (remaining === "explicit partial")
+      finalDraft.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, finalDraft);
+    const saved = JSON.parse(
+      await readFile(path.join(context.root, "coverage.json"), "utf8"),
+    );
+    assert.equal(
+      saved.completeness,
+      remaining === "none" ? "complete" : "partial",
+    );
+    assert.equal(
+      saved.deferred.some((item) => item.candidateId === pending.candidate_id),
+      false,
+    );
+    if (remaining === "deferred") assert.equal(saved.deferred.length, 1);
+    if (remaining === "surface") assert.equal(saved.surfaces.length, 1);
+  });
+}

@@ -5,17 +5,11 @@ import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
 type JsonObject = Record<string, unknown>;
 
-/** Retain unresolved diff candidates alongside the final coverage evidence. */
-export async function preserveUnconfirmedDiffCandidates(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-): Promise<ScanDraftInput> {
-  if (context.mode !== "diff") return input;
-
+async function readDiffCandidates(context: ArtifactContext) {
+  if (context.mode !== "diff") return undefined;
   const label = "diff candidate ledger";
-  let candidates;
   try {
-    candidates = await readArtifactJsonl(
+    return await readArtifactJsonl(
       context,
       ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
       label,
@@ -26,10 +20,29 @@ export async function preserveUnconfirmedDiffCandidates(
       error instanceof Error &&
       error.message === `${label}: the requested artifact is unavailable.`
     ) {
-      return input;
+      return undefined;
     }
     throw error;
   }
+}
+
+/** Resolve historical checkpoints before their pending work downgrades coverage. */
+export async function resolvedDiffCandidateIds(
+  context: ArtifactContext,
+): Promise<string[]> {
+  const candidates = await readDiffCandidates(context);
+  return (candidates ?? [])
+    .filter((candidate) => !isUnconfirmed(candidate))
+    .map((candidate) => candidate.candidate_id);
+}
+
+/** Retain unresolved diff candidates alongside the final coverage evidence. */
+export async function preserveUnconfirmedDiffCandidates(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<ScanDraftInput> {
+  const candidates = await readDiffCandidates(context);
+  if (candidates === undefined) return input;
 
   const resolvedIds = new Set<string>();
   for (const finding of input.findings) {

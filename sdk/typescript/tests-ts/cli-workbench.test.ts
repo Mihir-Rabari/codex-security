@@ -40,7 +40,7 @@ describe("CLI workbench", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("FINDINGS  1 (1 high)");
-    expect(stderr.text()).toContain("UNCONFIRMED  1 saved candidates");
+    expect(stderr.text()).toContain("UNCONFIRMED  1 saved candidate\n");
     expect(JSON.parse(stdout.text())).toMatchObject({
       unconfirmedCandidateCount: 1,
       unconfirmedCandidates: [{ candidateId: "candidate-1" }],

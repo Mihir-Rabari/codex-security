@@ -6,7 +6,10 @@ import commonSchema from "../../schemas/definitions/artifact-common.schema.json"
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
-import { preserveUnconfirmedDiffCandidates } from "./artifact-diff-candidates.js";
+import {
+  preserveUnconfirmedDiffCandidates,
+  resolvedDiffCandidateIds,
+} from "./artifact-diff-candidates.js";
 import {
   artifactDestination,
   readArtifactJsonObject,
@@ -360,6 +363,7 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
+  const diffResolvedCandidateIds = await resolvedDiffCandidateIds(context);
   const resolvedCandidateIds = new Set(
     [
       ...result.findings.map(findingCandidateId),
@@ -457,6 +461,7 @@ async function preserveScanDraft(
     }
     const resolvedIds = new Set(
       [
+        ...diffResolvedCandidateIds,
         ...result.findings.map(findingCandidateId),
         ...candidateRows.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),

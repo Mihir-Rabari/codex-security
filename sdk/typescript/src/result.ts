@@ -119,9 +119,16 @@ export class ScanResult {
       JSON.stringify([sourceWorkerId ?? null, candidateId]);
     const resolved = new Set<string>();
     for (const finding of this.findings.findings) {
-      const candidateId =
-        finding.provenance["candidateId"] ?? finding.extensions?.candidateId;
-      if (typeof candidateId === "string") {
+      const candidateId = [
+        finding.provenance["candidateId"],
+        finding.extensions?.candidateId,
+        finding.extensions?.reportId,
+        finding.extensions?.ledgerRowId,
+      ].find(
+        (value): value is string =>
+          typeof value === "string" && value.trim() !== "",
+      );
+      if (candidateId !== undefined) {
         resolved.add(
           identity(
             candidateId,
@@ -168,13 +175,14 @@ export class ScanResult {
   }
 
   public toJSON(): Record<string, unknown> {
+    const unconfirmedCandidates = this.unconfirmedCandidates;
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
-      unconfirmedCandidateCount: this.unconfirmedCandidateCount,
-      unconfirmedCandidates: this.unconfirmedCandidates,
+      unconfirmedCandidateCount: unconfirmedCandidates.length,
+      unconfirmedCandidates,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

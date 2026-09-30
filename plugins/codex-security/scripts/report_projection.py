@@ -29,39 +29,58 @@ def unconfirmed_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     """Return distinct saved candidates that still need validation, scoped to their worker."""
+
+    def objects(value: Any) -> list[dict[str, Any]]:
+        # Progress also reads incomplete, unsealed drafts before finalizer recovery.
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def identity(candidate_id: Any, owner: Any) -> tuple[str | None, str] | None:
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.strip()
+            or (owner is not None and not isinstance(owner, str))
+        ):
+            return None
+        return owner, candidate_id
+
     resolved: set[tuple[str | None, str]] = set()
-    for finding in findings or []:
-        provenance = finding.get("provenance", {})
-        extensions = finding.get("extensions", {})
-        candidate_id = provenance.get("candidateId") or extensions.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id:
-            owner = (
-                provenance.get("sourceWorkerId")
-                or provenance.get("workerId")
-                or extensions.get("sourceWorkerId")
-            )
-            resolved.add((owner, candidate_id))
+    for finding in objects(findings):
+        provenance = finding.get("provenance")
+        provenance = provenance if isinstance(provenance, dict) else {}
+        extensions = finding.get("extensions")
+        extensions = extensions if isinstance(extensions, dict) else {}
+        candidate_id = next(
+            (
+                value
+                for value in [
+                    provenance.get("candidateId"),
+                    extensions.get("candidateId"),
+                    extensions.get("reportId"),
+                    extensions.get("ledgerRowId"),
+                ]
+                if isinstance(value, str) and value.strip()
+            ),
+            None,
+        )
+        owner = (
+            provenance.get("sourceWorkerId")
+            or provenance.get("workerId")
+            or extensions.get("sourceWorkerId")
+        )
+        if (key := identity(candidate_id, owner)) is not None:
+            resolved.add(key)
     for field in ("surfaces", "explicitExclusions"):
-        for item in coverage.get(field, []):
-            candidate_id = item.get("candidateId")
+        for item in objects(coverage.get(field)):
             if (
-                isinstance(candidate_id, str)
-                and candidate_id
-                and item.get("disposition")
-                in {
-                    "reported",
-                    "rejected",
-                    "not_applicable",
-                }
+                item.get("disposition") in ("reported", "rejected", "not_applicable")
+                and (key := identity(item.get("candidateId"), item.get("sourceWorkerId")))
+                is not None
             ):
-                resolved.add((item.get("sourceWorkerId"), candidate_id))
+                resolved.add(key)
     candidates: dict[tuple[str | None, str], dict[str, Any]] = {}
-    for item in coverage.get("deferred", []):
-        candidate_id = item.get("candidateId")
-        if not isinstance(candidate_id, str) or not candidate_id:
-            continue
-        key = (item.get("sourceWorkerId"), candidate_id)
-        if key not in resolved:
+    for item in objects(coverage.get("deferred")):
+        key = identity(item.get("candidateId"), item.get("sourceWorkerId"))
+        if key is not None and key not in resolved:
             candidates.setdefault(key, item)
     return list(candidates.values())
 

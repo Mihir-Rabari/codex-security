@@ -52,6 +52,30 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test.each(["candidateId", "reportId", "ledgerRowId"])(
+    "recognizes resolved candidates through legacy extensions.%s",
+    (field) => {
+      const result = fakeResult(["high"]);
+      result.findings.findings[0]!.extensions = { [field]: "resolved" };
+      result.coverage.deferred = [
+        {
+          id: "old",
+          candidateId: "resolved",
+          reason: "Superseded checkpoint.",
+        },
+        {
+          id: "pending",
+          candidateId: "pending",
+          reason: "Still awaiting a decision.",
+        },
+      ];
+      expect(
+        result.unconfirmedCandidates.map((candidate) => candidate.candidateId),
+      ).toEqual(["pending"]);
+      expect(result.unconfirmedCandidateCount).toBe(1);
+    },
+  );
+
   test("counts saved unresolved candidates once per logical worker", () => {
     const result = fakeResult(["high"]);
     result.findings.findings[0]!.provenance["candidateId"] = "confirmed";
