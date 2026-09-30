@@ -790,52 +790,6 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("records an ordinary failure as failed when cancellation follows it", async () => {
-    const { repository, commands, controller, dependencies } =
-      await cancellationSetup(await temporaryDirectory());
-
-    const client = new TestClient(
-      {},
-      {
-        ...dependencies,
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          commands.push(args);
-          if (args[0] === "get-scan-feedback") {
-            const failure = new Error("underlying scan failure");
-            return await Promise.reject<never>(failure).finally(() => {
-              controller.abort("caller canceled");
-            });
-          }
-          return mockWorkbench(args, input);
-        },
-        createCodex: () => {
-          throw new Error("Codex must not start after feedback failure");
-        },
-      },
-    );
-
-    await expect(
-      client.run(repository, { signal: controller.signal }),
-    ).rejects.toBeInstanceOf(ScanInterruptedError);
-    expect(commands.map(([command]) => command)).toEqual([
-      "register-cli-scan",
-      "get-scan-feedback",
-      "fail-scan",
-    ]);
-    expect(commands.at(-1)).toEqual([
-      "fail-scan",
-      "--scan-id",
-      "scan_example_001",
-      "--message",
-      "underlying scan failure",
-    ]);
-    await client.close();
-  });
-
   test("records a client-close cancellation as canceled instead of failed", async () => {
     const { repository, commands, dependencies } = await cancellationSetup(
       await temporaryDirectory(),

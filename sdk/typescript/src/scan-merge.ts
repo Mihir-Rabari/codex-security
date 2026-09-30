@@ -241,14 +241,11 @@ export function unchangedScanGroups(
 
 /** Preserve each independent scan's coverage; the merge model cannot resolve it. */
 export function combineScanCoverage(
-  inputs: readonly { draft: { coverage: SemanticCoverage } }[],
+  inputs: readonly SemanticCoverage[],
   unresolved: readonly string[] = [],
   priorCoverage?: SemanticCoverage,
 ): SemanticCoverage {
-  const completed = [
-    ...(priorCoverage ? [priorCoverage] : []),
-    ...inputs.map((input) => input.draft.coverage),
-  ];
+  const completed = [...(priorCoverage ? [priorCoverage] : []), ...inputs];
   const coverage: SemanticCoverage = {
     completeness:
       completed.length === 0 ||
