@@ -571,7 +571,14 @@ def merge_saved_results(
         if parent_manifest is not None and parent is not None:
             parent_scan = parent_manifest["scan"]
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
-                payload = _encoded(parent)
+                checkpoint = copy.deepcopy(parent)
+                if (
+                    stopped
+                    and parent_scan.get("sealedAt")
+                    and not parent_scan.get("preservedSources")
+                ):
+                    checkpoint["coverage"]["legacyUnscopedParentCandidates"] = True
+                payload = _encoded(checkpoint)
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
@@ -821,6 +828,27 @@ def merge_saved_results(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
+    legacy_candidate_rows = {
+        field: [
+            item
+            for draft in (
+                ([parent] if stopped_parent_seal and not parent_preserved_sources else [])
+                + [
+                    source
+                    for _, source, _ in sources
+                    if source["coverage"].get("legacyUnscopedParentCandidates") is True
+                ]
+            )
+            for items in [draft["coverage"].get(field, [])]
+            if isinstance(items, list)
+            for item in items
+            if isinstance(item, dict)
+            and isinstance(item.get("candidateId"), str)
+            and item.get("sourceWorkerId") is None
+        ]
+        for field in ("surfaces", "explicitExclusions", "deferred")
+    }
+
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
@@ -858,7 +886,8 @@ def merge_saved_results(
                 candidate_owner = owner or provenance.get(
                     "sourceWorkerId", provenance.get("workerId")
                 )
-                resolved.setdefault((candidate_owner, candidate_id), "reported")
+                if candidate_owner is None or isinstance(candidate_owner, str):
+                    resolved.setdefault((candidate_owner, candidate_id), "reported")
         for field in ("surfaces", "explicitExclusions"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -867,10 +896,11 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"rejected", "not_applicable"}
                 ):
-                    resolved.setdefault(
-                        (owner or item.get("sourceWorkerId"), item["candidateId"]),
-                        item["disposition"],
-                    )
+                    candidate_owner = owner or item.get("sourceWorkerId")
+                    if candidate_owner is None or isinstance(candidate_owner, str):
+                        resolved.setdefault(
+                            (candidate_owner, item["candidateId"]), item["disposition"]
+                        )
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     for draft in [parent] if parent else []:
@@ -982,10 +1012,11 @@ def merge_saved_results(
                 if isinstance(provenance, dict)
                 else None
             )
-            if relative != "parent" and resolved.get((candidate_owner, candidate_id)) in {
-                "rejected",
-                "not_applicable",
-            }:
+            if (
+                relative != "parent"
+                and (candidate_owner is None or isinstance(candidate_owner, str))
+                and resolved.get((candidate_owner, candidate_id)) in {"rejected", "not_applicable"}
+            ):
                 surfaces = coverage.get("surfaces")
                 for item in surfaces if isinstance(surfaces, list) else []:
                     if isinstance(item, dict) and item.get("candidateId") == candidate_id:
@@ -1112,6 +1143,29 @@ def merge_saved_results(
                     and isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
                 ):
+                    # Legacy parents copied worker rows without ownership. Preserve
+                    # the existing exact/semantic dedupe before adding that owner.
+                    semantic_item = dict(item)
+                    if field == "surfaces":
+                        semantic_item.setdefault("receiptRefs", [])
+                    for existing in output:
+                        if (
+                            isinstance(existing, dict)
+                            and existing.get("sourceWorkerId") is None
+                            and existing in legacy_candidate_rows.get(field, [])
+                            and (
+                                existing == item
+                                or (
+                                    "id" not in item
+                                    and {
+                                        key: value for key, value in existing.items() if key != "id"
+                                    }
+                                    == semantic_item
+                                )
+                            )
+                        ):
+                            existing["sourceWorkerId"] = worker_id
+                            break
                     item = {**item, "sourceWorkerId": worker_id}
                 if (
                     field == "surfaces"
@@ -1134,6 +1188,10 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
+                    and (
+                        item.get("sourceWorkerId") is None
+                        or isinstance(item.get("sourceWorkerId"), str)
+                    )
                     and (item.get("sourceWorkerId"), item.get("candidateId")) in pending_resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
@@ -1157,6 +1215,10 @@ def merge_saved_results(
             item
             for item in coverage["deferred"]
             if not isinstance(item, dict)
+            or (
+                item.get("sourceWorkerId") is not None
+                and not isinstance(item.get("sourceWorkerId"), str)
+            )
             or (item.get("sourceWorkerId"), item.get("candidateId")) not in pending_resolved
         ]
 
