@@ -13,6 +13,7 @@ import {
   IncompleteScanError,
   OutputDirectoryError,
 } from "./errors.js";
+import { ScanPermissionError } from "./scan-execution.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import { scanCostUsage, ScanCostTracker, type ScanCost } from "./cost.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
@@ -272,7 +273,7 @@ export async function publishScan(
   context: ScanPublicationContext,
   turn: CompletedScanTurn,
   cost: ScanCost | null,
-  sealed = false,
+  sealed: boolean,
 ): Promise<{
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
@@ -421,6 +422,7 @@ export async function preservePublishedArtifacts(
     pluginRoot: string;
     expectation: ScanExpectation;
     signal: AbortSignal;
+    onRestorationError: (error: OutputDirectoryError) => void;
   },
   prepareRestorer: () => Promise<ScanArtifactRestorer>,
   run: () => Promise<void>,
@@ -446,21 +448,21 @@ export async function preservePublishedArtifacts(
     restorer = await prepareRestorer();
     await run();
   } catch (error) {
-    if (signal.aborted) throw error;
     if (restorer !== null) {
       for (const artifact of artifacts) {
         try {
           await restorer.restore(artifact.name, artifact.contents);
         } catch (cause) {
-          if (signal.aborted) throw cause;
           const failure = new OutputDirectoryError(
             "Cannot restore an artifact outside the scan directory.",
             { cause },
           );
+          context.onRestorationError(failure);
           throw failure;
         }
       }
     }
+    if (signal.aborted || error instanceof ScanPermissionError) throw error;
     await collectResult({ ...context, scanDir }, result, true);
     return { error };
   }

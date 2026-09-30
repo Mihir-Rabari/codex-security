@@ -9,6 +9,8 @@ import {
   scanFindingIdentity,
   validateCoverageSemantics,
   validateFindingSemantics,
+  semanticScanDraft,
+  type SemanticCoverage,
   type SemanticScan,
   type PreparedScanDraft as SharedPreparedScanDraft,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
@@ -279,27 +281,19 @@ export async function saveScanDraftCheckpoint(
       ? JSON.stringify(snapshot, null, 2) + "\n"
       : JSON.stringify(snapshot);
   const name = scanDraftCheckpointName(input);
+  if (context.layout !== "worker") {
+    const marker = await artifactDestination(
+      context,
+      ["checkpoints", "pending", name],
+      "scan checkpoint marker",
+    );
+    await replaceArtifactText(marker, "");
+  }
   const destination = await artifactDestination(
     context,
     ["checkpoints", name],
     "scan checkpoint",
   );
-  if (context.layout !== "worker") {
-    const historyRoot = dirname(destination);
-    const pending = await lstatIfExists(join(historyRoot, "pending"));
-    // Pre-index scans still need their unpublished history on retries.
-    const legacyHistory =
-      pending === undefined &&
-      (await fs.readdir(historyRoot)).some((entry) => entry.endsWith(".json"));
-    if (!legacyHistory) {
-      const marker = await artifactDestination(
-        context,
-        ["checkpoints", "pending", name],
-        "scan checkpoint marker",
-      );
-      await replaceArtifactText(marker, "");
-    }
-  }
   try {
     const existing = await fs.readFile(destination, "utf8");
     if (existing !== contents)
@@ -331,7 +325,7 @@ async function preserveScanDraft(
 }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
-  let result = structuredClone(input);
+  let result = structuredClone(input as SemanticScan);
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
@@ -344,13 +338,17 @@ async function preserveScanDraft(
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
-  const sources: ScanDraftInput[] = previous
-    ? [previous, ...inputs, ...archived]
-    : [...inputs, ...archived];
+  const sources = (
+    previous ? [previous, ...inputs, ...archived] : [...inputs, ...archived]
+  ) as SemanticScan[];
   if (input.complete === false) {
     const final = sources.find((source) => source.complete !== false);
-    if (final) result = structuredClone(final);
+    if (final) {
+      result = structuredClone(final);
+      sources.push(input as SemanticScan);
+    }
   }
+  const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -367,7 +365,7 @@ async function preserveScanDraft(
   const resolvedCandidateIds = new Set(
     [
       ...result.findings.map(findingCandidateId),
-      ...(result.coverage.surfaces as JsonObject[])
+      ...result.coverage.surfaces
         .filter(
           (surface) =>
             surface.disposition === "rejected" ||
@@ -377,7 +375,7 @@ async function preserveScanDraft(
     ].filter((value): value is string => typeof value === "string"),
   );
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
-    const pending = source.coverage.deferred as JsonObject[];
+    const pending = source.coverage.deferred;
     if (
       pending.length === 0 ||
       pending.some((item) => {
@@ -389,28 +387,28 @@ async function preserveScanDraft(
       })
     )
       return [];
-    return (source.coverage.surfaces as JsonObject[]).filter(
+    return source.coverage.surfaces.filter(
       (surface) => surface.disposition === "needs_follow_up",
     );
   });
 
   for (const source of sources) {
-    const deferred = result.coverage.deferred as JsonObject[];
-    const dispositions = (result.coverage.surfaces as JsonObject[]).filter(
+    const deferred = result.coverage.deferred;
+    const dispositions = result.coverage.surfaces.filter(
       (surface) =>
         (surface.disposition === "rejected" ||
           surface.disposition === "not_applicable") &&
         typeof surface.candidateId === "string",
     );
     const candidateRows = [...deferred, ...dispositions];
-    for (const pending of source.coverage.deferred as JsonObject[]) {
+    for (const pending of source.coverage.deferred) {
       const candidateId = pending.candidateId ?? pending.id;
       if (typeof candidateId !== "string") continue;
       const finding = result.findings.find(
         (item) => findingCandidateId(item) === candidateId,
       );
       if (finding) {
-        const provenance = finding.provenance as JsonObject;
+        const provenance = finding.provenance;
         if (pending.candidate !== undefined)
           provenance.originalCandidates = exactUnion(
             Array.isArray(provenance.originalCandidates)
@@ -425,6 +423,12 @@ async function preserveScanDraft(
           (item) => item.candidateId === candidateId || item.id === candidateId,
         );
         if (candidateRow) {
+          if (
+            candidateRow.candidateId === undefined &&
+            (pending.candidateScoped === true ||
+              typeof pending.candidateId === "string")
+          )
+            candidateRow.candidateScoped = true;
           for (const field of ["candidate", "finding"] as const) {
             if (pending[field] !== undefined)
               candidateRow[field] ??= structuredClone(pending[field]);
@@ -462,26 +466,34 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...dispositions.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
       ...source.coverage,
-      deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
+      deferred: source.coverage.deferred.filter((item) => {
         const candidateId = item.candidateId ?? item.id;
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
-          !coverageEntryPresent(result.coverage.deferred as unknown[], item)
+          !(
+            typeof item.candidateId !== "string" &&
+            item.candidateScoped !== true &&
+            item.candidate === undefined &&
+            item.finding === undefined &&
+            Array.isArray(item.surfaceIds) &&
+            item.surfaceIds.length > 0 &&
+            item.surfaceIds.every(
+              (id) => typeof id === "string" && resolvedSurfaces.has(id),
+            )
+          ) &&
+          !coverageEntryPresent(result.coverage.deferred, item)
         );
       }),
-      surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
+      surfaces: source.coverage.surfaces.filter((surface) => {
         const candidateId = surface.candidateId ?? surface.id;
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
-          !coverageEntryPresent(
-            result.coverage.surfaces as unknown[],
-            surface,
-          ) &&
+          !coverageEntryPresent(result.coverage.surfaces, surface) &&
           !(
             surface.disposition === "needs_follow_up" &&
             coverageEntryPresent(resolvedFollowUpSurfaces, surface)
@@ -490,23 +502,16 @@ async function preserveScanDraft(
       }),
       openQuestions:
         result.complete === false
-          ? (
-              (source.coverage.openQuestions as unknown[] | undefined) ?? []
-            ).filter(
+          ? (source.coverage.openQuestions ?? []).filter(
               (question) =>
                 !coverageEntryPresent(
-                  (result.coverage.openQuestions as unknown[] | undefined) ??
-                    [],
+                  result.coverage.openQuestions ?? [],
                   question,
                 ),
             )
           : [],
     };
-    result.coverage = preserveScanCoverage(
-      result.coverage,
-      [previousCoverage],
-      false,
-    );
+    result.coverage = preserveScanCoverage(result.coverage, previousCoverage);
   }
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return {
@@ -522,13 +527,14 @@ async function readCurrentCheckpoints(
 ): Promise<Array<{ name: string; input: ScanDraftInput }>> {
   const root = join(context.root, "checkpoints", "pending");
   const metadata = await lstatIfExists(root);
-  if (context.layout === "worker" || metadata === undefined) {
+  if (context.layout === "worker") {
     const inputs = await readLegacyCheckpoints(context, excludedCheckpoint);
     return inputs.map((input) => ({
       name: scanDraftCheckpointName(input),
       input,
     }));
   }
+  if (metadata === undefined) return [];
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new Error(
       "scan checkpoint: current checkpoint set is not a safe directory.",
@@ -576,7 +582,7 @@ async function readCurrentCheckpoints(
       }
     }
     if (contents === undefined) continue;
-    const input = parsePersistedCheckpoint(
+    const input = parseCanonicalPersistedScanDraft(
       parseJsonObject(contents, "current scan checkpoint"),
     );
     if (input.scanId !== context.scanId)
@@ -756,42 +762,16 @@ async function readPreviousScanDraft(
     "previous scan draft coverage",
   );
   const scan = requireObject(manifest.scan, "previous scan draft.scan");
-  const semanticScope = isObject(scan.scope) ? { ...scan.scope } : undefined;
-  if (semanticScope) {
-    delete semanticScope.includePaths;
-    delete semanticScope.excludePaths;
-  }
-  const semanticCoverage = { ...coverage };
-  for (const field of [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "mode",
-    "includePaths",
-    "excludePaths",
-    "receiptRefs",
-    "inventoryStrategy",
-  ])
-    delete semanticCoverage[field];
   return {
     digest,
-    input: parsePersistedScanDraft({
-      scanId: context.scanId,
-      ...(scan.complete === false ? { complete: false } : {}),
-      ...(semanticScope && Object.keys(semanticScope).length > 0
-        ? { scope: semanticScope }
-        : {}),
-      ...(isObject(scan.threatModel)
-        ? { threatModel: structuredClone(scan.threatModel) }
-        : {}),
-      findings: (findings.findings as JsonObject[]).map((finding) => {
-        const semantic = { ...finding };
-        for (const field of ["findingId", "occurrenceId", "fingerprints"])
-          delete semantic[field];
-        return semantic;
-      }),
-      coverage: semanticCoverage,
-    }),
+    input: parseCanonicalPersistedScanDraft(
+      semanticScanDraft(
+        context.scanId!,
+        scan,
+        findings.findings as JsonObject[],
+        coverage,
+      ) as unknown as JsonObject,
+    ),
   };
 }
 
@@ -1101,79 +1081,91 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
   return [];
 }
 
-/** Reducers cannot resolve source review by omitting its coverage records. */
-export function preserveScanCoverage(
-  coverage: JsonObject,
-  sources: JsonObject[],
-  preserveCompleteness = true,
-): JsonObject {
-  const result = structuredClone(coverage);
-  for (const field of [
-    "surfaces",
-    "explicitExclusions",
-    "deferred",
-    "openQuestions",
-  ] as const) {
-    const current = (result[field] as unknown[] | undefined) ?? [];
-    const values = [...current];
-    for (const source of sources) {
-      for (const value of (source[field] as unknown[] | undefined) ?? []) {
-        if (!coverageEntryPresent(values, value))
-          values.push(structuredClone(value));
-      }
+/** Explicit, unambiguous resolution closes historical work; omission does not. */
+function resolvedCoverageSurfaceIds(
+  coverage: SemanticCoverage,
+  sources: SemanticScan[],
+): Set<string> {
+  const key = (surface: SemanticCoverage["surfaces"][number]) =>
+    JSON.stringify([surface.label, surface.riskArea ?? null]);
+  const historical = new Map<string, string | null>();
+  for (const source of sources)
+    for (const surface of source.coverage.surfaces) {
+      if (typeof surface.id !== "string") continue;
+      const identity = key(surface);
+      historical.set(
+        surface.id,
+        historical.has(surface.id) && historical.get(surface.id) !== identity
+          ? null
+          : identity,
+      );
     }
-    if (
-      field !== "openQuestions" ||
-      values.length > 0 ||
-      result[field] !== undefined
-    )
-      result[field] = values;
-  }
-  if (
-    coverageHasOutstandingWork(result) ||
-    (preserveCompleteness &&
-      sources.some(
-        (source) =>
-          source.completeness === "partial" &&
-          !coverageHasOutstandingWork(source),
-      ))
-  )
-    result.completeness = "partial";
-  else if (
-    preserveCompleteness &&
-    sources.some((source) => source.completeness === "unknown")
-  ) {
-    result.completeness = "unknown";
-  }
+  const surfaces = coverage.surfaces;
+  const counts = new Map<string, number>();
+  for (const surface of surfaces)
+    if (typeof surface.id === "string")
+      counts.set(surface.id, (counts.get(surface.id) ?? 0) + 1);
+  const pending = new Set(
+    coverage.deferred.flatMap((row) =>
+      Array.isArray(row.surfaceIds) ? row.surfaceIds : [],
+    ),
+  );
+  return new Set(
+    surfaces.flatMap((surface) =>
+      typeof surface.id === "string" &&
+      typeof surface.candidateId !== "string" &&
+      counts.get(surface.id) === 1 &&
+      surface.disposition !== "needs_follow_up" &&
+      !pending.has(surface.id) &&
+      historical.get(surface.id) === key(surface)
+        ? [surface.id]
+        : [],
+    ),
+  );
+}
+
+/** Keep saved coverage that the current draft has not resolved. */
+function preserveScanCoverage(
+  coverage: SemanticCoverage,
+  source: SemanticCoverage,
+): SemanticCoverage {
+  const result = structuredClone(coverage);
+  const retain = <Entry>(values: Entry[], previous: Entry[]): Entry[] => {
+    for (const value of previous)
+      if (!coverageEntryPresent(values, value))
+        values.push(structuredClone(value));
+    return values;
+  };
+  result.surfaces = retain(result.surfaces, source.surfaces);
+  result.explicitExclusions = retain(
+    result.explicitExclusions,
+    source.explicitExclusions,
+  );
+  result.deferred = retain(result.deferred, source.deferred);
+  const questions = retain(
+    result.openQuestions ?? [],
+    source.openQuestions ?? [],
+  );
+  if (questions.length > 0 || result.openQuestions !== undefined)
+    result.openQuestions = questions;
+  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 
-function coverageHasOutstandingWork(coverage: JsonObject): boolean {
+function coverageHasOutstandingWork(coverage: SemanticCoverage): boolean {
   return (
-    ((coverage.deferred as unknown[] | undefined) ?? []).length > 0 ||
-    ((coverage.surfaces as JsonObject[] | undefined) ?? []).some(
+    coverage.deferred.length > 0 ||
+    coverage.surfaces.some(
       (surface) => surface.disposition === "needs_follow_up",
     )
   );
 }
 
 function findingCandidateId(finding: JsonObject): string | undefined {
-  const provenance = finding.provenance;
-  if (
-    isObject(provenance) &&
-    typeof provenance.candidateId === "string" &&
-    provenance.candidateId.trim()
-  ) {
-    return provenance.candidateId;
-  }
-  const extensions = finding.extensions;
-  if (isObject(extensions)) {
-    for (const field of ["candidateId", "reportId", "ledgerRowId"] as const) {
-      const value = extensions[field];
-      if (typeof value === "string" && value.trim()) return value;
-    }
-  }
-  return undefined;
+  return [
+    isObject(finding.provenance) ? finding.provenance.candidateId : undefined,
+    isObject(finding.extensions) ? finding.extensions.candidateId : undefined,
+  ].find((id): id is string => typeof id === "string" && id.trim().length > 0);
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */
@@ -1225,11 +1217,36 @@ export async function getCodexSecurityCompletedScan(
   return { scanId: parsed.scanId, manifest, findings, coverage };
 }
 
-export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
+export function parseScanDraft(input: unknown): ScanDraftInput {
   const parsed = scanDraftInputSchema.parse(input);
   validateFindingSemantics(parsed.findings as SemanticScan["findings"]);
   validateCoverageSemantics(parsed.coverage as SemanticScan["coverage"]);
   return parsed;
+}
+
+/** Project current canonical metadata without coercing persisted finding details. */
+function parseCanonicalPersistedScanDraft(
+  input: Record<string, unknown>,
+): ScanDraftInput {
+  try {
+    const projected = semanticScanDraft(
+      input.scanId as string,
+      input,
+      input.findings as JsonObject[],
+      requireObject(input.coverage, "saved scan draft coverage"),
+    );
+    return parseScanDraft({
+      ...input,
+      ...(isObject(input.scope) ? { scope: projected.scope } : {}),
+      findings: projected.findings,
+      coverage: projected.coverage,
+    });
+  } catch (cause) {
+    throw new Error(
+      "Saved scan draft does not match the current schema. Start a new scan; the saved artifacts remain available.",
+      { cause },
+    );
+  }
 }
 
 /** Re-admit results persisted by older plugin versions without loosening live tool input. */
@@ -1488,7 +1505,7 @@ function requireBoundScan(
   input: CompletedScanInput,
   requireRunning: boolean,
 ): void {
-  if (context.layout !== "scan") {
+  if (context.layout !== undefined && context.layout !== "scan") {
     throw new Error(
       "scan draft: this operation requires an authoritative parent scan context.",
     );

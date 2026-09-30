@@ -262,6 +262,7 @@ def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
     name = hashlib.sha256(contents).hexdigest() + ".json"
     saved.write_scan_local_bytes(scan_dir, stage_path, contents)
     saved.write_scan_local_bytes(scan_dir, "checkpoints/" + "0" * 64 + ".json", b"old evidence")
+    assert list(saved._saved_result_paths(scan_dir)) == []
     saved.write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", stage_path.encode())
     assert list(saved._saved_result_paths(scan_dir)) == [f"checkpoints/{name}"]
     assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload

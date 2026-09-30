@@ -4,12 +4,12 @@ import json
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import (
+from legacy_deep_scan_test_support import (
     add_worker,
     assert_published_aggregate,
     complete,
 )
-from test_deep_scan_successful_publication import (
+from legacy_deep_scan_test_support import (
     publication_scan as publication_scan,
 )
 

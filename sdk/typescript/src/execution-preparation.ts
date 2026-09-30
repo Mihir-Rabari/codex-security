@@ -153,8 +153,6 @@ export interface PreparedRuntime {
   preserveCodexHomeConfig?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
-  /** Legacy coordinator configuration, retained until joint activation. */
-  deepScanConfigPath?: string;
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
