@@ -141,6 +141,7 @@ import {
   CodexSecurityError,
   ConfigurationError,
   IncompleteScanError,
+  OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
   safeErrorMessage,
@@ -1255,6 +1256,36 @@ export class CodexSecurity {
         await writeDeepScanConfig(deepScanConfigPath, deepScanConfiguration);
       }
       checkOpen();
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...withoutCodexHome(environmentWithGit(git.environment, git)),
+          CODEX_HOME: runtime.codexHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the Codex Security scan",
+      };
+      if (
+        options.archiveExisting &&
+        requestedOutput !== null &&
+        options.resumeScanId === undefined
+      ) {
+        const saved = await workbench(workbenchOptions, [
+          "list-scans",
+          "--scan-root",
+          requestedOutput,
+          "--status",
+          "running",
+          "--limit",
+          "1",
+        ]);
+        if ((saved["scans"] as JsonObject[]).length > 0)
+          throw new OutputDirectoryError(
+            "Cannot archive output while a scan in that directory is running.",
+          );
+      }
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
@@ -1410,17 +1441,6 @@ export class CodexSecurity {
         recipe["postScanPrompt"] = options.postScanPrompt;
       if (options.validationPrompt !== undefined)
         recipe["validationMode"] = "custom";
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot: runtime.plugin.pluginRoot,
-        environment: {
-          ...withoutCodexHome(environmentWithGit(git.environment, git)),
-          CODEX_HOME: runtime.codexHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the Codex Security scan",
-      };
       const {
         registration,
         scanId,
