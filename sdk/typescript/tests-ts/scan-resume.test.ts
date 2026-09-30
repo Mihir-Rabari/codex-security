@@ -247,19 +247,28 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
-test.each([
-  "failed",
-  "canceled",
-  "standard",
-  "changed",
-  "replaced",
-  "wrong-owner",
-])(
+test("workbench resumes an interrupted Standard scan with its saved registration", async () => {
+  const f = await interruptedScan("standard");
+  const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+  const resumed = await f.command([
+    "get-cli-scan-resume",
+    "--scan-id",
+    f.scanId,
+  ]);
+  expect(resumed).toMatchObject({
+    ...f.registration,
+    recipe: f.recipe,
+    threadId: f.threadId,
+    claimToken: null,
+  });
+  expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(before);
+  expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+});
+
+test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
   "resume refuses %s scans without altering their saved state",
   async (scenario) => {
-    const f = await interruptedScan(
-      scenario === "standard" ? "standard" : "deep",
-    );
+    const f = await interruptedScan();
     if (scenario === "failed")
       await f.command([
         "fail-scan",
@@ -303,9 +312,7 @@ test.each([
           ? "checkout is missing or was replaced"
           : scenario === "wrong-owner"
             ? "original owning CLI session"
-            : scenario === "standard"
-              ? "Deep Scan with a saved CLI launch recipe"
-              : "running scan; completed, failed, and canceled",
+            : "running scan; completed, failed, and canceled",
     );
     expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
       before,

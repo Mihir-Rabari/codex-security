@@ -743,3 +743,108 @@ def test_parent_stop_keeps_child_candidates_separate(
         assert finding["provenance"]["candidateId"].startswith(child["scanId"] + ":")
         original = finding["provenance"]["sourceFindings"][0]["finding"]
         assert original["provenance"]["candidateId"] == "shared-candidate"
+
+
+def test_standard_resume_retains_registration_before_and_after_thread_binding(
+    tmp_path: Path,
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    resume = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resume["scanId"] == scan["scanId"]
+    assert resume["threadId"] is None
+    assert resume["recipe"] == recipe(target)
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "execution")
+    resume = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resume["threadId"] == "execution"
+    assert len(run_workbench(state, "list-scans")["scans"]) == 1
+    (target / "app.py").write_text("print('changed')\n")
+    rejected = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False)
+    assert "original checkout revision or contents changed" in rejected["stderr"]
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_resume_distinguishes_empty_artifact_drafts_from_sealed_results(
+    tmp_path: Path, compact: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state, directory = tmp_path / "state", tmp_path / "scan"
+    scan = register(state, target, directory)
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "execution")
+    path = directory / "scan-manifest.json"
+    path.write_text(json.dumps({"scan": {"artifacts": []}}))
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert not (directory / "findings.json").exists()
+
+    write_completed_contract(directory, scan["scanId"], target)
+    manifest = json.loads(path.read_text())
+    manifest["scan"]["artifacts"] = []
+    if compact:
+        del manifest["scan"]["producer"]
+    path.write_text(json.dumps(manifest))
+    draft = path.read_bytes()
+
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert "sealedProducerVersion" not in resumed
+    assert path.read_bytes() == draft
+
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan["scanId"])
+    sealed = path.read_bytes()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
+    assert resumed["sealedProducerVersion"] == json.loads(sealed)["scan"]["producer"]["version"]
+    assert path.read_bytes() == sealed
+
+
+@pytest.mark.parametrize("action", ["fail-scan", "cancel-scan"])
+def test_stopped_standard_cannot_resume_and_preserves_checkpoint(
+    tmp_path: Path, action: str
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    write_completed_contract(Path(scan["scanDir"]), scan["scanId"], target, relative_path="app.py")
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "synthetic interruption") if action == "fail-scan" else ()),
+    )
+    before = (Path(scan["scanDir"]) / "scan-manifest.json").read_bytes()
+    resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"], check=False)
+    assert "completed, failed, and canceled scans cannot resume" in resumed["stderr"]
+    assert (Path(scan["scanDir"]) / "scan-manifest.json").read_bytes() == before
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findingCount"] == 1
+    )
+
+
+def test_running_pass_retains_paid_receipt_before_resume_and_failure(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    run_workbench(state, "set-scan-thread", "--scan-id", scan["scanId"], "--thread-id", "paid-pass")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    receipt = run_workbench(
+        state, "preserve-scan-results", "--scan-id", scan["scanId"], "--cost-json", json.dumps(cost)
+    )["scan"]
+    assert receipt["progress"]["status"] == "running"
+    assert receipt["cost"] == cost
+    assert (
+        run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])["threadId"]
+        == "paid-pass"
+    )
+    assert (
+        run_workbench(state, "list-scans", "--scan-root", scan["scanDir"])["scans"][0]["cost"]
+        == cost
+    )
+    run_workbench(state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Retry exhausted.")
+    assert run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["cost"] == cost
