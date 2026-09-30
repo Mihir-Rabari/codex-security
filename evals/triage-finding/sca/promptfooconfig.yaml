@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: "SCA synthetic smoke: existing triage prompt and typed-match prototype"
+tags:
+  suite: sca-synthetic-smoke
+
+prompts:
+  - id: file://./prompts/triage-baseline.txt
+    label: existing-triage
+  - id: file://./prompts/sca-wrapper.txt
+    label: typed-match-prototype
+
+providers:
+  - id: openai:codex-sdk:gpt-5.5
+    label: Codex SDK SCA synthetic smoke
+    config:
+      working_dir: "{{env.SCA_EVAL_RUNTIME_ROOT}}"
+      # Native CLI helpers execute inside the same sandbox as source reads.
+      # This package contains runtime binaries, not the gold dataset.
+      additional_directories:
+        - "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}"
+      skip_git_repo_check: true
+      approval_policy: never
+      model_reasoning_effort: xhigh
+      cli_env:
+        CODEX_HOME: "{{env.SCA_EVAL_CODEX_HOME}}"
+        HTTP_PROXY: "{{env.HTTP_PROXY}}"
+        HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
+        ALL_PROXY: "{{env.ALL_PROXY}}"
+        NO_PROXY: "{{env.NO_PROXY}}"
+      cli_config:
+        default_permissions: sca_eval_runtime_only
+        permissions:
+          sca_eval_runtime_only:
+            filesystem:
+              ":minimal": read
+              ":workspace_roots": read
+            network:
+              enabled: false
+        features:
+          memories: false
+          plugins: false
+
+evaluateOptions:
+  maxConcurrency: 1
+
+extensions:
+  - file://./assertions/sca-metrics.js:afterEach
+
+defaultTest:
+  assert:
+    - type: contains-json
+      value: file://../../../plugins/codex-security/schemas/triage-result.schema.json
+      metric: schema_valid
+    - type: javascript
+      value: file://./assertions/sca-evidence.js
+      metric: synthetic_case_correct
+
+derivedMetrics:
+  - name: confirmation_precision
+    value: correctly_confirmed / max(confirmed, 1)
+  - name: affected_confirmation_recall
+    value: correctly_confirmed / max(affected_cases, 1)
+  - name: incorrect_dismissal_rate
+    value: incorrect_dismissals / max(affected_cases, 1)
+  - name: uncertainty_handling
+    value: correctly_unresolved / max(unresolved_cases, 1)
+  - name: decision_coverage
+    value: decisive / max(attempted, 1)
+
+tests: file://./scripts/generate-tests.js:generateTests

@@ -1545,7 +1545,7 @@ export function requireOutputOutsideRepositories(
 
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
-  category: "scans" | "policies" | "validations" | "imports",
+  category: "scans" | "policies" | "validations" | "imports" | "dependencies",
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);

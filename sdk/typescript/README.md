@@ -2633,3 +2633,55 @@ paths. See the security policy below for the full threat model.
   feature requests
 - [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md)
   for private vulnerability reporting and safe operation
+
+## Dependency assessment (SCA MVP)
+
+`scanDependencies` inventories npm package-lock/shrinkwrap v2/v3 and pnpm v9
+lockfiles with an installed OSV-Scanner, then uses static `triage-finding`
+assessment for the matched advisories. Install OSV-Scanner v2.6.0 (the tested
+contract) or a compatible executable on PATH. It is not installed by the SDK.
+
+```ts
+import { createSecurity } from "@openai/codex-security";
+
+await using security = createSecurity();
+const result = await security.scanDependencies({
+  repositoryPath: "/path/to/repository",
+  outputDir: "/path/outside/repository/dependencies",
+  maxCostUsd: 5, // optional; applies to static model assessment
+});
+console.log(result.status, result.matches.length, result.outputDir);
+```
+
+Options also accept the existing `auth` mode and `signal`. Source matching runs
+before model authentication. Zero matches with complete coverage require no
+model call. Model errors preserve the scanner evidence and return `partial`.
+Invalid arguments, cancellation, and exceeded budgets use the existing SDK
+errors; interruption errors include the directory containing partial output.
+
+The output directory contains `osv-output.json`, `osv-stderr.log`,
+`sca-result.json`, and `report.md`. Raw advisory matches and optional static
+assessments remain separate. A `not_actionable` assessment never removes a
+match, establishes VEX `not_affected`, or automatically changes merge policy.
+`needs_review` is a completed uncertain assessment; `failed` means an assessment
+was unavailable. The run's coverage status describes advisory matching, while
+its overall status also accounts for assessment execution.
+
+OSV sends package identities to its advisory service, not repository source.
+The assessment uses the existing Codex provider/model/authentication settings
+and the existing read-only, offline tool permission profile. It executes no
+application code or vulnerability reproductions. OSV configuration exclusions
+remain effective and are reported; exact suppressed counts and dependency
+introduction chains are unavailable. Unsupported lockfiles and unresolved
+local/Git identities leave coverage incomplete.
+
+`compareScaResults(base, head)` returns alias-aware changes with conservative
+resolution semantics. Live OSV runs have no atomic database snapshot, so a
+disappeared match remains “no longer observed.” `createScaUpdateHandoff(result,
+matchIds, checks)` builds an explicit update request from advisory fixed-version
+candidates for the existing `patch` workflow. Ordinary dependency resolution
+and build/test checks are still required before calling an update verified.
+
+See [local, CI, comparison, and handoff examples](../../examples/sca/README.md)
+and the [evaluation harness](../../evals/triage-finding/sca/README.md). This MVP
+is an additive SDK workflow; there are no new CLI commands or scan modes.

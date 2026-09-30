@@ -1,0 +1,78 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const { createRequire } = require("node:module");
+const childProcess = require("node:child_process");
+const {
+  stageSkillRuntime,
+} = require("../../sastbench/scripts/run-sastbench-promptfoo.js");
+const { CORPUS, FIXTURE_ROOT } = require("./sca-result.js");
+
+const EVAL_ROOT = path.resolve(__dirname, "../..");
+
+function nativeCodexRuntimeRoot() {
+  const sdkRequire = createRequire(
+    fs.realpathSync(
+      path.join(EVAL_ROOT, "node_modules/@openai/codex-sdk/package.json"),
+    ),
+  );
+  const codexRequire = createRequire(
+    sdkRequire.resolve("@openai/codex/package.json"),
+  );
+  return path.dirname(
+    codexRequire.resolve(
+      `@openai/codex-${process.platform}-${process.arch}/package.json`,
+    ),
+  );
+}
+
+function stageRuntime() {
+  const runtime = stageSkillRuntime();
+  try {
+    for (const testCase of CORPUS.cases) {
+      fs.cpSync(
+        path.join(FIXTURE_ROOT, testCase.case_id),
+        path.join(runtime, "cases", testCase.case_id),
+        { recursive: true },
+      );
+    }
+    return runtime;
+  } catch (error) {
+    fs.rmSync(runtime, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function main(args = process.argv.slice(2)) {
+  if (args.length === 0)
+    throw new Error("Expected Promptfoo arguments (validate config or eval)");
+  const runtime = stageRuntime();
+  fs.mkdirSync(path.join(EVAL_ROOT, "artifacts"), { recursive: true });
+  try {
+    childProcess.execFileSync(
+      path.join(EVAL_ROOT, "node_modules/.bin/promptfoo"),
+      args,
+      {
+        cwd: EVAL_ROOT,
+        env: {
+          ...process.env,
+          SCA_EVAL_RUNTIME_ROOT: runtime,
+          SCA_EVAL_CODEX_RUNTIME_ROOT: nativeCodexRuntimeRoot(),
+          SCA_EVAL_CODEX_HOME:
+            process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+          PROMPTFOO_CONFIG_DIR: ".promptfoo",
+          PROMPTFOO_DISABLE_WAL_MODE: "true",
+        },
+        stdio: "inherit",
+      },
+    );
+  } finally {
+    fs.rmSync(runtime, { recursive: true, force: true });
+  }
+}
+
+if (require.main === module) main();
+module.exports = { stageRuntime, nativeCodexRuntimeRoot, main };

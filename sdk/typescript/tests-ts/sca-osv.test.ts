@@ -1,0 +1,743 @@
+import { execFile as execFileCallback } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+  watch,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  discoverScaInputs,
+  normalizeOsvOutput,
+  osvErrorDiagnostics,
+  runOsvProcess,
+  runOsvScan,
+  type OsvProcessOptions,
+  type OsvProcessResult,
+} from "../src/sca-osv.js";
+import type { ScaInput } from "../src/sca-types.js";
+
+const execFile = promisify(execFileCallback);
+const temporaryDirectories: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+async function setup() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "sca-osv-")));
+  temporaryDirectories.push(root);
+  const repository = join(root, "repository with spaces");
+  const output = join(root, "output");
+  await Promise.all([mkdir(repository), mkdir(output)]);
+  return { root, repository, output };
+}
+const npmLock = (version = 3) =>
+  JSON.stringify({
+    name: "synthetic-app",
+    lockfileVersion: version,
+    packages: {
+      "": { name: "synthetic-app", version: "1.0.0" },
+      "node_modules/synthetic-lib": { version: "1.2.0" },
+    },
+  });
+function input(path = "package-lock.json"): ScaInput {
+  return {
+    path,
+    format: "npm",
+    status: "scanned",
+    reason: null,
+    sha256: "abc",
+  };
+}
+function advisory(id: string, aliases: string[] = []) {
+  return {
+    id,
+    aliases,
+    modified: "2026-01-01T00:00:00Z",
+    affected: [
+      {
+        package: { name: "synthetic-lib", ecosystem: "npm" },
+        ranges: [
+          { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "1.3.0" }] },
+        ],
+      },
+    ],
+  };
+}
+function rawOutput(source: string, vulnerabilities: unknown[] = []) {
+  return {
+    results: [
+      {
+        source: { path: source, type: "lockfile" },
+        packages: [
+          {
+            package: {
+              name: "synthetic-lib",
+              version: "1.2.0",
+              ecosystem: "npm",
+            },
+            dependency_groups: ["dev"],
+            vulnerabilities,
+          },
+        ],
+      },
+    ],
+  };
+}
+async function scanFixture(
+  out: OsvProcessResult,
+  files: Record<string, string> = {},
+) {
+  const { repository, output } = await setup();
+  await writeFile(join(repository, "package-lock.json"), npmLock());
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(repository, path, ".."), { recursive: true });
+    await writeFile(join(repository, path), content);
+  }
+  return runOsvScan(
+    { repositoryPath: repository, outputDir: output },
+    {
+      executable: process.execPath,
+      runProcess: async (_exe, argv) =>
+        argv[0] === "--version"
+          ? { stdout: "osv-scanner version: 2.6.0\n", stderr: "", exitCode: 0 }
+          : out,
+    },
+  );
+}
+
+describe("SCA input selection", () => {
+  test("selects npm v2/v3 and pnpm v9 across nested workspaces, excluding installed trees", async () => {
+    const { repository } = await setup();
+    await Promise.all([
+      mkdir(join(repository, "packages", "app"), { recursive: true }),
+      mkdir(join(repository, "node_modules", "library"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, "package-lock.json"), npmLock(2)),
+      writeFile(
+        join(repository, "packages", "app", "pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\npackages: {}\n",
+      ),
+      writeFile(
+        join(repository, "node_modules", "library", "package-lock.json"),
+        npmLock(),
+      ),
+    ]);
+    const discovered = await discoverScaInputs(repository);
+    expect(discovered.inputs.map((item) => [item.path, item.status])).toEqual([
+      ["package-lock.json", "scanned"],
+      ["packages/app/pnpm-lock.yaml", "scanned"],
+    ]);
+    expect(
+      discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
+    ).toBe(true);
+  });
+  test("prefers shrinkwrap without invoking a competing package-lock", async () => {
+    const { repository } = await setup();
+    await Promise.all([
+      writeFile(join(repository, "package-lock.json"), npmLock()),
+      writeFile(join(repository, "npm-shrinkwrap.json"), npmLock()),
+    ]);
+    const { inputs } = await discoverScaInputs(repository);
+    expect(
+      inputs.find((item) => item.path === "npm-shrinkwrap.json")?.status,
+    ).toBe("scanned");
+    expect(
+      inputs.find((item) => item.path === "package-lock.json")?.status,
+    ).toBe("excluded");
+  });
+  test("reports unsupported versions and malformed lockfiles", async () => {
+    const { repository } = await setup();
+    await Promise.all([
+      writeFile(join(repository, "package-lock.json"), npmLock(1)),
+      writeFile(join(repository, "pnpm-lock.yaml"), "lockfileVersion: [\n"),
+    ]);
+    const { inputs } = await discoverScaInputs(repository);
+    expect(inputs.map((item) => item.status)).toEqual([
+      "unsupported",
+      "failed",
+    ]);
+  });
+  test("does not follow repository-controlled lockfile or directory links", async () => {
+    const { repository, root } = await setup();
+    const other = join(root, "other");
+    await mkdir(other);
+    await writeFile(join(other, "package-lock.json"), npmLock());
+    await symlink(
+      join(other, "package-lock.json"),
+      join(repository, "package-lock.json"),
+      "file",
+    );
+    await symlink(
+      other,
+      join(repository, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const { inputs } = await discoverScaInputs(repository);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]?.status).toBe("unsupported");
+  });
+  test("records OSV config digests and exclusions without overriding them", async () => {
+    const { repository } = await setup();
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    await writeFile(
+      join(repository, "osv-scanner.toml"),
+      '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+    );
+    const found = await discoverScaInputs(repository);
+    expect(found.configFiles[0]?.path).toBe("osv-scanner.toml");
+    expect(found.configFiles[0]?.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(
+      found.limitations.some((line) => line.includes("suppressed counts")),
+    ).toBe(true);
+  });
+  test("rejects a config link outside the repository", async () => {
+    const { repository, root } = await setup();
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    const external = join(root, "external.toml");
+    await writeFile(external, "");
+    await symlink(external, join(repository, "osv-scanner.toml"), "file");
+    await expect(discoverScaInputs(repository)).rejects.toThrow(
+      "OSV configuration must be a regular file",
+    );
+  });
+  test("ignores root configuration when only nested sources are selected", async () => {
+    const { repository } = await setup();
+    await mkdir(join(repository, "nested"));
+    await writeFile(join(repository, "nested", "package-lock.json"), npmLock());
+    await writeFile(join(repository, "osv-scanner.toml"), "invalid=[");
+    const found = await discoverScaInputs(repository);
+    expect(found.inputs[0]?.status).toBe("scanned");
+    expect(found.configFiles).toEqual([]);
+    expect(found.packageExclusionSources).toEqual([]);
+  });
+  test("does not inherit root exclusions to explain missing nested inventory", async () => {
+    const result = await scanFixture(
+      {
+        stdout: JSON.stringify(rawOutput("package-lock.json")),
+        stderr: "",
+        exitCode: 0,
+      },
+      {
+        "nested/package-lock.json": npmLock(),
+        "osv-scanner.toml":
+          '[[PackageOverrides]]\nname="other-lib"\nignore=true\n',
+      },
+    );
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("partial");
+    expect(
+      result.diagnostics.some((line) =>
+        line.includes("nested/package-lock.json"),
+      ),
+    ).toBe(true);
+  });
+  test("uses Git's tracked and untracked scope, respecting ignored files", async () => {
+    const { repository } = await setup();
+    await execFile("git", ["init", repository]);
+    await writeFile(
+      join(repository, ".gitignore"),
+      "ignored/\nnpm-shrinkwrap.json\n",
+    );
+    await mkdir(join(repository, "ignored"));
+    await Promise.all([
+      writeFile(join(repository, "package-lock.json"), npmLock()),
+      writeFile(join(repository, "npm-shrinkwrap.json"), npmLock()),
+      writeFile(
+        join(repository, "ignored", "pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+      ),
+    ]);
+    const { inputs } = await discoverScaInputs(repository);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]?.status).toBe("unsupported");
+    expect(inputs[0]?.reason).toContain("outside the selected file scope");
+  });
+});
+
+describe("SCA OSV normalization", () => {
+  test("retains full advisory records, sources, dependency groups and relevant fixed versions", () => {
+    const vulnerability = {
+      ...advisory("SYNTHETIC-1", ["CVE-2099-10001"]),
+      future_field: { preserved: true },
+    };
+    vulnerability.affected.push({
+      package: { name: "different-lib", ecosystem: "npm" },
+      ranges: [
+        { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "9.9.9" }] },
+      ],
+    });
+    const normalized = normalizeOsvOutput(
+      rawOutput("/repo/package-lock.json", [vulnerability]),
+      { repositoryPath: "/repo", inputs: [input()] },
+    );
+    expect(normalized.components[0]).toMatchObject({
+      name: "synthetic-lib",
+      sourcePath: "package-lock.json",
+      version: "1.2.0",
+      dependencyGroups: ["dev"],
+    });
+    expect(normalized.matches[0]).toMatchObject({
+      advisoryIds: ["SYNTHETIC-1"],
+      aliases: ["CVE-2099-10001", "SYNTHETIC-1"],
+      fixedVersions: ["1.3.0"],
+      sourceAdvisories: [vulnerability],
+    });
+  });
+  test("groups intersecting advisory aliases transitively without losing unrelated records", () => {
+    const raw = rawOutput("package-lock.json", [
+      advisory("A", ["X"]),
+      advisory("B", ["Y"]),
+      advisory("C", ["X", "Y"]),
+      advisory("D"),
+    ]);
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: "/repo",
+      inputs: [input()],
+    });
+    expect(normalized.matches).toHaveLength(2);
+    expect(normalized.matches.map((match) => match.advisoryIds)).toEqual([
+      ["A", "B", "C"],
+      ["D"],
+    ]);
+  });
+  test("uses scanner group aliases and severity and keeps unavailable fixes empty", () => {
+    const raw = rawOutput("package-lock.json", [
+      { id: "A" },
+      { id: "B", withdrawn: "2026-01-01T00:00:00Z" },
+    ]);
+    Object.assign(raw.results[0]!.packages[0]!, {
+      groups: [{ ids: ["A", "B"], aliases: ["SHARED"], max_severity: "7.5" }],
+    });
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: "/repo",
+      inputs: [input()],
+    });
+    expect(normalized.matches[0]).toMatchObject({
+      severity: "7.5",
+      fixedVersions: [],
+      advisoryIds: ["A", "B"],
+    });
+    expect(
+      normalized.matches[0]?.sourceAdvisories[1]?.["withdrawn"],
+    ).toBeDefined();
+  });
+  test("does not present Git commit fixes as package-version candidates", () => {
+    const vulnerability = advisory("A");
+    vulnerability.affected[0]!.ranges.push({
+      type: "GIT",
+      events: [{ introduced: "0" }, { fixed: "abcdef0123456789" }],
+    });
+    const normalized = normalizeOsvOutput(
+      rawOutput("package-lock.json", [vulnerability]),
+      { repositoryPath: "/repo", inputs: [input()] },
+    );
+    expect(normalized.matches[0]?.fixedVersions).toEqual(["1.3.0"]);
+    expect(normalized.matches[0]?.sourceAdvisories).toEqual([vulnerability]);
+  });
+  test("retains unresolved package identities as unknown, not clean", () => {
+    const raw = rawOutput("package-lock.json");
+    Object.assign(raw.results[0]!.packages[0]!.package, {
+      version: "",
+      ecosystem: "",
+    });
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: "/repo",
+      inputs: [input()],
+    });
+    expect(normalized.unresolvedPackages).toBe(1);
+    expect(normalized.components[0]).toMatchObject({
+      version: null,
+      ecosystem: null,
+    });
+  });
+  test("distinguishes installed versions and retains packages without matches", () => {
+    const raw = rawOutput("package-lock.json");
+    raw.results[0]!.packages.push({
+      package: { name: "synthetic-lib", version: "2.0.0", ecosystem: "npm" },
+      dependency_groups: ["optional"],
+      vulnerabilities: [],
+    });
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: "/repo",
+      inputs: [input()],
+    });
+    expect(normalized.components).toHaveLength(2);
+    expect(normalized.components[0]?.id).not.toBe(normalized.components[1]?.id);
+    expect(normalized.matches).toEqual([]);
+  });
+  test("component and match identities survive relocation and Windows source paths", () => {
+    const first = normalizeOsvOutput(
+      rawOutput("/repo/package-lock.json", [advisory("A")]),
+      { repositoryPath: "/repo", inputs: [input()] },
+    );
+    const second = normalizeOsvOutput(
+      rawOutput("C:\\work with spaces\\package-lock.json", [advisory("A")]),
+      { repositoryPath: "C:\\work with spaces", inputs: [input()] },
+    );
+    expect(second).toEqual(first);
+  });
+  test("reports malformed fields and unknown sources while preserving valid matches", () => {
+    const raw = rawOutput("package-lock.json", [
+      { summary: "missing id" },
+      advisory("A"),
+    ]);
+    raw.results.push({
+      source: { path: "../other/package-lock.json", type: "lockfile" },
+      packages: [],
+    });
+    const normalized = normalizeOsvOutput(raw, {
+      repositoryPath: "/repo",
+      inputs: [input()],
+    });
+    expect(normalized.matches).toHaveLength(1);
+    expect(normalized.diagnostics).toHaveLength(2);
+    expect(() =>
+      normalizeOsvOutput({}, { repositoryPath: "/repo", inputs: [] }),
+    ).toThrow("results array");
+  });
+});
+
+describe("SCA scanner execution", () => {
+  test.each([0, 1])(
+    "accepts successful OSV exit %d and retains raw artifacts",
+    async (exitCode) => {
+      const output = JSON.stringify(
+        rawOutput("package-lock.json", exitCode === 1 ? [advisory("A")] : []),
+      );
+      const result = await scanFixture({
+        stdout: output,
+        stderr: "Scanned file and found 1 package\n",
+        exitCode,
+      });
+      expect(result.status).toBe("completed");
+      expect(result.scanner.version).toContain("2.6.0");
+      expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(output);
+      expect(result.matches.length).toBe(exitCode);
+    },
+  );
+  test.each([127, 128, 130, null])(
+    "never reports clean for error/no-package exit %s",
+    async (exitCode) => {
+      const result = await scanFixture({
+        stdout:
+          exitCode === 128
+            ? ""
+            : JSON.stringify(rawOutput("package-lock.json")),
+        stderr: "diagnostic",
+        exitCode,
+      });
+      expect(result.status).not.toBe("completed");
+      expect(result.diagnostics.length).toBeGreaterThan(0);
+    },
+  );
+  test("detects real pinned matcher failure diagnostics even with exit 0 and valid inventory", async () => {
+    const stderr =
+      "could not load db for npm ecosystem: unable to fetch OSV database: no offline version of the OSV database is available\nError during extraction: (extracting as vulnmatch/osvlocal) unable to fetch OSV database: no offline version of the OSV database is available\n";
+    const result = await scanFixture({
+      stdout: JSON.stringify(rawOutput("package-lock.json")),
+      stderr,
+      exitCode: 0,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.components).toHaveLength(1);
+    expect(result.coverage.inputs[0]?.status).toBe("failed");
+    expect(
+      osvErrorDiagnostics("Starting filesystem walk\nEnd status: 0 dirs\n"),
+    ).toEqual([]);
+    expect(
+      osvErrorDiagnostics(
+        "Error during extraction: (extracting as vulnmatch/osvdev) API unavailable",
+      ),
+    ).toHaveLength(1);
+  });
+  test("retains matches when another scanner stage fails", async () => {
+    const result = await scanFixture({
+      stdout: JSON.stringify(rawOutput("package-lock.json", [advisory("A")])),
+      stderr:
+        "Error during extraction: (extracting as vulnmatch/osvdev) API unavailable",
+      exitCode: 127,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.matches).toHaveLength(1);
+  });
+  test.each(["", "not JSON", '{"results":{}}'])(
+    "reports invalid JSON contract %s",
+    async (stdout) => {
+      const result = await scanFixture({ stdout, stderr: "", exitCode: 0 });
+      expect(result.status).toBe("failed");
+    },
+  );
+  test("does not count unsupported Git identities as complete npm registry coverage", async () => {
+    const raw = rawOutput("package-lock.json");
+    Object.assign(raw.results[0]!.packages[0]!.package, {
+      ecosystem: "GIT",
+      name: "https://example.test/synthetic/lib",
+      commit: "a".repeat(40),
+    });
+    const result = await scanFixture({
+      stdout: JSON.stringify(raw),
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.coverage.unresolvedPackages).toBe(1);
+    expect(
+      result.diagnostics.some((line) =>
+        line.includes("npm registry identities"),
+      ),
+    ).toBe(true);
+  });
+  test("does not silently mark an omitted selected source as scanned", async () => {
+    const result = await scanFixture(
+      {
+        stdout: JSON.stringify(rawOutput("package-lock.json")),
+        stderr: "",
+        exitCode: 0,
+      },
+      { "nested/package-lock.json": npmLock() },
+    );
+    expect(result.status).toBe("partial");
+    expect(
+      result.diagnostics.some((line) =>
+        line.includes("nested/package-lock.json"),
+      ),
+    ).toBe(true);
+  });
+  test("does not let advisory-only exclusions explain missing package inventory", async () => {
+    const result = await scanFixture(
+      { stdout: '{"results":[]}', stderr: "", exitCode: 0 },
+      { "osv-scanner.toml": '[[IgnoredVulns]]\nid="A"\n' },
+    );
+    expect(result.status).toBe("failed");
+  });
+  test("reports unresolved inventory as partial", async () => {
+    const raw = rawOutput("package-lock.json");
+    raw.results[0]!.packages[0]!.package.version = "";
+    expect(
+      (
+        await scanFixture({
+          stdout: JSON.stringify(raw),
+          stderr: "",
+          exitCode: 0,
+        })
+      ).status,
+    ).toBe("partial");
+  });
+  test("does not invoke a scanner with no supported inputs", async () => {
+    const { repository, output } = await setup();
+    let called = false;
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        runProcess: async () => {
+          called = true;
+          throw new Error("unexpected call");
+        },
+      },
+    );
+    expect(called).toBe(false);
+    expect(result.status).toBe("failed");
+  });
+  test("reports missing executable without claiming a clean scan", async () => {
+    const { repository, output, root } = await setup();
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      { executable: join(root, "missing-scanner") },
+    );
+    expect(result.status).toBe("failed");
+    expect(result.diagnostics.join(" ")).toContain("not installed");
+  });
+  test("passes explicit selected lockfiles and inherited environment at the child boundary", async () => {
+    const { repository, output } = await setup();
+    await Promise.all([
+      writeFile(join(repository, "package-lock.json"), npmLock()),
+      writeFile(join(repository, "npm-shrinkwrap.json"), npmLock()),
+    ]);
+    const calls: { argv: string[]; options: OsvProcessOptions }[] = [];
+    const result = await runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        environment: {
+          ...process.env,
+          SCA_SYNTHETIC_SETTING: "one",
+          HTTPS_PROXY: "http://127.0.0.1:1234",
+        },
+      },
+      {
+        executable: process.execPath,
+        runProcess: async (_exe, argv, options) => {
+          calls.push({ argv, options });
+          return argv[0] === "--version"
+            ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+            : {
+                stdout: JSON.stringify(rawOutput("npm-shrinkwrap.json")),
+                stderr: "",
+                exitCode: 0,
+              };
+        },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(calls[1]?.argv).toEqual([
+      "scan",
+      "source",
+      "--format=json",
+      "--all-packages",
+      "--no-call-analysis=all",
+      "--no-resolve",
+      `--lockfile=:${join(repository, "npm-shrinkwrap.json")}`,
+    ]);
+    expect(calls[1]?.options.environment["SCA_SYNTHETIC_SETTING"]).toBe("one");
+    expect(calls[1]?.options.environment["HTTPS_PROXY"]).toBe(
+      "http://127.0.0.1:1234",
+    );
+    expect(calls[1]?.options.cwd).toBe(repository);
+  });
+  test("isolates concurrent environments and output files", async () => {
+    const a = await setup();
+    const b = await setup();
+    await Promise.all([
+      writeFile(join(a.repository, "package-lock.json"), npmLock()),
+      writeFile(join(b.repository, "package-lock.json"), npmLock()),
+    ]);
+    const seen: string[] = [];
+    const runProcess = async (
+      _exe: string,
+      argv: string[],
+      options: OsvProcessOptions,
+    ) => {
+      if (argv[0] === "--version")
+        return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+      seen.push(options.environment["SCA_SYNTHETIC_SETTING"]!);
+      return {
+        stdout: JSON.stringify(
+          rawOutput("package-lock.json", [
+            advisory(options.environment["SCA_SYNTHETIC_SETTING"]!),
+          ]),
+        ),
+        stderr: "",
+        exitCode: 1,
+      };
+    };
+    const results = await Promise.all(
+      [a, b].map((item, index) =>
+        runOsvScan(
+          {
+            repositoryPath: item.repository,
+            outputDir: item.output,
+            environment: {
+              ...process.env,
+              SCA_SYNTHETIC_SETTING: String(index),
+            },
+          },
+          { executable: process.execPath, runProcess },
+        ),
+      ),
+    );
+    expect(seen.sort()).toEqual(["0", "1"]);
+    expect(results[0]?.matches[0]?.advisoryIds).toEqual(["0"]);
+    expect(results[1]?.matches[0]?.advisoryIds).toEqual(["1"]);
+    expect(results[0]?.scanner.rawOutputPath).not.toBe(
+      results[1]?.scanner.rawOutputPath,
+    );
+  });
+  test("preserves an explicit empty effective scope when OSV applies exclusions", async () => {
+    const result = await scanFixture(
+      {
+        stdout: '{"results":[]}',
+        stderr: "Package npm/synthetic-lib/1.2.0 has been filtered out",
+        exitCode: 0,
+      },
+      {
+        "osv-scanner.toml":
+          '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.components).toEqual([]);
+  });
+  test("streams native child output and preserves it on cancellation", async () => {
+    const { repository, output } = await setup();
+    const controller = new AbortController();
+    const stdoutPath = join(output, "child.json");
+    const stderrPath = join(output, "child.log");
+    const watcher = watch(output);
+    const execution = runOsvProcess(
+      process.execPath,
+      [
+        "-e",
+        'console.log(process.env.SCA_SYNTHETIC_SETTING); console.error("started"); setInterval(() => {}, 1000);',
+      ],
+      {
+        cwd: repository,
+        environment: { ...process.env, SCA_SYNTHETIC_SETTING: "inherited" },
+        signal: controller.signal,
+        stdoutPath,
+        stderrPath,
+      },
+    );
+    // File events establish that the child actually ran before cancellation.
+    for await (const _event of watcher) {
+      if (
+        (await readFile(stderrPath, "utf8").catch(() => "")).includes("started")
+      )
+        break;
+    }
+    controller.abort(new Error("requested stop"));
+    await expect(execution).rejects.toThrow();
+    expect(await readFile(stdoutPath, "utf8")).toContain("inherited");
+  });
+  test("attaches partial scanner context to interruption for orchestration persistence", async () => {
+    const { repository, output } = await setup();
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    const controller = new AbortController();
+    const pending = runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        signal: controller.signal,
+      },
+      {
+        executable: process.execPath,
+        runProcess: async (_exe, argv, processOptions) => {
+          if (argv[0] === "--version")
+            return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+          await writeFile(
+            processOptions.stdoutPath!,
+            JSON.stringify(rawOutput("package-lock.json", [advisory("A")])),
+          );
+          controller.abort(new Error("requested stop"));
+          controller.signal.throwIfAborted();
+          throw new Error("unreachable");
+        },
+      },
+    );
+    try {
+      await pending;
+      throw new Error("expected interruption");
+    } catch (error) {
+      expect(error).toHaveProperty("osvResult");
+      expect(
+        (error as { osvResult: { matches: unknown[] } }).osvResult.matches,
+      ).toHaveLength(1);
+      expect(
+        (error as { osvResult: { scanner: { completedAt: string } } }).osvResult
+          .scanner.completedAt,
+      ).not.toBe("");
+    }
+  });
+});
