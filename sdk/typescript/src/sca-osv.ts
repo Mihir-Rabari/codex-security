@@ -102,18 +102,19 @@ function unique(values: string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-interface PnpmLocalReference {
+interface DependencyLocalReference {
   sourcePath: string;
   name: string;
-  version: string;
+  version: string | null;
+  resolution: string;
 }
 
 /** OSV omits pnpm links and cannot match directory references as registry versions. */
 function pnpmLocalReferences(
   parsed: Record<string, unknown>,
   sourcePath: string,
-): PnpmLocalReference[] {
-  const references = new Map<string, PnpmLocalReference>();
+): DependencyLocalReference[] {
+  const references = new Map<string, DependencyLocalReference>();
   for (const section of [parsed["importers"], parsed["snapshots"]]) {
     if (!record(section)) continue;
     for (const project of Object.values(section)) {
@@ -135,6 +136,7 @@ function pnpmLocalReferences(
             sourcePath,
             name,
             version,
+            resolution: version,
           });
         }
       }
@@ -143,8 +145,42 @@ function pnpmLocalReferences(
   return [...references.values()];
 }
 
-function unobservedLocalReferences(
-  references: PnpmLocalReference[],
+/** A semver in an npm lockfile does not establish registry provenance. */
+function npmLocalReferences(
+  parsed: Record<string, unknown>,
+  sourcePath: string,
+): DependencyLocalReference[] {
+  const packages = parsed["packages"];
+  if (!record(packages)) return [];
+  const references = new Map<string, DependencyLocalReference>();
+  for (const [path, dependency] of Object.entries(packages)) {
+    if (!path || !record(dependency)) continue;
+    const resolved = dependency["resolved"];
+    if (
+      dependency["link"] !== true &&
+      (typeof resolved !== "string" || !/^(?:file|link):/u.test(resolved))
+    )
+      continue;
+    const name =
+      typeof dependency["name"] === "string"
+        ? dependency["name"]
+        : path.split("node_modules/").at(-1)!;
+    const version =
+      typeof dependency["version"] === "string" ? dependency["version"] : null;
+    const resolution =
+      typeof resolved === "string" ? resolved : "workspace link";
+    references.set(JSON.stringify([name, version, resolution]), {
+      sourcePath,
+      name,
+      version,
+      resolution,
+    });
+  }
+  return [...references.values()];
+}
+
+function uncountedLocalReferences(
+  references: DependencyLocalReference[],
   components: ScaComponent[],
 ): number {
   return references.filter(
@@ -153,9 +189,13 @@ function unobservedLocalReferences(
         (component) =>
           component.sourcePath === reference.sourcePath &&
           component.name === reference.name &&
-          component.version !== null &&
+          (component.ecosystem !== "npm" ||
+            component.version === null ||
+            semverValid(component.version) === null) &&
           (component.version === reference.version ||
-            reference.version.startsWith(`${component.version}(`)),
+            (reference.version !== null &&
+              component.version !== null &&
+              reference.version.startsWith(`${component.version}(`))),
       ),
   ).length;
 }
@@ -165,6 +205,20 @@ function caseInsensitiveField(
   name: string,
 ): unknown {
   return Object.entries(value).find(([key]) => key.toLowerCase() === name)?.[1];
+}
+
+function inputProvenance(
+  coverage: Pick<ScaCoverage, "inputs" | "configFiles">,
+): string {
+  return JSON.stringify({
+    inputs: coverage.inputs.map(({ path, sha256, format, status }) => ({
+      path,
+      sha256,
+      format,
+      status,
+    })),
+    configFiles: coverage.configFiles,
+  });
 }
 
 /** Use the same tracked/untracked, non-ignored scope as other repository operations. */
@@ -230,17 +284,18 @@ export async function discoverScaInputs(
 ): Promise<
   Pick<ScaCoverage, "inputs" | "configFiles" | "limitations"> & {
     packageExclusionSources: string[];
-    localReferences: PnpmLocalReference[];
+    localReferences: DependencyLocalReference[];
     diagnostics: string[];
   }
 > {
   const repository = await normalizeRepository(repositoryPath, signal);
   const candidates = (await repositoryFiles(repository, environment, signal))
     .filter((path) => lockNames.has(basename(path)))
+    .map(slash)
     .sort();
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
-  const localReferences: PnpmLocalReference[] = [];
+  const localReferences: DependencyLocalReference[] = [];
   const diagnostics: string[] = [];
   const packageExclusions = new Map<string, boolean>();
   const limitations: string[] = [
@@ -258,7 +313,17 @@ export async function discoverScaInputs(
     };
     inputs.push(input);
     try {
-      const metadata = await lstat(path);
+      const metadata = await lstat(path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
+      );
+      if (metadata === null) {
+        // The Git index can still list a file deleted from the working tree.
+        inputs.pop();
+        continue;
+      }
       if (
         !metadata.isFile() ||
         relativePathIsOutside(relative(repository, await realpath(path)))
@@ -306,12 +371,15 @@ export async function discoverScaInputs(
       ) {
         input.status = "unsupported";
         input.reason = `Unsupported ${input.format} lockfile version: ${String(version)}.`;
-      } else if (input.format === "pnpm" && record(parsed)) {
-        const references = pnpmLocalReferences(parsed, input.path);
+      } else if (record(parsed)) {
+        const references =
+          input.format === "pnpm"
+            ? pnpmLocalReferences(parsed, input.path)
+            : npmLocalReferences(parsed, input.path);
         localReferences.push(...references);
         if (references.length > 0)
           limitations.push(
-            `${input.path} includes local dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.version}`).join(", ")}.`,
+            `${input.path} includes local dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.resolution}`).join(", ")}.`,
           );
       }
     } catch (error) {
@@ -713,7 +781,7 @@ export async function runOsvScan(
     writeFile(scanner.stderrPath, ""),
   ]);
   const environment = { ...(options.environment ?? process.env) };
-  let localReferences: PnpmLocalReference[] = [];
+  let localReferences: DependencyLocalReference[] = [];
   try {
     options.signal?.throwIfAborted();
     const repository = await normalizeRepository(
@@ -727,6 +795,7 @@ export async function runOsvScan(
       ...discovered
     } = await discoverScaInputs(repository, environment, options.signal);
     localReferences = discoveredLocalReferences;
+    const capturedProvenance = inputProvenance(discovered);
     Object.assign(result.coverage, discovered);
     result.coverage.unresolvedPackages = localReferences.length;
     result.diagnostics.push(...diagnostics);
@@ -824,10 +893,26 @@ export async function runOsvScan(
       result.matches = normalized.matches;
       result.coverage.unresolvedPackages =
         normalized.unresolvedPackages +
-        unobservedLocalReferences(localReferences, normalized.components);
+        uncountedLocalReferences(localReferences, normalized.components);
       result.diagnostics.push(...normalized.diagnostics);
     } else if (output.exitCode !== 128)
       result.diagnostics.push("OSV returned no JSON output.");
+    try {
+      const current = await discoverScaInputs(
+        repository,
+        environment,
+        options.signal,
+      );
+      if (inputProvenance(current) !== capturedProvenance)
+        result.diagnostics.push(
+          "Dependency inputs or OSV configuration changed while matching; recorded digests describe discovery. Rerun against stable inputs.",
+        );
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      result.diagnostics.push(
+        `Unable to verify dependency input provenance after matching: ${errorMessage(error)}`,
+      );
+    }
     if (output.exitCode === 128)
       result.diagnostics.push(
         "OSV found no packages in the selected effective inputs; this is not a clean-repository result.",
@@ -879,7 +964,7 @@ export async function runOsvScan(
           result.matches = normalized.matches;
           result.coverage.unresolvedPackages =
             normalized.unresolvedPackages +
-            unobservedLocalReferences(localReferences, normalized.components);
+            uncountedLocalReferences(localReferences, normalized.components);
           result.diagnostics.push(...normalized.diagnostics);
         } catch {
           // A truncated stream remains available as raw evidence, never a clean result.

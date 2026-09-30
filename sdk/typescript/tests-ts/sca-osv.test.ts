@@ -157,6 +157,53 @@ describe("SCA input selection", () => {
       inputs.find((item) => item.path === "package-lock.json")?.status,
     ).toBe("excluded");
   });
+  test("selects nested shrinkwrap consistently in non-Git directories", async () => {
+    const { repository } = await setup();
+    await mkdir(join(repository, "nested"));
+    await Promise.all([
+      writeFile(join(repository, "nested", "package-lock.json"), npmLock()),
+      writeFile(join(repository, "nested", "npm-shrinkwrap.json"), npmLock()),
+    ]);
+    const { inputs } = await discoverScaInputs(repository);
+    expect(inputs.map((item) => [item.path, item.status])).toEqual([
+      ["nested/npm-shrinkwrap.json", "scanned"],
+      ["nested/package-lock.json", "excluded"],
+    ]);
+  });
+  test("scans the working-tree lockfile replacement regardless of deletion staging", async () => {
+    const { repository, output } = await setup();
+    await execFile("git", ["init", repository]);
+    const oldLock = join(repository, "package-lock.json");
+    await writeFile(oldLock, npmLock());
+    await execFile("git", ["-C", repository, "add", "package-lock.json"]);
+    await rm(oldLock);
+    await writeFile(
+      join(repository, "pnpm-lock.yaml"),
+      "lockfileVersion: '9.0'\npackages: {}\n",
+    );
+    const before = await discoverScaInputs(repository);
+    expect(before.inputs.map((item) => [item.path, item.status])).toEqual([
+      ["pnpm-lock.yaml", "scanned"],
+    ]);
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) =>
+          argv[0] === "--version"
+            ? { stdout: "osv-scanner version: 2.6.0", stderr: "", exitCode: 0 }
+            : {
+                stdout: JSON.stringify(rawOutput("pnpm-lock.yaml")),
+                stderr: "",
+                exitCode: 0,
+              },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.coverage.inputs).toEqual(before.inputs);
+    await execFile("git", ["-C", repository, "add", "--update"]);
+    expect((await discoverScaInputs(repository)).inputs).toEqual(before.inputs);
+  });
   test("reports unsupported versions and malformed lockfiles", async () => {
     const { repository } = await setup();
     await Promise.all([
@@ -504,6 +551,68 @@ describe("SCA scanner execution", () => {
       expect(result.matches.length).toBe(exitCode);
     },
   );
+  test.each([
+    "unchanged",
+    "lockfile",
+    "lockfile-add",
+    "lockfile-delete",
+    "config",
+    "config-add",
+    "config-delete",
+  ] as const)(
+    "preserves scanner evidence and verifies post-scan provenance for %s inputs",
+    async (change) => {
+      const { repository, output } = await setup();
+      const lockfile = join(repository, "package-lock.json");
+      const config = join(repository, "osv-scanner.toml");
+      await writeFile(lockfile, npmLock());
+      if (change !== "config-add") await writeFile(config, "");
+      const before = await discoverScaInputs(repository);
+      const raw = JSON.stringify(
+        rawOutput("package-lock.json", [advisory("A")]),
+      );
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) => {
+            if (argv[0] === "--version")
+              return {
+                stdout: "osv-scanner version: 2.6.0",
+                stderr: "",
+                exitCode: 0,
+              };
+            if (change === "lockfile") await writeFile(lockfile, npmLock(2));
+            if (change === "lockfile-add")
+              await writeFile(
+                join(repository, "npm-shrinkwrap.json"),
+                npmLock(),
+              );
+            if (change === "lockfile-delete") await rm(lockfile);
+            if (change === "config" || change === "config-add")
+              await writeFile(config, '[[IgnoredVulns]]\nid="A"\n');
+            if (change === "config-delete") await rm(config);
+            return { stdout: raw, stderr: "", exitCode: 1 };
+          },
+        },
+      );
+      expect(result.status).toBe(
+        change === "unchanged" ? "completed" : "partial",
+      );
+      expect(result.coverage.status).toBe(
+        change === "unchanged" ? "complete" : "partial",
+      );
+      expect(result.matches).toHaveLength(1);
+      expect(result.coverage.inputs[0]?.sha256).toBe(before.inputs[0]?.sha256);
+      expect(result.coverage.configFiles).toEqual(before.configFiles);
+      expect(
+        result.diagnostics.some((line) =>
+          line.includes("changed while matching"),
+        ),
+      ).toBe(change !== "unchanged");
+      expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(raw);
+    },
+  );
   test.each([127, 128, 130, null])(
     "never reports clean for error/no-package exit %s",
     async (exitCode) => {
@@ -576,6 +685,76 @@ describe("SCA scanner execution", () => {
       ),
     ).toBe(true);
   });
+  test.each([2, 3])(
+    "keeps npm v%d local tarball provenance incomplete despite a registry-shaped scanner tuple",
+    async (version) => {
+      const result = await scanFixture(
+        {
+          stdout: JSON.stringify(
+            rawOutput("package-lock.json", [advisory("A")]),
+          ),
+          stderr: "",
+          exitCode: 1,
+        },
+        {
+          "package-lock.json": JSON.stringify({
+            lockfileVersion: version,
+            packages: {
+              "": { name: "synthetic-app", version: "1.0.0" },
+              "node_modules/synthetic-lib": {
+                version: "1.2.0",
+                resolved: "file:../local-lib.tgz",
+              },
+            },
+          }),
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.unresolvedPackages).toBe(1);
+      expect(result.components[0]?.version).toBe("1.2.0");
+      expect(result.matches).toHaveLength(1);
+      expect(
+        result.coverage.limitations.some((line) =>
+          line.includes("file:../local-lib.tgz"),
+        ),
+      ).toBe(true);
+    },
+  );
+  test.each([true, false])(
+    "counts npm workspace links once when an unresolved tuple is emitted: %s",
+    async (emitted) => {
+      const raw = rawOutput("package-lock.json");
+      if (emitted)
+        raw.results[0]!.packages.push({
+          package: { name: "linked-lib", version: "", ecosystem: "npm" },
+          dependency_groups: [],
+          vulnerabilities: [],
+        });
+      const result = await scanFixture(
+        { stdout: JSON.stringify(raw), stderr: "", exitCode: 0 },
+        {
+          "package-lock.json": JSON.stringify({
+            lockfileVersion: 3,
+            packages: {
+              "node_modules/synthetic-lib": { version: "1.2.0" },
+              "node_modules/linked-lib": {
+                resolved: "packages/linked-lib",
+                link: true,
+              },
+              "packages/linked-lib": { name: "linked-lib", version: "1.0.0" },
+            },
+          }),
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.unresolvedPackages).toBe(1);
+      expect(
+        result.coverage.limitations.some((line) =>
+          line.includes("linked-lib@packages/linked-lib"),
+        ),
+      ).toBe(true);
+    },
+  );
   test.each([true, false])(
     "accounts for pnpm local references when file tuples are emitted: %s",
     async (emitted) => {

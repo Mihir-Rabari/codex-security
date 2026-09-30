@@ -55,6 +55,7 @@ async function scan(
   name: string,
   files: Record<string, string>,
   missingDatabase = false,
+  changeBeforeMatching?: (repository: string) => Promise<void>,
 ) {
   const repository = join(root, name, "repository with spaces");
   const output = join(root, name, "output");
@@ -73,6 +74,7 @@ async function scan(
           assert.match(version.stdout, /osv-scanner version: 2\.6\.0\b/u);
           return version;
         }
+        await changeBeforeMatching?.(repository);
         // Offline arguments belong only to this synthetic contract harness. Production keeps its documented arguments.
         return runOsvProcess(
           command,
@@ -172,6 +174,54 @@ try {
       ?.status,
     "excluded",
   );
+  const nestedShrinkwrap = await scan("nested-shrinkwrap", {
+    "nested/package-lock.json": npmLock(3),
+    "nested/npm-shrinkwrap.json": npmLock(3, "1.3.0"),
+  });
+  assert.equal(nestedShrinkwrap.status, "completed");
+  assert.equal(nestedShrinkwrap.matches.length, 0);
+  assert.deepEqual(
+    nestedShrinkwrap.coverage.inputs.map((input) => [input.path, input.status]),
+    [
+      ["nested/npm-shrinkwrap.json", "scanned"],
+      ["nested/package-lock.json", "excluded"],
+    ],
+  );
+  for (const version of [2, 3]) {
+    const localTarball = await scan(`npm-v${version}-local-tarball`, {
+      "package-lock.json": JSON.stringify({
+        lockfileVersion: version,
+        packages: {
+          "": { name: "synthetic-app", version: "1.0.0" },
+          "node_modules/synthetic-lib": {
+            version: "1.2.0",
+            resolved: "file:../local-lib.tgz",
+          },
+        },
+      }),
+    });
+    assert.equal(localTarball.status, "partial");
+    assert.equal(localTarball.coverage.unresolvedPackages, 1);
+    assert.equal(localTarball.components[0]?.version, "1.2.0");
+    assert.equal(localTarball.matches.length, 1);
+  }
+  const workspaceLink = await scan("npm-workspace-link", {
+    "package-lock.json": JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "synthetic-app", version: "1.0.0" },
+        "node_modules/synthetic-lib": { version: "1.2.0" },
+        "node_modules/linked-lib": {
+          resolved: "packages/linked-lib",
+          link: true,
+        },
+        "packages/linked-lib": { name: "linked-lib", version: "1.0.0" },
+      },
+    }),
+  });
+  assert.equal(workspaceLink.status, "partial");
+  assert.equal(workspaceLink.coverage.unresolvedPackages, 1);
+  assert.equal(workspaceLink.matches.length, 1);
   const pnpm = await scan("pnpm-v9-workspace-peer", {
     "workspace/pnpm-lock.yaml": `lockfileVersion: '9.0'
 importers:
@@ -348,6 +398,34 @@ snapshots:
   assert.equal(invalidConfig.status, "partial");
   assert.equal(invalidConfig.scanner.exitCode, 130);
   assert.equal(invalidConfig.matches.length, 1);
+  for (const changed of ["lockfile", "config"]) {
+    const drift = await scan(
+      `changed-${changed}-during-matching`,
+      {
+        "package-lock.json": npmLock(3),
+      },
+      false,
+      async (repository) => {
+        if (changed === "lockfile")
+          await writeFile(
+            join(repository, "package-lock.json"),
+            npmLock(3, "1.3.0"),
+          );
+        else
+          await writeFile(
+            join(repository, "osv-scanner.toml"),
+            '[[IgnoredVulns]]\nid="SYNTHETIC-2026-001"\nreason="Synthetic drift fixture"\n',
+          );
+      },
+    );
+    assert.equal(drift.status, "partial");
+    assert.equal(drift.scanner.exitCode, 0);
+    assert.equal(drift.components.length, 1);
+    assert.equal(drift.matches.length, 0);
+    assert.ok(
+      drift.diagnostics.some((line) => line.includes("changed while matching")),
+    );
+  }
   const empty = await scan("no-packages", {
     "package-lock.json": JSON.stringify({ lockfileVersion: 3, packages: {} }),
   });
