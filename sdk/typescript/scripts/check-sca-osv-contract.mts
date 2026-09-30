@@ -130,6 +130,36 @@ try {
   assert.equal(nestedConfig.status, "completed");
   assert.equal(nestedConfig.matches.length, 1);
   assert.deepEqual(nestedConfig.coverage.configFiles, []);
+  // Bun 1.3.14 realpath rejects literal POSIX backslashes. Exercise this
+  // filesystem case under Node; the normalization unit test runs on both.
+  if (process.platform !== "win32" && process.versions["bun"] !== "1.3.14") {
+    const literalBackslash = await scan("posix-literal-backslash", {
+      "nested\\folder/package-lock.json": npmLock(3),
+    });
+    assert.equal(literalBackslash.status, "completed");
+    assert.equal(literalBackslash.matches.length, 1);
+    assert.equal(
+      literalBackslash.components[0]?.sourcePath,
+      "nested\\folder/package-lock.json",
+    );
+  }
+  const malformedNestedConfig = await scan("malformed-nested-config", {
+    "package-lock.json": npmLock(3),
+    "nested/package-lock.json": npmLock(3),
+    "nested/osv-scanner.toml": "IgnoredVulns = [",
+  });
+  assert.equal(malformedNestedConfig.status, "partial");
+  assert.equal(malformedNestedConfig.scanner.exitCode, 130);
+  assert.equal(malformedNestedConfig.matches.length, 2);
+  assert.equal(malformedNestedConfig.coverage.inputs.length, 2);
+  assert.equal(malformedNestedConfig.coverage.configFiles.length, 1);
+  assert.ok(
+    malformedNestedConfig.diagnostics.some((line) =>
+      line.includes(
+        "Unable to parse OSV configuration nested/osv-scanner.toml",
+      ),
+    ),
+  );
   const shrink = await scan("shrinkwrap", {
     "package-lock.json": npmLock(3),
     "npm-shrinkwrap.json": npmLock(3, "1.3.0"),
@@ -166,6 +196,36 @@ snapshots:
     "1.2.0",
   );
   assert.equal(pnpm.matches.length, 1);
+  const pnpmLocal = await scan("pnpm-local-directory-and-link", {
+    "pnpm-lock.yaml": `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      synthetic-lib: {specifier: '1.2.0', version: '1.2.0'}
+      local-lib: {specifier: 'file:../local-lib', version: 'file:../local-lib'}
+    devDependencies:
+      linked-lib: {specifier: 'link:../linked-lib', version: 'link:../linked-lib'}
+packages:
+  synthetic-lib@1.2.0: {resolution: {integrity: synthetic}}
+  local-lib@file:../local-lib: {resolution: {directory: ../local-lib, type: directory}}
+snapshots:
+  synthetic-lib@1.2.0: {}
+  local-lib@file:../local-lib: {}
+`,
+  });
+  assert.equal(pnpmLocal.status, "partial");
+  assert.equal(pnpmLocal.coverage.unresolvedPackages, 2);
+  assert.equal(pnpmLocal.matches.length, 1);
+  assert.equal(
+    pnpmLocal.components.find((component) => component.name === "local-lib")
+      ?.version,
+    "file:../local-lib",
+  );
+  assert.ok(
+    pnpmLocal.coverage.limitations.some((line) =>
+      line.includes("linked-lib@link:../linked-lib"),
+    ),
+  );
   const alias = await scan("npm-alias-scoped-multiple", {
     "package-lock.json": JSON.stringify({
       lockfileVersion: 3,
@@ -236,6 +296,22 @@ snapshots:
   assert.equal(excluded.coverage.configFiles.length, 1);
   assert.ok(
     excluded.coverage.limitations.some((line) =>
+      line.includes("suppressed counts"),
+    ),
+  );
+  const lowercaseExclusions = await scan(
+    "case-insensitive-package-exclusions",
+    {
+      "package-lock.json": npmLock(3),
+      "osv-scanner.toml":
+        '[[packageoverrides]]\nName="synthetic-lib"\nEcosystem="npm"\nIgnore=true\n',
+    },
+  );
+  assert.equal(lowercaseExclusions.status, "completed");
+  assert.equal(lowercaseExclusions.scanner.exitCode, 0);
+  assert.equal(lowercaseExclusions.components.length, 0);
+  assert.ok(
+    lowercaseExclusions.coverage.limitations.some((line) =>
       line.includes("suppressed counts"),
     ),
   );

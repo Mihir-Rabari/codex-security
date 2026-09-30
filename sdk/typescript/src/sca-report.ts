@@ -39,7 +39,9 @@ function sourceIdentity(path: string, repositoryPath: string): string {
     return win32.relative(repositoryPath, path).replaceAll("\\", "/");
   }
   if (posix.isAbsolute(path)) return posix.relative(repositoryPath, path);
-  return posix.normalize(path.replaceAll("\\", "/"));
+  if (win32.isAbsolute(repositoryPath) && !posix.isAbsolute(repositoryPath))
+    return win32.normalize(path).replaceAll("\\", "/");
+  return posix.normalize(path);
 }
 
 function identifiers(match: ScaMatch): string[] {

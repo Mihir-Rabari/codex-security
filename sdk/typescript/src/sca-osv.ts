@@ -12,10 +12,9 @@ import {
 import {
   basename,
   dirname,
-  isAbsolute,
   join,
+  posix,
   relative,
-  resolve,
   sep,
   win32,
 } from "node:path";
@@ -23,6 +22,7 @@ import { finished } from "node:stream/promises";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { parse as parseToml } from "smol-toml";
+import semverValid from "semver/functions/valid.js";
 import { errorMessage } from "./errors.js";
 import { executablePathForSpawn } from "./runtime.js";
 import type {
@@ -35,6 +35,8 @@ import type {
 } from "./sca-types.js";
 import {
   enclosingGitWorktreeRoot,
+  gitMarkerRoot,
+  isolatedGitEnvironment,
   normalizeRepository,
   relativePathIsOutside,
   validatedGitEnvironment,
@@ -100,6 +102,71 @@ function unique(values: string[]): string[] {
   return [...new Set(values)].sort();
 }
 
+interface PnpmLocalReference {
+  sourcePath: string;
+  name: string;
+  version: string;
+}
+
+/** OSV omits pnpm links and cannot match directory references as registry versions. */
+function pnpmLocalReferences(
+  parsed: Record<string, unknown>,
+  sourcePath: string,
+): PnpmLocalReference[] {
+  const references = new Map<string, PnpmLocalReference>();
+  for (const section of [parsed["importers"], parsed["snapshots"]]) {
+    if (!record(section)) continue;
+    for (const project of Object.values(section)) {
+      if (!record(project)) continue;
+      for (const group of [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+      ]) {
+        const dependencies = project[group];
+        if (!record(dependencies)) continue;
+        for (const [name, dependency] of Object.entries(dependencies)) {
+          const version = record(dependency)
+            ? dependency["version"]
+            : dependency;
+          if (typeof version !== "string" || !/^(?:file|link):/u.test(version))
+            continue;
+          references.set(JSON.stringify([name, version]), {
+            sourcePath,
+            name,
+            version,
+          });
+        }
+      }
+    }
+  }
+  return [...references.values()];
+}
+
+function unobservedLocalReferences(
+  references: PnpmLocalReference[],
+  components: ScaComponent[],
+): number {
+  return references.filter(
+    (reference) =>
+      !components.some(
+        (component) =>
+          component.sourcePath === reference.sourcePath &&
+          component.name === reference.name &&
+          component.version !== null &&
+          (component.version === reference.version ||
+            reference.version.startsWith(`${component.version}(`)),
+      ),
+  ).length;
+}
+
+function caseInsensitiveField(
+  value: Record<string, unknown>,
+  name: string,
+): unknown {
+  return Object.entries(value).find(([key]) => key.toLowerCase() === name)?.[1];
+}
+
 /** Use the same tracked/untracked, non-ignored scope as other repository operations. */
 async function repositoryFiles(
   repository: string,
@@ -108,7 +175,11 @@ async function repositoryFiles(
 ): Promise<string[]> {
   if (await enclosingGitWorktreeRoot(repository, signal)) {
     validatedGitEnvironment(environment);
-    const git = await resolveTrustedExecutable("git", environment, repository);
+    const git = await resolveTrustedExecutable(
+      "git",
+      isolatedGitEnvironment(false, environment),
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+    );
     if (git === null)
       throw new Error(
         "Git is required to enumerate dependency inputs in this repository.",
@@ -116,6 +187,8 @@ async function repositoryFiles(
     const { stdout } = await execFile(
       git.executable,
       [
+        "-c",
+        "core.fsmonitor=false",
         "-C",
         repository,
         "ls-files",
@@ -132,7 +205,7 @@ async function repositoryFiles(
     return stdout
       .split("\0")
       .filter(Boolean)
-      .filter((path) => !path.split(/[\\/]/u).includes("node_modules"));
+      .filter((path) => !path.split("/").includes("node_modules"));
   }
   const files: string[] = [];
   const pending = [repository];
@@ -157,6 +230,8 @@ export async function discoverScaInputs(
 ): Promise<
   Pick<ScaCoverage, "inputs" | "configFiles" | "limitations"> & {
     packageExclusionSources: string[];
+    localReferences: PnpmLocalReference[];
+    diagnostics: string[];
   }
 > {
   const repository = await normalizeRepository(repositoryPath, signal);
@@ -165,6 +240,8 @@ export async function discoverScaInputs(
     .sort();
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
+  const localReferences: PnpmLocalReference[] = [];
+  const diagnostics: string[] = [];
   const packageExclusions = new Map<string, boolean>();
   const limitations: string[] = [
     "Inventory covers observed package tuples in npm v2/v3 and pnpm v9 lockfiles, not every installed instance or a complete dependency graph.",
@@ -229,6 +306,13 @@ export async function discoverScaInputs(
       ) {
         input.status = "unsupported";
         input.reason = `Unsupported ${input.format} lockfile version: ${String(version)}.`;
+      } else if (input.format === "pnpm" && record(parsed)) {
+        const references = pnpmLocalReferences(parsed, input.path);
+        localReferences.push(...references);
+        if (references.length > 0)
+          limitations.push(
+            `${input.path} includes local dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.version}`).join(", ")}.`,
+          );
       }
     } catch (error) {
       signal?.throwIfAborted();
@@ -260,17 +344,28 @@ export async function discoverScaInputs(
       path: slash(relative(repository, path)),
       sha256: digest(content),
     });
-    const config = parseToml(content.toString("utf8"));
+    let config: Record<string, unknown>;
+    try {
+      config = parseToml(content.toString("utf8"));
+    } catch (error) {
+      diagnostics.push(
+        `Unable to parse OSV configuration ${slash(relative(repository, path))}: ${errorMessage(error)}`,
+      );
+      continue;
+    }
+    const overrides = caseInsensitiveField(config, "packageoverrides");
     packageExclusions.set(
       directory,
-      Array.isArray(config["PackageOverrides"]) &&
-        config["PackageOverrides"].some(
-          (override) => record(override) && override["ignore"] === true,
+      Array.isArray(overrides) &&
+        overrides.some(
+          (override) =>
+            record(override) &&
+            caseInsensitiveField(override, "ignore") === true,
         ),
     );
     if (
-      config["IgnoredVulns"] !== undefined ||
-      config["PackageOverrides"] !== undefined
+      caseInsensitiveField(config, "ignoredvulns") !== undefined ||
+      overrides !== undefined
     )
       limitations.push(
         `OSV exclusions/overrides are configured in ${slash(relative(repository, path))}; results are evaluated after these settings. Exact suppressed counts are unavailable.`,
@@ -282,7 +377,14 @@ export async function discoverScaInputs(
         packageExclusions.get(dirname(join(repository, input.path))) ?? false,
     )
     .map((input) => input.path);
-  return { inputs, configFiles, limitations, packageExclusionSources };
+  return {
+    inputs,
+    configFiles,
+    limitations,
+    packageExclusionSources,
+    localReferences,
+    diagnostics,
+  };
 }
 
 /** Error diagnostics from the pinned scanner can accompany exit 0 and valid JSON. */
@@ -297,14 +399,13 @@ export function osvErrorDiagnostics(stderr: string): string[] {
 }
 
 function sourceRelativePath(repository: string, source: string): string {
-  const paths = /^[A-Za-z]:[\\/]/u.test(repository)
-    ? win32
-    : { isAbsolute, relative, resolve };
+  const windows = win32.isAbsolute(repository) && !posix.isAbsolute(repository);
+  const paths = windows ? win32 : posix;
   const normalized = paths.relative(
     repository,
     paths.isAbsolute(source) ? source : paths.resolve(repository, source),
   );
-  return normalized.replaceAll("\\", "/");
+  return windows ? normalized.replaceAll("\\", "/") : normalized;
 }
 
 /** Normalize scanner facts only. Every advisory is retained; aliases join groups transitively. */
@@ -366,7 +467,12 @@ export function normalizeOsvOutput(
         typeof pkg["ecosystem"] === "string" && pkg["ecosystem"] !== ""
           ? pkg["ecosystem"]
           : null;
-      if (name === "" || version === null || ecosystem !== "npm")
+      if (
+        name === "" ||
+        version === null ||
+        ecosystem !== "npm" ||
+        semverValid(version) === null
+      )
         unresolvedPackages++;
       if (ecosystem !== null && ecosystem !== "npm")
         diagnostics.push(
@@ -607,18 +713,23 @@ export async function runOsvScan(
     writeFile(scanner.stderrPath, ""),
   ]);
   const environment = { ...(options.environment ?? process.env) };
+  let localReferences: PnpmLocalReference[] = [];
   try {
     options.signal?.throwIfAborted();
     const repository = await normalizeRepository(
       options.repositoryPath,
       options.signal,
     );
-    const { packageExclusionSources, ...discovered } = await discoverScaInputs(
-      repository,
-      environment,
-      options.signal,
-    );
+    const {
+      packageExclusionSources,
+      localReferences: discoveredLocalReferences,
+      diagnostics,
+      ...discovered
+    } = await discoverScaInputs(repository, environment, options.signal);
+    localReferences = discoveredLocalReferences;
     Object.assign(result.coverage, discovered);
+    result.coverage.unresolvedPackages = localReferences.length;
+    result.diagnostics.push(...diagnostics);
     const selected = result.coverage.inputs.filter(
       (input) => input.status === "scanned",
     );
@@ -631,7 +742,8 @@ export async function runOsvScan(
     const executable = await resolveTrustedExecutable(
       dependencies.executable ?? "osv-scanner",
       environment,
-      repository,
+      (await gitMarkerRoot(repository, options.signal, "outermost")) ??
+        repository,
     );
     if (executable === null)
       throw new Error(
@@ -710,7 +822,9 @@ export async function runOsvScan(
       }
       result.components = normalized.components;
       result.matches = normalized.matches;
-      result.coverage.unresolvedPackages = normalized.unresolvedPackages;
+      result.coverage.unresolvedPackages =
+        normalized.unresolvedPackages +
+        unobservedLocalReferences(localReferences, normalized.components);
       result.diagnostics.push(...normalized.diagnostics);
     } else if (output.exitCode !== 128)
       result.diagnostics.push("OSV returned no JSON output.");
@@ -728,7 +842,7 @@ export async function runOsvScan(
       );
     if (result.coverage.unresolvedPackages > 0)
       result.coverage.limitations.push(
-        `${result.coverage.unresolvedPackages} observed package(s) lack a resolved identity; their advisory coverage is incomplete.`,
+        `${result.coverage.unresolvedPackages} package identities or dependency references lack a resolved npm registry version; their advisory coverage is incomplete.`,
       );
     const incomplete =
       result.diagnostics.length > 0 ||
@@ -763,7 +877,9 @@ export async function runOsvScan(
           });
           result.components = normalized.components;
           result.matches = normalized.matches;
-          result.coverage.unresolvedPackages = normalized.unresolvedPackages;
+          result.coverage.unresolvedPackages =
+            normalized.unresolvedPackages +
+            unobservedLocalReferences(localReferences, normalized.components);
           result.diagnostics.push(...normalized.diagnostics);
         } catch {
           // A truncated stream remains available as raw evidence, never a clean result.

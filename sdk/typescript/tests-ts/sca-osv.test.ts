@@ -202,6 +202,57 @@ describe("SCA input selection", () => {
       found.limitations.some((line) => line.includes("suppressed counts")),
     ).toBe(true);
   });
+  test.each([0, 130])(
+    "retains all lockfile evidence after malformed nested configuration with exit %d",
+    async (exitCode) => {
+      const raw = rawOutput("package-lock.json", [advisory("A")]);
+      raw.results.push(
+        ...rawOutput("nested/package-lock.json", [advisory("A")]).results,
+      );
+      const result = await scanFixture(
+        { stdout: JSON.stringify(raw), stderr: "", exitCode },
+        {
+          "nested/package-lock.json": npmLock(),
+          "nested/osv-scanner.toml": "IgnoredVulns = [",
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.matches).toHaveLength(2);
+      expect(result.coverage.inputs).toHaveLength(2);
+      expect(result.coverage.configFiles[0]?.path).toBe(
+        "nested/osv-scanner.toml",
+      );
+      expect(result.coverage.configFiles[0]?.sha256).toMatch(/^[a-f0-9]{64}$/u);
+      expect(
+        result.diagnostics.some((line) =>
+          line.includes(
+            "Unable to parse OSV configuration nested/osv-scanner.toml",
+          ),
+        ),
+      ).toBe(true);
+      expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
+        JSON.stringify(raw),
+      );
+    },
+  );
+  test.each(["packageoverrides", "PACKAGEOVERRIDES"])(
+    "honors case-insensitive OSV %s and Ignore configuration",
+    async (key) => {
+      const result = await scanFixture(
+        { stdout: '{"results":[]}', stderr: "", exitCode: 0 },
+        {
+          "osv-scanner.toml": `[[${key}]]\nname="synthetic-lib"\nIgnore=true\n`,
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result.coverage.inputs[0]?.status).toBe("scanned");
+      expect(
+        result.coverage.limitations.some((line) =>
+          line.includes("suppressed counts"),
+        ),
+      ).toBe(true);
+    },
+  );
   test("rejects a config link outside the repository", async () => {
     const { repository, root } = await setup();
     await writeFile(join(repository, "package-lock.json"), npmLock());
@@ -388,6 +439,32 @@ describe("SCA OSV normalization", () => {
     );
     expect(second).toEqual(first);
   });
+  test("preserves literal backslashes in POSIX scanner source identities", () => {
+    const source = "nested\\folder/package-lock.json";
+    const normalized = normalizeOsvOutput(
+      rawOutput(`/repo/${source}`, [advisory("A")]),
+      {
+        repositoryPath: "/repo",
+        inputs: [input(source)],
+      },
+    );
+    expect(normalized.components[0]?.sourcePath).toBe(source);
+    expect(normalized.matches).toHaveLength(1);
+    expect(normalized.diagnostics).toEqual([]);
+  });
+  test.each(["file:../local-lib", "link:../linked-lib"])(
+    "retains %s as an unresolved npm identity",
+    (version) => {
+      const raw = rawOutput("package-lock.json");
+      raw.results[0]!.packages[0]!.package.version = version;
+      const normalized = normalizeOsvOutput(raw, {
+        repositoryPath: "/repo",
+        inputs: [input()],
+      });
+      expect(normalized.unresolvedPackages).toBe(1);
+      expect(normalized.components[0]?.version).toBe(version);
+    },
+  );
   test("reports malformed fields and unknown sources while preserving valid matches", () => {
     const raw = rawOutput("package-lock.json", [
       { summary: "missing id" },
@@ -499,6 +576,55 @@ describe("SCA scanner execution", () => {
       ),
     ).toBe(true);
   });
+  test.each([true, false])(
+    "accounts for pnpm local references when file tuples are emitted: %s",
+    async (emitted) => {
+      const raw = rawOutput("package-lock.json");
+      const pnpm = rawOutput("pnpm-lock.yaml", [advisory("A")]);
+      if (emitted)
+        pnpm.results[0]!.packages.push({
+          package: {
+            name: "local-lib",
+            version: "file:../local-lib",
+            ecosystem: "npm",
+          },
+          dependency_groups: [],
+          vulnerabilities: [],
+        });
+      raw.results.push(...pnpm.results);
+      const result = await scanFixture(
+        { stdout: JSON.stringify(raw), stderr: "", exitCode: 0 },
+        {
+          "pnpm-lock.yaml": `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      synthetic-lib: {specifier: '1.2.0', version: '1.2.0'}
+      local-lib: {specifier: 'file:../local-lib', version: 'file:../local-lib'}
+    devDependencies:
+      linked-lib: {specifier: 'link:../linked-lib', version: 'link:../linked-lib'}
+packages:
+  synthetic-lib@1.2.0: {resolution: {integrity: synthetic}}
+  local-lib@file:../local-lib: {resolution: {directory: ../local-lib, type: directory}}
+snapshots:
+  synthetic-lib@1.2.0:
+    dependencies:
+      local-lib: 'file:../local-lib'
+  local-lib@file:../local-lib: {}
+`,
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.status).toBe("partial");
+      expect(result.coverage.unresolvedPackages).toBe(2);
+      expect(result.matches).toHaveLength(1);
+      expect(
+        result.coverage.limitations.some((line) =>
+          line.includes("linked-lib@link:../linked-lib"),
+        ),
+      ).toBe(true);
+    },
+  );
   test("does not silently mark an omitted selected source as scanned", async () => {
     const result = await scanFixture(
       {

@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { renderScaReport } from "./sca-report.js";
 import type { OsvScanResult } from "./sca-osv.js";
 import type { ScaResult } from "./sca-types.js";
+import { gitMarkerRoot, isolatedGitEnvironment } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -54,7 +55,11 @@ export async function dependencyRepositoryDirty(
   environment: Record<string, string | undefined>,
   signal: AbortSignal,
 ): Promise<boolean | null> {
-  const git = await resolveTrustedExecutable("git", environment, repository);
+  const git = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(false, environment),
+    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+  );
   if (git === null) return null;
   try {
     const { stdout } = await execFile(

@@ -301,6 +301,23 @@ describe("SCA comparison", () => {
     },
   );
 
+  test("does not conflate literal POSIX backslashes with directory separators", () => {
+    const base = fixture();
+    const head = fixture();
+    base.components[0]!.sourcePath = "nested\\folder/package-lock.json";
+    base.coverage.inputs[0]!.path = base.components[0]!.sourcePath;
+    head.components[0]!.sourcePath = "nested/folder/package-lock.json";
+    head.coverage.inputs[0]!.path = head.components[0]!.sourcePath;
+    head.matches[0]!.id = "head-match";
+    const comparison = compareScaResults(base, head);
+    expect(comparison.persisting).toEqual([]);
+    expect(comparison.introduced).toEqual(["head-match"]);
+    expect(comparison.noLongerObserved).toEqual([
+      { matchId: "match-1", resolved: false },
+    ]);
+    expect(comparison.comparable).toBe(false);
+  });
+
   test("keeps separate versions and correlates an unambiguous version change", () => {
     const base = fixture();
     const head = fixture();

@@ -13,8 +13,8 @@ Implementation and isolated PR checks completed on Linux on September 30, 2026:
 
 | Check                          | Observed result                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 95 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.          |
-| Actual OSV-Scanner v2.6.0      | 15 offline synthetic contract cases passed.                                                                        |
+| Focused SDK regressions        | 108 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
+| Actual OSV-Scanner v2.6.0      | 19 offline synthetic contract cases passed under Node 24; 18 under Bun 1.3.14.                                     |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                         |
@@ -67,6 +67,11 @@ in [SDK instructions](../sdk/typescript/AGENTS.md) and
 [root instructions](../AGENTS.md) before publication.
 
 ## Remaining evaluation
+
+Bun 1.3.14 has a reproduced `realpath` limitation for literal backslashes in
+POSIX filenames. The real-scanner harness skips only that native-path case for
+that Bun version; it passes under Node 24, and the normalization regression stays
+enabled on both runtimes.
 
 Portable tests exercise Windows paths; native Windows and macOS checks remain
 for CI. The twelve-case corpus has no independent human labels. The planned
