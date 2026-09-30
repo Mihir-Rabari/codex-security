@@ -123,7 +123,7 @@ def _saved_result_paths(scan_dir: Path) -> Iterator[str]:
     )
     for name in _children(scan_dir, directory):
         if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            yield f"{directory}/{name}"
+            yield f"checkpoints/{name}"
 
 
 def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dict[str, Any], str]:
@@ -214,10 +214,7 @@ def _saved_results_changed(db: Any, scan: Any) -> bool:
         current_sources = dict(published_sources)
         for path in paths:
             try:
-                _, digest = _read_saved_result(scan_dir, path, scan["id"])
-                # Migration can copy an already published archive into pending checkpoints.
-                if path in published_sources or digest not in published_sources.values():
-                    current_sources[path] = digest
+                _, current_sources[path] = _read_saved_result(scan_dir, path, scan["id"])
             except (ContractError, OSError, ValueError):
                 continue
         return current_sources != published_sources
@@ -280,17 +277,13 @@ def _recovery_source_digests(
 
     for relative in paths - recovery_sources.keys():
         try:
-            _, digest = _read_saved_result(scan_dir, relative, scan["id"])
-            if digest not in recovery_sources.values():
-                recovery_sources[relative] = digest
+            _, recovery_sources[relative] = _read_saved_result(scan_dir, relative, scan["id"])
         except (ContractError, OSError, ValueError):
             continue
     return recovery_sources, include_parent
 
 
-def scan_results_recovery_needed(
-    db: Any, connection: Any, scan: Any, composition: CompositionView
-) -> bool:
+def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False
     warnings = json.loads(scan["completion_warnings_json"])
@@ -404,9 +397,7 @@ def merge_saved_results(
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
                 payload = _encoded(parent)
                 parent_digest = hashlib.sha256(payload).hexdigest()
-                parent_checkpoint = (
-                    f"checkpoints/pending/{save_pending_checkpoint(scan_dir, payload)}"
-                )
+                parent_checkpoint = f"checkpoints/{save_pending_checkpoint(scan_dir, payload)}"
                 if frozen_source_digests is not None:
                     frozen_source_digests = {
                         **frozen_source_digests,
@@ -421,10 +412,11 @@ def merge_saved_results(
         if isinstance(recorded, dict):
             parent_preserved_sources = recorded
             source_digests.update(parent_preserved_sources)
-    paths = list(_saved_result_paths(scan_dir))
-    if frozen_source_digests is not None:
-        paths = list(dict.fromkeys([*paths, *frozen_source_digests]))
-        paths = [relative for relative in paths if relative in frozen_source_digests]
+    paths = (
+        list(frozen_source_digests)
+        if frozen_source_digests is not None
+        else list(_saved_result_paths(scan_dir))
+    )
 
     for relative in paths:
         try:
@@ -885,32 +877,12 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
     return {"findings": draft["findings"], "coverage": draft["coverage"]}
 
 
-def stop_composition_children(db: Any, connection: Any, composition: CompositionView) -> None:
-    merged = set(composition.checkpoint["mergedScanIds"]) if composition.checkpoint else set()
-    for child in composition.children:
-        if child["id"] not in merged and child["status"] == "running":
-            fail_scan(
-                db,
-                connection,
-                argparse.Namespace(
-                    scan_id=child["id"],
-                    claim_token=child["handoff_claim_token"],
-                    cost_json=None,
-                    message="Parent Deep Scan stopped.",
-                ),
-            )
-
-
 def save_composed_checkpoint(
-    db: Any, connection: Any, scan: Any, scan_dir: Path, composition: CompositionView | None = None
+    db: Any, connection: Any, scan: Any, scan_dir: Path, composition: CompositionView
 ) -> dict[str, Any] | None:
     """Retain accepted progress and unmerged ordinary child observations."""
-    composition = composition if composition is not None else load_composition(connection, scan)
     checkpoint = composition.checkpoint
-    children = {
-        child["scan_dir"]: db.require_scan(connection, child["id"])
-        for child in composition.children
-    }
+    children = {child["scan_dir"]: child for child in composition.children}
     if checkpoint is None and not children:
         return None
     merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
@@ -928,7 +900,7 @@ def save_composed_checkpoint(
         if child["id"] in merged_ids:
             continue
         try:
-            draft = _stopped_child_draft(db, child, scan_dir)
+            draft = _stopped_child_draft(db, db.require_scan(connection, child["id"]), scan_dir)
         except (ContractError, OSError, SystemExit, ValueError) as exc:
             recovery_errors[child["id"]] = str(exc)
             continue
@@ -1285,26 +1257,42 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def stop_composition_children(db: Any, connection: Any, composition: CompositionView) -> None:
+    merged = set(composition.checkpoint["mergedScanIds"]) if composition.checkpoint else set()
+    for child in composition.children:
+        if child["id"] not in merged and child["status"] == "running":
+            fail_scan(
+                db,
+                connection,
+                argparse.Namespace(
+                    scan_id=child["id"],
+                    claim_token=child["handoff_claim_token"],
+                    cost_json=None,
+                    message="Parent Deep Scan stopped.",
+                ),
+            )
+
+
 def initialize_pending_checkpoints(scan_dir: Path) -> None:
     if (scan_dir / "checkpoints/pending/.initialized").is_file():
         return
     prepare_scan_local_directory(scan_dir, "checkpoints/pending")
     for name in _children(scan_dir, "checkpoints"):
         if re.fullmatch(r"[0-9a-f]{64}\.json", name):
-            # Recovery validates each checkpoint independently after preserving its bytes.
-            descriptor = open_scan_local_file_descriptor(
-                scan_dir, f"checkpoints/{name}", "Saved checkpoint"
+            # Pending entries index immutable history, including malformed evidence.
+            os.close(
+                open_scan_local_file_descriptor(scan_dir, f"checkpoints/{name}", "Saved checkpoint")
             )
-            with os.fdopen(descriptor, "rb") as checkpoint:
-                write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", checkpoint.read())
+            write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", b"")
     write_scan_local_bytes(scan_dir, "checkpoints/pending/.initialized", b"")
 
 
 def save_pending_checkpoint(scan_dir: Path, payload: bytes) -> str:
     initialize_pending_checkpoints(scan_dir)
     name = f"{hashlib.sha256(payload).hexdigest()}.json"
+    # Publish the index first so every saved checkpoint remains discoverable.
+    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", b"")
     write_scan_local_bytes(scan_dir, f"checkpoints/{name}", payload)
-    write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", payload)
     return name
 
 

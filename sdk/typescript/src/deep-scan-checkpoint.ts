@@ -29,6 +29,7 @@ interface CompositionMetadata {
   costUnavailable?: true;
   /** Retained coordinator accounting is read-only; live continuation is retired. */
   legacy?: {
+    discoveryRuns?: number;
     cost?: ScanCost;
     originThreadId?: string;
     [extension: string]: unknown;

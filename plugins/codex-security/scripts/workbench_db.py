@@ -1513,6 +1513,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
             if saved_recipe is None:
+                sealed_version = sealed_scan_producer_version(scan)
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1521,9 +1522,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                     "updated_at = ? WHERE id = ?",
                     (
                         json.dumps(recipe, allow_nan=False),
-                        scan["continuation_thread_id"]
-                        if sealed_scan_producer_version(scan) is not None
-                        else None,
+                        scan["continuation_thread_id"] if sealed_version is not None else None,
                         now(),
                         scan_id,
                     ),
@@ -2734,7 +2733,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan, composition
+            _WORKBENCH_DB_CONTEXT, connection, scan
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],

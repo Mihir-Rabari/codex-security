@@ -440,6 +440,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
   );
   const defaultHome = join(root, ".codex");
   const explicitHome = join(root, "explicit");
+  const spacedHome = join(root, " spaced ");
   const pluginRoot = join(root, "plugin");
   const keys = [
     "HOME",
@@ -466,6 +467,9 @@ test("native scans preserve selected Codex homes and saved settings", async () =
     const homes = [
       [defaultHome, "synthetic-default", 2],
       [explicitHome, "synthetic-explicit", 4],
+      ...(process.platform === "win32"
+        ? []
+        : [[spacedHome, "synthetic-spaced", 3]]),
     ];
     for (const [home, model, workers] of homes) {
       await mkdir(join(home, "codex-security"), { recursive: true });
@@ -484,15 +488,17 @@ test("native scans preserve selected Codex homes and saved settings", async () =
       process.platform === "win32" ? "junction" : "dir",
     );
     const linkedHome = `${link}${sep}..`;
-    const linkedSettings = homes.find(([home]) => home === defaultHome);
+    const physicalHome = await realpath(linkedHome);
+    const linkedSettings = homes.find(([home]) => home === physicalHome);
     assert.ok(linkedSettings);
     for (const [override, home, model, workers] of [
       [undefined, defaultHome, "synthetic-default", 2],
       ["", defaultHome, "synthetic-default", 2],
       [" \t\n", defaultHome, "synthetic-default", 2],
       [explicitHome, explicitHome, "synthetic-explicit", 4],
-      [`  ${explicitHome}  `, explicitHome, "synthetic-explicit", 4],
-      ["~/explicit", explicitHome, "synthetic-explicit", 4],
+      ...(process.platform === "win32"
+        ? []
+        : [[spacedHome, spacedHome, "synthetic-spaced", 3]]),
       [linkedHome, ...linkedSettings],
     ]) {
       if (override === undefined) delete process.env.CODEX_HOME;

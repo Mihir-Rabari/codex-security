@@ -433,7 +433,7 @@ def test_explicit_recovery_preserves_sealed_parent_with_empty_source_map(
     later_finding["title"] = "Later checkpoint finding"
     later = copy.deepcopy(late)
     later["findings"] = [later_finding]
-    write_checkpoint(scan_dir / "checkpoints/pending", later)
+    write_checkpoint(scan_dir / "checkpoints", later)
 
     recovered_again = run_workbench(
         state_dir,

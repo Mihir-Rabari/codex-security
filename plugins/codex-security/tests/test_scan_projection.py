@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from workbench_test_support import register, run_workbench, write_completed_contract
+from workbench_test_support import checkpoint, register, run_workbench, write_completed_contract
 
 
 def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> None:
@@ -157,7 +157,7 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
         assert (child_dir / name).read_text() == contents
 
 
-def test_projection_preserves_long_report_basename(tmp_path, workbench_api, monkeypatch):
+def test_projection_preserves_long_report_references(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("\n" * 50)
@@ -171,8 +171,9 @@ def test_projection_preserves_long_report_basename(tmp_path, workbench_api, monk
     report_path = f"findings/{slug}/{slug}.md"
     source = child_dir / report_path
     source.parent.mkdir(parents=True)
-    source.write_text("# Synthetic report\n[Evidence](trace.txt)\n")
-    (source.parent / "trace.txt").write_text("Synthetic supporting evidence\n")
+    source.write_text("# Synthetic report\n[Evidence](poc/trace.txt)\n")
+    (source.parent / "poc").mkdir()
+    (source.parent / "poc/trace.txt").write_text("Synthetic supporting evidence\n")
     findings_path = child_dir / "findings.json"
     document = json.loads(findings_path.read_text())
     document["findings"][0]["writeup"] = {"reportPath": report_path}
@@ -184,10 +185,24 @@ def test_projection_preserves_long_report_basename(tmp_path, workbench_api, monk
     projected = parent_dir / live["writeup"]["reportPath"]
     assert projected.name == source.name
     assert projected.read_bytes() == source.read_bytes()
-    assert (projected.parent / "trace.txt").read_bytes() == (
-        source.parent / "trace.txt"
+    assert (projected.parent / "poc/trace.txt").read_bytes() == (
+        source.parent / "poc/trace.txt"
     ).read_bytes()
     assert completed_projection(parent_dir, parent, child_dir, child).stdout == completed.stdout
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    run_workbench(state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Stopped.")
+    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]["findings"][0]
+    assert saved["writeup"] == live["writeup"]
+    assert saved["artifactPaths"] == [
+        live["writeup"]["reportPath"],
+        (projected.parent / "poc/trace.txt").relative_to(parent_dir).as_posix(),
+    ]
 
 
 @pytest.mark.parametrize(

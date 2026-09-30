@@ -31,7 +31,6 @@ def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_
         connection.row_factory = sqlite3.Row
         connection.executescript(
             "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
-            "CREATE VIEW public_scans AS SELECT * FROM scans WHERE parent_scan_role IS NOT 'deep_pass';"
             "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
             "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
             "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"

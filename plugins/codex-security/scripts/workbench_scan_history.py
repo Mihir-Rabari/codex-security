@@ -144,11 +144,12 @@ def independent_review_progress(
 ) -> dict[str, Any] | None:
     run = composition.legacy_run
     children = composition.children
-    if children or scan["recipe_json"] is not None:
+    if children or (run is None and scan["recipe_json"] is not None):
         recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
         return {
             "active": sum(child["status"] == "running" for child in children),
-            "completed": sum(child["status"] == "complete" for child in children),
+            "completed": sum(child["status"] == "complete" for child in children)
+            + (run["completion_sequence"] if run is not None else 0),
             "maximum": recipe.get("deepScan", {}).get("maxDiscoveryRuns", len(children)),
             "consolidating": scan["status"] == "running"
             and scan["phase"] in {"validation", "reporting"},
@@ -267,7 +268,8 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
-    table = "scans" if args is not None and args.scan_root else "public_scans"
+    if args is None or not args.scan_root:
+        clauses.append("scans.parent_scan_role IS NOT 'deep_pass'")
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = connection.execute(
@@ -350,7 +352,7 @@ def list_scans(
                 FROM finding_occurrences AS occurrences
                 WHERE occurrences.scan_id = scans.id
             ) AS finding_count
-        FROM {table} AS scans
+        FROM scans
         JOIN scan_progress AS progress ON progress.scan_id = scans.id
         {where}
         ORDER BY
@@ -433,7 +435,8 @@ def list_unmatched_scan_pairs(
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT * FROM public_scans WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT * FROM scans WHERE status = 'complete' "
+            "AND parent_scan_role IS NOT 'deep_pass' ORDER BY started_at, id"
         )
         if _same_repository(scan, requested)
     ]
@@ -1018,19 +1021,17 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
+        JOIN scans ON scans.id = matches.after_scan_id
         WHERE matches.before_occurrence_id = ?
-            AND (occurrences.scan_id = ? OR EXISTS (
-                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
-            ))
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
+        JOIN scans ON scans.id = matches.before_scan_id
         WHERE matches.after_occurrence_id = ?
-            AND (occurrences.scan_id = ? OR EXISTS (
-                SELECT 1 FROM public_scans WHERE public_scans.id = occurrences.scan_id
-            ))
+            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, scan_id, occurrence_id, scan_id),
@@ -1038,16 +1039,15 @@ def finding_matches(
     linked_rows = list(
         connection.execute(
             f"""
-            {_LINKED_FINDINGS_SQL}
+            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
                 scans.started_at, scans.id AS scan_id
             FROM linked
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE EXISTS (SELECT 1 FROM public_scans WHERE public_scans.id = scans.id)
-                OR scans.id = ?
-            """.format(placeholders="?"),
+            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
+            """,
             (occurrence_id, scan_id),
         )
     )

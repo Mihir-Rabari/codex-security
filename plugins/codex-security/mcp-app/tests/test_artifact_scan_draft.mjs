@@ -302,42 +302,6 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   );
   assert.deepEqual(carriedParentManifest.scan.threatModel, input.threatModel);
 
-  const hostSnapshotRoot = path.join(root, "host-canonical-checkpoint");
-  await mkdir(hostSnapshotRoot);
-  await saveScanDraftCheckpoint(
-    { ...context, root: hostSnapshotRoot },
-    {
-      scanId,
-      scope: carriedParentManifest.scan.scope,
-      threatModel: carriedParentManifest.scan.threatModel,
-      findings: (
-        await readJson(parentCheckpointRoot, "findings.json")
-      ).findings.map((entry) => ({
-        ...entry,
-        findingId: "generated",
-        occurrenceId: "generated",
-      })),
-      coverage: {
-        ...(await readJson(parentCheckpointRoot, "coverage.json")),
-        documentType: "codex-security.coverage",
-        schemaVersion: "1.0",
-        scanId,
-      },
-    },
-  );
-  await recordCodexSecurityScanDraft(
-    { ...context, root: hostSnapshotRoot },
-    { ...input, findings: [] },
-  );
-  assert.deepEqual(
-    (await readJson(hostSnapshotRoot, "findings.json")).findings,
-    (await readJson(parentCheckpointRoot, "findings.json")).findings,
-  );
-  assert.equal(
-    (await readJson(hostSnapshotRoot, "scan-manifest.json")).scan.scope.summary,
-    input.scope.summary,
-  );
-
   const pendingRoot = path.join(root, "pending-only-checkpoints");
   await mkdir(pendingRoot);
   await recordCodexSecurityScanDraft({ ...context, root: pendingRoot }, input);
@@ -349,14 +313,13 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     "{old incompatible evidence",
   );
   const pendingInput = { ...input, findings: [interruptedFinding] };
-  await writeFile(
-    path.join(pendingDirectory, "pending.json"),
-    JSON.stringify(pendingInput),
-  );
+  await writeFile(path.join(pendingDirectory, "pending.json"), "");
   await writeFile(
     path.join(pendingRoot, "checkpoints", "pending.json"),
     JSON.stringify(pendingInput),
   );
+  // A stopped writer may leave its marker before publishing immutable history.
+  await writeFile(path.join(pendingDirectory, "interrupted.json"), "");
   const originalReaddir = fs.readdir;
   fs.readdir = async (...args) => {
     const entries = await originalReaddir(...args);
@@ -382,6 +345,18 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       finding.provenance.candidateId,
       interruptedFinding.provenance.candidateId,
     ]),
+  );
+
+  await writeFile(
+    path.join(pendingRoot, "checkpoints", "interrupted.json"),
+    "{malformed saved history",
+  );
+  await assert.rejects(
+    recordCodexSecurityScanDraft(
+      { ...context, root: pendingRoot },
+      { ...input, findings: [] },
+    ),
+    /current scan checkpoint: stored JSON is malformed/,
   );
 
   const deepParentRoot = path.join(root, "accepted-deep-parent");
@@ -1390,9 +1365,6 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       ...surfaceDraft,
       coverage: {
         ...surfaceDraft.coverage,
-        surfaces: surfaceDraft.coverage.surfaces.map((surface) => ({
-          ...surface,
-        })),
         deferred: [unresolved],
       },
     });

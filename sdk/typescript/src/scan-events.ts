@@ -57,6 +57,7 @@ interface ScanEventRunOptions {
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
+/** @internal */
 export function reportScanActivities(
   event: ScanEvent,
   repository: string,
@@ -72,6 +73,7 @@ export function reportScanActivities(
   }
 }
 
+/** @internal */
 export function scanReconnectObserver(
   options: Pick<ScanEventRunOptions, "onReconnect" | "onObserverError">,
 ) {
