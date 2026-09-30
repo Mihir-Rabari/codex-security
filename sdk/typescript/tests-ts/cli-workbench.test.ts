@@ -18,6 +18,35 @@ import {
 } from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
+  test("reports saved unconfirmed candidates separately from reportable findings", async () => {
+    const result = fakeResult(["high"]);
+    result.coverage.completeness = "partial";
+    result.coverage.deferred = [
+      {
+        id: "pending",
+        candidateId: "candidate-1",
+        reason: "Evidence is incomplete.",
+      },
+      { id: "review", reason: "Remaining review work." },
+    ];
+    const stderr = capture();
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("FINDINGS  1 (1 high)");
+    expect(stderr.text()).toContain("UNCONFIRMED  1 saved candidates");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      unconfirmedCandidateCount: 1,
+      unconfirmedCandidates: [{ candidateId: "candidate-1" }],
+    });
+  });
+
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = capture();

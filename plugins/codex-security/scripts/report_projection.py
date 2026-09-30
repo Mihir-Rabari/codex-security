@@ -25,6 +25,47 @@ class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
 
 
+def unconfirmed_candidates(
+    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Return distinct saved candidates that still need validation, scoped to their worker."""
+    resolved: set[tuple[str | None, str]] = set()
+    for finding in findings or []:
+        provenance = finding.get("provenance", {})
+        extensions = finding.get("extensions", {})
+        candidate_id = provenance.get("candidateId") or extensions.get("candidateId")
+        if isinstance(candidate_id, str) and candidate_id:
+            owner = (
+                provenance.get("sourceWorkerId")
+                or provenance.get("workerId")
+                or extensions.get("sourceWorkerId")
+            )
+            resolved.add((owner, candidate_id))
+    for field in ("surfaces", "explicitExclusions"):
+        for item in coverage.get(field, []):
+            candidate_id = item.get("candidateId")
+            if (
+                isinstance(candidate_id, str)
+                and candidate_id
+                and item.get("disposition")
+                in {
+                    "reported",
+                    "rejected",
+                    "not_applicable",
+                }
+            ):
+                resolved.add((item.get("sourceWorkerId"), candidate_id))
+    candidates: dict[tuple[str | None, str], dict[str, Any]] = {}
+    for item in coverage.get("deferred", []):
+        candidate_id = item.get("candidateId")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        key = (item.get("sourceWorkerId"), candidate_id)
+        if key not in resolved:
+            candidates.setdefault(key, item)
+    return list(candidates.values())
+
+
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
@@ -801,6 +842,7 @@ def build_report_markdown(
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = _uses_deep_presentation(coverage, findings)
+    pending_candidates = unconfirmed_candidates(coverage, findings_document["findings"])
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
@@ -860,6 +902,7 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
+            f"| Saved unconfirmed candidates | {len(pending_candidates)} |",
             f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
@@ -1006,6 +1049,31 @@ def build_report_markdown(
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]
         )
+    if pending_candidates:
+        lines.extend(
+            [
+                "",
+                "## Saved Unconfirmed Candidates",
+                "",
+                "These saved candidates still require validation. They are not confirmed findings.",
+                "",
+                "| Candidate | Source worker | Title | Remaining validation |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for candidate in pending_candidates:
+            original = candidate.get("candidate", candidate.get("finding", {}))
+            title = (
+                original.get("title", original.get("summary"))
+                if isinstance(original, dict)
+                else None
+            )
+            lines.append(
+                f"| {_cell(candidate['candidateId'])} "
+                f"| {_cell(candidate.get('sourceWorkerId'))} "
+                f"| {_cell(title or candidate.get('title', candidate['candidateId']))} "
+                f"| {_cell(candidate.get('reason'))} |"
+            )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
         lines.extend(

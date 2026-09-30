@@ -6,6 +6,7 @@ import commonSchema from "../../schemas/definitions/artifact-common.schema.json"
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
+import { preserveUnconfirmedDiffCandidates } from "./artifact-diff-candidates.js";
 import {
   artifactDestination,
   readArtifactJsonObject,
@@ -94,7 +95,10 @@ export async function recordCodexSecurityScanDraft(
       context.mode === "deep" && parsed.complete !== false
         ? { input: parsed, previousDigest: undefined }
         : await preserveScanDraft(context, parsed, false);
-    const reconciled = preserved.input;
+    const reconciled = await preserveUnconfirmedDiffCandidates(
+      context,
+      preserved.input,
+    );
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -1175,7 +1179,7 @@ export function scanFindingIdentity(finding: JsonObject): string {
   ]);
 }
 
-function findingCandidateId(finding: JsonObject): string | undefined {
+export function findingCandidateId(finding: JsonObject): string | undefined {
   const provenance = finding.provenance;
   if (
     isObject(provenance) &&

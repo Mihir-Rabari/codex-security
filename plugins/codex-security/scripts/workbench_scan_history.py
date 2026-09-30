@@ -14,13 +14,25 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
-from report_projection import SEVERITY_ORDER
+from finalize_scan_contract import ContractError, _prepare_scan_finalization, _read_scan_local_json
+from report_projection import SEVERITY_ORDER, unconfirmed_candidates
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
+
+
+def saved_unconfirmed_candidates(scan: sqlite3.Row) -> list[dict[str, Any]]:
+    """Read candidate counts from saved artifacts without requiring a completed scan."""
+    scan_dir = Path(scan["scan_dir"])
+    try:
+        coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved coverage")
+        findings = _read_scan_local_json(scan_dir, "findings.json", "Saved findings")
+    except (ContractError, OSError, ValueError):
+        # Running and removed scans may have no readable canonical artifacts yet.
+        return []
+    return unconfirmed_candidates(coverage, findings.get("findings", []))
 
 
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
@@ -311,7 +323,10 @@ def list_scans(
                 "model": row["model"],
                 "parentScanId": row["parent_scan_id"],
                 "progress": {
-                    "candidates": {"reportable": row["reportable_findings_count"]},
+                    "candidates": {
+                        "reportable": row["reportable_findings_count"],
+                        "unconfirmed": len(saved_unconfirmed_candidates(row)),
+                    },
                     "coverage": {
                         "closedRows": row["review_items_completed"],
                         "filesTotal": row["scope_file_count"],

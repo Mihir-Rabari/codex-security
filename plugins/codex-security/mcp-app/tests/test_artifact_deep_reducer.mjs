@@ -218,6 +218,9 @@ try {
   const outcome = await recordCodexSecurityDeepReduction(context, merged);
   const mergedWithSources = {
     ...merged,
+    unconfirmedCandidates: [
+      { ...rejectedCoverage.deferred[0], sourceWorkerId: first.id },
+    ],
     findings: [
       retainedFinding(shared, [
         { id: "worker-001:0", finding: shared },
@@ -557,9 +560,13 @@ function workerDraft(findings, extra = {}) {
 }
 
 function withSourceRefs(worker) {
-  const { coverage: _coverage, ...result } = worker.result;
+  const { coverage, ...result } = worker.result;
+  const unconfirmedCandidates = coverage.deferred
+    .filter((item) => typeof item.candidateId === "string")
+    .map((item) => ({ ...item, sourceWorkerId: worker.id }));
   return {
     ...result,
+    ...(unconfirmedCandidates.length > 0 ? { unconfirmedCandidates } : {}),
     findings: worker.result.findings.map((finding, index) => ({
       ...finding,
       provenance: {

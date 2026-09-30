@@ -278,6 +278,11 @@ describe("custom validation", () => {
       "artifacts/custom-validation/proof.txt",
     );
     expect(coverage.deferred).toHaveLength(1);
+    expect(coverage.deferred[0]).toMatchObject({
+      id: "custom-validation-candidate-4",
+      candidateId: "candidate-4",
+      candidate: f.findings.findings[3],
+    });
     expect(await json(join(f.scanDir, resultName))).toMatchObject({
       scanId: f.scanId,
       ...output,

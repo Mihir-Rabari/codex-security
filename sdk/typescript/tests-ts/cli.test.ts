@@ -4411,6 +4411,7 @@ describe("CLI", () => {
         "",
         "  FINDINGS  1 (1 high)",
         "  COVERAGE  complete",
+        "  UNCONFIRMED  0 saved candidates",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",

@@ -52,6 +52,75 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test("counts saved unresolved candidates once per logical worker", () => {
+    const result = fakeResult(["high"]);
+    result.findings.findings[0]!.provenance["candidateId"] = "confirmed";
+    result.coverage.completeness = "partial";
+    result.coverage.surfaces = [
+      {
+        id: "rejected",
+        label: "Rejected candidate",
+        disposition: "rejected",
+        receiptRefs: [],
+        candidateId: "rejected",
+      },
+      {
+        id: "excluded",
+        label: "Not applicable",
+        disposition: "not_applicable",
+        receiptRefs: [],
+        candidateId: "excluded",
+      },
+    ];
+    result.coverage.deferred = [
+      { id: "scan-stopped", reason: "Review did not finish." },
+      { id: "old", candidateId: "pending", reason: "Awaiting evidence." },
+      {
+        id: "checkpoint",
+        candidateId: "pending",
+        reason: "Same saved candidate.",
+      },
+      {
+        id: "confirmed",
+        candidateId: "confirmed",
+        reason: "Superseded by a finding.",
+      },
+      {
+        id: "rejected",
+        candidateId: "rejected",
+        reason: "Superseded by rejection.",
+      },
+      {
+        id: "excluded",
+        candidateId: "excluded",
+        reason: "Superseded by exclusion.",
+      },
+      {
+        id: "worker-a",
+        candidateId: "pending",
+        sourceWorkerId: "worker-a",
+        reason: "Worker A candidate.",
+      },
+      {
+        id: "worker-b",
+        candidateId: "pending",
+        sourceWorkerId: "worker-b",
+        reason: "Worker B candidate.",
+      },
+    ];
+    expect(result.unconfirmedCandidateCount).toBe(3);
+    expect(
+      result.unconfirmedCandidates.map((candidate) => candidate.id),
+    ).toEqual(["old", "worker-a", "worker-b"]);
+    expect(result.toJSON()).toMatchObject({
+      unconfirmedCandidateCount: 3,
+      unconfirmedCandidates: result.unconfirmedCandidates,
+    });
+    expect(result.findings.findings).toHaveLength(1);
+    expect(result.hasFindingsAtOrAbove("high")).toBe(true);
+    expect(fakeResult([]).unconfirmedCandidateCount).toBe(0);
+  });
+
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
       const result = fakeResult(levels);

@@ -946,6 +946,19 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
+The final `UNCONFIRMED` line counts saved candidates still awaiting a decision.
+`FINDINGS` continues to count reportable findings. Unconfirmed candidates do not
+contribute to severity totals or finding-based exit thresholds. JSON results and
+the SDK expose `unconfirmedCandidateCount` and `unconfirmedCandidates`; the report
+lists their saved details and reasons for follow-up.
+
+Candidates are counted once by `candidateId` within each logical Deep worker,
+including resumed workers. Rejected and not-applicable candidates, generic
+unfinished review work, and superseded checkpoints are excluded. Different
+workers may save candidates for the same underlying issue, so this is a candidate
+count, not a count of unique vulnerabilities. Older artifacts without candidate
+identities remain available as follow-up work but are not included in this count.
+
 The token summary shows uncached input, cache reads, cache writes, output,
 and total tokens. Total tokens include all input plus output; cache reads and
 writes are subsets of input, not extra tokens. When cache-write usage is missing,

@@ -1,0 +1,126 @@
+import type { ArtifactContext } from "./artifact-context.js";
+import { readArtifactJsonl } from "./artifact-io.js";
+import type { ScanDraftInput } from "./artifact-scan-draft.js";
+import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
+
+type JsonObject = Record<string, unknown>;
+
+/** Retain unresolved diff candidates alongside the final coverage evidence. */
+export async function preserveUnconfirmedDiffCandidates(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<ScanDraftInput> {
+  if (context.mode !== "diff") return input;
+
+  const label = "diff candidate ledger";
+  let candidates;
+  try {
+    candidates = await readArtifactJsonl(
+      context,
+      ["artifacts", "02_discovery", "candidate_ledger.jsonl"],
+      label,
+      candidateSchemaV1.passthrough(),
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === `${label}: the requested artifact is unavailable.`
+    ) {
+      return input;
+    }
+    throw error;
+  }
+
+  const resolvedIds = new Set<string>();
+  for (const finding of input.findings) {
+    const provenance = object(finding.provenance);
+    const extensions = object(finding.extensions);
+    const candidateId = [
+      provenance?.candidateId,
+      extensions?.candidateId,
+      extensions?.reportId,
+      extensions?.ledgerRowId,
+    ].find((value) => typeof value === "string" && value.trim());
+    if (typeof candidateId === "string") resolvedIds.add(candidateId);
+  }
+  for (const surface of input.coverage.surfaces as JsonObject[]) {
+    if (
+      (surface.disposition === "rejected" ||
+        surface.disposition === "not_applicable") &&
+      typeof surface.candidateId === "string"
+    ) {
+      resolvedIds.add(surface.candidateId);
+    }
+  }
+
+  const pending = new Map(
+    candidates
+      .filter((candidate) => {
+        if (resolvedIds.has(candidate.candidate_id)) return false;
+        if (isUnconfirmed(candidate)) return true;
+        resolvedIds.add(candidate.candidate_id);
+        return false;
+      })
+      .map((candidate) => [candidate.candidate_id, candidate]),
+  );
+  const deferred = (input.coverage.deferred as JsonObject[])
+    .filter((item) => {
+      const candidateId = item.candidateId ?? item.id;
+      return typeof candidateId !== "string" || !resolvedIds.has(candidateId);
+    })
+    .map((item) => {
+      const candidateId = item.candidateId ?? item.id;
+      const candidate =
+        typeof candidateId === "string" ? pending.get(candidateId) : undefined;
+      if (!candidate) return item;
+      return {
+        ...item,
+        candidateId: candidate.candidate_id,
+        candidate: item.candidate ?? candidate,
+      };
+    });
+  const recordedIds = new Set(
+    deferred.map((item) => item.candidateId ?? item.id),
+  );
+  for (const candidate of pending.values()) {
+    if (recordedIds.has(candidate.candidate_id)) continue;
+    const validation = object(candidate.validation);
+    const attackPath = object(candidate.attack_path);
+    deferred.push({
+      candidateId: candidate.candidate_id,
+      candidate,
+      reason:
+        attackPath?.proof_gap ||
+        validation?.counterevidence_or_proof_gap ||
+        validation?.remaining_uncertainty ||
+        `Candidate review is incomplete: ${candidate.summary}`,
+      paths: [...new Set(candidate.locations.map((location) => location.path))],
+    });
+  }
+  return {
+    ...input,
+    coverage: {
+      ...input.coverage,
+      ...(deferred.length > 0 ? { completeness: "partial" } : {}),
+      deferred,
+    },
+  };
+}
+
+function isUnconfirmed(candidate: JsonObject): boolean {
+  const validation = object(candidate.validation)?.disposition;
+  const attackPath = object(candidate.attack_path)?.decision;
+  if (validation === "reportable" && attackPath === "reportable") return false;
+  if (validation === "deferred" || attackPath === "deferred") return true;
+  return (
+    validation !== "not_applicable" &&
+    validation !== "suppressed" &&
+    attackPath !== "ignore"
+  );
+}
+
+function object(value: unknown): JsonObject | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : undefined;
+}

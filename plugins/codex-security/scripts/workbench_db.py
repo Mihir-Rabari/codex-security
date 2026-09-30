@@ -2803,7 +2803,10 @@ def scan_result(
         else None
     )
     progress_result = {
-        "candidates": {"reportable": progress["reportable_findings_count"]},
+        "candidates": {
+            "reportable": progress["reportable_findings_count"],
+            "unconfirmed": len(scan_history.saved_unconfirmed_candidates(scan)),
+        },
         "coverage": {
             "closedRows": progress["review_items_completed"],
             "filesTotal": progress["scope_file_count"],

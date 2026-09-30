@@ -75,6 +75,92 @@ def test_projection_normalizes_multiline_and_block_structural_text() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+def test_projection_counts_saved_candidates_by_worker_and_separates_unfinished_work() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["completeness"] = "partial"
+    pending = {
+        "id": "candidate-one",
+        "candidateId": "candidate-one",
+        "sourceWorkerId": "worker-one",
+        "candidate": {"title": "Review the parser boundary"},
+        "reason": "The parser call site still needs validation.",
+    }
+    coverage["deferred"] = [
+        pending,
+        {**pending, "id": "candidate-one-copy"},
+        {**pending, "id": "candidate-one-other", "sourceWorkerId": "worker-two"},
+        {"id": "scan-stopped", "reason": "The remaining files were not reviewed."},
+    ]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Saved unconfirmed candidates | 2 |" in markdown
+    assert "## Saved Unconfirmed Candidates" in markdown
+    assert "| candidate-one | worker-one | Review the parser boundary |" in markdown
+    assert "| candidate-one | worker-two | Review the parser boundary |" in markdown
+    assert markdown.count("| candidate-one |") == 2
+    assert "The remaining files were not reviewed." in markdown
+
+
+def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["provenance"] = {
+        "candidateId": "confirmed",
+        "workerId": "worker-one",
+    }
+    coverage["completeness"] = "partial"
+    coverage["surfaces"] = [
+        {
+            "id": "rejected-surface",
+            "label": "Reviewed helper",
+            "candidateId": "rejected",
+            "sourceWorkerId": "worker-one",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        },
+        {
+            "id": "not-applicable-surface",
+            "label": "Unused helper",
+            "candidateId": "not-applicable",
+            "disposition": "not_applicable",
+            "receiptRefs": [],
+        },
+    ]
+    coverage["deferred"] = [
+        {
+            "id": f"{owner}-{candidate_id}",
+            "candidateId": candidate_id,
+            **({"sourceWorkerId": owner} if owner else {}),
+            "reason": "Validation has not finished.",
+        }
+        for owner, candidate_id in [
+            ("worker-one", "confirmed"),
+            ("worker-two", "confirmed"),
+            ("worker-one", "rejected"),
+            (None, "not-applicable"),
+        ]
+    ]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Saved unconfirmed candidates | 1 |" in markdown
+    assert "| confirmed | worker-two |" in markdown
+    assert "| confirmed | worker-one |" not in markdown
+    assert "| rejected | worker-one |" not in markdown
+
+
+def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [{"id": "legacy-item", "reason": "A saved question."}]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Saved unconfirmed candidates | 0 |" in markdown
+    assert "## Saved Unconfirmed Candidates" not in markdown
+    assert "A saved question." in markdown
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]

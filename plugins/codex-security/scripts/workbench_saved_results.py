@@ -598,9 +598,16 @@ def merge_saved_results(
             if frozen_source_digests is not None and frozen_source_digests[relative] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             source_digests[relative] = digest
-            # Recovery expects coverage, but reducer results only contain findings
-            # and context. Add an empty value after hashing the original result.
-            sources.append((relative, {"coverage": {}, **draft}, worker_id))
+            # Reducer metadata retains pending candidates independently of findings.
+            # Project it only after hashing the immutable original result.
+            projected = {"coverage": {}, **draft}
+            if relative in reducer_paths and draft.get("unconfirmedCandidates"):
+                projected["coverage"] = copy.deepcopy(projected["coverage"])
+                projected["coverage"].setdefault("deferred", []).extend(
+                    copy.deepcopy(draft["unconfirmedCandidates"])
+                )
+                projected["coverage"]["completeness"] = "partial"
+            sources.append((relative, projected, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -732,7 +739,11 @@ def merge_saved_results(
                 and valid_finding(finding)
                 and (candidate_id := finding_candidate_id(finding))
             ):
-                resolved.setdefault((owner, candidate_id), "reported")
+                provenance = finding.get("provenance", {})
+                candidate_owner = owner or provenance.get(
+                    "sourceWorkerId", provenance.get("workerId")
+                )
+                resolved.setdefault((candidate_owner, candidate_id), "reported")
         for field in ("surfaces", "explicitExclusions"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -741,7 +752,10 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                 ):
-                    resolved.setdefault((owner, item["candidateId"]), item["disposition"])
+                    resolved.setdefault(
+                        (owner or item.get("sourceWorkerId"), item["candidateId"]),
+                        item["disposition"],
+                    )
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     for draft in [parent] if parent else []:
@@ -970,6 +984,12 @@ def merge_saved_results(
                 if field == "openQuestions" and isinstance(item, str):
                     item = {"question": item.strip()}
                 if (
+                    worker_id is not None
+                    and isinstance(item, dict)
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    item = {**item, "sourceWorkerId": worker_id}
+                if (
                     field == "surfaces"
                     and isinstance(item, dict)
                     and item.get("disposition") in {"rejected", "not_applicable"}
@@ -990,7 +1010,7 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (worker_id, item.get("candidateId")) in resolved
+                    and (item.get("sourceWorkerId"), item.get("candidateId")) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
@@ -1007,6 +1027,14 @@ def merge_saved_results(
                         continue
                 if item not in output:
                     output.append(copy.deepcopy(item))
+
+    if isinstance(coverage.get("deferred"), list):
+        coverage["deferred"] = [
+            item
+            for item in coverage["deferred"]
+            if not isinstance(item, dict)
+            or (item.get("sourceWorkerId"), item.get("candidateId")) not in resolved
+        ]
 
     identities: dict[str, str] = {}
     for finding in findings:

@@ -80,6 +80,15 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
+    assert (
+        next(item for item in coverage["deferred"] if item.get("candidateId") == "pending-query")[
+            "sourceWorkerId"
+        ]
+        == worker_id
+    )
+    assert stopped["progress"]["candidates"]["unconfirmed"] == 1
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    assert history[0]["progress"]["candidates"]["unconfirmed"] == 1
     assert result_path.read_text() == "{incomplete"
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == termination
@@ -1648,7 +1657,10 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     assert recovered.get("openQuestions", []) == []
 
 
-def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pending_candidate", [False, True])
+def test_canceled_reducer_checkpoint_supersedes_discovery_result(
+    tmp_path: Path, pending_candidate: bool
+) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
@@ -1710,6 +1722,15 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     reduced = copy.deepcopy(discovery)
     reduced["findings"][0]["summary"] = "The reducer retained stronger merged evidence."
     reduced["coverage"]["surfaces"][0]["notes"] = "Reducer-validated merged evidence."
+    if pending_candidate:
+        reduced["unconfirmedCandidates"] = [
+            {
+                "candidateId": "pending-reducer",
+                "sourceWorkerId": worker_id,
+                "candidate": {"title": "Review parser bounds"},
+                "reason": "The parser route still needs validation.",
+            }
+        ]
     reducer_result.write_text(json.dumps(reduced))
     checkpoints = reducer_result.parent / "checkpoints"
     checkpoints.mkdir()
@@ -1734,6 +1755,67 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert findings[0]["summary"] == reduced["findings"][0]["summary"]
     assert coverage["surfaces"][0]["notes"] == "Reducer-validated merged evidence."
+    if pending_candidate:
+        pending = [item for item in coverage["deferred"] if item.get("candidateId")]
+        assert len(pending) == 1
+        assert pending[0]["candidateId"] == "pending-reducer"
+        assert pending[0]["sourceWorkerId"] == worker_id
+        assert "| Saved unconfirmed candidates | 1 |" in (scan_dir / "report.md").read_text()
+
+
+@pytest.mark.parametrize("resolve_first", [False, True])
+def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
+    tmp_path: Path, resolve_first: bool
+) -> None:
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    workers = [
+        accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id, name=f"worker-{index}")
+        for index in range(2)
+    ]
+    for index, (_, result_path) in enumerate(workers):
+        draft = json.loads(result_path.read_text())
+        draft["coverage"].update(
+            completeness="partial",
+            deferred=[
+                {
+                    "candidateId": "candidate-one",
+                    "reason": "The parser route still needs validation.",
+                    "candidate": {"title": "Review parser bounds"},
+                }
+            ],
+        )
+        write_checkpoint(result_path.parent / "checkpoints", draft)
+        if index == 0 and resolve_first:
+            draft["coverage"].update(
+                completeness="complete",
+                deferred=[],
+                surfaces=[
+                    {
+                        "candidateId": "candidate-one",
+                        "label": "Parser route",
+                        "disposition": "rejected",
+                        "notes": "The existing bounds check covers this route.",
+                    }
+                ],
+            )
+        result_path.write_text(json.dumps(draft))
+
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped after candidate checkpoints.",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    pending = [item for item in coverage["deferred"] if item.get("candidateId")]
+    expected_owners = {workers[1][0]} if resolve_first else {worker[0] for worker in workers}
+    assert {item["sourceWorkerId"] for item in pending} == expected_owners
+    assert stopped["progress"]["candidates"]["unconfirmed"] == len(expected_owners)
 
 
 def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:

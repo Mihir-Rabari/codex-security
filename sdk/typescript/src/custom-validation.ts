@@ -385,6 +385,8 @@ export async function runCustomValidation(options: {
       coverage.completeness = "partial";
       coverage.deferred.push({
         id: `custom-validation-${candidate.candidateId}`,
+        candidateId: candidate.candidateId,
+        candidate: candidate.finding,
         reason:
           validation.counterevidence_or_proof_gap ||
           validation.remaining_uncertainty ||

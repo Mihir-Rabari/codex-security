@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+  findingCandidateId,
   parsePersistedScanDraft,
   parseScanDraft,
   preserveFindingDetails,
@@ -14,7 +15,14 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export interface UnconfirmedCandidate extends Record<string, unknown> {
+  candidateId: string;
+  sourceWorkerId: string;
+}
+
+export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
+  unconfirmedCandidates?: UnconfirmedCandidate[];
+};
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -28,25 +36,81 @@ export interface ReducerArtifactValidation {
 
 /**
  * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
+ * Reuse its coverage validator for saved candidate state, then remove coverage.
  */
 export function parseDeepReduction(
   input: Record<string, unknown>,
   persisted = false,
 ): DeepReductionInput {
+  const { unconfirmedCandidates, ...semantic } = input;
   const standard = {
-    ...input,
+    ...semantic,
     coverage: {
-      completeness: "complete",
+      completeness: persisted && unconfirmedCandidates ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: [],
+      deferred: persisted ? (unconfirmedCandidates ?? []) : [],
     },
   };
-  const { coverage: _coverage, ...parsed } = persisted
+  const { coverage, ...parsed } = persisted
     ? parsePersistedScanDraft(standard)
     : parseScanDraft(standard as unknown as ScanDraftInput);
-  return parsed;
+  return {
+    ...parsed,
+    ...((coverage.deferred as unknown[]).length > 0
+      ? { unconfirmedCandidates: coverage.deferred as UnconfirmedCandidate[] }
+      : {}),
+  };
+}
+
+/** Retain candidate state without importing worker-local coverage observations. */
+export function discoveryReductionInput(
+  input: ScanDraftInput,
+  workerId: string,
+): DeepReductionInput {
+  const { coverage, ...result } = input;
+  const resolved = new Set([
+    ...result.findings.map(findingCandidateId),
+    ...[
+      ...(coverage.surfaces as Record<string, unknown>[]),
+      ...(coverage.explicitExclusions as Record<string, unknown>[]),
+    ]
+      .filter((item) =>
+        ["reported", "rejected", "not_applicable"].includes(
+          item.disposition as string,
+        ),
+      )
+      .map((item) => item.candidateId),
+  ]);
+  const unconfirmedCandidates = (coverage.deferred as Record<string, unknown>[])
+    .filter(
+      (item) =>
+        typeof item.candidateId === "string" && !resolved.has(item.candidateId),
+    )
+    .map((item) => ({
+      ...structuredClone(item),
+      candidateId: item.candidateId as string,
+      sourceWorkerId: workerId,
+    }));
+  return {
+    ...result,
+    ...(unconfirmedCandidates.length > 0 ? { unconfirmedCandidates } : {}),
+  };
+}
+
+export function deepReductionScanDraft(
+  input: DeepReductionInput,
+): ScanDraftInput {
+  const { unconfirmedCandidates = [], ...result } = structuredClone(input);
+  return {
+    ...result,
+    coverage: {
+      completeness: unconfirmedCandidates.length > 0 ? "partial" : "complete",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: unconfirmedCandidates,
+    },
+  };
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -159,6 +223,23 @@ export function reconcileDeepReduction(
         "Deep reduction source is only a checkpoint, not a complete result.",
       );
   }
+  const currentWorkers = new Set(discoveries.map((source) => source.workerId));
+  const pending = new Map<string, UnconfirmedCandidate>();
+  for (const candidate of [
+    ...(previous?.unconfirmedCandidates ?? []).filter(
+      (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
+    ),
+    ...discoveries.flatMap(
+      (source) => source.result.unconfirmedCandidates ?? [],
+    ),
+  ]) {
+    pending.set(
+      JSON.stringify([candidate.sourceWorkerId, candidate.candidateId]),
+      structuredClone(candidate),
+    );
+  }
+  delete result.unconfirmedCandidates;
+  if (pending.size > 0) result.unconfirmedCandidates = [...pending.values()];
   validateRetainedFindings(
     result,
     discoveries.map((discovery) => discovery.result),

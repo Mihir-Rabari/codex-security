@@ -925,7 +925,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
         "filesTotal": 0,
         "worklistRows": 31,
     }
-    assert updated["scan"]["progress"]["candidates"] == {"reportable": 1}
+    assert updated["scan"]["progress"]["candidates"] == {"reportable": 1, "unconfirmed": 0}
 
     write_completed_contract(scan_dir, scan_id, target)
     completed = run_workbench(

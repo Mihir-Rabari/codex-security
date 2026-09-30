@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  DeferredCoverage,
   Finding,
   FindingsDocument,
   ScanManifest,
@@ -112,6 +113,53 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
+  /** Saved candidates still awaiting a decision, distinct within each logical worker. */
+  public get unconfirmedCandidates(): readonly DeferredCoverage[] {
+    const identity = (candidateId: string, sourceWorkerId: unknown): string =>
+      JSON.stringify([sourceWorkerId ?? null, candidateId]);
+    const resolved = new Set<string>();
+    for (const finding of this.findings.findings) {
+      const candidateId =
+        finding.provenance["candidateId"] ?? finding.extensions?.candidateId;
+      if (typeof candidateId === "string") {
+        resolved.add(
+          identity(
+            candidateId,
+            finding.provenance["sourceWorkerId"] ??
+              finding.provenance["workerId"] ??
+              finding.extensions?.["sourceWorkerId"],
+          ),
+        );
+      }
+    }
+    for (const surface of [
+      ...this.coverage.surfaces,
+      ...this.coverage.explicitExclusions,
+    ]) {
+      if (
+        typeof surface["candidateId"] === "string" &&
+        (surface["disposition"] === "reported" ||
+          surface["disposition"] === "rejected" ||
+          surface["disposition"] === "not_applicable")
+      ) {
+        resolved.add(
+          identity(surface["candidateId"], surface["sourceWorkerId"]),
+        );
+      }
+    }
+    const pending = new Map<string, DeferredCoverage>();
+    for (const candidate of this.coverage.deferred) {
+      if (candidate.candidateId === undefined) continue;
+      const key = identity(candidate.candidateId, candidate.sourceWorkerId);
+      if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
+    }
+    return [...pending.values()];
+  }
+
+  public get unconfirmedCandidateCount(): number {
+    return this.unconfirmedCandidates.length;
+  }
+
   public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
     severityThresholdRank(threshold);
     return this.findings.findings.some((finding) =>
@@ -125,6 +173,8 @@ export class ScanResult {
       repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
+      unconfirmedCandidateCount: this.unconfirmedCandidateCount,
+      unconfirmedCandidates: this.unconfirmedCandidates,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

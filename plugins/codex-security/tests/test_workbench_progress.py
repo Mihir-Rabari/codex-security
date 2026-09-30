@@ -22,7 +22,7 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
         "--reportable-findings-count",
         "8",
     )
-    assert discovery["scan"]["progress"]["candidates"] == {"reportable": 8}
+    assert discovery["scan"]["progress"]["candidates"] == {"reportable": 8, "unconfirmed": 0}
 
     validation = run_workbench(
         state_dir,
@@ -32,7 +32,7 @@ def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:
         "--phase",
         "validation",
     )
-    assert validation["scan"]["progress"]["candidates"] == {"reportable": 0}
+    assert validation["scan"]["progress"]["candidates"] == {"reportable": 0, "unconfirmed": 0}
 
 
 def test_phase_progress_tracks_and_resets_phase_specific_receipts(tmp_path: Path) -> None:
