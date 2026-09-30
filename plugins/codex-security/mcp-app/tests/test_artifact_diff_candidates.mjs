@@ -343,6 +343,142 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
   });
 }
 
+for (const remaining of [
+  "none",
+  "shared checkpoint",
+  "shared current",
+  "shared direct candidate",
+  "generic gap",
+  "current follow-up",
+]) {
+  test(`ledger resolution clears linked historical follow-ups with ${remaining} remaining`, async (t) => {
+    const pending = candidate("linked-review");
+    const other = candidate("other-review");
+    const context = await fixture(t, [
+      pending,
+      ...(remaining === "shared direct candidate" ? [other] : []),
+    ]);
+    const linkedSurface = {
+      id: "shared-boundary",
+      ...(remaining === "shared direct candidate"
+        ? { candidateId: other.candidate_id }
+        : {}),
+      label: "Synthetic review boundary",
+      disposition: "needs_follow_up",
+      notes: "The linked candidate needs validation.",
+    };
+    const checkpoint = {
+      ...draft([
+        {
+          candidateId: pending.candidate_id,
+          reason: "Validate the linked candidate.",
+          surfaceIds: [linkedSurface.id],
+        },
+      ]),
+      complete: false,
+    };
+    checkpoint.coverage.completeness = "partial";
+    checkpoint.coverage.surfaces.push(linkedSurface);
+    if (remaining === "shared direct candidate") {
+      checkpoint.coverage.deferred.push({
+        candidateId: other.candidate_id,
+        reason: "The directly linked candidate still needs validation.",
+      });
+    }
+    if (remaining === "generic gap") {
+      checkpoint.coverage.deferred.push({
+        reason: "An unrelated source review remains unfinished.",
+        surfaceIds: ["generic-boundary"],
+      });
+      checkpoint.coverage.surfaces.push({
+        id: "generic-boundary",
+        label: "Unrelated source review",
+        disposition: "needs_follow_up",
+      });
+    }
+    await recordCodexSecurityScanDraft(context, checkpoint);
+    const ledger = path.join(
+      context.root,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    const otherDeferred = {
+      candidateId: other.candidate_id,
+      reason: "A second candidate still needs validation.",
+      surfaceIds: [linkedSurface.id],
+    };
+    if (remaining === "shared checkpoint") {
+      await writeFile(
+        ledger,
+        [pending, other].map((row) => JSON.stringify(row)).join("\n"),
+      );
+      const sharedCheckpoint = { ...draft([otherDeferred]), complete: false };
+      sharedCheckpoint.coverage.completeness = "partial";
+      await recordCodexSecurityScanDraft(context, sharedCheckpoint);
+    }
+    const shared = remaining.startsWith("shared");
+    await writeFile(
+      ledger,
+      [
+        { ...pending, validation: { disposition: "suppressed" } },
+        ...(shared ? [other] : []),
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+    const finalDraft = {
+      ...draft(remaining === "shared current" ? [otherDeferred] : []),
+      complete: true,
+    };
+    if (remaining === "shared current" || remaining === "current follow-up")
+      finalDraft.coverage.completeness = "partial";
+    if (remaining === "current follow-up") {
+      finalDraft.coverage.surfaces.push({
+        ...linkedSurface,
+        notes: "The current draft explicitly retains additional review work.",
+      });
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, finalDraft);
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "coverage.json"), "utf8"),
+      );
+      assert.equal(
+        saved.completeness,
+        remaining === "none" ? "complete" : "partial",
+      );
+      assert.equal(
+        saved.deferred.some(
+          (item) => item.candidateId === pending.candidate_id,
+        ),
+        false,
+      );
+      assert.deepEqual(
+        saved.surfaces.map((surface) => surface.id),
+        remaining === "generic gap"
+          ? ["generic-boundary"]
+          : shared || remaining === "current follow-up"
+            ? [linkedSurface.id]
+            : [],
+      );
+      if (shared) {
+        assert.deepEqual(
+          saved.deferred.map((item) => item.candidateId),
+          [other.candidate_id],
+        );
+      }
+      if (remaining === "generic gap") assert.equal(saved.deferred.length, 1);
+      if (remaining === "current follow-up") {
+        assert.equal(
+          saved.surfaces[0].notes,
+          finalDraft.coverage.surfaces[0].notes,
+        );
+      }
+    }
+  });
+}
+
 for (const disposition of ["rejected", "not_applicable"]) {
   test(`explicit ${disposition} exclusions resolve diff candidates through later drafts`, async (t) => {
     const pending = candidate("excluded-review");
