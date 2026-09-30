@@ -322,3 +322,103 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
     assert any("Skipped malformed coverage surface" in warning for warning in stopped["warnings"])
     assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("source", ["parent", "checkpoint"])
+@pytest.mark.parametrize(
+    "scenario", ["shared", "direct-only", "all-resolved", "linked-only", "other-owner"]
+)
+def test_stopped_diff_preserves_shared_follow_up_evidence(
+    tmp_path: Path, termination: str, source: str, scenario: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    first = json.loads(ledger.read_text())
+    second = {**first, "candidate_id": "candidate-pending", "summary": "Second synthetic review."}
+    receipt_path = scan_dir / "artifacts/shared-evidence.txt"
+    receipt_path.write_text("Synthetic shared route evidence.\n")
+    shared = {
+        "id": "shared-follow-up",
+        "candidateId": first["candidate_id"],
+        "label": "Shared synthetic route",
+        "disposition": "needs_follow_up",
+        "notes": "Both candidates depend on this saved route evidence.",
+        "receiptRefs": ["artifacts/shared-evidence.txt"],
+    }
+    if scenario == "linked-only":
+        shared.pop("candidateId")
+    elif scenario == "other-owner":
+        shared["sourceWorkerId"] = "different-worker"
+    deferred = [
+        {
+            "id": candidate["candidate_id"],
+            "candidateId": candidate["candidate_id"],
+            "candidate": candidate,
+            "reason": "Synthetic validation remains unfinished.",
+            "surfaceIds": [shared["id"]],
+        }
+        for candidate in (first, second)
+    ]
+    if scenario in {"direct-only", "other-owner"}:
+        deferred[1]["surfaceIds"] = []
+    checkpoint["coverage"].update(surfaces=[shared], deferred=deferred)
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": []},
+                "coverage": {**checkpoint["coverage"], "inventoryStrategy": "diff"},
+            }
+        )
+    )
+    run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    checkpoint_path = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    if source == "checkpoint":
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan_dir / name).unlink()
+    first["validation"] = {"disposition": "suppressed"}
+    second["validation"] = {
+        "disposition": "suppressed" if scenario == "all-resolved" else "deferred"
+    }
+    ledger.write_text("\n".join(json.dumps(candidate) for candidate in (first, second)) + "\n")
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_retained() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unconfirmed"] == int(scenario != "all-resolved")
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        pending = [row for row in coverage["deferred"] if row.get("candidateId")]
+        assert [row["candidateId"] for row in pending] == (
+            [] if scenario == "all-resolved" else [second["candidate_id"]]
+        )
+        retained = [row for row in coverage["surfaces"] if row["id"] == shared["id"]]
+        if scenario in {"shared", "linked-only", "other-owner"}:
+            assert retained == [shared]
+        else:
+            assert retained == []
+        assert checkpoint_path.read_bytes() == checkpoint_bytes
+        assert receipt_path.read_text() == "Synthetic shared route evidence.\n"
+
+    assert_retained()
+    first.pop("validation")
+    second["validation"] = {"disposition": "suppressed"}
+    ledger.write_text("\n".join(json.dumps(candidate) for candidate in (first, second)) + "\n")
+    if termination == "fail-scan":
+        # Admit new saved work to force replay of the original frozen decision and
+        # surface checkpoints after the live ledger has changed.
+        late = copy.deepcopy(checkpoint)
+        late["coverage"].update(
+            surfaces=[], deferred=[{"id": "late-review", "reason": "Additional saved work."}]
+        )
+        write_checkpoint(scan_dir / "checkpoints", late)
+        run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+        assert any(
+            row.get("id") == "late-review"
+            for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+        )
+    else:
+        run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_retained()

@@ -1193,7 +1193,14 @@ def merge_saved_results(
                         or isinstance(item.get("sourceWorkerId"), str)
                     )
                     and (item.get("sourceWorkerId"), item.get("candidateId")) in pending_resolved
-                    and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+                    and (
+                        field == "deferred"
+                        or (
+                            item.get("disposition") == "needs_follow_up"
+                            and (item.get("sourceWorkerId"), item.get("candidateId"))
+                            not in diff_resolved
+                        )
+                    )
                 ):
                     continue
                 if isinstance(item, dict) and "id" not in item:
@@ -1223,6 +1230,17 @@ def merge_saved_results(
         ]
 
     if diff_resolved and isinstance(coverage.get("surfaces"), list):
+        # Shared evidence still belongs to any surviving deferred reference.
+        deferred = coverage.get("deferred", [])
+        pending_surface_ids = {
+            surface_id
+            for item in (deferred if isinstance(deferred, list) else [])
+            if isinstance(item, dict)
+            for surface_ids in [item.get("surfaceIds", [])]
+            if isinstance(surface_ids, list)
+            for surface_id in surface_ids
+            if isinstance(surface_id, str)
+        }
         coverage["surfaces"] = [
             item
             for item in coverage["surfaces"]
@@ -1233,6 +1251,7 @@ def merge_saved_results(
                 and not isinstance(item.get("sourceWorkerId"), str)
             )
             or (item.get("sourceWorkerId"), item.get("candidateId")) not in diff_resolved
+            or (isinstance(item.get("id"), str) and item["id"] in pending_surface_ids)
         ]
 
     identities: dict[str, str] = {}
