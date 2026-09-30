@@ -13,7 +13,7 @@ Implementation and isolated PR checks completed on Linux on September 30, 2026:
 
 | Check                          | Observed result                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 142 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
+| Focused SDK regressions        | 150 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
 | Actual OSV-Scanner v2.6.0      | 43 offline synthetic contract cases passed under Node 24; 42 under Bun 1.3.14.                                     |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
@@ -38,7 +38,10 @@ properties, and sandboxed shell tools need the native executable directory as a
 read-only runtime root. The canonical triage parser remains compatible with its
 existing v0 contract. A further QA regression ensures the saved run remains
 partial while assessments are pending; completed assessments cannot promote
-incomplete matching coverage to a completed run.
+incomplete matching coverage to a completed run. Static assessments compare the
+existing source snapshots before inventory and after model output; changed or
+unavailable source context retains scanner facts without accepting a completed
+assessment.
 
 Actual OSV failure cases included exit 127 with retained inventory for a missing
 local database and exit 130 with retained matches for invalid configuration.

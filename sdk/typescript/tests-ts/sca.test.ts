@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   CodexOptions,
@@ -14,7 +15,11 @@ import {
 } from "../src/index.js";
 import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
-import { resolveCodexCommand } from "../src/runtime.js";
+import {
+  resolveCodexCommand,
+  resolvePluginPython,
+  type WorkbenchCommandOptions,
+} from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import {
   createApiTestFixtures,
@@ -142,6 +147,11 @@ async function fixture(
     controller?: AbortController;
     abortAt?: "scanner" | "model";
     model?: string;
+    dirtyRepository?: boolean;
+    changeSourceAt?: "scanner" | "model";
+    changeRevision?: boolean;
+    snapshotErrorAt?: 1 | 2;
+    workbenchSnapshot?: boolean;
   } = {},
 ) {
   const root = await temporaryDirectory();
@@ -152,16 +162,39 @@ async function fixture(
     mkdir(repository, { mode: 0o700 }),
     mkdir(codexHome, { mode: 0o700 }),
   ]);
+  if (options.dirtyRepository)
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+  const sourcePath = join(repository, "usage.txt");
+  await writeFile(sourcePath, "synthetic initial source context");
+  let snapshotCalls = 0;
+  let revision = "synthetic-revision";
+  const changeSource = async () => {
+    if (options.changeRevision) revision = "synthetic-next-revision";
+    else await writeFile(sourcePath, "synthetic changed source context");
+  };
   const calls = { runtime: 0, model: 0, scanner: 0 };
   const captured: {
     codex?: CodexOptions;
     thread?: ThreadOptions;
     prompt?: string;
   } = {};
+  const sourceCalls: WorkbenchCommandOptions[] = [];
+  const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
   const environment = {
     PATH: process.env["PATH"] ?? "",
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
     OPENAI_API_KEY: "synthetic-sca-key",
+  };
+  const sourceSnapshot = async (path: string) => {
+    expect(path).toBe(repository);
+    if (++snapshotCalls === options.snapshotErrorAt)
+      throw new Error("synthetic source snapshot unavailable");
+    return {
+      repository,
+      revision,
+      refsDigest: "synthetic-refs",
+      content: await readFile(sourcePath, "utf8"),
+    };
   };
   const client = new TestClient(
     {
@@ -172,10 +205,26 @@ async function fixture(
     },
     {
       environment,
-      repositoryRevision: async () => "synthetic-revision",
+      repositoryRevision: async () => revision,
+      ...(options.workbenchSnapshot
+        ? {
+            runWorkbench: async (
+              workbenchOptions: WorkbenchCommandOptions,
+              args: readonly string[],
+              input?: string,
+            ) => {
+              expect(args).toEqual(["finding-workflow"]);
+              const request = JSON.parse(input!);
+              expect(request.action).toBe("source");
+              sourceCalls.push(workbenchOptions);
+              return { source: await sourceSnapshot(request.repository) };
+            },
+          }
+        : { sourceSnapshot }),
       runOsvScan: async (input) => {
         calls.scanner++;
         expect(input.environment).toEqual(environment);
+        if (options.changeSourceAt === "scanner") await changeSource();
         if (options.abortAt === "scanner")
           options.controller!.abort("cancel after scanner");
         const result = scanner(input.outputDir, options.matched ?? true);
@@ -200,7 +249,11 @@ async function fixture(
           throw new Error("synthetic authentication unavailable");
         return { ...preparedRuntime(codexHome), environment };
       },
-      resolvePluginPython: async () => "/managed/python",
+      resolvePluginPython: async (input) => {
+        if (!options.workbenchSnapshot) return "/managed/python";
+        pythonResolutions.push(input);
+        return await resolvePluginPython(input);
+      },
       createCodex: (codex) => {
         captured.codex = codex;
         calls.model++;
@@ -219,6 +272,8 @@ async function fixture(
                       throw new Error("interrupted");
                     }
                     if (options.error) throw new Error(options.error);
+                    if (options.changeSourceAt === "model")
+                      await changeSource();
                     yield {
                       type: "item.completed",
                       item: {
@@ -255,7 +310,16 @@ async function fixture(
       },
     },
   );
-  return { client, repository, outputDir, calls, captured };
+  return {
+    client,
+    repository,
+    outputDir,
+    calls,
+    captured,
+    sourceCalls,
+    pythonResolutions,
+    environment,
+  };
 }
 
 test("dependency scan saves scanner facts before auth, assesses inline, and produces schema-valid artifacts", async () => {
@@ -468,4 +532,125 @@ test("SCA preserves output-path protections and argument validation", async () =
     security.scanDependencies({ repositoryPath: repository, maxCostUsd: -1 }),
   ).rejects.toThrow("positive USD");
   expect(calls.scanner).toBe(0);
+});
+
+test("stable initially dirty source can complete dependency assessment", async () => {
+  const { client, repository, outputDir } = await fixture({
+    dirtyRepository: true,
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+  });
+  expect(result.repository.dirty).toBe(true);
+  expect(result.status).toBe("completed");
+  expect(result.assessments[0]!.status).toBe("completed");
+});
+
+test.each([
+  { changeSourceAt: "scanner" as const, changeRevision: false },
+  { changeSourceAt: "model" as const, changeRevision: false },
+  { changeSourceAt: "model" as const, changeRevision: true },
+])(
+  "source drift at $changeSourceAt (revision: $changeRevision) rejects stale assessments and retains OSV facts",
+  async (change) => {
+    const { client, repository, outputDir } = await fixture({
+      ...change,
+      dirtyRepository: true,
+    });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    expect(result.repository.dirty).toBe(true);
+    expect(result.repository.revision).toBe("synthetic-revision");
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("complete");
+    expect(result.matches).toHaveLength(1);
+    expect(result.assessments[0]).toMatchObject({
+      status: "failed",
+      verdict: null,
+    });
+    expect(result.diagnostics.join("\n")).toContain("Source changed");
+    expect(
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
+  },
+);
+
+test.each([1, 2] as const)(
+  "source snapshot failure at capture %i preserves OSV evidence without accepting an assessment",
+  async (snapshotErrorAt) => {
+    const { client, repository, outputDir, calls } = await fixture({
+      snapshotErrorAt,
+    });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.matches).toHaveLength(1);
+    expect(result.assessments[0]).toMatchObject({
+      status: "failed",
+      verdict: null,
+    });
+    expect(result.diagnostics.join("\n")).toContain(
+      "synthetic source snapshot unavailable",
+    );
+    expect(calls.runtime).toBe(snapshotErrorAt === 1 ? 0 : 1);
+    expect(calls.model).toBe(snapshotErrorAt === 1 ? 0 : 1);
+    expect(
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
+  },
+);
+
+test("zero-match inventory completes even when a source snapshot is unavailable", async () => {
+  const { client, repository, outputDir, calls } = await fixture({
+    matched: false,
+    snapshotErrorAt: 1,
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.assessments).toEqual([]);
+  expect(calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
+});
+
+test("dependency source snapshots preserve per-scan process environment, protected root, and cancellation", async () => {
+  const controller = new AbortController();
+  const {
+    client,
+    repository,
+    outputDir,
+    sourceCalls,
+    pythonResolutions,
+    environment,
+  } = await fixture({ workbenchSnapshot: true });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+    signal: controller.signal,
+  });
+  expect(result.status).toBe("completed");
+  expect(sourceCalls).toHaveLength(2);
+  expect(pythonResolutions[0]).toMatchObject({
+    environment,
+    protectedRoot: repository,
+  });
+  for (const call of sourceCalls) {
+    expect(call.environment).toEqual(environment);
+    expect(call.signal).toBe(pythonResolutions[0]!.signal);
+    expect(call.signal!.aborted).toBe(false);
+  }
+  controller.abort("synthetic cancellation");
+  expect(sourceCalls[0]!.signal!.aborted).toBe(true);
+  expect(sourceCalls[1]!.signal!.aborted).toBe(true);
 });

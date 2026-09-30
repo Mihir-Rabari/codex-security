@@ -478,6 +478,7 @@ interface ClientDependencies {
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
   runOsvScan?: typeof runOsvScan;
+  sourceSnapshot?: FindingWorkflow["sourceSnapshot"];
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -688,6 +689,39 @@ export class CodexSecurity {
         outputRoot,
         (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
       );
+      let sourceWorkflow: FindingWorkflow | undefined;
+      const snapshotSource = async (): Promise<JsonObject> => {
+        if (this.#dependencies.sourceSnapshot !== undefined)
+          return await this.#dependencies.sourceSnapshot(inputs.repository);
+        if (sourceWorkflow === undefined) {
+          const python = await (
+            this.#dependencies.resolvePluginPython ?? resolvePluginPython
+          )({
+            configuredPath: this.config.pythonPath,
+            environment: this.#dependencies.environment,
+            protectedRoot: inputs.protectedRoot,
+            signal,
+          });
+          sourceWorkflow = new FindingWorkflow(
+            "dependency-triage",
+            this.#dependencies.environment,
+            (options, args, input) =>
+              (this.#dependencies.runWorkbench ?? runWorkbench)(
+                { ...options, signal },
+                args,
+                input,
+              ),
+            python,
+          );
+        }
+        return await sourceWorkflow.sourceSnapshot(inputs.repository);
+      };
+      // Bind triage to the source before inventory, including dirty and ignored files.
+      // A snapshot failure must not discard deterministic scanner evidence.
+      const source = await snapshotSource().then(
+        (snapshot) => ({ digest: workflowDigest(snapshot) }),
+        (error: unknown) => ({ error }),
+      );
       const repository = {
         path: inputs.repository,
         revision: await (
@@ -723,6 +757,7 @@ export class CodexSecurity {
       if (result.matches.length === 0) return result;
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
+        if ("error" in source) throw source.error;
         const session = await this.#prepareSession(
           inputs,
           options,
@@ -819,7 +854,13 @@ export class CodexSecurity {
           throwIfAborted(signal, outputDir);
           if (turn.status !== "completed")
             throw new CodexSecurityError("Dependency triage did not complete.");
-          result.assessments = contract.parse(turn.finalResponse, result);
+          const assessments = contract.parse(turn.finalResponse, result);
+          if (workflowDigest(await snapshotSource()) !== source.digest)
+            throw new CodexSecurityError(
+              "Source changed during dependency assessment; rerun the dependency scan.",
+            );
+          throwIfAborted(signal, outputDir);
+          result.assessments = assessments;
           if (
             result.coverage.status === "complete" &&
             result.assessments.every((item) => item.status === "completed")
