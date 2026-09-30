@@ -30,6 +30,19 @@ const { recordCodexSecurityScanDraft } = await import(
   `data:text/javascript;base64,${Buffer.from(draftBundle.outputFiles[0].contents).toString("base64")}`
 );
 
+const validationBundle = await build({
+  bundle: true,
+  entryPoints: [
+    new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+  ],
+  format: "esm",
+  platform: "node",
+  write: false,
+});
+const { recordCodexSecurityCandidateValidations } = await import(
+  `data:text/javascript;base64,${Buffer.from(validationBundle.outputFiles[0].contents).toString("base64")}`
+);
+
 function candidate(candidateId, validation, attackPath) {
   return {
     candidate_id: candidateId,
@@ -517,5 +530,43 @@ for (const authored of [false, true]) {
       if (authored)
         assert.equal(item.notes, checkpoint.coverage.deferred[0].notes);
     }
+  });
+}
+
+for (const uncertainty of ["  A runtime check is still required.\n", " \t "]) {
+  test(`blank phase reasons preserve readable diff checkpoints: ${uncertainty.trim() ? "recorded uncertainty" : "fallback"}`, async (t) => {
+    const pending = candidate("blank-reason");
+    const context = await fixture(t, [pending]);
+    const validation = {
+      disposition: "deferred",
+      method: "source review",
+      confidence: "low",
+      confidence_rationale: "The runtime behavior remains unverified.",
+      rubric: "Source review",
+      evidence: "Synthetic source evidence.",
+      counterevidence_or_proof_gap: " \t\n ",
+      remaining_uncertainty: uncertainty,
+    };
+    const accepted = await recordCodexSecurityCandidateValidations(context, {
+      validations: [{ candidateId: pending.candidate_id, validation }],
+    });
+    assert.equal(accepted.rowsWritten, 1);
+
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: false,
+    });
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+
+    const saved = JSON.parse(
+      await readFile(path.join(context.root, "coverage.json"), "utf8"),
+    );
+    const expectedReason = uncertainty.trim()
+      ? uncertainty
+      : `Candidate review is incomplete: ${pending.summary}`;
+    assert.equal(saved.completeness, "partial");
+    assert.equal(saved.deferred[0].reason, expectedReason);
+    assert.equal(saved.surfaces[0].notes, expectedReason);
+    assert.deepEqual(saved.deferred[0].candidate.validation, validation);
   });
 }

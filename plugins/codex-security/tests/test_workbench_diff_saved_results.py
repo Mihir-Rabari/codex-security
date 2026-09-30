@@ -284,3 +284,41 @@ def test_stopped_diff_without_saved_candidates_does_not_consult_ledger(tmp_path:
         json.loads(path.read_text())["coverage"].get("stoppedDiffCandidateDecisions")
         for path in (scan_dir / "checkpoints").glob("*.json")
     )
+
+
+@pytest.mark.parametrize("metadata", [["worker-one"], {"worker": "worker-one"}])
+def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
+    tmp_path: Path, metadata: object
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    imported_surface = {
+        "id": "imported-follow-up",
+        "candidateId": "imported-candidate",
+        "sourceWorkerId": metadata,
+        "label": "Imported synthetic coverage",
+        "disposition": "needs_follow_up",
+        "notes": "Retain the imported ownership metadata.",
+        "receiptRefs": [],
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"].append(imported_surface)
+    coverage_path.write_text(json.dumps(coverage))
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+
+    run_workbench(
+        state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped after review."
+    )
+
+    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert stopped["progress"]["candidates"]["unconfirmed"] == 0
+    sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
+    assert any(
+        imported_surface in json.loads((scan_dir / path).read_text())["coverage"]["surfaces"]
+        for path in sources
+    )
+    assert any("Skipped malformed coverage surface" in warning for warning in stopped["warnings"])
+    assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
+    assert (scan_dir / "report.md").is_file()

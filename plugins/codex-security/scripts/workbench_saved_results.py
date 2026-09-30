@@ -1228,6 +1228,10 @@ def merge_saved_results(
             for item in coverage["surfaces"]
             if not isinstance(item, dict)
             or item.get("disposition") != "needs_follow_up"
+            or (
+                item.get("sourceWorkerId") is not None
+                and not isinstance(item.get("sourceWorkerId"), str)
+            )
             or (item.get("sourceWorkerId"), item.get("candidateId")) not in diff_resolved
         ]
 

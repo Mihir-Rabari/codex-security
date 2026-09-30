@@ -156,7 +156,7 @@ function isUnconfirmed(candidate: JsonObject): boolean {
   );
 }
 
-function candidateReason(candidate: JsonObject): unknown {
+function candidateReason(candidate: JsonObject): string {
   const validation = object(candidate.validation);
   const attackPath = object(candidate.attack_path);
   if (
@@ -166,10 +166,14 @@ function candidateReason(candidate: JsonObject): unknown {
     return `A reportable candidate has no saved finding: ${candidate.summary}`;
   }
   return (
-    attackPath?.proof_gap ||
-    validation?.counterevidence_or_proof_gap ||
-    validation?.remaining_uncertainty ||
-    `Candidate review is incomplete: ${candidate.summary}`
+    [
+      attackPath?.proof_gap,
+      validation?.counterevidence_or_proof_gap,
+      validation?.remaining_uncertainty,
+    ].find(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    ) ?? `Candidate review is incomplete: ${candidate.summary}`
   );
 }
 
