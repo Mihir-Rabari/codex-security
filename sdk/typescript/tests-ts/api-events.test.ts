@@ -1366,7 +1366,7 @@ describe("Deep worker terminal lifecycle", () => {
         ? codex.resumeThread!("thread-1", {})
         : codex.startThread({});
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5_000);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let pid: number | undefined;
       let exited = false;
       try {
@@ -1374,11 +1374,22 @@ describe("Deep worker terminal lifecycle", () => {
           "Synthetic process fixture; no model.",
           { signal: controller.signal },
         );
-        await expect(readCodexTurn({ thread, events })).resolves.toMatchObject({
+        await expect(
+          readCodexTurn({
+            thread,
+            events,
+            onEvent: (event) => {
+              // Bound terminal cleanup, not lazy process and overlay startup.
+              if (event.type === "turn.completed")
+                timer = setTimeout(() => controller.abort(), 5_000);
+            },
+          }),
+        ).resolves.toMatchObject({
           threadId: "thread-1",
           status: "completed",
           finalResponse: "scan complete",
         });
+        clearTimeout(timer);
         expect(controller.signal.aborted).toBe(false);
         pid = Number(await readFile(pidPath, "utf8"));
         const deadline = Date.now() + 5_000;
