@@ -425,6 +425,7 @@ describe("CodexSecurity finding validation", () => {
   async function validationClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       validationEvents(),
+    pluginRoot = PLUGIN_ROOT,
   ) {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -436,13 +437,19 @@ describe("CodexSecurity finding validation", () => {
       thread?: ThreadOptions;
       prompt?: string;
     } = {};
-    const workbench = mock(async () => ({}));
+    const workbench = mock(
+      async (_options: WorkbenchCommandOptions, _args: readonly string[]) => ({
+        scan: { targetPath: repository },
+      }),
+    );
     const environment = {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       OPENAI_API_KEY: "synthetic-validation-key",
     };
     const client = new TestClient(
       {
+        pluginPath: pluginRoot,
+        pythonPath: "/managed/python",
         codexOverrides: {
           model: "test-model",
           model_reasoning_effort: "high",
@@ -452,11 +459,15 @@ describe("CodexSecurity finding validation", () => {
       },
       {
         environment,
-        prepareRuntime: async () => ({
-          ...preparedRuntime(codexHome),
-          environment,
-        }),
-        resolvePluginPython: async () => "/managed/python",
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          return {
+            ...runtime,
+            plugin: { ...runtime.plugin, pluginRoot },
+            environment,
+          };
+        },
+        resolvePluginPython: async ({ configuredPath } = {}) => configuredPath!,
         runWorkbench: workbench,
         createCodex: (options) => {
           captured.codex = options;
@@ -511,6 +522,7 @@ describe("CodexSecurity finding validation", () => {
         ...options,
         finding,
         auth: "api-key",
+        safetyIdentifier: "synthetic-validation-user",
       });
       expect(result).toEqual({
         ...assessment,
@@ -540,9 +552,80 @@ describe("CodexSecurity finding validation", () => {
       });
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
+      expect(captured.codex?.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+        "synthetic-validation-user",
+      );
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
         options.repositoryPath,
       );
+    },
+  );
+
+  test("checks recorded targets through the selected validation runtime before and after the model", async () => {
+    const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
+    const {
+      client: security,
+      options,
+      workbench,
+      captured,
+      stateDirectory,
+    } = await validationClient(undefined, pluginRoot);
+    await using client = security;
+    const controller = new AbortController();
+    await client.validate({
+      ...options,
+      scanId: "recorded-scan",
+      signal: controller.signal,
+    });
+    expect(workbench).toHaveBeenCalledTimes(2);
+    for (const [runtime, args] of workbench.mock.calls) {
+      expect(runtime).toMatchObject({
+        python: "/managed/python",
+        pluginRoot,
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+      });
+      expect(runtime.signal?.aborted).toBe(false);
+      expect(args).toEqual([
+        "get-scan",
+        "--scan-id",
+        "recorded-scan",
+        "--check-target",
+      ]);
+    }
+    expect(captured.prompt).toContain(
+      JSON.stringify(join(pluginRoot, "skills", "validation", "SKILL.md")),
+    );
+  });
+
+  test.each(["before", "after", "different repository"])(
+    "rejects a recorded target mismatch %s validation",
+    async (phase) => {
+      const {
+        client: security,
+        options,
+        workbench,
+        captured,
+      } = await validationClient();
+      await using client = security;
+      let checks = 0;
+      workbench.mockImplementation(async () => {
+        checks += 1;
+        if (phase === "before" || (phase === "after" && checks === 2)) {
+          throw new Error("The recorded scan target changed.");
+        }
+        return {
+          scan: {
+            targetPath:
+              phase === "different repository"
+                ? join(options.repositoryPath, "other")
+                : options.repositoryPath,
+          },
+        };
+      });
+      await expect(
+        client.validate({ ...options, scanId: "recorded-scan" }),
+      ).rejects.toThrow(/scan target/);
+      expect(captured.prompt !== undefined).toBe(phase === "after");
     },
   );
 
@@ -551,6 +634,7 @@ describe("CodexSecurity finding validation", () => {
       client: security,
       options,
       stateDirectory,
+      captured,
     } = await validationClient(() =>
       validationEvents(
         JSON.stringify({ ...assessment, disposition: "deferred" }),
@@ -562,6 +646,7 @@ describe("CodexSecurity finding validation", () => {
     expect(
       result.outputDir.startsWith(join(stateDirectory, "validations")),
     ).toBe(true);
+    expect(captured.thread?.workingDirectory).toBe(result.outputDir);
     const evidence = join(result.outputDir, "evidence.txt");
     await writeFile(evidence, "synthetic evidence");
     await client.close();

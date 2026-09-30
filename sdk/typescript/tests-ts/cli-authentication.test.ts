@@ -380,6 +380,7 @@ describe("CLI authentication", () => {
       const stderr = capture(false);
       const deps = dependencies({ environment });
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onAuthentication?.({
             method: "aws_credentials",
@@ -437,6 +438,7 @@ describe("CLI authentication", () => {
         environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
       });
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onAuthentication?.({
             method: "aws_credentials",
@@ -887,6 +889,7 @@ describe("CLI authentication", () => {
     const stderr = capture(true);
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
@@ -928,6 +931,7 @@ describe("CLI authentication", () => {
         const stderr = capture(false);
         const deps = dependencies({ environment });
         deps.createSecurity = () => ({
+          ...dependencies().createSecurity({}),
           run: async (_repository, options) => {
             options?.onAuthentication?.({
               method: "api_key",
@@ -1035,6 +1039,7 @@ describe("CLI authentication", () => {
     const stderr = capture(false);
     const deps = dependencies();
     deps.createSecurity = () => ({
+      ...dependencies().createSecurity({}),
       run: async (_repository, options) => {
         options?.onAuthentication?.({
           method: "api_key",
@@ -1071,6 +1076,7 @@ describe("CLI authentication", () => {
       const stderr = capture(false);
       const deps = dependencies({ environment });
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async () => {
           throw new CodexSecurityError(message);
         },
@@ -1103,6 +1109,7 @@ describe("CLI authentication", () => {
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
+        ...dependencies().createSecurity({}),
         run: async (_repository, options) => {
           options?.onAuthentication?.(authentication);
           return fakeResult();

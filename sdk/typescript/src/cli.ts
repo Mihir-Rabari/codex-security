@@ -229,6 +229,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  normalizeRepository,
   type ScanTarget,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -1093,7 +1094,6 @@ interface SkillRunOptions {
   readonly auth?: ScanAuthMode;
   safetyIdentifier?: string;
   directory?: string;
-  validationRepository?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   validationPrompt?: string;
@@ -1140,7 +1140,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
-  ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
@@ -7501,7 +7501,6 @@ async function runSkill(
   const plugin = await bundledPluginRoot();
   const verify = skill === "verify-fix";
   const assess = skill === "assess-patch-risk";
-  const patch = skill === "fix-finding";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
   let prompt = [
     ...(verify
@@ -7521,15 +7520,10 @@ async function runSkill(
         ]
       : [
           `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
-          ...(patch && options.findings !== undefined
-            ? [
-                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
-              ]
-            : []),
-          ...(options.validationRepository === undefined
+          ...(options.findings === undefined
             ? []
             : [
-                `Validate only these findings against repository ${JSON.stringify(options.validationRepository)}. This is a standalone validation of a completed scan; do not run or register another scan. Use ${JSON.stringify(directory)} for supporting reports, receipts, PoCs, builds, and logs. The CLI saves your final response as validation.md; do not create that file. Leave the repository unchanged.`,
+                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
               ]),
         ]),
     ...(options.findingInstructions === undefined
@@ -7566,6 +7560,7 @@ async function runSkill(
       "Start the marked report at heading level 3. Return the validated JSON object after the end marker. Use only repository-relative source paths in the report; do not include the local repository or artifact path.",
     ].join("\n");
   }
+  const patch = skill === "fix-finding";
   const appServer = patch || verify || assess;
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
@@ -8296,8 +8291,7 @@ async function executeScan(
   dependencies.addSignalListener("SIGINT", onInterrupt);
   dependencies.addSignalListener("SIGTERM", onTerminate);
 
-  let security: Pick<CodexSecurity, "run" | "preflight" | "close"> | null =
-    null;
+  let security: ReturnType<CliDependencies["createSecurity"]> | null = null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
   let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
@@ -8305,7 +8299,9 @@ async function executeScan(
     DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
-  let skillAnalyticsOverride: string | undefined;
+  let patchAnalyticsOverride: string | undefined;
+  let validation: Record<string, unknown> | undefined;
+  let validationExitCode = 0;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8313,6 +8309,12 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    if (arguments_.validate) {
+      repository = await normalizeRepository(
+        resolve(directory, expandHome(repository)),
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
@@ -8338,7 +8340,7 @@ async function executeScan(
       isJsonObject(analytics) &&
       analytics["enabled"] !== undefined
     ) {
-      skillAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
+      patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
       !arguments_.dryRun && !arguments_.mock && interactive
@@ -8719,6 +8721,58 @@ async function executeScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
+      if (arguments_.validate) {
+        const findings = result.findings.findings;
+        if (targetWarnings.length > 0) {
+          validation = {
+            status: "skipped",
+            reason: "The scan target changed during execution.",
+          };
+        } else if (findings.length === 0) {
+          validation = { status: "complete", findings: 0 };
+        } else {
+          stopPresentation();
+          try {
+            progress?.stage(`Validating ${findings.length} scan findings`);
+          } catch {}
+          try {
+            const reports: string[] = [];
+            for (const finding of findings) {
+              const assessment = await security.validate({
+                repositoryPath: repository,
+                scanId: result.manifest.scan.id,
+                finding,
+                auth,
+                safetyIdentifier: arguments_.safetyIdentifier,
+                signal: preparationAbortController.signal,
+              });
+              reports.push(
+                `## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}`,
+              );
+            }
+            const reportPath = join(result.scanDir, "validation.md");
+            await writeFile(reportPath, `${reports.join("\n\n---\n\n")}\n`, {
+              flag: "wx",
+              mode: 0o600,
+            });
+            validation = {
+              status: "complete",
+              findings: findings.length,
+              reportPath,
+            };
+            try {
+              progress?.stage(`Finding validation saved to ${reportPath}`);
+            } catch {}
+          } catch (error) {
+            validationExitCode = 2;
+            const message = safeErrorMessage(error);
+            validation = { status: "failed", message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${message}\n`,
+            );
+          }
+        }
+      }
     }
   } catch (error) {
     failed = true;
@@ -8748,6 +8802,19 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    if (result !== null && arguments_.validate) {
+      const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
+      errorOutput.write(
+        `codex-security: Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.\n`,
+      );
+      return {
+        exitCode,
+        data: {
+          ...result.toJSON(),
+          validation: { ...validation, status: "failed", exitCode },
+        },
+      };
+    }
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -8846,6 +8913,7 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
+  if (validation !== undefined) scanData = { ...scanData, validation };
   const incomplete = result.coverage.completeness !== "complete";
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
@@ -8868,89 +8936,6 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  let validationExitCode = 0;
-  if (arguments_.validate) {
-    if (targetWarnings.length > 0) {
-      scanData = {
-        ...scanData,
-        validation: {
-          status: "skipped",
-          reason: "The scan target changed during execution.",
-        },
-      };
-    } else if (findings.length === 0) {
-      scanData = {
-        ...scanData,
-        validation: { status: "complete", findings: 0 },
-      };
-    } else {
-      try {
-        progress?.stage(`Validating ${findings.length} scan findings`);
-      } catch {}
-      let report = "";
-      const validationOutput: Writable = {
-        write(value: string | Uint8Array): boolean {
-          report += value.toString();
-          return true;
-        },
-      };
-      try {
-        const status = await runSkill(
-          "validation",
-          [],
-          [
-            `model=${JSON.stringify(effectiveModel)}`,
-            `model_reasoning_effort=${JSON.stringify(effectiveReasoningEffort)}`,
-            ...(skillAnalyticsOverride === undefined
-              ? []
-              : [skillAnalyticsOverride]),
-          ],
-          undefined,
-          validationOutput,
-          errorOutput,
-          dependencies,
-          {
-            ...providerOptions,
-            safetyIdentifier: arguments_.safetyIdentifier,
-            auth,
-            directory: result.scanDir,
-            validationRepository: repository,
-            findings,
-            environment: dependencies.environment,
-          },
-        );
-        if (status !== 0) {
-          validationExitCode = status === 130 || status === 143 ? status : 2;
-          scanData = {
-            ...scanData,
-            validation: { status: "failed", exitCode: validationExitCode },
-          };
-        } else {
-          const reportPath = join(result.scanDir, "validation.md");
-          await writeFile(reportPath, report, { flag: "wx", mode: 0o600 });
-          scanData = {
-            ...scanData,
-            validation: {
-              status: "complete",
-              findings: findings.length,
-              reportPath,
-            },
-          };
-          try {
-            progress?.stage(`Finding validation saved to ${reportPath}`);
-          } catch {}
-        }
-      } catch (error) {
-        validationExitCode = 2;
-        const message = safeErrorMessage(error);
-        errorOutput.write(`codex-security: Validation failed: ${message}\n`);
-        scanData = {
-          ...scanData,
-          validation: { status: "failed", message },
-        };
-      }
-    }
-  }
   const completedScan = (exitCode: number): ScanOutcome => {
     diagnostic("scan.completed", {
       coverage: result.coverage.completeness,
@@ -8966,7 +8951,7 @@ async function executeScan(
     progress?.stopTimer();
     return { exitCode, data: scanData };
   };
-  if (validationExitCode === 130 || validationExitCode === 143) {
+  if (validationExitCode !== 0) {
     return completedScan(validationExitCode);
   }
   if (targetWarnings.length > 0) {
@@ -9039,9 +9024,9 @@ async function executeScan(
         selected,
         [
           `model=${JSON.stringify(effectiveModel)}`,
-          ...(skillAnalyticsOverride === undefined
+          ...(patchAnalyticsOverride === undefined
             ? []
-            : [skillAnalyticsOverride]),
+            : [patchAnalyticsOverride]),
         ],
         effectiveReasoningEffort as ScanReasoningEffort,
         errorOutput,
@@ -9090,11 +9075,7 @@ async function executeScan(
             meetsSeverity(finding, threshold) &&
             !resolved.has(finding.occurrenceId),
         ).length;
-  const exitCode = Math.max(
-    blockingCount > 0 ? 1 : 0,
-    patchExitCode(patches),
-    validationExitCode,
-  );
+  const exitCode = Math.max(blockingCount > 0 ? 1 : 0, patchExitCode(patches));
   return completedScan(exitCode);
 }
 

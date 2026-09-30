@@ -312,11 +312,13 @@ export interface ScanOptions extends ScanSettings {
 
 export interface ValidationOptions extends Pick<
   ScanOptions,
-  "auth" | "outputDir" | "signal"
+  "auth" | "outputDir" | "safetyIdentifier" | "signal"
 > {
   repositoryPath: string;
   /** Finding text or a JSON-serializable object. Strings are never file paths. */
   finding: string | object;
+  /** @internal Verify the recorded target for CLI post-scan validation. */
+  scanId?: string;
 }
 
 const VALIDATION_DISPOSITIONS = [
@@ -661,6 +663,29 @@ export class CodexSecurity {
         temporaryRoot,
       );
       const { runtime, approvalPolicy } = session;
+      const checkTarget = async (): Promise<void> => {
+        if (options.scanId === undefined) return;
+        const context = await (this.#dependencies.runWorkbench ?? runWorkbench)(
+          {
+            python: session.python,
+            pluginRoot: runtime.plugin.pluginRoot,
+            environment: {
+              ...runtime.environment,
+              CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+            },
+            signal,
+            failureMessage: "Could not verify the scan target",
+          },
+          ["get-scan", "--scan-id", options.scanId, "--check-target"],
+        );
+        const scan = context["scan"];
+        if (!isRecord(scan) || scan["targetPath"] !== inputs.repository) {
+          throw new CodexSecurityError(
+            "The recorded scan target does not match the validation repository.",
+          );
+        }
+      };
+      await checkTarget();
       const outputRoot =
         inputs.outputDir === null
           ? await preparePersistentOutputRoot(
@@ -727,6 +752,7 @@ export class CodexSecurity {
           "Finding validation returned an invalid result.",
         );
       }
+      await checkTarget();
       return { ...result, outputDir, threadId };
     } catch (error) {
       if (this.#closed) this.#requireOpen();

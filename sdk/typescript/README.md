@@ -587,15 +587,19 @@ Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
 
-Add `--validate` to run the standalone `validate` workflow once on all findings
-reported by the scan. It runs after the scan, saves its assessment as
-`<scan-dir>/validation.md`, and reports the validation status and path in JSON
-scan output. A scan with no findings needs no second pass. Validation failures
-exit with `2` while retaining the completed scan; a validation assessment does
-not rewrite the sealed findings or change the `--fail-on-severity` decision.
-This second pass makes additional model calls. Because the standalone workflow
-does not track cost, `--validate` cannot be combined with `--max-cost` (including
-a configured scan cost limit), `--dry-run`, or `--mock`.
+Scans already validate findings against local source. Add `--validate` to run
+the existing standalone validation workflow for each reported finding after
+the scan. Each assessment uses a separate evidence directory; the combined
+report is saved as `<scan-dir>/validation.md`. JSON scan output includes the
+execution status and report path. Completion means the assessments finished,
+not that every finding was confirmed. A scan with no findings needs no second
+pass.
+
+The report is supplemental: its assessments are not applied to the saved
+findings or the `--fail-on-severity` decision. Validation failures exit with
+`2` while retaining the completed scan. The additional model calls are not
+cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
+configured scan cost limit), `--dry-run`, or `--mock`.
 
 For machine-readable scan output (`--format json` or `--format jsonl`), a scan
 execution failure writes one structured object to stdout:
