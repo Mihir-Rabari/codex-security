@@ -1993,6 +1993,76 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
     assert stopped["progress"]["candidates"]["unconfirmed"] == len(expected_owners)
 
 
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize("owner_field", ["workerId", "sourceWorkerId"])
+@pytest.mark.parametrize("same_worker", [False, True])
+def test_stopped_recovery_applies_worker_decisions_to_parent_checkpoints(
+    tmp_path: Path, disposition: str, owner_field: str, same_worker: bool
+) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import workbench_saved_results
+
+    target = tmp_path.resolve() / "target"
+    target.mkdir()
+    (target / "app.py").write_text("value = 1\n")
+    scan_dir = tmp_path.resolve() / "scan"
+    scan_dir.mkdir()
+    scan_id = "stopped-worker-decision"
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    manifest["scan"]["complete"] = True
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(
+        candidateId="candidate-one",
+        **{owner_field: "worker-one" if same_worker else "worker-two"},
+    )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "complete": False, "findings": [finding], "coverage": coverage},
+    )
+    checkpoint_bytes = checkpoint.read_bytes()
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": []}))
+    coverage["surfaces"] = [
+        {
+            "label": "Reviewed candidate",
+            "candidateId": "candidate-one",
+            "sourceWorkerId": "worker-one",
+            "disposition": disposition,
+            "notes": "The completed review dismissed this worker's candidate.",
+        }
+    ]
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    warnings: list[str] = []
+
+    result = workbench_saved_results.merge_saved_results(
+        scan_dir, scan_id, binding, [], warnings, stopped=True, reason="Stopped after review."
+    )
+
+    assert result is not None
+    assert warnings == []
+    recovered = result[1]["findings"]
+    assert len(recovered) == (0 if same_worker else 1)
+    if same_worker:
+        assert result[2]["surfaces"][0]["previousFindings"] == [finding]
+    else:
+        assert recovered[0]["provenance"][owner_field] == "worker-two"
+        assert recovered[0]["summary"] == finding["summary"]
+    assert checkpoint.read_bytes() == checkpoint_bytes
+
+
 def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)

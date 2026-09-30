@@ -28,6 +28,8 @@ def saved_unconfirmed_candidates(scan: sqlite3.Row) -> list[dict[str, Any]]:
     scan_dir = Path(scan["scan_dir"])
     try:
         coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved coverage")
+        if not unconfirmed_candidates(coverage):
+            return []
         findings = _read_scan_local_json(scan_dir, "findings.json", "Saved findings")
     except (ContractError, OSError, ValueError):
         # Running and removed scans may have no readable canonical artifacts yet.

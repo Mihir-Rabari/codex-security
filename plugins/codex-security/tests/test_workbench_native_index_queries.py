@@ -257,3 +257,62 @@ def test_scan_list_probes_requested_repository_once(
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
         ("remote", "get-url", "origin"),
     ]
+
+
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        {},
+        {"deferred": [{"reason": "General review work remains."}]},
+        {
+            "deferred": [{"candidateId": "candidate-1", "reason": "Review remains."}],
+            "explicitExclusions": [{"candidateId": "candidate-1", "disposition": "not_applicable"}],
+        },
+    ],
+    ids=["no-candidates", "general-review-work", "resolved-in-coverage"],
+)
+def test_scan_list_skips_findings_artifacts_without_unconfirmed_candidates(
+    workbench_api, indexed_collections, monkeypatch, coverage
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    reads = []
+
+    def read_artifact(scan_dir, name, label):
+        reads.append((scan_dir.name, name))
+        return coverage if name == "coverage.json" else {"findings": []}
+
+    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    scans = history.list_scans(connection)["scans"]
+
+    assert len(scans) == len(SCAN_IDS)
+    assert all(scan["progress"]["candidates"]["unconfirmed"] == 0 for scan in scans)
+    assert sorted(reads) == [(scan_id, "coverage.json") for scan_id in SCAN_IDS]
+
+
+def test_scan_list_reads_findings_to_resolve_saved_candidates(
+    workbench_api, indexed_collections, monkeypatch
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    reads = []
+    coverage = {
+        "deferred": [
+            {"candidateId": "candidate-confirmed", "reason": "Validation is pending."},
+            {"candidateId": "candidate-pending", "reason": "Validation is pending."},
+        ]
+    }
+    findings = {"findings": [{"provenance": {"candidateId": "candidate-confirmed"}}]}
+
+    def read_artifact(scan_dir, name, label):
+        reads.append((scan_dir.name, name))
+        return coverage if name == "coverage.json" else findings
+
+    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    scans = history.list_scans(connection)["scans"]
+
+    assert len(scans) == len(SCAN_IDS)
+    assert all(scan["progress"]["candidates"]["unconfirmed"] == 1 for scan in scans)
+    assert sorted(reads) == [
+        (scan_id, name) for scan_id in SCAN_IDS for name in ("coverage.json", "findings.json")
+    ]

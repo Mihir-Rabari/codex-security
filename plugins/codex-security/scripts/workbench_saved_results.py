@@ -460,6 +460,88 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
+def _stopped_diff_candidate_decisions(
+    scan_dir: Path, scan_id: str, drafts: list[dict[str, Any]], warnings: list[str]
+) -> dict[str, Any] | None:
+    pending_ids = {
+        item["candidateId"]
+        for draft in drafts
+        for items in [draft["coverage"].get("deferred", [])]
+        if isinstance(items, list)
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("candidateId"), str)
+        and item.get("sourceWorkerId") is None
+    }
+    if not pending_ids:
+        return None
+    surfaces = []
+    relative = "artifacts/02_discovery/candidate_ledger.jsonl"
+    try:
+        if (scan_dir / relative).exists():
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, relative, "Diff candidate ledger"
+            )
+            with os.fdopen(descriptor, encoding="utf-8") as handle:
+                candidates = [json.loads(line) for line in handle if line.strip()]
+            for candidate in candidates:
+                if (
+                    not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("candidate_id"), str)
+                    or candidate["candidate_id"] not in pending_ids
+                ):
+                    continue
+                validation = candidate.get("validation") or {}
+                attack_path = candidate.get("attack_path") or {}
+                if not isinstance(validation, dict) or not isinstance(attack_path, dict):
+                    raise ValueError("Diff candidate phase records must be objects.")
+                disposition = validation.get("disposition")
+                decision = attack_path.get("decision")
+                # Match the Diff report contract: either deferred phase remains pending.
+                if disposition == "deferred" or decision == "deferred":
+                    continue
+                if disposition not in ("suppressed", "not_applicable") and decision != "ignore":
+                    continue
+                summary = candidate.get("summary")
+                if not isinstance(summary, str) or not summary.strip():
+                    raise ValueError("Diff candidate summary is missing.")
+                surfaces.append(
+                    {
+                        "candidateId": candidate["candidate_id"],
+                        "label": summary,
+                        "disposition": "not_applicable"
+                        if disposition == "not_applicable"
+                        else "rejected",
+                        "notes": next(
+                            value
+                            for value in (
+                                attack_path.get("proof_gap"),
+                                validation.get("counterevidence_or_proof_gap"),
+                                validation.get("remaining_uncertainty"),
+                                summary,
+                            )
+                            if isinstance(value, str) and value.strip()
+                        ),
+                        "candidate": candidate,
+                    }
+                )
+    except (ContractError, OSError, ValueError) as exc:
+        warnings.append(f"Could not reconcile the saved Diff candidates: {exc}")
+    return {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "explicitExclusions": [],
+            "deferred": [],
+            # Coverage extensions are accepted by the existing semantic checkpoint readers.
+            "stoppedDiffCandidateDecisions": True,
+        },
+    }
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -614,6 +696,36 @@ def merge_saved_results(
     if frozen_source_digests is not None:
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
+
+    decision_drafts = [
+        draft
+        for _, draft, _ in sources
+        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True
+    ]
+    if (
+        stopped
+        and binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
+        and frozen_source_digests is None
+        and not decision_drafts
+    ):
+        decision_draft = _stopped_diff_candidate_decisions(
+            scan_dir,
+            scan_id,
+            ([parent] if parent else []) + [draft for _, draft, _ in sources],
+            warnings,
+        )
+        if decision_draft is not None:
+            digest = _digest(decision_draft)
+            relative = f"checkpoints/{digest}.json"
+            write_scan_local_bytes(scan_dir, relative, _encoded(decision_draft))
+            source_digests[relative] = digest
+            sources.append((relative, decision_draft, None))
+            decision_drafts.append(decision_draft)
+    diff_resolved = {
+        (None, item["candidateId"])
+        for draft in decision_drafts
+        for item in draft["coverage"]["surfaces"]
+    }
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     latest_reducer_key = (
@@ -800,6 +912,7 @@ def merge_saved_results(
                                 _digest(_finding_content(original["finding"]))
                             )
                             resolved.setdefault(candidate_key, "reported")
+    pending_resolved = resolved.keys() | diff_resolved
     for relative, draft, worker_id in all_sources:
         superseded = (
             worker_id is None
@@ -816,6 +929,8 @@ def merge_saved_results(
                 for saved_path, current, saved_worker in sources
             )
         )
+        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True:
+            superseded = False
         if (
             (relative != "parent" or not parent_manifest)
             and not superseded
@@ -861,7 +976,13 @@ def merge_saved_results(
             source_value = copy.deepcopy(value)
             finding = copy.deepcopy(value)
             candidate_id = finding_candidate_id(finding)
-            if relative != "parent" and resolved.get((worker_id, candidate_id)) in {
+            provenance = finding.get("provenance")
+            candidate_owner = worker_id or (
+                provenance.get("sourceWorkerId", provenance.get("workerId"))
+                if isinstance(provenance, dict)
+                else None
+            )
+            if relative != "parent" and resolved.get((candidate_owner, candidate_id)) in {
                 "rejected",
                 "not_applicable",
             }:
@@ -1013,7 +1134,7 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (item.get("sourceWorkerId"), item.get("candidateId")) in resolved
+                    and (item.get("sourceWorkerId"), item.get("candidateId")) in pending_resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
@@ -1036,7 +1157,16 @@ def merge_saved_results(
             item
             for item in coverage["deferred"]
             if not isinstance(item, dict)
-            or (item.get("sourceWorkerId"), item.get("candidateId")) not in resolved
+            or (item.get("sourceWorkerId"), item.get("candidateId")) not in pending_resolved
+        ]
+
+    if diff_resolved and isinstance(coverage.get("surfaces"), list):
+        coverage["surfaces"] = [
+            item
+            for item in coverage["surfaces"]
+            if not isinstance(item, dict)
+            or item.get("disposition") != "needs_follow_up"
+            or (item.get("sourceWorkerId"), item.get("candidateId")) not in diff_resolved
         ]
 
     identities: dict[str, str] = {}
