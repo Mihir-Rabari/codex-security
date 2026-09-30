@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sqlite3
@@ -17,6 +18,7 @@ from workbench_test_support import (
     recipe,
     register,
     run_workbench,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -308,7 +310,7 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
     }
     assert {
         finding["scanId"] for finding in run_workbench(state, "list-global-findings")["findings"]
-    } == {unrelated["scanId"]}
+    } == {parent["scanId"], unrelated["scanId"]}
     assert run_workbench(state, "list-repositories")["repositories"][0]["scanCount"] == 3
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
@@ -409,3 +411,335 @@ def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
     assert context["scan"]["progress"]["status"] == "failed"
     assert context["scan"]["threadIds"] == ["failed-follow-up", "repeated-follow-up"]
     assert context["scan"]["executionThreadIds"] == context["scan"]["threadIds"]
+
+
+def test_stopped_standard_does_not_rebind_another_scans_coverage(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    scan = register(state, target, tmp_path / "scan")
+    directory = Path(scan["scanDir"])
+    write_completed_contract(directory, scan["scanId"], target, relative_path="app.py")
+    coverage = json.loads((directory / "coverage.json").read_text())
+    coverage["scanId"] = "00000000-0000-4000-8000-000000000000"
+    raw = json.dumps(coverage).encode()
+    (directory / "coverage.json").write_bytes(raw)
+    for name in ("scan-manifest.json", "findings.json", "report.md"):
+        (directory / name).unlink()
+    run_workbench(state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Interrupted.")
+    assert (directory / "coverage.json").read_bytes() == raw
+    assert not (directory / "scan-manifest.json").exists()
+    assert not (directory / "findings.json").exists()
+    assert not list((directory / "checkpoints").glob("*.json"))
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findingCount"] == 0
+    )
+
+
+@pytest.mark.parametrize("accepted_membership", ["merged", "represented"])
+def test_native_cancel_retains_accepted_and_later_unmerged_findings(
+    tmp_path: Path, accepted_membership: str
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    children = []
+    for index, anchor in enumerate(("accepted-finding", "separate-unmerged-finding"), 1):
+        directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
+        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+        write_completed_contract(
+            directory, child["scanId"], target, relative_path="app.py", identity_anchor=anchor
+        )
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+        protected = {
+            name: (directory / name).read_bytes()
+            for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        }
+        children.append((child, directory, protected))
+    first, _, first_bytes = children[0]
+    original = json.loads(first_bytes["findings.json"])["findings"][0]
+    accepted = copy.deepcopy(original)
+    accepted["provenance"]["sourceFindingIds"] = [f"{first['scanId']}:0"]
+    accepted["provenance"]["sourceFindings"] = [{"id": f"{first['scanId']}:0", "finding": original}]
+    saved = checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": directory.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+            for child, directory, _ in children
+        ],
+        merged=[first["scanId"]] if accepted_membership == "merged" else [],
+    )
+    saved["noNewStreak"] = 2
+    saved["aggregate"] = {
+        "scanId": parent["scanId"],
+        "findings": [accepted],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [{"reason": "Accepted pass still needs dependency review."}],
+        },
+    }
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        parent["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        input_text=json.dumps(saved),
+    )
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+    context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert context["progress"]["status"] == "canceled"
+    assert context["findingCount"] == 2
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    preserved = next(finding for finding in retained if finding["identity"] == accepted["identity"])
+    assert preserved["findingId"] == accepted["findingId"]
+    assert preserved["provenance"]["sourceFindings"] == accepted["provenance"]["sourceFindings"]
+    later, _, later_bytes = children[1]
+    recovered = next(
+        finding
+        for finding in retained
+        if finding["provenance"]["sourceFindingIds"] == [f"{later['scanId']}:0"]
+    )
+    assert recovered["identity"]["anchor"] == "separate-unmerged-finding"
+    assert (
+        recovered["provenance"]["sourceFindings"][0]["finding"]
+        == json.loads(later_bytes["findings.json"])["findings"][0]
+    )
+    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    assert coverage["completeness"] == "partial"
+    assert any(row["reason"].startswith("Accepted pass still") for row in coverage["deferred"])
+    assert any("artifacts/deep-scan/passes/pass-2" in row["reason"] for row in coverage["deferred"])
+    for child, directory, protected in children:
+        for name, contents in protected.items():
+            assert (directory / name).read_bytes() == contents
+        assert (
+            run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"][
+                "status"
+            ]
+            == "complete"
+        )
+    assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
+
+
+def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
+    saved = workbench_api["saved_results"]
+    root = Path("/synthetic-scan")
+    children = [
+        {"id": "broken", "scan_dir": str(root / "broken")},
+        {"id": "retained", "scan_dir": str(root / "retained")},
+    ]
+    composition = workbench_api["load_composition"].__globals__["CompositionView"](
+        None, tuple(children), (), None
+    )
+    db = mock.Mock(
+        require_scan=lambda _, child_id: next(
+            child for child in children if child["id"] == child_id
+        )
+    )
+    monkeypatch.setattr(saved, "save_pending_checkpoint", lambda *_: None)
+    retained_coverage = {"surfaces": [{"id": "retained/surface", "summary": "Saved work"}]}
+    with mock.patch.object(
+        saved,
+        "_stopped_child_draft",
+        side_effect=[
+            ValueError("Synthetic malformed artifact"),
+            {"findings": [], "coverage": retained_coverage},
+        ],
+    ):
+        result = saved.save_composed_checkpoint(
+            db, None, {"id": "parent", "scan_dir": str(root)}, root, composition
+        )
+    assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
+    assert result["coverage"]["deferred"][0] == {
+        "id": "unmerged-broken",
+        "reason": "Independent scan did not complete and merge. Saved work: broken. "
+        "Recovery failed: Synthetic malformed artifact",
+    }
+    assert result["complete"] is False
+
+
+@pytest.mark.parametrize("alias", ["exact", "case", "directory"])
+def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": "findings/issue/issue.md"}
+    findings_path.write_text(json.dumps(document))
+    reports = child_dir / "findings/issue"
+    reports.mkdir(parents=True)
+    report = reports / "issue.md"
+    report.write_text("# Original report\n")
+    name = f"{child['scanId']}-issue.md"
+    evidence = reports / (name.upper() if alias == "case" else name)
+    if alias == "directory":
+        evidence.mkdir()
+        evidence = evidence / "trace.txt"
+    evidence.write_text("Synthetic supporting evidence\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert saved["progress"]["status"] == "canceled"
+    assert not any(
+        "conflicts with its projected report" in warning for warning in saved.get("warnings", [])
+    )
+    projected = parent_dir / "findings" / child["scanId"] / "issue/issue.md"
+    assert projected.read_bytes() == report.read_bytes()
+    assert (projected.parent / evidence.relative_to(reports)).read_bytes() == evidence.read_bytes()
+    parent_findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert (
+        parent_findings[0]["writeup"]["reportPath"] == projected.relative_to(parent_dir).as_posix()
+    )
+    assert report.read_text() == "# Original report\n"
+    assert evidence.read_text() == "Synthetic supporting evidence\n"
+
+
+def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    pass_directory = "artifacts/deep-scan/passes/pass-1"
+    child_dir = parent_dir / pass_directory
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"][0]["writeup"] = {"reportPath": "findings/check/check.md"}
+    other = copy.deepcopy(findings["findings"][0])
+    other["identity"]["anchor"] = "another-finding"
+    other["writeup"]["reportPath"] = "findings/check-3/check-3.md"
+    findings["findings"].append(other)
+    findings_path.write_text(json.dumps(findings))
+    source = child_dir / "findings/check"
+    source.mkdir(parents=True)
+    base = f"{child['scanId']}-check"
+    evidence_name = f"{base}.MD".upper().replace("K", "\u212a")
+    evidence_directory = f"{base}-2.md"
+    report = f"# Validated finding\n\n[Evidence]({evidence_name})\n"
+    (source / "check.md").write_text(report)
+    (source / evidence_name).write_text("Supporting evidence.\n")
+    (source / evidence_directory).mkdir()
+    (source / evidence_directory / "trace.txt").write_text("Source trace.\n")
+    other_report = child_dir / "findings/check-3/check-3.md"
+    other_report.parent.mkdir()
+    other_report.write_text("# Another finding\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(state, parent, passes=[{"directory": pass_directory, "scanId": child["scanId"]}])
+
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 2
+    assert {finding["writeup"]["reportPath"] for finding in retained} == {
+        f"findings/{child['scanId']}/check/check.md",
+        f"findings/{child['scanId']}/check-3/check-3.md",
+    }
+    projected = parent_dir / "findings" / child["scanId"] / "check"
+    assert (projected / "check.md").read_text() == report
+    assert (projected / evidence_name).read_text() == "Supporting evidence.\n"
+    assert (projected / evidence_directory / "trace.txt").read_text() == "Source trace.\n"
+    assert (
+        parent_dir / "findings" / child["scanId"] / "check-3/check-3.md"
+    ).read_text() == "# Another finding\n"
+
+
+@pytest.mark.parametrize("child_state", ["complete", "checkpoint"])
+@pytest.mark.parametrize("stop_command", ["cancel-scan", "fail-scan"])
+def test_parent_stop_keeps_child_candidates_separate(
+    tmp_path: Path, child_state: str, stop_command: str
+) -> None:
+    state, target = _scan_workspace(tmp_path, "\n" * 50)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    children = []
+    for index in (1, 2):
+        directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
+        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+        write_completed_contract(
+            directory,
+            child["scanId"],
+            target,
+            relative_path="app.py",
+            identity_anchor=f"child-{index}",
+        )
+        findings = json.loads((directory / "findings.json").read_text())["findings"]
+        findings[0]["provenance"]["candidateId"] = "shared-candidate"
+        (directory / "findings.json").write_text(json.dumps({"findings": findings}))
+        if child_state == "complete":
+            run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+        else:
+            write_checkpoint(
+                directory / "checkpoints",
+                {
+                    "scanId": child["scanId"],
+                    "findings": findings,
+                    "coverage": json.loads((directory / "coverage.json").read_text()),
+                    "complete": False,
+                },
+            )
+            for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+                (directory / name).unlink()
+        children.append(child)
+    write_completed_contract(
+        parent_dir,
+        parent["scanId"],
+        target,
+        relative_path="app.py",
+        coverage_mode="deep_repository",
+    )
+    (parent_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage["completeness"] = "partial"
+    coverage["surfaces"] = [
+        {
+            "id": "parent-decision",
+            "label": "Parent candidate",
+            "disposition": "rejected",
+            "candidateId": "shared-candidate",
+        }
+    ]
+    (parent_dir / "coverage.json").write_text(json.dumps(coverage))
+    manifest = json.loads((parent_dir / "scan-manifest.json").read_text())
+    manifest["scan"]["complete"] = False
+    (parent_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {
+                "directory": Path(child["scanDir"]).relative_to(parent_dir).as_posix(),
+                "scanId": child["scanId"],
+            }
+            for child in children
+        ],
+    )
+    extra = ("--message", "Synthetic scan stopped.") if stop_command == "fail-scan" else ()
+    run_workbench(state, stop_command, "--scan-id", parent["scanId"], *extra)
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 2
+    for child in children:
+        status = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"][
+            "status"
+        ]
+        assert status == ("complete" if child_state == "complete" else "failed")
+        finding = next(
+            item
+            for item in retained
+            if item["provenance"]["sourceFindingIds"] == [f"{child['scanId']}:0"]
+        )
+        assert finding["provenance"]["candidateId"].startswith(child["scanId"] + ":")
+        original = finding["provenance"]["sourceFindings"][0]["finding"]
+        assert original["provenance"]["candidateId"] == "shared-candidate"

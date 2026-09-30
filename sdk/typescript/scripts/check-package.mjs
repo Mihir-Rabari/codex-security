@@ -243,6 +243,7 @@ const distFiles = new Set(
     "scan-activity",
     "scan-comparison",
     "scan-dashboard",
+    "scan-draft-publication",
     "scan-history-renderer",
     "scan-logs",
     "scan-merge",
