@@ -509,6 +509,18 @@ async function preserveScanDraft(
           )
         );
       }),
+      explicitExclusions: (
+        source.coverage.explicitExclusions as JsonObject[]
+      ).filter((exclusion) => {
+        const candidateId = exclusion.candidateId ?? exclusion.id;
+        return (
+          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          !coverageEntryPresent(
+            result.coverage.explicitExclusions as unknown[],
+            exclusion,
+          )
+        );
+      }),
       openQuestions:
         result.complete === false
           ? (

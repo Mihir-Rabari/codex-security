@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -364,6 +371,83 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.equal(retained.completeness, "complete");
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.explicitExclusions, resolved.explicitExclusions);
+  });
+
+  test(`new deferred review supersedes an older ${disposition} exclusion`, async (t) => {
+    const pending = candidate("reopened-review");
+    const context = await fixture(t, [pending]);
+    const earlierExclusion = {
+      candidateId: pending.candidate_id,
+      disposition,
+      pattern: "src/handler.ts",
+      reason: "An earlier synthetic review dismissed the candidate.",
+    };
+    const unrelatedExclusion = {
+      pattern: "vendor/**",
+      reason: "The independent vendor scope remains excluded.",
+    };
+    const earlier = { ...draft(), complete: false };
+    earlier.coverage.explicitExclusions.push(
+      earlierExclusion,
+      unrelatedExclusion,
+    );
+    await recordCodexSecurityScanDraft(context, earlier);
+    const checkpoints = path.join(context.root, "checkpoints");
+    const history = await Promise.all(
+      (await readdir(checkpoints)).map(async (name) => [
+        name,
+        await readFile(path.join(checkpoints, name), "utf8"),
+      ]),
+    );
+    assert.ok(
+      history.some(([, content]) =>
+        JSON.parse(content).coverage.explicitExclusions.some(
+          (item) => item.reason === earlierExclusion.reason,
+        ),
+      ),
+    );
+    const currentExclusion = {
+      candidateId: "another-candidate",
+      disposition: "not_applicable",
+      pattern: "src/other.ts",
+      reason: "This current exclusion remains authoritative.",
+    };
+    const followup = {
+      ...draft([
+        {
+          candidateId: pending.candidate_id,
+          reason: "Later evidence requires another review.",
+        },
+      ]),
+      complete: false,
+    };
+    followup.coverage.completeness = "partial";
+    followup.coverage.explicitExclusions.push(currentExclusion);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, followup);
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "coverage.json"), "utf8"),
+      );
+      assert.deepEqual(
+        saved.deferred.map((item) => item.candidateId),
+        [pending.candidate_id],
+      );
+      assert.equal(
+        saved.deferred[0].reason,
+        followup.coverage.deferred[0].reason,
+      );
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(saved.explicitExclusions, [
+        currentExclusion,
+        unrelatedExclusion,
+      ]);
+    }
+    for (const [name, content] of history) {
+      assert.equal(
+        await readFile(path.join(checkpoints, name), "utf8"),
+        content,
+      );
+    }
   });
 
   test(`terminal diff ledger resolution retains saved ${disposition} surface rationale`, async (t) => {

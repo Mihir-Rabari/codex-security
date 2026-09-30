@@ -387,6 +387,15 @@ export async function runCustomValidation(options: {
   );
   const decisions = new Map<string, CustomValidationResult["validations"]>();
   const reported: Finding[] = [];
+  const candidateIdCounts = new Map<string, number>();
+  for (const finding of findings) {
+    const candidateId = candidateIdentities(finding)[0];
+    if (candidateId !== undefined)
+      candidateIdCounts.set(
+        candidateId,
+        (candidateIdCounts.get(candidateId) ?? 0) + 1,
+      );
+  }
   const reservedIds = new Set([
     ...findings.flatMap(candidateIdentities),
     ...[
@@ -414,9 +423,13 @@ export async function runCustomValidation(options: {
       let suffix = 2;
       while (reservedIds.has(deferredId)) deferredId = `${baseId}-${suffix++}`;
       reservedIds.add(deferredId);
+      const candidateId = candidateIdentities(candidate.finding)[0];
       coverage.deferred.push({
         id: deferredId,
-        candidateId: candidateIdentities(candidate.finding)[0] ?? deferredId,
+        candidateId:
+          candidateId !== undefined && candidateIdCounts.get(candidateId) === 1
+            ? candidateId
+            : deferredId,
         candidate: candidate.finding,
         reason:
           validation.counterevidence_or_proof_gap ||
