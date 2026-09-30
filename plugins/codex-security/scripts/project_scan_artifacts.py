@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import closing
 from os.path import normcase
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
@@ -193,6 +194,13 @@ def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
         raise ContractError("Scan projection source does not match the requested scan")
     if not sealed or scan["status"] != "completed" or scan.get("complete") is False:
         raise ContractError("Only a sealed completed scan can be merged as a completed scan")
+    # Use the saved receipt, not only the hashes supplied by the artifact itself.
+    import workbench_db
+
+    with closing(workbench_db.connect()) as connection:
+        source = workbench_db.require_scan(connection, request["sourceScanId"])
+        workbench_db.require_recorded_manifest_digest(source, source_directory)
+        workbench_db.verify_manifest_binding(source, manifest)
     expected = request["expectedParentIdentity"]
     return project_scan_artifacts(
         request["parentScanId"],

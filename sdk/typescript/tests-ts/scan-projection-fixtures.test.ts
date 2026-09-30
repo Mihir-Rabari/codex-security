@@ -29,12 +29,6 @@ const python =
 const sourcePlugin = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
-const fixture = JSON.parse(
-  JSON.stringify(fixtureTemplate).replaceAll(
-    "@CHILD@",
-    fixtureTemplate.sourceScanId,
-  ),
-) as typeof fixtureTemplate;
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -50,8 +44,11 @@ async function canonicalChild() {
   );
   roots.push(root);
   const parent = join(root, "parent");
-  const source = join(parent, fixture.relativeDirectory);
-  await mkdir(source, { recursive: true, mode: 0o700 });
+  const source = join(parent, fixtureTemplate.relativeDirectory);
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
   const prepared = await runCodexCommand(
     { command: python },
     [
@@ -61,19 +58,24 @@ async function canonicalChild() {
       "-B",
       "-c",
       `
-import json, sys
+import json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
 sys.path.insert(0, str(Path(sys.argv[2]) / "scripts"))
-from workbench_test_support import write_completed_contract
-from finalize_scan_contract import finalize_scan
-source, target = Path(sys.argv[3]), Path(sys.argv[4])
-fixture = json.load(sys.stdin)
+import workbench_test_support as support
+support.SCRIPT = Path(sys.argv[2]) / "scripts/workbench_db.py"
+source, target, parent_dir = map(Path, sys.argv[3:6])
+raw_fixture = sys.stdin.read()
 for name in ("src/extract.py", "shared/control.py", "outside.py"):
     path = target / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("print('synthetic fixture')\\n" * 2)
-write_completed_contract(source, fixture["sourceScanId"], target, include_paths=["src"], coverage_mode="scoped_path", inventory_strategy="scoped_path")
+state = Path(os.environ["CODEX_SECURITY_STATE_DIR"])
+parent = support.register(state, target, parent_dir, mode="deep")
+child = support.register(state, target, source, parent=parent["scanId"], role="deep_pass", paths=("src",))
+fixture = json.loads(raw_fixture.replace("@CHILD@", child["scanId"]))
+fixture.update(parentScanId=parent["scanId"], sourceScanId=child["scanId"])
+support.write_completed_contract(source, child["scanId"], target, include_paths=["src"], coverage_mode="scoped_path", inventory_strategy="scoped_path")
 for name, values in (("findings", {"findings": fixture["findings"]}), ("coverage", fixture["coverage"])):
     path = source / (name + ".json")
     path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
@@ -81,30 +83,34 @@ for name, contents in fixture["files"].items():
     path = source / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents)
-finalize_scan(source)
+support.run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+print(json.dumps(fixture))
 `,
       sourcePlugin,
       PLUGIN_ROOT,
       source,
       join(root, "target"),
+      parent,
     ],
-    process.env,
-    JSON.stringify(fixture),
+    environment,
+    JSON.stringify(fixtureTemplate),
   );
   expect(prepared.success, prepared.stderr).toBe(true);
+  const fixture = JSON.parse(prepared.stdout) as typeof fixtureTemplate;
   const original = JSON.parse(
     await readFile(join(source, "findings.json"), "utf8"),
   ) as { findings: Finding[] };
   const options = {
     python,
     pluginRoot: PLUGIN_ROOT,
-    environment: { ...process.env },
+    environment,
   };
-  return { root, parent, source, original, options };
+  return { root, parent, source, fixture, original, options };
 }
 
 test("completed projection follows the shared canonical child fixture", async () => {
   const h = await canonicalChild();
+  const { fixture } = h;
   const writer = await prepareScanArtifactRestorer(h.options, h.parent);
   const projected = await writer.projectChild(
     fixture.parentScanId,
@@ -163,6 +169,7 @@ test("completed projection follows the shared canonical child fixture", async ()
 
 test("normalizes sealed legacy findings for merging while retaining exact source evidence", async () => {
   const h = await canonicalChild();
+  const { fixture } = h;
   const first = fixture.expected.sourceFindingIndexes[0]!;
   const legacy = {
     ...h.original,
@@ -189,6 +196,28 @@ test("normalizes sealed legacy findings for merging while retaining exact source
     (artifact) => artifact.path === "findings.json",
   )!.sha256 = createHash("sha256").update(sourceBytes).digest("hex");
   await writeFile(manifestPath, JSON.stringify(manifest));
+  // Older completed rows did not pin a manifest digest; their binding still applies.
+  const unpinned = await runCodexCommand(
+    { command: h.options.python },
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      `
+import sys
+sys.path.insert(0, sys.argv[1])
+from workbench_db import connect
+with connect() as connection:
+    connection.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (sys.argv[2],))
+`,
+      join(PLUGIN_ROOT, "scripts"),
+      fixture.sourceScanId,
+    ],
+    h.options.environment,
+  );
+  expect(unpinned.success, unpinned.stderr).toBe(true);
 
   const writer = await prepareScanArtifactRestorer(h.options, h.parent);
   const projected = await writer.projectChild(
@@ -225,6 +254,7 @@ test.each(["source ID", "seal", "parent directory"])(
   "rejects changed %s at the projection boundary",
   async (change) => {
     const h = await canonicalChild();
+    const { fixture } = h;
     const writer = await prepareScanArtifactRestorer(h.options, h.parent);
     let source = h.source;
     let scanId = fixture.sourceScanId;
@@ -248,6 +278,7 @@ test.skipIf(process.platform === "win32")(
   "rejects unsafe evidence without copying outside bytes",
   async () => {
     const h = await canonicalChild();
+    const { fixture } = h;
     const outside = join(h.root, "outside.txt");
     await writeFile(outside, "Synthetic outside evidence");
     await symlink(outside, join(h.source, "findings/check/unsafe.txt"));
@@ -296,6 +327,7 @@ test.skipIf(process.platform === "win32")(
   "projects many evidence files with one selected Python process",
   async () => {
     const h = await canonicalChild();
+    const { fixture } = h;
     const many = join(h.source, "findings/check/many");
     await mkdir(many);
     const files = Array.from({ length: 64 }, (_, index) => ({
@@ -338,6 +370,7 @@ test.skipIf(process.platform === "win32")(
   "cancellation waits for the admitted projection process to close",
   async () => {
     const h = await canonicalChild();
+    const { fixture } = h;
     const wrapper = await pythonWrapper(h.root, true);
     const controller = new AbortController();
     const writer = await prepareScanArtifactRestorer(
@@ -374,6 +407,7 @@ test.skipIf(process.platform === "win32")(
 
 test("preserves report and evidence basenames under the child namespace", async () => {
   const h = await canonicalChild();
+  const { fixture } = h;
   const evidence = `${fixture.sourceScanId}-check-3.md`;
   await writeFile(
     join(h.source, "findings/check-3", evidence),

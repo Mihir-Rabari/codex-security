@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -75,7 +78,7 @@ def projection_fixture(tmp_path):
 
 
 def completed_projection(
-    parent_dir, parent, child_dir, child, *, descriptor_limit=None, **overrides
+    state, parent_dir, parent, child_dir, child, *, descriptor_limit=None, **overrides
 ):
     identity = parent_dir.stat()
     request = {
@@ -103,6 +106,7 @@ def completed_projection(
     return subprocess.run(
         command,
         input=json.dumps(request),
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
         capture_output=True,
         text=True,
         check=False,
@@ -112,7 +116,7 @@ def completed_projection(
 def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, monkeypatch):
     state, parent_dir, parent, child_dir, child, fixture = projection_fixture
     originals = json.loads((child_dir / "findings.json").read_text())["findings"]
-    completed = completed_projection(parent_dir, parent, child_dir, child)
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
     assert completed.returncode == 0, completed.stderr
     live = json.loads(completed.stdout)
     assert live["scanId"] == child["scanId"]
@@ -157,6 +161,55 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
         assert (child_dir / name).read_text() == contents
 
 
+@pytest.mark.parametrize("rewrite", ["findings", "legacy-binding"])
+def test_completed_projection_rejects_rewritten_saved_scan(
+    projection_fixture, workbench_api, monkeypatch, rewrite
+):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    manifest_path = child_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if rewrite == "findings":
+        findings_path = child_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        index = fixture["expected"]["sourceFindingIndexes"][0]
+        findings["findings"][index]["summary"] = "Rewritten completed observation"
+        payload = json.dumps(findings).encode()
+        findings_path.write_bytes(payload)
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == "findings.json":
+                artifact["sha256"] = hashlib.sha256(payload).hexdigest()
+        message = "sealed scan manifest changed after completion"
+    else:
+        # Historical completed rows can lack a pinned digest; their target binding still applies.
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (child["scanId"],)
+            )
+        manifest["scan"]["target"]["displayName"] = "Different target"
+        message = "target displayName must match the workbench target"
+    manifest_path.write_text(json.dumps(manifest))
+    source_bytes = {
+        name: (child_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    listed = run_workbench(state, "list-scans", "--scan-root", str(child_dir))["scans"]
+    assert len(listed) == 1
+    assert listed[0]["scanId"] == child["scanId"]
+    assert listed[0]["progress"]["status"] == "complete"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    with workbench_api["connect"]() as connection:
+        row = workbench_api["require_scan"](connection, child["scanId"])
+        with pytest.raises(SystemExit, match=message):
+            workbench_api["saved_results"]._stopped_child_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir
+            )
+    projected = completed_projection(state, parent_dir, parent, child_dir, child)
+    assert projected.returncode != 0
+    assert message in projected.stderr
+    assert not (parent_dir / "findings").exists()
+    assert {name: (child_dir / name).read_bytes() for name in source_bytes} == source_bytes
+
+
 def test_projection_preserves_long_report_references(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
@@ -179,7 +232,7 @@ def test_projection_preserves_long_report_references(tmp_path):
     document["findings"][0]["writeup"] = {"reportPath": report_path}
     findings_path.write_text(json.dumps(document))
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    completed = completed_projection(parent_dir, parent, child_dir, child)
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
     assert completed.returncode == 0, completed.stderr
     live = json.loads(completed.stdout)["draft"]["findings"][0]
     projected = parent_dir / live["writeup"]["reportPath"]
@@ -188,7 +241,9 @@ def test_projection_preserves_long_report_references(tmp_path):
     assert (projected.parent / "poc/trace.txt").read_bytes() == (
         source.parent / "poc/trace.txt"
     ).read_bytes()
-    assert completed_projection(parent_dir, parent, child_dir, child).stdout == completed.stdout
+    assert (
+        completed_projection(state, parent_dir, parent, child_dir, child).stdout == completed.stdout
+    )
     checkpoint(
         state,
         parent,
@@ -219,8 +274,8 @@ def test_projection_preserves_long_report_references(tmp_path):
 def test_completed_projection_keeps_source_and_parent_binding(
     projection_fixture, field, value, message
 ):
-    _, parent_dir, parent, child_dir, child, _ = projection_fixture
-    completed = completed_projection(parent_dir, parent, child_dir, child, **{field: value})
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
+    completed = completed_projection(state, parent_dir, parent, child_dir, child, **{field: value})
     assert completed.returncode != 0
     assert message in completed.stderr
     assert not (parent_dir / "findings").exists()
@@ -228,7 +283,7 @@ def test_completed_projection_keeps_source_and_parent_binding(
 
 @pytest.mark.parametrize("directory", [False, True])
 def test_completed_projection_rejects_symlink_evidence(projection_fixture, directory):
-    _, parent_dir, parent, child_dir, child, _ = projection_fixture
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
     outside = parent_dir.parent / "outside-evidence.txt"
     if directory:
         outside.mkdir()
@@ -236,7 +291,7 @@ def test_completed_projection_rejects_symlink_evidence(projection_fixture, direc
     else:
         outside.write_text("Evidence outside the child must not be projected.")
     (child_dir / "findings/check/unsafe.txt").symlink_to(outside, target_is_directory=directory)
-    completed = completed_projection(parent_dir, parent, child_dir, child)
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
     assert completed.returncode != 0
     assert "inside the scan directory" in completed.stderr
     assert not list((parent_dir / "findings").glob("*/unsafe.txt"))
@@ -260,7 +315,7 @@ def test_completed_projection_rejects_symlink_evidence(projection_fixture, direc
     ],
 )
 def test_completed_projection_copies_deep_evidence(projection_fixture, depth, descriptor_limit):
-    _, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
     source = child_dir / "findings/check"
     destination = parent_dir / f"findings/{child['scanId']}/check"
     components = ["d"] * depth
@@ -273,7 +328,7 @@ def test_completed_projection_copies_deep_evidence(projection_fixture, depth, de
             directory.mkdir()
         source_leaf.write_bytes(b"\x00\xffSynthetic nested evidence")
         completed = completed_projection(
-            parent_dir, parent, child_dir, child, descriptor_limit=descriptor_limit
+            state, parent_dir, parent, child_dir, child, descriptor_limit=descriptor_limit
         )
         assert completed.returncode == 0, completed.stderr
         assert destination_leaf.read_bytes() == source_leaf.read_bytes()
@@ -293,7 +348,7 @@ def test_completed_projection_copies_deep_evidence(projection_fixture, depth, de
 
 @pytest.mark.parametrize("terminal", ["unsealed", "interrupted"])
 def test_completed_projection_requires_completed_seal(projection_fixture, terminal):
-    _, parent_dir, parent, child_dir, child, _ = projection_fixture
+    state, parent_dir, parent, child_dir, child, _ = projection_fixture
     path = child_dir / "scan-manifest.json"
     manifest = json.loads(path.read_text())
     if terminal == "unsealed":
@@ -302,7 +357,7 @@ def test_completed_projection_requires_completed_seal(projection_fixture, termin
     else:
         manifest["scan"]["status"] = "interrupted"
     path.write_text(json.dumps(manifest))
-    completed = completed_projection(parent_dir, parent, child_dir, child)
+    completed = completed_projection(state, parent_dir, parent, child_dir, child)
     assert completed.returncode != 0
     assert "Only a sealed completed scan" in completed.stderr
     assert not (parent_dir / "findings").exists()
