@@ -392,7 +392,7 @@ test("classifies identical findings independently in each scan", async () => {
   ).toEqual(originalRows);
 });
 
-test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
+test("migration preserves assessments for unindexed scan directories", async () => {
   const first = await fixture();
   const second = await fixture("scan_example_002");
   const environment = first.environment;
@@ -405,7 +405,10 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     "INSERT INTO finding_severity_assessments SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
   await query(environment, "DROP TABLE scan_severity_assessments");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 42");
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (42, 46)",
+  );
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -422,15 +425,15 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
-  await expect(
-    readScanSeverityClassification(
+  expect(
+    await readScanSeverityClassification(
       first.scanDirectory,
       scanId,
       first.findings,
       undefined,
       environment,
     ),
-  ).rejects.toThrow("incomplete");
+  ).toEqual(classification);
   expect(
     (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
       .assessments,

@@ -1,13 +1,6 @@
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { privateDirectory, privateDirectories } from "./helpers/source.mjs";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -24,9 +17,7 @@ test(
   "shipped native entrypoint extracts a PDF before Codex authentication",
   { timeout: 30000 },
   async () => {
-    const root = await realpath(
-      await mkdtemp(path.join(tmpdir(), "codex-security-native-pdf-")),
-    );
+    const root = await privateDirectory("codex-security-native-pdf-");
     const repository = path.join(root, "repository");
     const temporary = path.join(root, "tmp");
     const codexHome = path.join(root, "codex");
@@ -40,9 +31,7 @@ test(
       version: "1.0.0",
     });
     try {
-      await Promise.all(
-        [repository, temporary, codexHome].map((directory) => mkdir(directory)),
-      );
+      await privateDirectories(repository, temporary, codexHome);
       await writeFile(
         path.join(repository, "app.py"),
         "print('synthetic fixture')\n",

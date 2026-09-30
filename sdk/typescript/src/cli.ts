@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { loadDeepScanCheckpoint } from "./deep-scan-checkpoint.js";
+import { loadDeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 
 import {
   execFile as execFileCallback,
@@ -9223,7 +9223,7 @@ async function readDeepScanStop(
     "--scan-id",
     result.manifest.scan.id,
   ]);
-  const state = await loadDeepScanCheckpoint(result.scanDir);
+  const state = await loadDeepScanCheckpointSummary(result.scanDir);
   if (state?.terminalReason === "saturated") {
     return {
       reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
@@ -9234,8 +9234,9 @@ async function readDeepScanStop(
     { deepScan?: Required<DeepScanOptions> } | undefined;
   if (recipe?.deepScan === undefined) return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = recipe.deepScan;
+  const historical = state["legacy"] as { discoveryRuns?: number } | undefined;
   if (
-    state.passes.length + (state.legacy?.discoveryRuns ?? 0) >=
+    state.passes.length + (historical?.discoveryRuns ?? 0) >=
     maxDiscoveryRuns
   ) {
     const stillFindingIssues =

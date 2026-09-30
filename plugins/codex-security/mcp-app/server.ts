@@ -1176,13 +1176,7 @@ export function createCodexSecurityServer(): McpServer {
           {
             scan,
             ...(isJsonObject(begun.recipe)
-              ? { recipe: begun.recipe as NativeScanInput["recipe"] }
-              : {}),
-            ...(isJsonObject(begun.deepScanSettings)
-              ? {
-                  savedDeepScanSettings:
-                    begun.deepScanSettings as NativeScanInput["savedDeepScanSettings"],
-                }
+              ? { recipe: begun.recipe as unknown as NativeScanInput["recipe"] }
               : {}),
             threadId,
             ...modelSettings,
@@ -1195,7 +1189,15 @@ export function createCodexSecurityServer(): McpServer {
           },
           abortSignalFromExtra(extra),
         );
-        return nativeScanCompletedResult(scan, "get-scan");
+        const completed = await runWorkbench([
+          "get-scan",
+          "--scan-id",
+          scan.scanId,
+        ]);
+        return nativeScanCompletedResult(
+          scan,
+          nativeCompletionMetadata(completed.scan),
+        );
       } catch (error: unknown) {
         if (error instanceof ScanPermissionError)
           return toolErrorResult(deepScanInvocationFailureMessage(error));
@@ -2382,20 +2384,20 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
 
 async function nativeScanCompletedResult(
   scan: ScanResults,
-  command: "complete-scan" | "get-scan" = "complete-scan",
+  metadata?: JsonObject,
 ) {
-  let completed: JsonObject;
-  try {
-    completed = await runWorkbench([
-      command,
-      "--scan-id",
-      scan.scanId,
-      ...(command === "complete-scan"
-        ? optionalArg("--claim-token", scan.handoffClaimToken)
-        : []),
-    ]);
-  } catch (error) {
-    return toolErrorResult(completionFailureMessage(error));
+  if (metadata === undefined) {
+    try {
+      const completed = await runWorkbench([
+        "complete-scan",
+        "--scan-id",
+        scan.scanId,
+        ...optionalArg("--claim-token", scan.handoffClaimToken),
+      ]);
+      metadata = nativeCompletionMetadata(completed.scan);
+    } catch (error) {
+      return toolErrorResult(completionFailureMessage(error));
+    }
   }
   const instructions = `Deep Scan ${scan.scanId} is complete. The ordinary scans have been merged, and the parent artifacts are sealed under ${scan.scanDir}. The generated report.md is ready. Return the report and requested results. Do not call complete_codex_security_scan or start another scan.`;
   return {
@@ -2405,7 +2407,7 @@ async function nativeScanCompletedResult(
       scanDir: scan.scanDir,
       manifestPath: join(scan.scanDir, "scan-manifest.json"),
       reportPath: join(scan.scanDir, "report.md"),
-      ...nativeCompletionMetadata(completed.scan),
+      ...metadata,
       instructions,
     },
   };
@@ -2449,41 +2451,27 @@ async function nativeScanTerminalResult(
 ) {
   const status = scan.progress?.status;
   if (status === "complete") return nativeScanCompletedResult(scan);
-  const retained =
-    status === "canceled" || status === "failed"
-      ? await finalizeNativeStoppedScan(scan.scanId, nativeScans, {
-          message: scan.failureMessage ?? undefined,
-        })
-      : undefined;
-  if (status === "canceled") {
-    const instructions = `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`;
-    return {
-      content: [{ type: "text" as const, text: instructions }],
-      structuredContent: {
-        status: "canceled",
-        scanId: scan.scanId,
-        scanDir: scan.scanDir,
-        ...nativeCompletionMetadata(retained?.scan),
-        instructions,
-      },
-    };
-  }
-  if (status === "failed") {
-    const instructions =
-      scan.failureMessage ??
-      `Deep Scan ${scan.scanId} failed. Check retained results and publication warnings; coverage is incomplete.`;
-    return {
-      ...toolErrorResult(instructions),
-      structuredContent: {
-        status,
-        scanId: scan.scanId,
-        scanDir: scan.scanDir,
-        ...nativeCompletionMetadata(retained?.scan),
-        instructions,
-      },
-    };
-  }
-  return undefined;
+  if (status !== "canceled" && status !== "failed") return undefined;
+  const retained = await finalizeNativeStoppedScan(scan.scanId, nativeScans, {
+    message: scan.failureMessage ?? undefined,
+  });
+  const instructions =
+    status === "canceled"
+      ? `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`
+      : (scan.failureMessage ??
+        `Deep Scan ${scan.scanId} failed. Check retained results and publication warnings; coverage is incomplete.`);
+  return {
+    ...(status === "failed"
+      ? toolErrorResult(instructions)
+      : { content: [{ type: "text" as const, text: instructions }] }),
+    structuredContent: {
+      status,
+      scanId: scan.scanId,
+      scanDir: scan.scanDir,
+      ...nativeCompletionMetadata(retained.scan),
+      instructions,
+    },
+  };
 }
 
 async function runWorkbench(
@@ -2581,7 +2569,7 @@ async function withWorkbenchStateSelectionLock<T>(
   }
 }
 
-async function executeWorkbench(
+export async function executeWorkbench(
   pythonCommand: string,
   args: string[],
   stateDir?: string,

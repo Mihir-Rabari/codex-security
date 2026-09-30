@@ -16,7 +16,7 @@ import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
-import type { JsonObject } from "../src/config.js";
+import { codexConfigOverrides, type JsonObject } from "../src/config.js";
 import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
@@ -119,9 +119,13 @@ await new Promise(() => {});
           }
           return result;
         },
-        createCodex: (options) =>
+        createCodex: ({ config, configOverrides, ...options }) =>
           new Codex({
             ...options,
+            configOverrides: [
+              ...codexConfigOverrides(config as JsonObject),
+              ...(configOverrides ?? []),
+            ],
             codexPathOverride: nodeExecutable,
             env: {
               ...options.env,
@@ -218,11 +222,15 @@ await new Promise(() => {});
     );
   expect(launches).toHaveLength(2);
   for (const launch of launches) {
-    const permission = launch.args.find((value) =>
-      value.startsWith("permissions.codex_security_scan="),
+    const config = Object.assign(
+      {},
+      ...launch.args.flatMap((value, index) =>
+        value === "-c" || value === "--config"
+          ? [parseToml(launch.args[index + 1]!)]
+          : [],
+      ),
     );
-    expect(permission).toBeDefined();
-    expect(parseToml(permission!)).toMatchObject({
+    expect(config).toMatchObject({
       permissions: {
         codex_security_scan: {
           filesystem: {
@@ -237,12 +245,7 @@ await new Promise(() => {});
     expect(launch.selected).toBe("selected-value");
     expect(launch.safetyIdentifier).toBe("synthetic-saved-identifier");
     expect(launch.providerKey).toBe("synthetic-provider-key");
-    const settings = launch.args.filter((value) =>
-      Object.keys(savedSettings).some(
-        (key) => value.startsWith(`${key}=`) || value.startsWith(`${key}.`),
-      ),
-    );
-    expect(parseToml(settings.join("\n"))).toMatchObject(savedSettings);
+    expect(config).toMatchObject(savedSettings);
   }
   expect(launches[1]!.args).toContain("resume");
   expect(launches[1]!.args).toContain(threadId);

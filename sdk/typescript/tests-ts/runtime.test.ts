@@ -324,8 +324,9 @@ describe("plugin runtime preparation", () => {
     ).toEqual(["candidate-a", "candidate-b"]);
   });
 
-  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
+  test("disambiguates duplicate coverage surface identities without losing evidence", () => {
     const coverage = semanticCoverage({
+      completeness: "partial",
       surfaces: [
         {
           id: "surface-web",
@@ -362,14 +363,18 @@ describe("plugin runtime preparation", () => {
         mode: "deep",
         targetContract: {
           target: {
-            allowedKinds: ["git_worktree"],
-            targetId: "fixture",
-            displayName: "fixture",
+            allowedKinds: ["directory_snapshot"],
+            targetId: "target_example",
+            displayName: "example",
           },
           scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
         },
       },
-      { scanId: "fixture", findings: [], coverage },
+      {
+        scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f49",
+        findings: [],
+        coverage,
+      },
     ).coverage;
 
     expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
@@ -2276,8 +2281,20 @@ describe("plugin runtime preparation", () => {
       restorationSignal.abort();
       await restorer.restore(artifact, expected);
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      await restorer.restoreMany([
+        { path: artifact, contents: Buffer.from([9, 0, 8]) },
+        { path: "artifacts/second.bin", contents: expected },
+        { path: artifact, contents: expected },
+      ]);
+      expect(await readFile(join(scanDir, artifact))).toEqual(expected);
+      expect(await readFile(join(scanDir, "artifacts/second.bin"))).toEqual(
+        expected,
+      );
       await expect(
-        restorer.restore("../outside.bin", expected),
+        restorer.restoreMany([
+          { path: "../outside.bin", contents: expected },
+          { path: artifact, contents: Buffer.from([7]) },
+        ]),
       ).rejects.toThrow("safely restore");
       expect(await readFile(join(scanDir, artifact))).toEqual(expected);
 

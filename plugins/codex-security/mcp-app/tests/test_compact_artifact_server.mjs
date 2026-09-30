@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -444,20 +444,8 @@ async function testSemanticScanDraftCompletion() {
     const candidateCollisionDeferred = {
       reason: "An unavailable adapter belongs to an existing candidate.",
     };
-    const deferredIdentity = ({ reason, paths, surfaceIds }) => {
-      const digest = createHash("sha256")
-        .update(JSON.stringify([reason, paths ?? [], surfaceIds ?? []]))
-        .digest("hex")
-        .slice(0, 16);
-      return `deferred-${digest}`;
-    };
-    const reasonOnlyDeferredId = deferredIdentity(reasonOnlyDeferred);
-    const explicitCollisionDeferredId = deferredIdentity(
-      explicitCollisionDeferred,
-    );
-    const candidateCollisionDeferredId = deferredIdentity(
-      candidateCollisionDeferred,
-    );
+    const explicitCollisionDeferredId = "explicit-deferred-query";
+    const candidateCollisionDeferredId = "candidate-owned-query";
     const coverage = {
       completeness: "partial",
       surfaces: [
@@ -505,7 +493,7 @@ async function testSemanticScanDraftCompletion() {
         },
         {
           candidateId: candidateCollisionDeferredId,
-          reason: "The later candidate identity must retain its owned base.",
+          reason: "Retain the later candidate metadata.",
         },
       ],
       openQuestions: [
@@ -676,6 +664,25 @@ async function testSemanticScanDraftCompletion() {
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
+    const savedFindings = JSON.parse(
+      await readFile(path.join(scanDirectory, "findings.json"), "utf8"),
+    );
+    finding.identity = savedFindings.findings[0].identity;
+    assert.ok(finding.identity.anchor);
+    const savedCoverage = JSON.parse(
+      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+    );
+    coverage.surfaces[0].id = savedCoverage.surfaces[0].id;
+    assert.equal(
+      new Set(savedCoverage.deferred.map((row) => row.id)).size,
+      coverage.deferred.length,
+    );
+    for (const [index, row] of coverage.deferred.entries()) {
+      const savedId = savedCoverage.deferred[index].id;
+      assert.ok(savedId);
+      if (row.id !== undefined) assert.equal(savedId, row.id);
+      row.id = savedId;
+    }
     const discovery = await progress();
     assert.equal(discovery.status, "running");
     assert.equal(discovery.phase, "discovery");
@@ -778,46 +785,7 @@ async function testSemanticScanDraftCompletion() {
     assert.deepEqual(results.coverage.includePaths, ["."]);
     assert.deepEqual(results.coverage.excludePaths, []);
     assert.equal(results.coverage.surfaces[0].disposition, "reported");
-    assert.deepEqual(results.coverage.deferred, [
-      {
-        ...coverage.deferred[0],
-        id: "candidate-deferred-query",
-      },
-      {
-        ...coverage.deferred[1],
-        id: "candidate-reserved-query-2",
-      },
-      coverage.deferred[2],
-      {
-        ...coverage.deferred[3],
-        id: "candidate-deferred-query-2",
-      },
-      {
-        ...coverage.deferred[4],
-        id: "candidate-reserved-query-3",
-      },
-      {
-        ...reasonOnlyDeferred,
-        id: reasonOnlyDeferredId,
-      },
-      {
-        ...reasonOnlyDeferred,
-        id: `${reasonOnlyDeferredId}-2`,
-      },
-      {
-        ...explicitCollisionDeferred,
-        id: `${explicitCollisionDeferredId}-2`,
-      },
-      {
-        ...candidateCollisionDeferred,
-        id: `${candidateCollisionDeferredId}-2`,
-      },
-      coverage.deferred[9],
-      {
-        ...coverage.deferred[10],
-        id: candidateCollisionDeferredId,
-      },
-    ]);
+    assert.deepEqual(results.coverage.deferred, coverage.deferred);
     assert.deepEqual(results.coverage.openQuestions, [
       { question: "Can a neighboring query API bypass parameterization?" },
       coverage.openQuestions[1],
@@ -1205,6 +1173,7 @@ async function testPromptDrivenPrivateRecipe() {
       CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
       CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
     };
+    await mkdir(fixtureRoot, { mode: 0o700 });
     await mkdir(repoRoot, { recursive: true });
     await mkdir(environment.CODEX_SECURITY_SCAN_ROOT, { mode: 0o700 });
     await writeFile(path.join(repoRoot, "fixture.py"), "print('fixture')\n");
@@ -1307,6 +1276,7 @@ async function testNativeDeepTerminalResults() {
     CODEX_API_KEY: "",
     OPENAI_API_KEY: "",
   };
+  await mkdir(fixtureRoot, { mode: 0o700 });
   await mkdir(repoRoot, { recursive: true });
   await mkdir(environment.CODEX_SECURITY_SCAN_ROOT, { mode: 0o700 });
   await mkdir(environment.CODEX_HOME, { mode: 0o700 });
@@ -1374,10 +1344,10 @@ process.exit(1);
       "artifacts/deep-scan/checkpoint.json",
     ],
     {
-      version: 2,
+      version: 3,
       passes: [],
       mergedScanIds: [],
-      aggregate: null,
+      aggregatePath: null,
       terminalReason: "capped",
     },
   );
@@ -1555,10 +1525,10 @@ process.exit(1);
         "artifacts/deep-scan/checkpoint.json",
       ],
       {
-        version: 2,
+        version: 3,
         passes: [{ directory: childRelativeDirectory, scanId: child.scanId }],
         mergedScanIds: [],
-        aggregate: null,
+        aggregatePath: null,
       },
     );
     runWorkbenchFixture(environment, [

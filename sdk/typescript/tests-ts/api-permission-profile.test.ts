@@ -1,28 +1,35 @@
-import { fixtureSpawn } from "./support/codex-process.js";
 import * as childProcess from "node:child_process";
 import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { stringify } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
-import { executablePathForSpawn } from "../src/runtime.js";
+import {
+  bootstrapPlugin,
+  executablePathForSpawn,
+  resolveCodexCommand,
+  type PluginInstall,
+} from "../src/runtime.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
-import { semanticFinding } from "./helpers/semantic-scan.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { semanticFinding } from "./helpers/semantic-scan.js";
 import { mockWorkbench, TEST_SNAPSHOT_DIGEST } from "./support/api-client.js";
 import {
   createApiTestFixtures,
+  copyPluginVariant,
   preparedRuntime,
 } from "./support/api-events.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-type Role = "discovery" | "merge" | "standard" | "custom" | "comparison";
+type Role =
+  "discovery" | "merge" | "standard" | "custom" | "comparison" | "followup";
 type Scenario =
   | "rejected"
   | "fallback"
@@ -36,35 +43,67 @@ async function fixture(
   scenario: Scenario,
   surface: "sdk" | "cli",
   replaceEnvironmentDuringPreparation = false,
+  selectedProfile: "selected" | "missing" | undefined = undefined,
+  composedDiscovery = false,
+  replaceSelectedPlugin = false,
 ) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
-  const scanDir = join(root, "scan");
+  const scanDir = join(root, role === "followup" ? "scan[ab]" : "scan");
   const codexHome = join(root, "codex-home");
   const executable = join(root, "synthetic-codex.exe");
   const script = join(root, "synthetic-codex.cjs");
   const capture = join(root, "processes.jsonl");
-  const restore = async (path: string, contents: Uint8Array) => {
-    await mkdir(dirname(join(scanDir, path)), { recursive: true });
-    await writeFile(join(scanDir, path), contents);
-  };
-
+  const projects = Object.fromEntries(
+    Array.from({ length: 2_000 }, (_, index) => [
+      join(root, `synthetic-project-${index}`),
+      { trust_level: "untrusted" },
+    ]),
+  );
   const scanId =
-    role === "comparison" ? "scan_example_001" : "parent-permission-fixture";
+    role === "comparison" || role === "followup"
+      ? "scan_example_001"
+      : "parent-permission-fixture";
   const threadId = "00000000-0000-4000-8000-000000000001";
+  const childId = "child-permission-fixture";
+  const childDir = join(scanDir, "artifacts/deep-scan/passes/pass-1");
   const cwd =
-    role === "merge" ? join(scanDir, "artifacts/deep-scan/merge") : scanDir;
+    role === "merge"
+      ? join(scanDir, "artifacts/deep-scan/merge")
+      : composedDiscovery
+        ? childDir
+        : scanDir;
   const inheritedPermissions = {
     filesystem: { [join(root, "private")]: "deny" },
     network: { enabled: false },
   };
   await Promise.all([
     mkdir(repository),
-    mkdir(codexHome),
+    mkdir(codexHome, { mode: 0o700 }),
     mkdir(scanDir, { mode: 0o700 }),
   ]);
   await writeFile(join(repository, "app.py"), "print('synthetic fixture')\n");
   await writeFile(capture, "");
+  await writeFile(
+    join(codexHome, "config.toml"),
+    [
+      'model_provider = "synthetic_secondary"',
+      'forced_login_method = "chatgpt"',
+      'forced_chatgpt_workspace_id = "synthetic-secondary-workspace"',
+    ].join("\n"),
+  );
+  let selectedPlugin: PluginInstall | undefined;
+  let replacementPlugin: string | undefined;
+  const pluginOptions = {
+    codexCommand: resolveCodexCommand({}),
+    environment: { CODEX_HOME: codexHome },
+  };
+  if (replaceSelectedPlugin) {
+    await writeFile(join(codexHome, "config.toml"), "");
+    const selected = await copyPluginVariant(root, "selected-a");
+    replacementPlugin = await copyPluginVariant(root, "selected-b");
+    selectedPlugin = await bootstrapPlugin(codexHome, selected, pluginOptions);
+  }
   await writeFile(
     script,
     [
@@ -73,17 +112,69 @@ async function fixture(
         JSON.stringify(createRequire(import.meta.url).resolve("smol-toml")) +
         ");",
       "const args = process.argv.slice(2);",
+      ...(replaceSelectedPlugin
+        ? [
+            'if (args.includes("plugin")) {',
+            '  const result = require("node:child_process").spawnSync(' +
+              JSON.stringify(
+                executablePathForSpawn(pluginOptions.codexCommand.command),
+              ) +
+              ', args, { stdio: "inherit" });',
+            "  process.exit(result.status ?? 1);",
+            "}",
+          ]
+        : []),
       "const record = (value) => fs.appendFileSync(" +
         JSON.stringify(capture) +
         ', JSON.stringify(value) + "\\n");',
-      "  const config = {};",
+      '  const config = parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME, "config.toml"), "utf8"));',
       "  const merge = (target, value) => {",
       '    for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child;',
       "    return target;",
       "  };",
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, apiKey: process.env.CODEX_API_KEY });',
-      'if (args.includes("mcp")) { console.log("[]"); process.exit(0); }',
+      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, model: config.model, effort: config.model_reasoning_effort, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
+      ...(replaceSelectedPlugin
+        ? [
+            'const servers = JSON.parse(require("node:child_process").execFileSync(' +
+              JSON.stringify(
+                executablePathForSpawn(pluginOptions.codexCommand.command),
+              ) +
+              ', ["mcp", "list", "--json", "-c", "features.plugins=true"], { encoding: "utf8" }));',
+            'record({ kind: "plugin-selection", marker: servers.find(({ name }) => name === "synthetic-plugin")?.transport.args[0] });',
+          ]
+        : []),
+      "if (config.profile !== undefined) {",
+      '  const result = require("node:child_process").spawnSync(' +
+        JSON.stringify(
+          executablePathForSpawn(resolveCodexCommand({}).command),
+        ) +
+        ', ["mcp", "list", "--json"], { encoding: "utf8" });',
+      '  record({ kind: "profile-validation", exitCode: result.status, stderr: result.stderr });',
+      '  process.stderr.write(result.stderr ?? "");',
+      "  process.exit(result.status ?? 1);",
+      "}",
+      'if (args.includes("mcp")) {',
+      '  const result = require("node:child_process").spawnSync(' +
+        JSON.stringify(
+          executablePathForSpawn(resolveCodexCommand({}).command),
+        ) +
+        ', args, { stdio: "inherit" });',
+      "  process.exit(result.status ?? 1);",
+      "}",
+      ...(role === "followup"
+        ? [
+            `if (args.includes("app-server") && process.cwd() !== ${JSON.stringify(scanDir)}) {`,
+            '  const result = require("node:child_process").spawnSync(' +
+              JSON.stringify(
+                executablePathForSpawn(resolveCodexCommand({}).command),
+              ) +
+              ', [...args.slice(0, -2), "mcp", "list", "--json", "-c", "features.plugins=false"], { encoding: "utf8" });',
+            '  record({ kind: "permission-validation", exitCode: result.status, stderr: result.stderr });',
+            '  if (result.status !== 0) { process.stderr.write(result.stderr ?? ""); process.exit(result.status ?? 1); }',
+            "}",
+          ]
+        : []),
       'if (args.includes("app-server")) {',
       "  const selected = config.default_permissions;",
       "  const profile = config.permissions[selected];",
@@ -103,7 +194,9 @@ async function fixture(
       '    const result = request.method === "initialize" ? {} : request.method === "config/read" ? { config } : request.method === "permissionProfile/list" ? request.params?.cursor !== "selected-page" ? { data: [{ id: "other-profile", allowed: true }], nextCursor: "selected-page" } : { data: [{ id: selected, allowed: ' +
         (role === "comparison"
           ? 'config.default_permissions !== "codex_security_comparison" || '
-          : "") +
+          : role === "followup"
+            ? `config.permissions[config.default_permissions].filesystem[${JSON.stringify(scanDir)}]?.["."] !== "read" || `
+            : "") +
         (scenario !== "rejected") +
         " }], nextCursor: null } : undefined;",
       '    if (!result) throw new Error("Unexpected fixture request " + request.method);',
@@ -114,9 +207,11 @@ async function fixture(
       '  console.log(JSON.stringify({ type: "thread.started", thread_id: ' +
         JSON.stringify(threadId) +
         " }));",
-      ...(role === "comparison"
+      ...(role === "comparison" || role === "followup"
         ? [
-            'if (config.default_permissions === "codex_security_scan") {',
+            role === "followup"
+              ? `if (config.permissions.codex_security_scan.filesystem[${JSON.stringify(scanDir)}]?.["."] !== "read") {`
+              : "if (config.features.plugins !== false) {",
             "  fs.cpSync(" +
               JSON.stringify(join(PLUGIN_ROOT, "examples/completed-scan")) +
               ", process.env.CODEX_SECURITY_SCAN_DIR, { recursive: true });",
@@ -161,7 +256,23 @@ async function fixture(
         "\n",
     );
   }
-  const childDir = join(scanDir, "artifacts/deep-scan/passes/pass-1");
+  if (composedDiscovery && resumed) {
+    await mkdir(childDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(scanDir, DEEP_SCAN_CHECKPOINT),
+      JSON.stringify({
+        version: 3,
+        startedAt: new Date().toISOString(),
+        passes: [
+          { directory: "artifacts/deep-scan/passes/pass-1", scanId: childId },
+        ],
+        mergedScanIds: [],
+        aggregate: null,
+        noNewStreak: 0,
+        consecutiveErrors: 0,
+      }),
+    );
+  }
   if (role === "merge") {
     await cp(join(PLUGIN_ROOT, "examples/completed-scan"), childDir, {
       recursive: true,
@@ -170,9 +281,11 @@ async function fixture(
     await writeFile(
       join(scanDir, DEEP_SCAN_CHECKPOINT),
       JSON.stringify({
-        version: 2,
+        version: 3,
         startedAt: new Date().toISOString(),
-        passes: [{ directory: "artifacts/deep-scan/passes/pass-1" }],
+        passes: [1, 2].map((index) => ({
+          directory: `artifacts/deep-scan/passes/pass-${index}`,
+        })),
         mergedScanIds: [],
         aggregate: null,
         noNewStreak: 0,
@@ -194,30 +307,31 @@ async function fixture(
     ),
   );
   const commands: string[] = [];
+  const recipes: JsonObject[] = [];
   const warnings: string[] = [];
   const completedArtifacts = new Map<string, Buffer<ArrayBuffer>>();
   let customCalls = 0;
+  let customProjects: unknown;
+  let preserveCodexHomeConfig = false;
   const registration: JsonObject = {
     scanId,
     scanDir,
     targetId: "target_sha256_example",
     targetRevision: "unversioned",
-    threadId: resumed ? threadId : null,
+    threadId: resumed && !composedDiscovery ? threadId : null,
     recipe: { repository, target: { kind: "repository", paths: [] } },
     contract: {
       target: {
         allowedKinds: ["directory_snapshot"],
         requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
-        targetId: "target_sha256_example",
-        displayName: "Synthetic repository",
       },
-      scope: { requiredIncludePaths: ["."], requiredExcludePaths: [] },
     },
   };
   const client = new CodexSecurity(
     {
       pluginPath: PLUGIN_ROOT,
       codexOverrides: {
+        projects,
         mcp_servers: {
           "codex-security": { command: "synthetic-workbench", enabled: true },
           synthetic: {
@@ -225,16 +339,43 @@ async function fixture(
             env: { SETTING: "inherited" },
           },
         },
+        ...(selectedProfile
+          ? {
+              profile: selectedProfile,
+              profiles: {
+                selected: {
+                  model_provider: "synthetic_selected",
+                  model: "gpt-6-astra",
+                  model_reasoning_effort: "high",
+                },
+              },
+              model_providers: {
+                synthetic_selected: {
+                  name: "Synthetic selected",
+                  base_url: "https://example.invalid/v1",
+                  env_key: "OPENAI_API_KEY",
+                  wire_api: "responses",
+                },
+              },
+            }
+          : {}),
       },
     },
     {
       environment,
       prepareRuntime: async () => ({
         ...preparedRuntime(codexHome),
+        ...(selectedPlugin === undefined ? {} : { plugin: selectedPlugin }),
+        configPath: join(root, "preflight.toml"),
         environment,
         persistentCredentialHome: true,
+        preserveCodexHomeConfig,
       }),
       resolvePluginPython: async () => {
+        if (replacementPlugin !== undefined) {
+          await bootstrapPlugin(codexHome, replacementPlugin, pluginOptions);
+          replacementPlugin = undefined;
+        }
         if (replaceEnvironmentDuringPreparation) {
           environment["CODEX_CLI_PATH"] = join(root, "later-executable");
           environment["OPENAI_API_KEY"] = "synthetic-later-key";
@@ -242,13 +383,21 @@ async function fixture(
         }
         return process.execPath;
       },
-      prepareOutputDir: async () => scanDir,
+      prepareOutputDir: async (requested) => {
+        await mkdir(requested ?? scanDir, { recursive: true, mode: 0o700 });
+        return requested ?? scanDir;
+      },
       acquireScanExecution: async () => () => {},
       repositoryRevision: async () => null,
       prepareScanArtifactRestorer: async () => ({
         async projectChild(parentScanId, sourceScanId, sourceDirectory) {
           const finding = semanticFinding({
+            identity: { anchor: sourceScanId },
             locations: [{ path: "app.py", startLine: 1 }],
+            provenance: {
+              source: "local_plugin",
+              sourceFindingIds: [`${sourceScanId}:0`],
+            },
           });
           return {
             scanId: sourceScanId,
@@ -256,15 +405,7 @@ async function fixture(
             sourceFindings: [finding],
             draft: {
               scanId: parentScanId,
-              findings: [
-                {
-                  ...finding,
-                  provenance: {
-                    ...finding.provenance,
-                    sourceFindingIds: [`${sourceScanId}:0`],
-                  },
-                },
-              ],
+              findings: [finding],
               coverage: {
                 completeness: "complete",
                 surfaces: [],
@@ -277,14 +418,23 @@ async function fixture(
         async prepareDirectory(path) {
           await mkdir(join(scanDir, path), { recursive: true });
         },
-        restore,
+        async restore(path, contents) {
+          await mkdir(dirname(join(scanDir, path)), { recursive: true });
+          await writeFile(join(scanDir, path), contents);
+        },
+        async restoreMany(artifacts) {
+          for (const { path, contents } of artifacts) {
+            await mkdir(dirname(join(scanDir, path)), { recursive: true });
+            await writeFile(join(scanDir, path), contents);
+          }
+        },
         async remove(path) {
           await rm(join(scanDir, path), { force: true });
         },
       }),
       runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args[0]!);
-        if (role === "comparison") {
+        if (role === "comparison" || role === "followup") {
           const current = {
             findingId: "csf_852f90d6e1177502ff113d4a",
             occurrenceId: "occ_e79cb19591e696572a1c22be",
@@ -318,11 +468,23 @@ async function fixture(
             return { scan: { scanId, progress: { status: "complete" } } };
           }
         }
-        if (["register-cli-scan", "get-cli-scan-resume"].includes(args[0]!))
-          return registration;
+        if (["register-cli-scan", "get-cli-scan-resume"].includes(args[0]!)) {
+          const recipe =
+            input === undefined ? undefined : JSON.parse(input).recipe;
+          if (recipe) recipes.push(recipe);
+          return composedDiscovery &&
+            (recipe?.mode === "standard" || args[2] === childId)
+            ? {
+                ...registration,
+                scanId: childId,
+                scanDir: childDir,
+                threadId: resumed ? threadId : null,
+              }
+            : registration;
+        }
         if (args[0] === "get-scan-feedback")
           return {
-            scanId,
+            scanId: args[2]!,
             targetId: registration["targetId"]!,
             falsePositives: [],
           };
@@ -330,16 +492,28 @@ async function fixture(
           return {
             scans:
               role === "merge"
-                ? [
-                    {
-                      scanId: "scan_example_001",
-                      scanDir: childDir,
-                      parentScanId: scanId,
-                      targetPath: repository,
-                      progress: { status: "complete" },
-                    },
-                  ]
-                : [],
+                ? [1, 2].map((index) => ({
+                    scanId: `scan_example_00${index}`,
+                    scanDir: join(
+                      scanDir,
+                      `artifacts/deep-scan/passes/pass-${index}`,
+                    ),
+                    parentScanId: scanId,
+                    targetPath: repository,
+                    progress: { status: "complete" },
+                  }))
+                : composedDiscovery && resumed
+                  ? [
+                      {
+                        scanId: childId,
+                        scanDir: childDir,
+                        parentScanId: scanId,
+                        targetPath: repository,
+                        continuationThreadId: threadId,
+                        progress: { status: "running" },
+                      },
+                    ]
+                  : [],
           };
         if (args[0] === "get-scan")
           return { scan: { progress: { status: "running" } } };
@@ -351,50 +525,57 @@ async function fixture(
       },
       ...(role === "custom"
         ? {
-            createCodex: () => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  customCalls++;
-                  throw new Error("synthetic custom factory");
-                },
-              }),
-            }),
+            createCodex: ({ config }) => {
+              customProjects = config?.["projects"];
+              return {
+                startThread: () => ({
+                  id: null,
+                  async runStreamed() {
+                    customCalls++;
+                    throw new Error("synthetic custom factory");
+                  },
+                }),
+              };
+            },
           }
         : {}),
     },
     { surface },
   );
+  const originalSpawn = childProcess.spawn;
   const children: childProcess.ChildProcess[] = [];
   const childSignals: { kind: string; signal: AbortSignal | undefined }[] = [];
-  const spawn = spyOn(childProcess, "spawn").mockImplementation(
-    fixtureSpawn(
-      executablePathForSpawn(executable),
-      script,
-      (child, argv, options) => {
-        children.push(child);
-        childSignals.push({
-          kind: argv.includes("mcp")
-            ? "mcp"
-            : argv.includes("app-server")
-              ? "preflight"
-              : "exec",
-          signal: options?.signal,
-        });
-      },
-    ),
-  );
+  const spawn = spyOn(childProcess, "spawn").mockImplementation(((
+    ...args: Parameters<typeof childProcess.spawn>
+  ) => {
+    const [command, argv, options] = args;
+    if (command !== executablePathForSpawn(executable) || !Array.isArray(argv))
+      return originalSpawn(...args);
+    const child = originalSpawn(process.execPath, [script, ...argv], options);
+    children.push(child);
+    childSignals.push({
+      kind: argv.includes("mcp")
+        ? "mcp"
+        : argv.includes("app-server")
+          ? "preflight"
+          : "exec",
+      signal: options?.signal,
+    });
+    return child;
+  }) as typeof childProcess.spawn);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
   const options: ScanOptions = {
-    mode: role === "merge" ? "deep" : "standard",
+    mode: role === "merge" || composedDiscovery ? "deep" : "standard",
     outputDir: scanDir,
-    ...(role === "comparison" ? { inheritedPermissions } : {}),
+    ...(role === "comparison" || role === "followup"
+      ? { inheritedPermissions }
+      : {}),
+    ...(role === "followup" ? { postScanPrompt: "Write follow-up notes" } : {}),
     ...(role === "discovery" || role === "custom"
       ? { deepScanPass: true }
       : {}),
     ...(resumed || role === "merge" ? { resumeScanId: scanId } : {}),
-    ...(role === "merge"
+    ...(role === "merge" || composedDiscovery
       ? { workers: 1, subagents: 0, maxDiscoveryRuns: 1, maxTimeHours: 1 }
       : {}),
     signal: controller.signal,
@@ -421,9 +602,10 @@ async function fixture(
         /* Consume the real child protocol. */
       }
     },
-    run: (onScanStarted?: () => void) =>
+    run: (onScanStarted?: () => void, overrides: Partial<ScanOptions> = {}) =>
       client.run(repository, {
         ...options,
+        ...overrides,
         onScanStarted,
         onWarning: (message) => warnings.push(message),
       }),
@@ -431,6 +613,13 @@ async function fixture(
     signal: controller.signal,
     childSignals,
     commands,
+    recipes,
+    projects,
+    codexHome,
+    async useAmbientHome() {
+      preserveCodexHomeConfig = true;
+      await writeFile(join(codexHome, "config.toml"), stringify({ projects }));
+    },
     scanDir,
     cwd,
     repository,
@@ -438,6 +627,7 @@ async function fixture(
     warnings,
     completedArtifacts,
     customCalls: () => customCalls,
+    customProjects: () => customProjects,
     observations: async (requests = false) =>
       (await readFile(capture, "utf8"))
         .trim()
@@ -448,69 +638,128 @@ async function fixture(
           requests ? kind === "request" : kind !== "request",
         ),
     async close() {
-      clearTimeout(timeout);
       try {
         await client.close();
+        // The Codex SDK removes child listeners during cleanup; exit state is retained.
+        for (const child of children) {
+          while (child.exitCode === null && child.signalCode === null)
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
       } finally {
         spawn.mockRestore();
       }
-      // The SDK removes child listeners during cleanup; exit state is retained.
-      for (const child of children)
-        while (child.exitCode === null && child.signalCode === null)
-          await new Promise<void>((resolve) => setImmediate(resolve));
     },
   };
 }
 
-test("default factory checks fresh and resumed discovery and merge permissions", async () => {
-  for (const role of ["discovery", "merge"] as const)
-    for (const resumed of [false, true])
-      for (const scenario of ["rejected", "fallback"] as const) {
-        const h = await fixture(role, resumed, scenario, "sdk");
-        try {
-          await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
-          const requests = await h.observations(true);
-          expect(requests.map(({ method }) => method)).toEqual([
-            "initialize",
-            "initialized",
-            "config/read",
-            "permissionProfile/list",
-            "permissionProfile/list",
-          ]);
-          expect(requests.at(-1).params).toMatchObject({
-            cursor: "selected-page",
-            cwd: h.cwd,
-          });
-          const observations = await h.observations();
-          expect(
-            observations.filter(({ kind }) => kind === "preflight"),
-          ).toMatchObject([{ cwd: h.cwd, surface: "sdk" }]);
-          const executions = observations.filter(({ kind }) => kind === "exec");
-          expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
-          if (executions.length) {
-            expect(executions[0].context).toBe("selected-scan");
-            expect(executions[0].apiKey).toBe("synthetic-fixture-key");
-            expect(executions[0].args.includes("resume")).toBe(resumed);
-            expect(executions[0].mcpServers).toEqual({
-              "codex-security": { command: "node", enabled: false },
-              synthetic: {
-                command: "synthetic-mcp",
-                env: { SETTING: "inherited" },
-              },
+test.each([
+  ["discovery", "fresh"],
+  ["discovery", "resumed"],
+  ["merge", "fresh"],
+  ["merge", "resumed"],
+] as const)(
+  "%s %s worker restores the selected plugin after shared setup changes",
+  async (role, phase) => {
+    const h = await fixture(
+      role,
+      phase === "resumed",
+      "fallback",
+      "sdk",
+      false,
+      undefined,
+      role === "discovery",
+      true,
+    );
+    try {
+      await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+      const selections = (await h.observations()).filter(
+        ({ kind }) => kind === "plugin-selection",
+      );
+      expect(selections.length).toBeGreaterThan(0);
+      expect(selections.every(({ marker }) => marker === "selected-a")).toBe(
+        true,
+      );
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test.each(["sdk", "cli"] as const)(
+  "%s default factory checks fresh and resumed discovery and merge permissions",
+  async (surface) => {
+    for (const role of ["discovery", "merge"] as const)
+      for (const resumed of [false, true])
+        for (const scenario of ["rejected", "fallback"] as const) {
+          const h = await fixture(role, resumed, scenario, surface);
+          try {
+            await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+            const requests = await h.observations(true);
+            expect(requests.map(({ method }) => method)).toEqual([
+              "initialize",
+              "initialized",
+              "config/read",
+              "permissionProfile/list",
+              "permissionProfile/list",
+            ]);
+            expect(requests.at(-1).params).toMatchObject({
+              cursor: "selected-page",
+              cwd: h.cwd,
             });
-          }
-          expect(h.commands).not.toContain("complete-scan");
-          if (role === "merge")
+            const observations = await h.observations();
             expect(
-              JSON.parse(
-                await readFile(join(h.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
-              ),
-            ).toMatchObject({ terminalReason: "failed", mergedScanIds: [] });
-        } finally {
-          await h.close();
+              observations.filter(({ kind }) => kind === "preflight"),
+            ).toMatchObject([
+              {
+                cwd: h.cwd,
+                surface,
+                modelProvider: "openai",
+                forcedLogin: null,
+                forcedWorkspace: null,
+              },
+            ]);
+            const executions = observations.filter(
+              ({ kind }) => kind === "exec",
+            );
+            expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
+            if (executions.length) {
+              expect(executions[0].args.includes("resume")).toBe(resumed);
+              expect(executions[0]).toMatchObject({
+                modelProvider: "openai",
+                forcedLogin: null,
+                forcedWorkspace: null,
+              });
+            }
+            for (const launch of observations.filter(
+              ({ kind }) => kind === "preflight" || kind === "exec",
+            )) {
+              expect(launch.context).toBe("selected-scan");
+              expect(launch.apiKey).toBe("synthetic-fixture-key");
+              expect(launch.projects).toEqual(h.projects);
+              expect(
+                launch.args.some((arg: string) => arg.startsWith("projects=")),
+              ).toBe(false);
+              expect(launch.mcpServers).toEqual({
+                "codex-security": { command: "node", enabled: false },
+                synthetic: {
+                  command: "synthetic-mcp",
+                  env: { SETTING: "inherited" },
+                },
+              });
+            }
+            expect(h.commands).not.toContain("complete-scan");
+            if (role === "merge")
+              expect(
+                JSON.parse(
+                  await readFile(join(h.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+                ),
+              ).toMatchObject({ terminalReason: "failed", mergedScanIds: [] });
+          } finally {
+            await h.close();
+          }
         }
-      }
-});
+  },
+);
 
 test.each(["rejected", "substituted-default", "substituted-profile"] as const)(
   "checks the paginated profile and rejects %s before executing the child",
@@ -574,7 +823,12 @@ test.each(["standard", "custom"] as const)(
       expect(observations.filter(({ kind }) => kind === "exec")).toHaveLength(
         role === "standard" ? 1 : 0,
       );
-      if (role === "standard")
+      if (role === "standard") {
+        const execution = observations.find(({ kind }) => kind === "exec");
+        expect(execution.projects).toEqual(h.projects);
+        expect(
+          execution.args.some((arg: string) => arg.startsWith("projects=")),
+        ).toBe(false);
         expect(
           observations.find(({ kind }) => kind === "exec").mcpServers,
         ).toEqual({
@@ -584,12 +838,74 @@ test.each(["standard", "custom"] as const)(
             env: { SETTING: "inherited" },
           },
         });
+      }
       expect(h.customCalls()).toBe(role === "custom" ? 1 : 0);
+      if (role === "custom") expect(h.customProjects()).toEqual(h.projects);
     } finally {
       await h.close();
     }
   },
 );
+
+test.each(["managed", "ambient"] as const)(
+  "ordinary scan comparison keeps large project settings in the %s home",
+  async (home) => {
+    const h = await fixture("comparison", false, "fallback", "sdk");
+    try {
+      if (home === "ambient") await h.useAmbientHome();
+      const before = await readFile(join(h.codexHome, "config.toml"));
+      await h.run(undefined, { inheritedPermissions: undefined });
+      const observations = await h.observations();
+      expect(observations.filter(({ kind }) => kind === "mcp")).toHaveLength(1);
+      expect(observations.filter(({ kind }) => kind === "exec")).toHaveLength(
+        2,
+      );
+      for (const launch of observations) {
+        expect(launch.projects).toEqual(h.projects);
+        expect(
+          launch.args.some((arg: string) => arg.startsWith("projects=")),
+        ).toBe(false);
+      }
+      if (home === "ambient")
+        expect(await readFile(join(h.codexHome, "config.toml"))).toEqual(
+          before,
+        );
+      expect(h.commands).toContain("complete-scan");
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test("ambient project history stays file-backed for fresh and resumed native workers", async () => {
+  for (const role of ["discovery", "merge"] as const)
+    for (const resumed of [false, true]) {
+      const h = await fixture(role, resumed, "fallback", "sdk");
+      try {
+        await h.useAmbientHome();
+        const before = await readFile(join(h.codexHome, "config.toml"));
+        await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+        const observations = await h.observations();
+        expect(observations.map(({ kind }) => kind)).toEqual([
+          "preflight",
+          "exec",
+        ]);
+        expect(observations[1].args.includes("resume")).toBe(resumed);
+        for (const launch of observations) {
+          expect(launch.projects).toEqual(h.projects);
+          expect(
+            launch.args.some((arg: string) => arg.startsWith("projects=")),
+          ).toBe(false);
+          expect(launch.mcpServers["codex-security"].enabled).toBe(false);
+        }
+        expect(await readFile(join(h.codexHome, "config.toml"))).toEqual(
+          before,
+        );
+      } finally {
+        await h.close();
+      }
+    }
+});
 
 test.each(["rejected", "fallback"] as const)(
   "preserves a completed scan when inherited comparison permissions are %s",
@@ -601,20 +917,19 @@ test.each(["rejected", "fallback"] as const)(
       const comparison = observations.filter(
         ({ profile }) => profile === "codex_security_comparison",
       );
-      expect(
-        comparison.filter(({ kind }) => kind === "preflight"),
-      ).toMatchObject([
-        {
-          cwd: h.repository,
-          permissions: {
-            codex_security_comparison: {
-              extends: ":read-only",
-              filesystem: h.inheritedPermissions.filesystem,
-              network: { enabled: false },
+      for (const stage of ["mcp", "preflight"])
+        expect(comparison.filter(({ kind }) => kind === stage)).toMatchObject([
+          {
+            cwd: h.repository,
+            permissions: {
+              codex_security_comparison: {
+                extends: ":read-only",
+                filesystem: h.inheritedPermissions.filesystem,
+                network: { enabled: false },
+              },
             },
           },
-        },
-      ]);
+        ]);
       expect(comparison.filter(({ kind }) => kind === "exec")).toHaveLength(
         scenario === "rejected" ? 0 : 1,
       );
@@ -643,10 +958,15 @@ test.each(["rejected", "fallback"] as const)(
   },
 );
 
-test.each([false, true])(
-  "keeps selected execution isolated from later environment changes (resumed: %p)",
-  async (resumed) => {
-    const h = await fixture("discovery", resumed, "fallback", "sdk", true);
+test.each([
+  ["discovery", false],
+  ["discovery", true],
+  ["merge", false],
+  ["merge", true],
+] as const)(
+  "keeps %s execution isolated from later environment changes (resumed: %p)",
+  async (role, resumed) => {
+    const h = await fixture(role, resumed, "fallback", "sdk", true);
     try {
       await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
       const observations = await h.observations();
@@ -662,6 +982,158 @@ test.each([false, true])(
           .find(({ kind }) => kind === "exec")
           .args.includes("resume"),
       ).toBe(resumed);
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test.each(["rejected", "fallback"] as const)(
+  "sealed followup permissions reach preflight and execution (%s)",
+  async (scenario) => {
+    const h = await fixture("followup", false, scenario, "sdk");
+    try {
+      await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+      const observations = await h.observations();
+      expect(
+        observations.find(({ kind }) => kind === "permission-validation"),
+      ).toMatchObject({ exitCode: 0 });
+      const followup = observations.filter(
+        ({ permissions }) =>
+          permissions?.codex_security_scan?.filesystem?.[h.scanDir]?.["."] ===
+          "read",
+      );
+      const output = followup.find(({ kind }) => kind === "preflight").cwd;
+      expect(dirname(output)).toBe(join(h.scanDir, "artifacts/follow-up"));
+      for (const launch of followup) {
+        expect(
+          launch.kind === "preflight"
+            ? launch.cwd
+            : launch.args[launch.args.indexOf("--cd") + 1],
+        ).toBe(output);
+        expect(launch).toMatchObject({
+          permissions: {
+            codex_security_scan: {
+              filesystem: {
+                ...h.inheritedPermissions.filesystem,
+                [h.scanDir]: { ".": "read" },
+                [output]: { ".": "write" },
+              },
+              network: { enabled: false },
+            },
+          },
+        });
+      }
+      expect(followup.filter(({ kind }) => kind === "exec")).toHaveLength(
+        scenario === "rejected" ? 0 : 1,
+      );
+      expect(
+        h.commands.filter((command) => command === "complete-scan"),
+      ).toHaveLength(1);
+      expect(h.commands).not.toContain("fail-scan");
+      expect(h.completedArtifacts.size).toBe(4);
+      for (const [file, bytes] of h.completedArtifacts)
+        expect(await readFile(join(h.scanDir, file))).toEqual(bytes);
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test.each([
+  ["standard", false],
+  ["discovery", false],
+  ["discovery", true],
+  ["merge", false],
+  ["merge", true],
+] as const)(
+  "unresolved profiles reach native validation for %s execution (resumed: %p)",
+  async (role, resumed) => {
+    const h = await fixture(role, resumed, "fallback", "sdk", false, "missing");
+    try {
+      await expect(h.run()).rejects.toThrow();
+      const observations = await h.observations();
+      expect(observations[0]?.kind).toBe(
+        role === "standard" ? "exec" : "preflight",
+      );
+      expect(observations[0]?.selectedProfile).toBe("missing");
+      const validation = observations.find(
+        ({ kind }) => kind === "profile-validation",
+      );
+      expect(validation).toMatchObject({ exitCode: 1 });
+      expect(validation.stderr).toContain("missing");
+      expect(h.commands).not.toContain("complete-scan");
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test("selected profile launch survives shared-home settings for fresh and resumed workers", async () => {
+  for (const role of ["discovery", "merge"] as const)
+    for (const resumed of [false, true]) {
+      const h = await fixture(
+        role,
+        resumed,
+        "fallback",
+        "sdk",
+        false,
+        "selected",
+      );
+      try {
+        await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+        const observations = (await h.observations()).filter(
+          ({ kind }) => kind === "preflight" || kind === "exec",
+        );
+        expect(observations).toHaveLength(2);
+        for (const launch of observations)
+          expect(launch).toMatchObject({
+            modelProvider: "synthetic_selected",
+            model: "gpt-6-astra",
+            effort: "high",
+            forcedLogin: null,
+            forcedWorkspace: null,
+          });
+      } finally {
+        await h.close();
+      }
+    }
+});
+
+test.each([
+  ["discovery", false],
+  ["discovery", true],
+  ["merge", false],
+  ["merge", true],
+] as const)(
+  "worker %s limits agree in recipes, preflight files and subprocesses (resumed: %p)",
+  async (role, resumed) => {
+    const h = await fixture(
+      role,
+      resumed,
+      "fallback",
+      "sdk",
+      false,
+      undefined,
+      role === "discovery",
+    );
+    try {
+      await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+      const launches = (await h.observations()).filter(
+        ({ kind }) => kind === "preflight" || kind === "exec",
+      );
+      expect(launches).toHaveLength(2);
+      for (const launch of launches)
+        expect(launch).toMatchObject({ workerLimit: 1, snapshotLimit: 1 });
+      for (const recipe of h.recipes)
+        expect(recipe).toMatchObject({
+          config: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: 1 },
+            },
+          },
+        });
+      if (role === "discovery" && !resumed) expect(h.recipes).toHaveLength(2);
     } finally {
       await h.close();
     }

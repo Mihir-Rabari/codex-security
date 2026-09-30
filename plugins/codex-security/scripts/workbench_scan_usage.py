@@ -54,6 +54,14 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
+def merge_scan_cost(existing: str | None, incoming: str | None) -> str | None:
+    """Keep measured usage unless an incoming receipt explicitly replaces it."""
+    if incoming is None:
+        return existing
+    fields = {**stored_scan_cost_fields(existing), **stored_scan_cost_fields(incoming)}
+    return json.dumps(fields if "usage" in fields else fields["cost"], allow_nan=False)
+
+
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -68,16 +76,6 @@ def reconcile_completed_scan_cost(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-
-
-def merge_scan_cost(stored: str | None, incoming: str | None) -> str | None:
-    """Replace supplied cost/usage fields while retaining the other measured fields."""
-    fields = {**stored_scan_cost_fields(stored), **stored_scan_cost_fields(incoming)}
-    if not fields:
-        return None
-    return json.dumps(
-        fields if "usage" in fields else fields["cost"], separators=(",", ":"), allow_nan=False
-    )
 
 
 def collect_scan_usage(
@@ -110,14 +108,7 @@ def collect_scan_usage(
         checkpoint is not None
         and (
             checkpoint.get("costUnavailable")
-            or (
-                not scan["continuation_thread_id"]
-                and (
-                    checkpoint.get("mergeStarted") is True
-                    or (checkpoint.get("mergeStarted") is not False and checkpoint["mergedScanIds"])
-                    or _merge_was_prepared(scan["scan_dir"])
-                )
-            )
+            or (checkpoint.get("mergeStarted") and not scan["continuation_thread_id"])
         )
     ) or any(not child["continuation_thread_id"] for child in composition.children):
         warnings.add("scan_thread_unavailable")
@@ -187,15 +178,6 @@ def collect_scan_usage(
     return result
 
 
-def _merge_was_prepared(scan_dir: str) -> bool:
-    # The host persists this input before launch; a completed discovery is not a merge.
-    try:
-        (Path(scan_dir) / "artifacts/deep-scan/merge-inputs.json").lstat()
-    except FileNotFoundError:
-        return False
-    return True
-
-
 def _scan_root_thread_ids(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -216,21 +198,9 @@ def _scan_root_thread_ids(
         ).fetchone()
         if workspace is not None:
             candidates.append(workspace["thread_id"])
+    candidates.extend(composition.execution_threads)
     if scan["mode"] == "deep":
-        candidates.extend(composition.execution_threads)
         candidates.extend(child["continuation_thread_id"] for child in composition.children)
-        candidates.extend(
-            row["sdk_thread_id"]
-            for row in connection.execute(
-                """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
-                """,
-                (scan["id"],),
-            )
-        )
     roots: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:

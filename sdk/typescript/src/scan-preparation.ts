@@ -13,7 +13,7 @@ import type { JsonObject } from "./config.js";
 import type { PluginInstall } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 
-/** Prepare the installed skill and its execution policy before registering a scan. */
+/** Prepare the selected skill and its execution policy before registering a scan. */
 export async function prepareScanSkill({
   plugin,
   runtimeHome,
@@ -50,9 +50,9 @@ export async function prepareScanSkill({
   const discoveryPrompt =
     validationPrompt === undefined
       ? undefined
-      : await customDiscoveryPrompt(plugin.installedRoot, skillName);
+      : await customDiscoveryPrompt(plugin.pluginRoot, skillName);
   if (discoveryPrompt !== undefined)
-    config = await customValidationConfig(config, plugin.installedRoot);
+    config = await customValidationConfig(config, plugin.pluginRoot);
   const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
   const skillMetadata = await lstat(skillPath).catch(() => null);
   if (

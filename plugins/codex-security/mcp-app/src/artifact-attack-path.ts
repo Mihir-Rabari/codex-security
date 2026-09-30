@@ -1,7 +1,7 @@
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
-import { candidateSchemaV1 } from "./artifact-candidate.js";
+import { candidateLedgerRowSchema } from "./artifact-candidate.js";
 import {
   artifactDestination,
   readArtifactJsonl,
@@ -62,8 +62,6 @@ export const candidateAttackPathsInputSchema = loadArtifactZodSchema(
   attackPathSchema.$id,
   "input",
 ) as z.ZodType<CandidateAttackPathsPayload & { scanId: string }>;
-
-const candidateLedgerRowSchema = candidateSchemaV1.passthrough();
 
 const candidateLedgerComponents = [
   "artifacts",

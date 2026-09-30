@@ -236,6 +236,19 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     assert_published_aggregate(scan)
 
 
+def test_standard_publication_preserves_deliberately_partial_coverage(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan(mode="standard")
+    scan.coverage["completeness"] = "partial"
+    scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+
+    complete(workbench_api, workbench_db, scan)
+
+    assert_published_aggregate(scan)
+
+
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 @pytest.mark.parametrize(("scope", "has_parent"), [(".", True), ("subdir", False)])
 def test_stopped_scan_salvages_saved_parent_checkpoints(
@@ -331,16 +344,3 @@ def test_stopped_deep_scan_preserves_checkpoint_without_coverage(
     assert recovered["resultsRecoveryNeeded"] is False
     assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
     assert source_path.read_bytes() == source_bytes
-
-
-def test_standard_publication_preserves_deliberately_partial_coverage(
-    workbench_api, workbench_db, publication_scan
-):
-    scan = publication_scan(mode="standard")
-    scan.coverage["completeness"] = "partial"
-    scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
-    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-
-    complete(workbench_api, workbench_db, scan)
-
-    assert_published_aggregate(scan)

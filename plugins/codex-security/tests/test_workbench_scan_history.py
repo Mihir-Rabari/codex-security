@@ -18,43 +18,13 @@ from workbench_test_support import (
     begin_legacy_scan,
     initialize_git_repository,
     mark_deep_aggregate_ready,
+    private_directory,
     stable_target_id,
     write_completed_contract,
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 FINALIZER = SCRIPT.with_name("finalize_scan_contract.py")
-
-
-def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_api) -> None:
-    with sqlite3.connect(":memory:") as connection:
-        connection.row_factory = sqlite3.Row
-        connection.executescript(
-            "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
-            "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
-            "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
-            "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"
-        )
-        connection.executemany(
-            "INSERT INTO scans VALUES (?, ?, ?)",
-            [("parent", "1", None), ("child", "2", "deep_pass"), ("rerun", "3", None)],
-        )
-        connection.executemany(
-            "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
-            [("p", "parent"), ("c", "child"), ("c2", "child"), ("r", "rerun")],
-        )
-        connection.executemany(
-            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'Confirmed')",
-            [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
-        )
-        matches = workbench_api["scan_history"].finding_matches
-        for occurrence, scan_id, started in (("p", "parent", "1"), ("r", "rerun", "3")):
-            rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
-            assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
-            assert known_since == "1"
-            assert known_scans == ["parent", "rerun"]
-        rows, _, _ = matches(connection, "c", "child", "2")
-        assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
 
 
 def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
@@ -137,7 +107,7 @@ def create_cli_scan(
     target_revision: str | None = None,
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
-    scan_dir.mkdir(mode=0o700, parents=True)
+    private_directory(scan_dir)
     recipe = {
         "config": {"model": "gpt-5.6-sol", "model_reasoning_effort": "high"},
         "mode": mode,
@@ -420,7 +390,7 @@ def test_get_scan_keeps_desktop_standard_owners_out_of_execution_roots(tmp_path:
             assert detail["continuationThreadId"] == "desktop-owner"
 
 
-def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_path: Path) -> None:
+def test_migration_preserves_historical_worker_thread_associations(tmp_path: Path) -> None:
     state_dir, codex_home = tmp_path / "state", tmp_path / "codex-home"
     repository, other_repository = tmp_path / "repository", tmp_path / "other-repository"
     repository.mkdir()
@@ -471,6 +441,10 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
             ],
         )
 
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TABLE scan_execution_threads")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 45")
+    run_workbench(state_dir, "database-info")
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert detail["continuationThreadId"] is None
     assert detail["threadIds"] == [
@@ -1580,3 +1554,34 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_api) -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE scans (id TEXT, started_at TEXT, parent_scan_role TEXT);"
+            "CREATE TABLE finding_occurrences (id TEXT, scan_id TEXT, finding_id TEXT, title TEXT);"
+            "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, "
+            "before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);"
+        )
+        connection.executemany(
+            "INSERT INTO scans VALUES (?, ?, ?)",
+            [("parent", "1", None), ("child", "2", "deep_pass"), ("rerun", "3", None)],
+        )
+        connection.executemany(
+            "INSERT INTO finding_occurrences VALUES (?, ?, 'stable', 'Synthetic finding')",
+            [("p", "parent"), ("c", "child"), ("c2", "child"), ("r", "rerun")],
+        )
+        connection.executemany(
+            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'Confirmed')",
+            [("parent", "child", "p", "c"), ("child", "rerun", "c", "r")],
+        )
+        matches = workbench_api["scan_history"].finding_matches
+        for occurrence, scan_id, started in (("p", "parent", "1"), ("r", "rerun", "3")):
+            rows, known_since, known_scans = matches(connection, occurrence, scan_id, started)
+            assert {row["scanId"] for row in rows} == ({"parent", "rerun"} - {scan_id})
+            assert known_since == "1"
+            assert known_scans == ["parent", "rerun"]
+        rows, _, _ = matches(connection, "c", "child", "2")
+        assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}

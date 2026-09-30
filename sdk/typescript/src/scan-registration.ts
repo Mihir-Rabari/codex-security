@@ -1,9 +1,35 @@
+import type { NormalizedTarget } from "./targets.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanExpectation } from "./contract.js";
+import type { DeepScanOptions } from "./scan-settings.js";
+import type { ScanPermissions } from "./execution-preparation.js";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
 import { join } from "node:path";
+
+/** Validated saved execution options shared by SDK and native resume. */
+export interface SavedScanRecipe {
+  repository: string;
+  target: Pick<
+    NormalizedTarget,
+    "kind" | "paths" | "base" | "head" | "baseRef" | "headRef"
+  >;
+  mode: ScanOptions["mode"];
+  pluginVersion: string;
+  repositoryRevision?: string;
+  auth?: ScanOptions["auth"];
+  knowledgeBasePaths?: string[];
+  knowledgeBaseSha256?: string;
+  maxCostUsd?: number;
+  postScanPrompt?: string;
+  failOnSeverity?: ScanOptions["failureSeverity"];
+  deepScan?: Required<DeepScanOptions>;
+  safetyIdentifier?: string;
+  inheritedPermissions?: ScanPermissions;
+  preserveProviderEnvironment?: boolean;
+  config: JsonObject;
+}
 
 /** Bind registration and resume metadata to this prepared execution. */
 export async function registerScan(options: {

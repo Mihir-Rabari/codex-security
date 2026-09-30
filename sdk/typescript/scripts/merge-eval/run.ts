@@ -1,8 +1,18 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { Codex } from "@openai/codex-sdk";
-import { validateScanMerge, scanMergePrompt } from "../../src/scan-merge.js";
+import { createHash } from "node:crypto";
+import { definedEnvironment } from "../../src/execution-auth.js";
+import {
+  scanCompositionOverrides,
+  codexConfigOverrides,
+} from "../../src/config.js";
+import {
+  createScanMergeValidator,
+  scanMergePrompt,
+} from "../../src/scan-merge.js";
 import { mergeFixtures, parentId } from "./fixtures.js";
 import { gradeMerge } from "./grade.js";
 import { disabledMcpServers } from "../../src/scan-comparison.js";
@@ -24,27 +34,26 @@ if (
   );
 const output = resolve(destination);
 await mkdir(output, { recursive: true });
-const environment = Object.fromEntries(
-  Object.entries(process.env).filter(
-    (entry): entry is [string, string] => entry[1] !== undefined,
-  ),
+const pluginRoot = fileURLToPath(
+  new URL("../../../../plugins/codex-security/", import.meta.url),
 );
+const validate = await createScanMergeValidator(pluginRoot);
+const environment = definedEnvironment(process.env);
 const command = resolveCodexCommand(environment);
+const config = scanCompositionOverrides(
+  {
+    project_doc_max_bytes: 0,
+    features: { apps: false, multi_agent: false },
+    mcp_servers: await disabledMcpServers(command, undefined, environment, {
+      workingDirectory: tmpdir(),
+    }),
+  },
+  0,
+);
 const codex = new Codex({
   codexPathOverride: executablePathForSpawn(command.command),
   env: environment,
-  config: {
-    project_doc_max_bytes: 0,
-    features: {
-      plugins: false,
-      apps: false,
-      multi_agent: false,
-      multi_agent_v2: { enabled: false },
-    },
-    mcp_servers: (await disabledMcpServers(command, undefined, environment, {
-      workingDirectory: tmpdir(),
-    })) as Record<string, { enabled: boolean }>,
-  },
+  configOverrides: [...codexConfigOverrides(config), "features.plugins=false"],
 });
 const results = [];
 for (let iteration = 0; iteration < Number(repetitions); iteration++) {
@@ -56,7 +65,21 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), bytes);
       },
+      async restoreMany(
+        artifacts: readonly { path: string; contents: Uint8Array }[],
+      ) {
+        for (const artifact of artifacts)
+          await this.restore(artifact.path, artifact.contents);
+      },
     };
+    await writer.restoreMany(
+      Object.entries(fixture.previous?.sourceFindings ?? {}).map(
+        ([id, finding]) => ({
+          path: `artifacts/deep-scan/sources/${createHash("sha256").update(id).digest("hex")}.json`,
+          contents: Buffer.from(JSON.stringify(finding)),
+        }),
+      ),
+    );
     const prompt = await scanMergePrompt(
       parentId,
       fixture.inputs,
@@ -85,8 +108,12 @@ for (let iteration = 0; iteration < Number(repetitions); iteration++) {
       record["usage"] = turn.usage;
       record["output"] = turn.finalResponse;
       const raw: unknown = JSON.parse(turn.finalResponse);
-      record["qualityErrors"] = gradeMerge(raw, fixture.expected);
-      validateScanMerge(raw, fixture.inputs, fixture.previous);
+      const accepted = validate(
+        raw,
+        fixture.inputs,
+        fixture.previous,
+      ).aggregate;
+      record["qualityErrors"] = gradeMerge(accepted, fixture.expected);
       record["hostValid"] = true;
     } catch (error) {
       record["error"] = String(error);

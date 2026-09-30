@@ -95,22 +95,9 @@ def cli_scan_resume(
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
     producer_version = sealed_producer_version(scan)
-    if producer_version is None:
-        require_current_deep_scan(connection, scan)
-    else:
+    if producer_version is not None:
         result["sealedProducerVersion"] = producer_version
     return result
-
-
-def require_current_deep_scan(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
-    if (
-        scan["mode"] == "deep"
-        and connection.execute(
-            "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
-        ).fetchone()
-        is not None
-    ):
-        raise SystemExit("This Deep Scan uses a retired runtime. Start a fresh scan.")
 
 
 def scan_registration(
@@ -143,10 +130,6 @@ def require_composition_complete(scan: sqlite3.Row, composition: CompositionView
     if checkpoint is not None:
         if checkpoint.get("terminalReason") in {"saturated", "capped"}:
             return
-    else:
-        legacy = composition.legacy_run
-        if legacy is not None and legacy["status"] == "succeeded" and legacy["manifest_path"]:
-            return
     raise SystemExit("Deep Scan must finish and save its aggregate before the parent can complete.")
 
 
@@ -154,28 +137,21 @@ def independent_review_progress(
     scan: sqlite3.Row,
     composition: CompositionView,
 ) -> dict[str, Any] | None:
-    run = composition.legacy_run
     children = composition.children
-    if children or (run is None and scan["recipe_json"] is not None):
+    if children or scan["recipe_json"] is not None or composition.saved_review_count:
         recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
         return {
             "active": sum(child["status"] == "running" for child in children),
             "completed": sum(child["status"] == "complete" for child in children)
-            + (run["completion_sequence"] if run is not None else 0),
-            "maximum": recipe.get("deepScan", {}).get("maxDiscoveryRuns", len(children)),
+            + composition.saved_review_count,
+            "maximum": recipe.get("deepScan", {}).get(
+                "maxDiscoveryRuns", composition.saved_review_maximum or len(children)
+            ),
             "consolidating": scan["status"] == "running"
             and scan["phase"] in {"validation", "reporting"},
             "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
         }
-    if run is None:
-        return None
-    return {
-        "active": 0,
-        "completed": run["completion_sequence"],
-        "maximum": run["max_discovery_runs"],
-        "consolidating": False,
-        "updatedAt": run["updated_at"],
-    }
+    return None
 
 
 def existing_deep_scan_for_target(
@@ -1033,36 +1009,33 @@ def finding_matches(
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        JOIN scans ON scans.id = matches.after_scan_id
+        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.before_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         UNION
         SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        JOIN scans ON scans.id = matches.before_scan_id
+        JOIN scans ON scans.id = occurrences.scan_id
         WHERE matches.after_occurrence_id = ?
-            AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
+          AND (scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?)
         ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, scan_id, occurrence_id, scan_id),
     ).fetchall()
-    linked_rows = list(
-        connection.execute(
-            f"""
-            {_LINKED_FINDINGS_SQL.format(placeholders="?")}
-            SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
-                scans.started_at, scans.id AS scan_id
-            FROM linked
-            CROSS JOIN finding_occurrences AS occurrences
-                ON occurrences.finding_id = linked.finding_id
-            CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
-            """,
-            (occurrence_id, scan_id),
-        )
-    )
+    linked_rows = connection.execute(
+        _LINKED_FINDINGS_SQL.format(placeholders="?")
+        + """
+        SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
+            scans.started_at, scans.id AS scan_id
+        FROM linked
+        CROSS JOIN finding_occurrences AS occurrences ON occurrences.finding_id = linked.finding_id
+        CROSS JOIN scans ON scans.id = occurrences.scan_id
+        WHERE scans.parent_scan_role IS NOT 'deep_pass' OR scans.id = ?
+        """,
+        (occurrence_id, scan_id),
+    ).fetchall()
     known_scans = sorted(
         {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
     )

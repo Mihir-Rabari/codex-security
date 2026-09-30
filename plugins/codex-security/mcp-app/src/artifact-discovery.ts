@@ -16,7 +16,10 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import { candidateSchemaV1 } from "./artifact-candidate.js";
+import {
+  candidateSchemaV1,
+  candidateLedgerRowSchema,
+} from "./artifact-candidate.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
@@ -74,11 +77,7 @@ export const rawDiscoveryCandidateSchema = loadArtifactZodSchema(
   "rawDiscoveryCandidate",
 ) as z.ZodType<RawDiscoveryCandidate>;
 
-export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidateDefinitions.$id,
-  "discoveryCandidate",
-) as z.ZodType<CompactDiscoveryCandidate>;
+export const compactDiscoveryCandidateSchema = candidateLedgerRowSchema;
 
 export const discoveryCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,

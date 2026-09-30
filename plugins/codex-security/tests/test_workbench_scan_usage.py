@@ -16,6 +16,7 @@ from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_aggregate_ready,
+    private_directory,
     run_workbench,
     start_delivered_scan,
     write_completed_contract,
@@ -32,46 +33,6 @@ class ScanFixture:
     environment: dict[str, str]
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
-
-
-@pytest.mark.parametrize("include_cost", [False, True])
-def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
-    usage = {
-        "coverage": "unavailable",
-        "source": "codex_rollout",
-        "threadCount": 0,
-        "warnings": ["scan_thread_unavailable"],
-    }
-    measured = {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(0, 0, 0),
-        "threadCount": 1,
-    }
-    cost = {
-        "model": "synthetic-model",
-        "inputTokens": 0,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 0,
-        "estimatedUsd": 0,
-    }
-    merge = workbench_api["scan_usage"].merge_scan_cost
-    stored = json.dumps({"usage": usage, "cost": cost})
-    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
-    assert json.loads(merge(stored, incoming)) == {"usage": measured, "cost": cost}
-    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
-    assert json.loads(merge(None, json.dumps(cost))) == cost
-    assert merge(None, None) is None
-    with sqlite3.connect(":memory:") as connection:
-        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
-        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
-        connection.commit()
-        workbench_api["scan_usage"].reconcile_completed_scan_cost(
-            connection, {"id": "scan", "cost_json": stored}, incoming
-        )
-        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
-        assert json.loads(receipt) == {"usage": measured, "cost": cost}
 
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
@@ -569,32 +530,26 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("prior_session_unavailable", "child_session_saved", "merge_state"),
+    ("prior_session_unavailable", "child_session_saved", "merge_kind"),
     [
-        (False, True, "saved"),
-        (True, True, "saved"),
-        (False, False, "saved"),
-        (False, True, "merged"),
-        (False, True, "prepared"),
-        (False, True, "not-started"),
-        (True, True, "not-started"),
-        (False, True, "accepted-without-merge"),
-        (False, True, "accepted-with-prepared-merge"),
-        (False, True, "started"),
-        (True, True, "accepted-without-merge"),
+        (False, True, "recorded"),
+        (True, True, "recorded"),
+        (False, False, "recorded"),
+        (False, True, "missing"),
+        (False, True, "deterministic"),
     ],
 )
 def test_completion_counts_ordinary_child_scans_and_descendants(
     tmp_path: Path,
     prior_session_unavailable: bool,
     child_session_saved: bool,
-    merge_state: str,
+    merge_kind: str,
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     environment = fixture.environment
     counted = fixture.started_at + timedelta(microseconds=1)
     directory = fixture.scan_dir / "artifacts" / "deep-scan" / "passes" / "pass-1"
-    directory.mkdir(parents=True, mode=0o700)
+    private_directory(directory)
     child = run_workbench(
         fixture.state_dir,
         "register-cli-scan",
@@ -643,7 +598,18 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
     checkpoint = mark_deep_aggregate_ready(fixture.state_dir, fixture.scan_id, fixture.scan_dir)
     document = json.loads(checkpoint.read_text())
     document["passes"] = [{"directory": str(directory), "scanId": child["scanId"]}]
-    if merge_state != "saved":
+    document["mergeStarted"] = merge_kind != "deterministic"
+    if merge_kind == "recorded":
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            fixture.scan_id,
+            "--thread-id",
+            "scan-parent",
+            environment=environment,
+        )
+    else:
         write_completed_contract(directory, child["scanId"], fixture.target, relative_path="app.py")
         run_workbench(
             fixture.state_dir,
@@ -653,15 +619,7 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
             environment=environment,
         )
         document["passes"][0]["completed"] = True
-        if merge_state in {"merged", "accepted-without-merge", "accepted-with-prepared-merge"}:
-            document["mergedScanIds"] = [child["scanId"]]
-        if merge_state in {"accepted-without-merge", "accepted-with-prepared-merge"}:
-            document["mergeStarted"] = False
-        elif merge_state == "started":
-            document["mergeStarted"] = True
-        if merge_state in {"prepared", "accepted-with-prepared-merge"}:
-            # Preparation is durable before launch; interrupted contents still record intent.
-            (checkpoint.parent / "merge-inputs.json").write_text("{")
+        document["mergedScanIds"] = [child["scanId"]]
         with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
             connection.execute(
                 "UPDATE scans SET continuation_thread_id = NULL WHERE id = ?", (fixture.scan_id,)
@@ -684,11 +642,7 @@ def test_completion_counts_ordinary_child_scans_and_descendants(
         [("sdk-worker", "sdk-child")],
     )
     usage = _complete_scan(fixture)["scan"]["usage"]
-    incomplete = (
-        prior_session_unavailable
-        or not child_session_saved
-        or merge_state in {"merged", "prepared", "accepted-with-prepared-merge", "started"}
-    )
+    incomplete = prior_session_unavailable or not child_session_saved or merge_kind == "missing"
     assert usage == {
         "coverage": "partial" if incomplete else "complete",
         "source": "codex_rollout",
@@ -779,47 +733,6 @@ def test_native_completion_retains_measured_usage_with_sdk_cost(
     assert repeated["usage"] == expected_usage
 
 
-@pytest.mark.parametrize("readable_usage", [False, True])
-def test_fresh_completion_does_not_promote_a_running_cost_estimate(
-    tmp_path: Path, readable_usage: bool
-) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
-    cost = {
-        "model": "synthetic-model",
-        "inputTokens": 10,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 5,
-        "estimatedUsd": 0.001,
-    }
-    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
-        )
-    if readable_usage:
-        _state_graph(
-            fixture.environment,
-            {
-                "scan-parent": _rollout(
-                    tmp_path,
-                    "scan-parent",
-                    [_token_event(fixture.started_at + timedelta(microseconds=1), 30, 10)],
-                )
-            },
-            [],
-        )
-    completed = _complete_scan(fixture)["scan"]
-    assert "cost" not in completed
-    assert completed["usage"]["coverage"] == ("complete" if readable_usage else "unavailable")
-    if readable_usage:
-        assert completed["usage"]["totalTokens"] == 40
-    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-        receipt = connection.execute(
-            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
-        ).fetchone()[0]
-    assert json.loads(receipt) == {"usage": completed["usage"]}
-
-
 def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -860,3 +773,147 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed
+
+
+def test_completed_accounting_and_sidecar_sessions_survive_migration(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    for thread in ("prior-merge", "scan-parent"):
+        run_workbench(
+            fixture.state_dir,
+            "set-scan-thread",
+            "--scan-id",
+            fixture.scan_id,
+            "--thread-id",
+            thread,
+            environment=fixture.environment,
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "prior-merge": _rollout(tmp_path, "prior-merge", [_token_event(counted, 20, 5)]),
+        },
+        [],
+    )
+    completed = _complete_scan(fixture)["scan"]
+    assert completed["usage"]["coverage"] == "complete"
+    assert completed["usage"]["totalTokens"] == 38
+    sidecar = fixture.scan_dir / "artifacts/deep-scan/execution-threads.json"
+    original = json.dumps(["prior-merge", "follow-up"]).encode()
+    sidecar.write_bytes(original)
+    database = fixture.state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+        connection.execute("DROP TABLE scan_execution_threads")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 45")
+    migrated = run_workbench(
+        fixture.state_dir,
+        "get-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert migrated["usage"] == completed["usage"]
+    assert {"prior-merge", "follow-up"} <= set(migrated["executionThreadIds"])
+    assert sidecar.read_bytes() == original
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+            ).fetchone()[0]
+            == receipt
+        )
+    sidecar.write_text('["not-imported-on-reopen"]')
+    reopened = run_workbench(
+        fixture.state_dir,
+        "get-scan",
+        "--scan-id",
+        fixture.scan_id,
+        environment=fixture.environment,
+    )["scan"]
+    assert reopened["executionThreadIds"] == migrated["executionThreadIds"]
+    assert reopened["usage"] == completed["usage"]
+
+
+@pytest.mark.parametrize("include_cost", [False, True])
+def test_cost_envelopes_preserve_usage_without_nesting(workbench_api, include_cost: bool) -> None:
+    usage = {
+        "coverage": "unavailable",
+        "source": "codex_rollout",
+        "threadCount": 0,
+        "warnings": ["scan_thread_unavailable"],
+    }
+    measured = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(0, 0, 0),
+        "threadCount": 1,
+    }
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0,
+    }
+    merge = workbench_api["scan_usage"].merge_scan_cost
+    stored = json.dumps({"usage": usage, "cost": cost})
+    incoming = json.dumps({"usage": measured, **({"cost": cost} if include_cost else {})})
+    assert json.loads(merge(stored, incoming)) == {"usage": measured, "cost": cost}
+    assert json.loads(merge(stored, json.dumps(cost))) == {"usage": usage, "cost": cost}
+    assert json.loads(merge(None, json.dumps(cost))) == cost
+    assert merge(None, None) is None
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE scans (id TEXT, status TEXT, cost_json TEXT)")
+        connection.execute("INSERT INTO scans VALUES ('scan', 'complete', ?)", (stored,))
+        connection.commit()
+        workbench_api["scan_usage"].reconcile_completed_scan_cost(
+            connection, {"id": "scan", "cost_json": stored}, incoming
+        )
+        receipt = connection.execute("SELECT cost_json FROM scans").fetchone()[0]
+        assert json.loads(receipt) == {"usage": measured, "cost": cost}
+
+
+@pytest.mark.parametrize("readable_usage", [False, True])
+def test_fresh_completion_does_not_promote_a_running_cost_estimate(
+    tmp_path: Path, readable_usage: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    cost = {
+        "model": "synthetic-model",
+        "inputTokens": 10,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.001,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
+        )
+    if readable_usage:
+        _state_graph(
+            fixture.environment,
+            {
+                "scan-parent": _rollout(
+                    tmp_path,
+                    "scan-parent",
+                    [_token_event(fixture.started_at + timedelta(microseconds=1), 30, 10)],
+                )
+            },
+            [],
+        )
+    completed = _complete_scan(fixture)["scan"]
+    assert "cost" not in completed
+    assert completed["usage"]["coverage"] == ("complete" if readable_usage else "unavailable")
+    if readable_usage:
+        assert completed["usage"]["totalTokens"] == 40
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        receipt = connection.execute(
+            "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()[0]
+    assert json.loads(receipt) == {"usage": completed["usage"]}

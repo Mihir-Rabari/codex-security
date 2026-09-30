@@ -70,6 +70,7 @@ function serverFor(fixture) {
 
 for (const entry of [
   "completed",
+  "run-success",
   "read-error",
   "run-error",
   "permission-error",
@@ -94,7 +95,17 @@ for (const entry of [
         if (command === "get-scan") {
           if (entry === "read-error")
             throw new Error("synthetic saved metadata unavailable");
-          return { scan: { ...scan, progress: { status: "complete" } } };
+          return {
+            scan: {
+              ...scan,
+              progress: { status: "complete" },
+              usage: {
+                coverage: "unavailable",
+                reason: "codex_state_unavailable",
+              },
+              warnings: ["synthetic completion warning"],
+            },
+          };
         }
         assert.equal(command, "complete-scan");
         assert.equal(
@@ -111,7 +122,7 @@ for (const entry of [
           scan.progress.status = "complete";
           throw new this.ScanPermissionError("synthetic permission rejection");
         }
-        return {};
+        return { turnResult: { usage: null }, cost: null };
       },
     });
     const result = await server.tools.get("start_codex_security_deep_scan")(
@@ -133,21 +144,33 @@ for (const entry of [
         },
       },
     );
-    assert.equal(result.isError, true);
-    assert.match(
-      result.content[0].text,
-      entry === "permission-error"
-        ? /synthetic permission rejection/
-        : entry === "read-error"
-          ? /synthetic saved metadata unavailable/
-          : /synthetic sealed artifact mismatch/,
-    );
-    assert.equal(result.structuredContent, undefined);
+    if (entry === "run-success") {
+      assert.equal(result.isError, undefined);
+      assert.deepEqual(result.structuredContent.usage, {
+        coverage: "unavailable",
+        reason: "codex_state_unavailable",
+      });
+      assert.deepEqual(result.structuredContent.warnings, [
+        "synthetic completion warning",
+      ]);
+      assert.equal(validations, 0, "fresh SDK completion must not seal again");
+    } else {
+      assert.equal(result.isError, true);
+      assert.match(
+        result.content[0].text,
+        entry === "permission-error"
+          ? /synthetic permission rejection/
+          : entry === "read-error"
+            ? /synthetic saved metadata unavailable/
+            : /synthetic sealed artifact mismatch/,
+      );
+      assert.equal(result.structuredContent, undefined);
+      assert.equal(
+        validations,
+        ["permission-error", "read-error"].includes(entry) ? 0 : 1,
+      );
+    }
     assert.equal(runs, entry === "completed" ? 0 : 1);
-    assert.equal(
-      validations,
-      ["permission-error", "read-error"].includes(entry) ? 0 : 1,
-    );
     if (entry === "permission-error")
       assert.equal(scan.progress.status, "complete");
   });
@@ -341,7 +364,13 @@ for (const status of ["canceled", "failed"]) {
 for (const completed of [false, true]) {
   test(`native completion returns sealed accounting (rejoin=${completed})`, async () => {
     const metadata = {
-      usage: { inputTokens: 100, outputTokens: 10 },
+      usage: {
+        coverage: "complete",
+        source: "codex_rollout",
+        threadCount: 2,
+        inputTokens: 100,
+        outputTokens: 10,
+      },
       cost: { estimatedUsd: 0.25 },
       warnings: ["Synthetic incomplete coverage"],
     };
@@ -366,9 +395,11 @@ for (const completed of [false, true]) {
         };
       },
       async run() {
-        // A successful SDK run has already completed the scan; saved metadata is authoritative.
         await this.workbench(["complete-scan", "--scan-id", scan.scanId]);
-        return { cost: { estimatedUsd: 99 }, turnResult: { usage: null } };
+        return {
+          turnResult: { usage: { input_tokens: 99, output_tokens: 9 } },
+          cost: null,
+        };
       },
     };
     const server = serverFor(fixture);

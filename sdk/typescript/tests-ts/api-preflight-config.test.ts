@@ -388,6 +388,7 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original)).toEqual({
+      model_provider: "openai",
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
       allow_login_shell: false,
@@ -474,12 +475,12 @@ describe("CodexSecurity preflight configuration", () => {
     expect(scanRuntimeCodexConfig(config)).toMatchObject({
       approval_policy: "never",
       approvals_reviewer: "auto_review",
-      profiles: { strict: { model: "profile-model" }, other: {} },
+      model: "profile-model",
     });
     expect(config.profiles.strict.approval_policy).toBe("never");
   });
 
-  test("removes execution and permission overrides from every configured profile", () => {
+  test("resolves the selected profile without its execution and permission overrides", () => {
     const original = {
       profile: "selected",
       profiles: {
@@ -507,12 +508,11 @@ describe("CodexSecurity preflight configuration", () => {
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
-      profile: "selected",
+      model: "profile-model",
     });
-    expect(hardened["profiles"]).toEqual({
-      selected: { model: "profile-model" },
-      other: { model_reasoning_effort: "high" },
-    });
+    expect(hardened).not.toHaveProperty("profile");
+    expect(hardened).not.toHaveProperty("profiles");
+    expect(hardened["permissions"]).not.toHaveProperty("unsafe");
     expect(original.profiles.selected).toMatchObject({
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",

@@ -34,7 +34,9 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
 
-Deep child artifacts use the ordinary canonical JSON paths. The parent stores `scan-manifest.json`, `findings.json`, `coverage.json`, and the generated `report.md`; child evidence and unfinished coverage remain available. Follow the [Deep Scan lifecycle](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans) for retries, cancellation, and completion ownership, and [scan-contract.md](scan-contract.md) for field definitions.
+Deep children use ordinary SDK-owned Standard canonical findings and coverage. Pending work and its evidence remain in child coverage.
+
+See [completion and recovery](scan-contract.md#completion-and-recovery) for parent finalization, retained child evidence, and checkpoint compatibility.
 
 - A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.

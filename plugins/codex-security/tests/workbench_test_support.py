@@ -28,9 +28,6 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
-    if checkpoint_dir.name == "checkpoints":
-        (checkpoint_dir / "pending").mkdir(exist_ok=True)
-        (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
     return checkpoint_path
 
@@ -222,11 +219,11 @@ def mark_deep_aggregate_ready(state_dir: Path, scan_id: str, scan_dir: Path) -> 
         json.loads(checkpoint.read_text())
         if checkpoint.exists()
         else {
-            "version": 2,
+            "version": 3,
             "startedAt": "2026-01-01T00:00:00Z",
             "passes": [],
             "mergedScanIds": [],
-            "aggregate": [],
+            "aggregate": None,
             "noNewStreak": 4,
             "consecutiveErrors": 0,
         }
@@ -268,68 +265,6 @@ def begin_legacy_scan(
         )
     scan["createdAt"] = scan["updatedAt"]
     return {"deepScan": scan}
-
-
-def finding_fixture(
-    *,
-    relative_path: str = "src/extract.py",
-    identity_anchor: str = "archive-entry-write-without-containment",
-) -> dict[str, Any]:
-    return {
-        "ruleId": "path-traversal.archive-extraction",
-        "identity": {"anchor": identity_anchor},
-        "title": "Unsafe archive extraction can escape the output directory",
-        "summary": "An attacker-controlled path reaches a filesystem write.",
-        "severity": {
-            "level": "high",
-            "rationale": "The reachable write can escape the extraction root.",
-        },
-        "confidence": {"level": "high", "rationale": "Direct source trace."},
-        "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
-        "locations": [{"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}],
-        "codeEvidence": [
-            {
-                "id": "archive-write",
-                "label": "Unchecked archive write",
-                "path": relative_path,
-                "startLine": 41,
-                "endLine": 44,
-                "language": "python",
-                "code": "destination.write_bytes(entry.read())",
-                "explanation": "The destination is written before containment is checked.",
-            }
-        ],
-        "validation": {
-            "method": "archive extraction test",
-            "summary": "A crafted entry wrote outside the extraction root.",
-            "evidenceRefs": ["archive-write"],
-            "assertions": ["The archive entry controls the destination path."],
-            "limitations": ["The test used a temporary extraction directory."],
-        },
-        "rootCause": {
-            "summary": "The archive destination is written before containment is enforced.",
-            "evidenceRefs": ["archive-write"],
-        },
-        "evidenceExcerpt": "destination.write_bytes(entry.read())",
-        "attackPath": {
-            "dataFlow": "archive entry -> destination path -> filesystem write",
-            "reachability": "An archive uploader can supply the crafted entry.",
-            "evidenceRefs": ["archive-write"],
-            "impact": {
-                "level": "high",
-                "why": "The write can replace files outside the extraction root.",
-            },
-            "likelihood": {
-                "level": "high",
-                "why": "No containment check blocks the crafted path.",
-            },
-            "limitations": ["Writable targets depend on process permissions."],
-        },
-        "preventiveControls": ["Use a containment-checking extraction helper."],
-        "remediation": "Reject archive entries that escape the extraction root.",
-        "remediationTests": ["Reject traversal entries during extraction."],
-        "provenance": {"source": "local_plugin"},
-    }
 
 
 def write_completed_contract(
@@ -375,7 +310,65 @@ def write_completed_contract(
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
         "scanId": artifact_scan_id,
-        "findings": [finding_fixture(relative_path=relative_path, identity_anchor=identity_anchor)],
+        "findings": [
+            {
+                "ruleId": "path-traversal.archive-extraction",
+                "identity": {"anchor": identity_anchor},
+                "title": "Unsafe archive extraction can escape the output directory",
+                "summary": "An attacker-controlled path reaches a filesystem write.",
+                "severity": {
+                    "level": "high",
+                    "rationale": "The reachable write can escape the extraction root.",
+                },
+                "confidence": {"level": "high", "rationale": "Direct source trace."},
+                "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
+                "locations": [
+                    {"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}
+                ],
+                "codeEvidence": [
+                    {
+                        "id": "archive-write",
+                        "label": "Unchecked archive write",
+                        "path": relative_path,
+                        "startLine": 41,
+                        "endLine": 44,
+                        "language": "python",
+                        "code": "destination.write_bytes(entry.read())",
+                        "explanation": "The destination is written before containment is checked.",
+                    }
+                ],
+                "validation": {
+                    "method": "archive extraction test",
+                    "summary": "A crafted entry wrote outside the extraction root.",
+                    "evidenceRefs": ["archive-write"],
+                    "assertions": ["The archive entry controls the destination path."],
+                    "limitations": ["The test used a temporary extraction directory."],
+                },
+                "rootCause": {
+                    "summary": "The archive destination is written before containment is enforced.",
+                    "evidenceRefs": ["archive-write"],
+                },
+                "evidenceExcerpt": "destination.write_bytes(entry.read())",
+                "attackPath": {
+                    "dataFlow": "archive entry -> destination path -> filesystem write",
+                    "reachability": "An archive uploader can supply the crafted entry.",
+                    "evidenceRefs": ["archive-write"],
+                    "impact": {
+                        "level": "high",
+                        "why": "The write can replace files outside the extraction root.",
+                    },
+                    "likelihood": {
+                        "level": "high",
+                        "why": "No containment check blocks the crafted path.",
+                    },
+                    "limitations": ["Writable targets depend on process permissions."],
+                },
+                "preventiveControls": ["Use a containment-checking extraction helper."],
+                "remediation": "Reject archive entries that escape the extraction root.",
+                "remediationTests": ["Reject traversal entries during extraction."],
+                "provenance": {"source": "local_plugin"},
+            }
+        ],
     }
     coverage = {
         "documentType": "codex-security.coverage",
@@ -431,9 +424,7 @@ def recipe(target: Path, mode: str = "standard") -> dict:
     }
 
 
-def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
-) -> dict:
+def private_directory(directory: Path) -> None:
     missing = []
     current = directory
     while not current.exists():
@@ -441,6 +432,12 @@ def register(
         current = current.parent
     for path in reversed(missing):
         path.mkdir(mode=0o700)
+
+
+def register(
+    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
+) -> dict:
+    private_directory(directory)
     saved_recipe = recipe(target, mode)
     if paths:
         saved_recipe["target"] = {"kind": "paths", "paths": list(paths)}
@@ -459,7 +456,7 @@ def register(
 
 def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) -> dict:
     value = {
-        "version": 2,
+        "version": 3,
         "startedAt": "2026-01-01T00:00:00Z",
         "passes": list(passes),
         "mergedScanIds": list(merged),
@@ -475,6 +472,19 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
         scan["scanId"],
         "--artifact-path",
         "artifacts/deep-scan/checkpoint.json",
-        input_text=json.dumps(value),
+        input_text=composition_payload(Path(scan["scanDir"]), value),
     )
     return value
+
+
+def composition_payload(scan_dir: Path, value: dict) -> str:
+    aggregate = value.get("aggregate")
+    value["aggregatePath"] = None
+    if aggregate is not None:
+        contents = json.dumps(aggregate).encode()
+        relative = f"artifacts/deep-scan/aggregates/{hashlib.sha256(contents).hexdigest()}.json"
+        path = scan_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(contents)
+        value["aggregatePath"] = relative
+    return json.dumps({key: item for key, item in value.items() if key != "aggregate"})

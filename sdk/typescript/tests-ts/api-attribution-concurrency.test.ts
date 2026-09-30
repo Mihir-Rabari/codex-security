@@ -73,6 +73,7 @@ describe("delegated scan attribution", () => {
               prepareScanArtifactRestorer: async () => ({
                 prepareDirectory: async () => {},
                 restore: async () => {},
+                restoreMany: async () => {},
                 remove: async () => {},
               }),
               repositoryRevision: async () => "deadbeef",

@@ -25,7 +25,6 @@ from finalize_scan_contract import (
     finding_candidate_id,
     open_scan_local_file_descriptor,
     scan_root_identity,
-    write_scan_local_bytes,
 )
 
 
@@ -56,18 +55,6 @@ def _scope_path(value: str) -> str:
 
 def _project_candidate_id(source_scan_id: str, candidate_id: str) -> str:
     return f"{source_scan_id}:{hashlib.sha256(candidate_id.encode()).hexdigest()}"
-
-
-def merge_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
-    """Retain distinct coverage rows in their original order."""
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = target.setdefault(field, [])
-        seen = {json.dumps(row, sort_keys=True) for row in rows}
-        for row in source.get(field, []):
-            key = json.dumps(row, sort_keys=True)
-            if key not in seen:
-                rows.append(row)
-                seen.add(key)
 
 
 def project_scan_artifacts(
@@ -104,18 +91,6 @@ def project_scan_artifacts(
     )
     # Merge the compatible view while retaining the exact sealed originals as provenance.
     projected = _legacy_sealed_findings_for_validation({"findings": originals})["findings"]
-    copied: set[Path] = set()
-
-    def read(relative: str) -> bytes:
-        with os.fdopen(
-            open_scan_local_file_descriptor(source_directory, relative, "Scan merge evidence"),
-            "rb",
-        ) as handle:
-            return handle.read()
-
-    def write(relative: str, payload: bytes) -> None:
-        write_scan_local_bytes(parent_directory, relative, payload, expected_root_identity=identity)
-
     for index, finding in enumerate(projected):
         for field in ("findingId", "occurrenceId", "fingerprints"):
             finding.pop(field, None)
@@ -125,27 +100,15 @@ def project_scan_artifacts(
         if candidate_id is not None:
             provenance["candidateId"] = _project_candidate_id(source_scan_id, candidate_id)
         writeup = finding.get("writeup")
-        if not isinstance(writeup, dict):
-            continue
-        report = Path(writeup["reportPath"])
-        # Keep every source basename and relative evidence link in an isolated namespace.
-        destination = Path("findings") / source_scan_id
-        if report.parent not in copied:
-            read(report.as_posix())
-            directories = [source_directory / report.parent]
-            while directories:
-                with os.scandir(directories.pop()) as entries:
-                    for entry in entries:
-                        if entry.is_dir(follow_symlinks=False):
-                            directories.append(Path(entry.path))
-                        else:
-                            relative = Path(entry.path).relative_to(source_directory)
-                            write(
-                                (destination / relative.relative_to("findings")).as_posix(),
-                                read(relative.as_posix()),
-                            )
-            copied.add(report.parent)
-        writeup["reportPath"] = (destination / report.relative_to("findings")).as_posix()
+        if isinstance(writeup, dict):
+            # The child is already beneath the parent. Retain its original tree and
+            # relative Markdown links; consumers use verified scan-local descriptors.
+            relative = writeup["reportPath"]
+            descriptor = open_scan_local_file_descriptor(
+                source_directory, relative, "Scan merge evidence"
+            )
+            os.close(descriptor)
+            writeup["reportPath"] = f"{prefix}/{relative}"
 
     semantic_coverage = copy.deepcopy(coverage)
     for field in (

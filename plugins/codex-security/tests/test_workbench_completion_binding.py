@@ -265,11 +265,10 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
 
     late_review = {"id": "late-review", "reason": "Review remains pending.", "paths": ["README.md"]}
-    for directory in ("checkpoints", "checkpoints/pending"):
-        write_checkpoint(
-            scan_dir / directory,
-            {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
-        )
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "findings": [], "coverage": {"deferred": [late_review]}},
+    )
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
 
     manifest = json.loads(manifest_path.read_text())
@@ -770,7 +769,7 @@ def test_deep_completion_derives_inventory_without_downgrading_coverage(
 ) -> None:
     for index, inventory in enumerate((None, "", "invalid_strategy")):
         case_dir = tmp_path / f"case-{index}"
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(case_dir)
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
@@ -1063,7 +1062,7 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
     )
     for case, candidates, expected in cases:
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
@@ -1397,7 +1396,7 @@ def test_completion_recovers_malformed_hardening_portfolios(tmp_path: Path) -> N
         ("symlink", {"portfolioPath": "hardening/hardening.md"}),
     ):
         case_dir = tmp_path / case
-        case_dir.mkdir()
+        case_dir.mkdir(mode=0o700)
         state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
         manifest_path = scan_dir / "scan-manifest.json"
         manifest = json.loads(manifest_path.read_text())

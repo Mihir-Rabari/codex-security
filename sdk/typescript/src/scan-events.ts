@@ -16,9 +16,7 @@ import {
   ScanTransportClosedError,
 } from "./scan-execution.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
-import type { ScanExpectation } from "./contract.js";
-import type { ScanResult } from "./result.js";
-import { collectResult, type CompletedScanTurn } from "./scan-publication.js";
+import type { CompletedScanTurn } from "./scan-publication.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -35,10 +33,8 @@ interface ScanEventRunOptions {
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
   scanDir: string;
-  pluginRoot: string;
-  expectation: ScanExpectation;
+  repository: string;
   authentication?: ScanAuthentication;
-  workbenchValidated?: boolean;
   model?: string;
   expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
@@ -87,39 +83,6 @@ export function scanReconnectObserver(
     );
 }
 
-function throwScanFailure(
-  error: unknown,
-  options: Pick<ScanEventRunOptions, "signal" | "scanDir">,
-): never {
-  if (options.signal.reason instanceof ScanCostLimitExceededError)
-    throw options.signal.reason;
-  if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
-    throw new ScanInterruptedError(
-      `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-      options.scanDir,
-      { cause: error },
-    );
-  }
-  throw error;
-}
-
-/** @internal */
-export async function runScanEvents(
-  options: ScanEventRunOptions,
-): Promise<ScanResult> {
-  try {
-    const completed = await runScanTurn(options);
-    const result = await collectResult(
-      options,
-      completed,
-      options.workbenchValidated,
-    );
-    throwIfAborted(options.signal, options.scanDir);
-    return result;
-  } catch (error) {
-    throwScanFailure(error, options);
-  }
-}
 /** @internal */
 export async function runScanTurn(
   options: ScanEventRunOptions,
@@ -151,7 +114,7 @@ export async function runScanTurn(
             }
           }
         }
-        reportScanActivities(event, options.expectation.repository, options);
+        reportScanActivities(event, options.repository, options);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
           if (
             options.expectedFilesTotal !== undefined &&
@@ -194,12 +157,7 @@ export async function runScanTurn(
     });
     const { status, threadId, finalResponse, lastStreamError } = turn;
     let { usage } = turn;
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-      );
-    }
+    throwIfAborted(options.signal, options.scanDir);
     if (status !== "completed") {
       throw new IncompleteScanError(
         lastStreamError ??
@@ -226,7 +184,8 @@ export async function runScanTurn(
       },
     };
   } catch (error) {
-    throwScanFailure(error, options);
+    throwIfAborted(options.signal, options.scanDir);
+    throw error;
   }
 }
 

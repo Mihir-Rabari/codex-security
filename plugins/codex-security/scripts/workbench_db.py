@@ -871,9 +871,10 @@ def _join_deep_scan(
     )
     if scan["status"] == "running" and scan["canceled_at"] is None:
         require_scan_target_identity(scan)
-    if scan["status"] == "running" and sealed_scan_producer_version(scan) is None:
-        scan_history.require_current_deep_scan(connection, scan)
-    return {**scan_context(connection, scan["id"]), "startDisposition": "joined"}
+    if scan["status"] == "running":
+        saved_results.require_current_deep_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
+    context = scan_context(connection, scan["id"])
+    return {**context, "startDisposition": "joined"}
 
 
 def start_prompt_only_scan(
@@ -1153,9 +1154,36 @@ def complete_budget_exhausted_scan(
             or measured.get("estimatedUsd", 0) <= limit
         ):
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
+        saved_results.require_current_deep_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
         composition = load_composition(connection, scan)
         scan_history.require_composition_complete(scan, composition)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        warning = optional_text(args.message, maximum=2400)
+        if warning is None:
+            warning = (
+                f"Deep Scan reached its cost limit after an estimated "
+                f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
+            )
+        warnings = json.loads(scan["completion_warnings_json"])
+        if artifact_path(scan_dir, "scan-manifest.json", required=False) is None:
+            saved_results.save_composed_checkpoint(
+                _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
+            )
+            documents = saved_results.merge_saved_results(
+                scan_dir,
+                scan_id,
+                workbench_completion_binding(scan, now()),
+                warnings,
+                stopped=True,
+                reason=warning,
+            )
+            if documents is not None:
+                saved_results.write_draft_documents(
+                    _WORKBENCH_DB_CONTEXT,
+                    scan,
+                    scan_dir,
+                    dict(zip(("manifest", "findings", "coverage"), documents, strict=True)),
+                )
         manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
         manifest_scan = manifest.get("scan", {})
         if manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") not in (
@@ -1163,18 +1191,22 @@ def complete_budget_exhausted_scan(
             [],
         ):
             raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
-        warning = optional_text(args.message, maximum=2400)
-        if warning is None:
-            warning = (
-                f"Deep Scan reached its cost limit after an estimated "
-                f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
-            )
-        coverage = read_json_object(artifact_path(scan_dir, "coverage.json", required=True))
+        committed_path = artifact_path(scan_dir, "artifacts/scan-draft.json", required=False)
+        draft = read_json_object(committed_path) if committed_path is not None else None
+        coverage = (
+            draft["coverage"]
+            if draft is not None
+            else read_json_object(artifact_path(scan_dir, "coverage.json", required=True))
+        )
         coverage["completeness"] = "partial"
         if not any(item.get("reason") == warning for item in coverage.setdefault("deferred", [])):
             coverage["deferred"].append({"id": "scan-cost-limit", "reason": warning})
-        write_scan_local_bytes(scan_dir, "coverage.json", (json.dumps(coverage) + "\n").encode())
-        warnings = json.loads(scan["completion_warnings_json"])
+        if draft is not None:
+            saved_results.write_draft_documents(_WORKBENCH_DB_CONTEXT, scan, scan_dir, draft)
+        else:
+            write_scan_local_bytes(
+                scan_dir, "coverage.json", (json.dumps(coverage) + "\n").encode()
+            )
         if warning not in warnings:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
@@ -1221,8 +1253,6 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    composition = composition if composition is not None else load_composition(connection, scan)
-    scan_history.require_composition_complete(scan, composition)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1236,24 +1266,36 @@ def complete_scan_locked(
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    current_manifest = None
-    if current_manifest_path is not None:
-        current_manifest = read_json_object(current_manifest_path)
-        if (
-            isinstance(current_manifest.get("scan"), dict)
-            and current_manifest["scan"].get("complete") is False
-        ):
-            raise SystemExit(
-                "The latest saved scan draft is incomplete; continue the scan before completing it."
-            )
+    current_manifest = (
+        read_json_object(current_manifest_path) if current_manifest_path is not None else None
+    )
     already_sealed = (
         current_manifest_path is not None
         and isinstance(current_manifest.get("scan"), dict)
         and (
             current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
+            or current_manifest["scan"].get("artifacts") not in (None, [])
         )
     )
+    documents = None
+    if not already_sealed:
+        committed_path = artifact_path(scan_dir, "artifacts/scan-draft.json", required=False)
+        if committed_path is not None:
+            draft = read_json_object(committed_path)
+            documents = draft["manifest"], draft["findings"], draft["coverage"]
+            current_manifest = documents[0]
+    if (
+        current_manifest is not None
+        and isinstance(current_manifest.get("scan"), dict)
+        and current_manifest["scan"].get("complete") is False
+    ):
+        raise SystemExit(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
+    composition = composition if composition is not None else load_composition(connection, scan)
+    if not already_sealed:
+        saved_results.require_current_deep_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
+        scan_history.require_composition_complete(scan, composition)
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
         missing_drafts = []
@@ -1268,7 +1310,7 @@ def complete_scan_locked(
                 missing_drafts.append(file_name)
                 continue
             artifact_path(scan_dir, file_name, required=True)
-        if missing_drafts:
+        if missing_drafts and documents is None:
             raise SystemExit(
                 "Scan agent did not create required draft artifacts: "
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
@@ -1276,10 +1318,10 @@ def complete_scan_locked(
             )
     if scan["mode"] == "deep":
         saved_results.advance_scan_phase(_WORKBENCH_DB_CONTEXT, connection, scan_id, "reporting")
+    completion_warnings = warnings if scan["mode"] != "deep" else None
     wrote = False
     try:
-        documents = None
-        if current_manifest_path is not None and not already_sealed:
+        if current_manifest is not None and not already_sealed:
             checkpoint = composition.checkpoint
             if (
                 checkpoint is not None
@@ -1295,11 +1337,16 @@ def complete_scan_locked(
                 recovered = saved_results.save_composed_checkpoint(
                     _WORKBENCH_DB_CONTEXT, connection, scan, scan_dir, composition
                 )
-                coverage = read_json_object(scan_dir / ARTIFACTS["coverage"])
+                coverage = (
+                    documents[2]
+                    if documents is not None
+                    else read_json_object(scan_dir / ARTIFACTS["coverage"])
+                )
                 coverage["completeness"] = "partial"
-                saved_results.merge_coverage(coverage, recovered["coverage"])
+                saved_results.union_coverage(coverage, recovered["coverage"])
                 documents = current_manifest, {"findings": recovered["findings"]}, coverage
-            elif scan["mode"] != "deep":
+                completion_warnings = warnings
+            if scan["mode"] != "deep" or saved_results._pending_result_paths(scan_dir):
                 documents = saved_results.merge_saved_results(
                     scan_dir,
                     scan["id"],
@@ -1307,14 +1354,13 @@ def complete_scan_locked(
                     warnings,
                     stopped=False,
                     reason="",
+                    parent_documents=documents,
                 )
         prepared = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
-            completion_warnings=warnings
-            if scan["mode"] != "deep" or documents is not None
-            else None,
+            completion_warnings=completion_warnings,
             draft_documents=documents,
         )
         add_warning()
@@ -1374,7 +1420,8 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        scan_history.require_composition_complete(scan, composition)
+        if not already_sealed:
+            scan_history.require_composition_complete(scan, composition)
         handoff.require_current_continuation(
             scan,
             claim_token,
@@ -1466,6 +1513,8 @@ def cli_scan_resume(
         sealed_producer_version=sealed_producer_version or sealed_scan_producer_version,
         claim_token=claim_token,
     )
+    if "sealedProducerVersion" not in result:
+        saved_results.require_current_deep_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
     composition = load_composition(connection, scan)
     result["scan"] = scan_result(connection, scan, composition=composition)
     checkpoint = composition.checkpoint
@@ -1517,12 +1566,22 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit(
                     "Saved scan registration must match its target, directory and mode."
                 )
+            if scan_target_identity(repository, None) != (
+                scan["target_revision"],
+                scan["target_snapshot_digest"],
+                scan["target_device"],
+                scan["target_inode"],
+            ):
+                raise SystemExit(
+                    "Cannot resume: the original checkout revision or contents changed."
+                )
+            sealed_version = sealed_scan_producer_version(scan)
+            if sealed_version is None:
+                saved_results.require_current_deep_scan(_WORKBENCH_DB_CONTEXT, connection, scan)
             saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
             if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
                 raise SystemExit("Saved scan registration must preserve the original scope.")
-            resume_verifier = sealed_scan_producer_version
             if saved_recipe is None:
-                sealed_version = sealed_scan_producer_version(scan)
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1536,13 +1595,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                         scan_id,
                     ),
                 )
-                resume_verifier = lambda _: sealed_version
             scan = require_scan(connection, scan_id)
             return cli_scan_resume(
                 connection,
                 scan,
                 registration.get("claimToken"),
-                sealed_producer_version=resume_verifier,
+                sealed_producer_version=lambda _: sealed_version,
             )
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
@@ -1659,12 +1717,15 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
         handoff.require_current_continuation(
             scan, args.claim_token, error_message="Scan execution is owned by another continuation."
         )
-        if scan["status"] != "running":
-            raise SystemExit("Only a running scan can attach its execution thread.")
         connection.execute(
-            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
-            (args.thread_id, now(), scan["id"]),
+            "INSERT OR IGNORE INTO scan_execution_threads(scan_id, thread_id) VALUES (?, ?)",
+            (scan["id"], args.thread_id),
         )
+        if scan["status"] == "running" and scan["seal_manifest_digest"] is None:
+            connection.execute(
+                "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
+                (args.thread_id, now(), scan["id"]),
+            )
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 
@@ -2748,7 +2809,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan
+            _WORKBENCH_DB_CONTEXT, scan
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
@@ -3275,6 +3336,7 @@ _WORKBENCH_DB_CONTEXT = saved_results.WorkbenchDbContext(
     require_workspace=require_workspace,
     scan_completion_lock=scan_completion_lock,
     scan_context=scan_context,
+    sealed_scan_producer_version=sealed_scan_producer_version,
     verify_manifest_binding=verify_manifest_binding,
     workbench_completion_binding=workbench_completion_binding,
     workspace_state=workspace_state,

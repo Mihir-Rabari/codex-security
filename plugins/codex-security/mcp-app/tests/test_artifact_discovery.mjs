@@ -285,7 +285,7 @@ async function verifyNormalizationAndPagination(context) {
   assert.deepEqual(candidateSchemaV1.parse(row), row);
   const extended = { ...row, savedExtension: { retained: true } };
   assert.equal(candidateSchemaV1.safeParse(extended).success, false);
-  assert.deepEqual(candidateSchemaV1.passthrough().parse(extended), extended);
+  assert.deepEqual(compactDiscoveryCandidateSchema.parse(extended), extended);
   for (const invalid of [
     { ...row, candidate_id: "  " },
     {
@@ -299,7 +299,7 @@ async function verifyNormalizationAndPagination(context) {
   ]) {
     assert.equal(candidateSchemaV1.safeParse(invalid).success, false);
     assert.equal(
-      candidateSchemaV1.passthrough().safeParse(invalid).success,
+      compactDiscoveryCandidateSchema.safeParse(invalid).success,
       false,
     );
   }
