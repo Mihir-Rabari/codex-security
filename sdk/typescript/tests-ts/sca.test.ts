@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
   Codex,
@@ -182,6 +183,7 @@ async function fixture(
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
     linkedCodex?: boolean;
+    codexLauncher?: string;
     advisoryDetails?: string;
   } = {},
 ) {
@@ -195,7 +197,7 @@ async function fixture(
   ]);
   if (options.mcpConfig !== undefined)
     await writeFile(join(codexHome, "config.toml"), options.mcpConfig);
-  let codexPath: string | undefined;
+  let codexPath = options.codexLauncher;
   if (options.linkedCodex) {
     const nativePath = resolveCodexCommand({}).command;
     const launcherDirectory = join(root, "linked-runtime");
@@ -451,6 +453,30 @@ async function fixture(
     codexHome,
   };
 }
+
+(process.platform === "win32" ? test.skip : test)(
+  "dependency triage keeps the installed npm JavaScript launcher and grants its native runtime",
+  async () => {
+    const launcher = createRequire(import.meta.url).resolve(
+      "@openai/codex/bin/codex.js",
+    );
+    const f = await fixture({ codexLauncher: launcher });
+    await using security = f.client;
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    });
+    expect(result.status).toBe("completed");
+    expect(f.captured.codex!.codexPathOverride).toBe(launcher);
+    expect(f.captured.thread!.additionalDirectories).toContain(
+      dirname(launcher),
+    );
+    expect(f.captured.thread!.additionalDirectories).toContain(
+      dirname(resolveCodexCommand({}).command),
+    );
+    expect(f.captured.codex!.env!["CODEX_CLI_PATH"]).toBe(launcher);
+  },
+);
 
 test("dependency triage disables inherited MCP servers and grants the linked native runtime", async () => {
   const mcpConfig =

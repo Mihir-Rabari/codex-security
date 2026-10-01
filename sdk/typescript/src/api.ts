@@ -187,6 +187,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  codexRuntimeReadDirectories,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -773,7 +774,8 @@ export class CodexSecurity {
         );
         result.model.skillDigest = contract.skillDigest;
         const command = this.#codexCommand();
-        const nativeCodexPath = await realpath(command.command);
+        const runtimeReadDirectories =
+          await codexRuntimeReadDirectories(command);
         const mcpServers = await disabledMcpServers(
           command,
           session.sessionConfig,
@@ -804,7 +806,7 @@ export class CodexSecurity {
               runtime.plugin.pluginRoot,
               // Linked launchers also need the native shell-tool runtime.
               dirname(command.command),
-              dirname(nativeCodexPath),
+              ...runtimeReadDirectories,
             ]),
           ],
           skipGitRepoCheck: true,
