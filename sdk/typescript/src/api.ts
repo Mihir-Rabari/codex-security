@@ -884,17 +884,23 @@ export class CodexSecurity {
             result.status = "completed";
         } finally {
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
-            if (options.maxCostUsd !== undefined) throw error;
+            if (options.maxCostUsd !== undefined) {
+              budgetController.abort(error);
+              throw error;
+            }
             result!.diagnostics.push(
               `Cost tracking: ${safeErrorMessage(error)}`,
             );
             return { cost: estimateScanCost(model, usage) };
           });
           if (snapshot.cost !== null) reportCost(snapshot.cost);
-          else if (options.maxCostUsd !== undefined)
-            throw new CodexSecurityError(
+          else if (options.maxCostUsd !== undefined) {
+            const error = new CodexSecurityError(
               "Could not verify the dependency assessment cost limit.",
             );
+            budgetController.abort(error);
+            throw error;
+          }
         }
         throwIfAborted(signal, outputDir);
       } catch (error) {

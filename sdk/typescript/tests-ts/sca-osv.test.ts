@@ -944,6 +944,62 @@ describe("SCA scanner execution", () => {
       ).toBe(true);
     },
   );
+  test.each(
+    [
+      {
+        path: "Pipfile.lock",
+        content: JSON.stringify({
+          _meta: {
+            sources: [
+              { name: "alternate", url: "https://index.example.test/simple" },
+            ],
+          },
+          default: {
+            "synthetic-lib": { version: "==1.2.0", index: "alternate" },
+          },
+        }),
+      },
+      {
+        path: "uv.lock",
+        content:
+          '[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource={registry="https://index.example.test/simple"}',
+      },
+      {
+        path: "poetry.lock",
+        content:
+          '[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource={type="legacy",url="https://index.example.test/simple"}',
+      },
+    ].flatMap((input) =>
+      [false, true].map((matched) => ({ ...input, matched })),
+    ),
+  )(
+    "keeps $path alternate-index coverage incomplete with advisory matches: $matched",
+    async ({ path, content, matched }) => {
+      const { repository, output } = await setup();
+      await writeFile(join(repository, path), content);
+      const vulnerability = advisory("SYNTHETIC-PYPI-1");
+      vulnerability.affected[0]!.package.ecosystem = "PyPI";
+      const raw = rawOutput(path, matched ? [vulnerability] : []);
+      raw.results[0]!.packages[0]!.package.ecosystem = "PyPI";
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_exe, argv) => ({
+            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
+            stderr: "",
+            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
+          }),
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.unresolvedPackages).toBe(1);
+      expect(result.coverage.limitations.join("\n")).toContain(
+        "https://index.example.test/simple",
+      );
+      expect(result.matches).toHaveLength(matched ? 1 : 0);
+    },
+  );
   test.each(["dependencies", "devDependencies", "optionalDependencies"])(
     "preserves npm direct URL provenance recorded in %s without changing registry tarballs",
     async (group) => {

@@ -2748,7 +2748,9 @@ declared pins when the `go` directive is older than 1.17 or missing, but coverag
 remains partial because indirect requirements may be absent. These inputs are
 reported explicitly; other supported inputs still produce results. Local,
 workspace, Git, direct URL, and alternate Cargo registry origins retain
-uncertainty when registry identity cannot be established.
+uncertainty when registry identity cannot be established. Non-PyPI indexes in
+Pipenv, uv, and Poetry lockfiles leave the affected package origins unresolved
+and coverage incomplete.
 
 ```ts
 import { createSecurity } from "@openai/codex-security";

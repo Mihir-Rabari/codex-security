@@ -66,20 +66,30 @@ describe("additional SCA input contracts", () => {
     },
   );
 
-  test("does not mistake registry URLs for direct Python archives", () => {
-    expect(
-      inspect(
-        '[[package]]\nname="synthetic"\nversion="2.0rc1"\nsource={registry="https://example.invalid/simple"}',
-        "uv",
-      ).references,
-    ).toEqual([]);
-    expect(
-      inspect(
-        '[[package]]\nname="synthetic"\nversion="2.0rc1"\nsource={type="legacy",url="https://example.invalid/simple"}',
-        "poetry",
-      ).references,
-    ).toEqual([]);
-  });
+  test.each(["uv", "poetry"] as const)(
+    "keeps alternate %s indexes unresolved while recognizing public PyPI",
+    (format) => {
+      for (const registry of [
+        "https://pypi.org/simple",
+        "https://pypi.python.org/simple/",
+        "https://index.example.test/simple",
+      ]) {
+        const source =
+          format === "uv"
+            ? `registry="${registry}"`
+            : `type="legacy",url="${registry}"`;
+        const references = inspect(
+          `[[package]]\nname="synthetic"\nversion="2.0rc1"\nsource={${source}}`,
+          format,
+        ).references;
+        expect(references).toEqual(
+          registry === "https://index.example.test/simple"
+            ? [expect.objectContaining({ resolution: `registry:${registry}` })]
+            : [],
+        );
+      }
+    },
+  );
 
   test("distinguishes uv virtual root from omitted local identities", () => {
     const root =
@@ -111,6 +121,47 @@ describe("additional SCA input contracts", () => {
       "range",
       "extra",
     ]);
+  });
+
+  test("preserves Pipenv named indexes and the default source", () => {
+    const sources = [
+      { name: "alternate", url: "https://index.example.test/simple" },
+      { name: "public", url: "https://pypi.org/simple/" },
+    ];
+    const result = inspect(
+      JSON.stringify({
+        _meta: { sources },
+        default: {
+          public: { version: "==1.2.3", index: "public" },
+          custom: { version: "==1.2.3", index: "alternate" },
+          implicit: { version: "==1.2.3" },
+          unknown: { version: "==1.2.3", index: "missing" },
+        },
+      }),
+      "pipenv",
+    );
+    expect(
+      result.references.map(({ name, resolution }) => ({ name, resolution })),
+    ).toEqual([
+      {
+        name: "custom",
+        resolution: "index:alternate;url:https://index.example.test/simple",
+      },
+      {
+        name: "implicit",
+        resolution: "index:alternate;url:https://index.example.test/simple",
+      },
+      { name: "unknown", resolution: "index:missing;url:unresolved" },
+    ]);
+    expect(
+      inspect(
+        JSON.stringify({
+          _meta: { sources: [sources[1]] },
+          default: { public: { version: "==1.2.3" } },
+        }),
+        "pipenv",
+      ).references,
+    ).toEqual([]);
   });
 
   test("keeps alternate Cargo registries and local origins unresolved", () => {

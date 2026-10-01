@@ -110,6 +110,13 @@ function packageName(pkg: Record<string, unknown>): string {
   return name;
 }
 
+function isPublicPypiIndex(url: string | null): boolean {
+  return (
+    url !== null &&
+    /^https?:\/\/pypi\.(?:org|python\.org)\/simple\/?$/u.test(url)
+  );
+}
+
 function inspectPythonToml(
   content: string,
   format: "uv" | "poetry",
@@ -124,6 +131,9 @@ function inspectPythonToml(
     if (format === "uv" && source["virtual"] === ".") continue;
     let origin: string | null = null;
     if (format === "uv") {
+      const registry = text(source["registry"]);
+      if (registry !== null && !isPublicPypiIndex(registry))
+        origin = `registry:${registry}`;
       for (const key of [
         "editable",
         "directory",
@@ -142,6 +152,10 @@ function inspectPythonToml(
       ["directory", "file", "url", "git"].includes(String(source["type"]))
     ) {
       origin = `${String(source["type"])}:${text(source["url"]) ?? ""}`;
+    } else if (source["type"] === "legacy") {
+      const registry = text(source["url"]);
+      if (!isPublicPypiIndex(registry))
+        origin = `registry:${registry ?? "unresolved"}`;
     }
     if (origin !== null)
       addReference(
@@ -160,6 +174,11 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
   const parsed: unknown = JSON.parse(content);
   if (!record(parsed)) throw new Error("Expected a Pipfile.lock object.");
   const result = inspection();
+  const metadata = parsed["_meta"];
+  const sources =
+    record(metadata) && Array.isArray(metadata["sources"])
+      ? metadata["sources"].filter(record)
+      : [];
   for (const [group, entries] of Object.entries(parsed)) {
     if (group === "_meta") continue;
     if (!record(entries))
@@ -171,11 +190,21 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
       const version = declaredVersion?.startsWith("==")
         ? text(declaredVersion.slice(2))
         : null;
-      const origin = ["path", "file", "git", "hg", "svn", "bzr"]
+      let origin = ["path", "file", "git", "hg", "svn", "bzr"]
         .map((key) =>
           text(pkg[key]) !== null ? `${key}:${String(pkg[key])}` : null,
         )
         .find((value) => value !== null);
+      if (origin === undefined) {
+        const index = text(pkg["index"]);
+        const source =
+          index === null
+            ? sources[0]
+            : sources.find((candidate) => candidate["name"] === index);
+        const url = source === undefined ? null : text(source["url"]);
+        if ((index !== null || source !== undefined) && !isPublicPypiIndex(url))
+          origin = `index:${index ?? text(source?.["name"]) ?? "default"};url:${url ?? "unresolved"}`;
+      }
       if (
         origin !== undefined ||
         version === null ||

@@ -15,9 +15,10 @@ import {
   type ThreadOptions,
 } from "@openai/codex-sdk";
 import Ajv from "ajv";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
+import { ScanCostTracker } from "../src/cost.js";
 import {
   ScanInterruptedError,
   ScanCostLimitExceededError,
@@ -745,6 +746,62 @@ test("requested cost limit interrupts while retaining completed evidence", async
   expect(saved.status).toBe("partial");
   expect(saved.model.costUsd).toBeGreaterThan(0.000001);
 });
+
+test.each([
+  { failure: "throw", requested: true },
+  { failure: "null", requested: true },
+  { failure: "throw", requested: false },
+  { failure: "null", requested: false },
+])(
+  "final cost verification $failure enforces requested limit: $requested",
+  async ({ failure, requested }) => {
+    const { client, repository, outputDir } = await fixture();
+    await using security = client;
+    const originalStop = ScanCostTracker.prototype.stop;
+    const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+      async function (this: ScanCostTracker, usage?: unknown) {
+        const snapshot = await originalStop.call(this, usage);
+        if (failure === "throw")
+          throw new Error("synthetic final cost tracking failure");
+        return { ...snapshot, cost: null };
+      },
+    );
+    try {
+      const operation = security.scanDependencies({
+        repositoryPath: repository,
+        outputDir,
+        ...(requested ? { maxCostUsd: 1 } : {}),
+      });
+      if (requested) {
+        const error = await operation.then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(error).toBeInstanceOf(ScanInterruptedError);
+        expect((error as ScanInterruptedError).cause).toMatchObject({
+          message:
+            failure === "throw"
+              ? "synthetic final cost tracking failure"
+              : "Could not verify the dependency assessment cost limit.",
+        });
+      } else {
+        expect((await operation).status).toBe("completed");
+      }
+      const saved = JSON.parse(
+        await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(saved.status).toBe(requested ? "partial" : "completed");
+      expect(saved.matches).toHaveLength(1);
+      expect(saved.assessments[0]!.status).toBe("completed");
+      if (failure === "throw")
+        expect(saved.diagnostics.join("\n")).toContain(
+          "synthetic final cost tracking failure",
+        );
+    } finally {
+      stop.mockRestore();
+    }
+  },
+);
 
 test("unknown model with a requested budget cannot silently assess without cost enforcement", async () => {
   const { client, repository, outputDir, calls } = await fixture({

@@ -129,6 +129,8 @@ export async function dependencyTriageContract(pluginRoot: string) {
         else if (!validateFinding(triage))
           error =
             "Dependency triage assessment did not satisfy triage-finding/v0.";
+        else if (triage.source_type !== "advisory")
+          error = "Dependency triage returned a non-advisory source type.";
         else if ((itemIdCounts.get(triage.triage_item_id) ?? 0) !== 1)
           error = "Dependency triage reused this assessment ID.";
         else

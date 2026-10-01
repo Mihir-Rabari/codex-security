@@ -172,6 +172,29 @@ describe("SCA static triage contract", () => {
     expect(assessments[1]!.error).toContain("triage-finding/v0");
   });
 
+  test.each(["sarif", "cve"] as const)(
+    "rejects schema-valid %s source types without losing independent assessments",
+    (source_type) => {
+      const result = fixture();
+      const matches = structuredClone(result.matches);
+      const assessments = contract.parse(
+        response([finding(1), { ...finding(2), source_type }, finding(3)]),
+        result,
+      );
+      expect(assessments.map((assessment) => assessment.status)).toEqual([
+        "completed",
+        "failed",
+        "completed",
+      ]);
+      expect(assessments[1]).toMatchObject({
+        verdict: null,
+        triage: null,
+        error: "Dependency triage returned a non-advisory source type.",
+      });
+      expect(result.matches).toEqual(matches);
+    },
+  );
+
   test("marks duplicate input IDs unavailable without discarding independent results", () => {
     const assessments = contract.parse(
       response([finding(1), finding(2), finding(2), finding(3)]),
