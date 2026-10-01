@@ -2721,8 +2721,8 @@ paths. See the security policy below for the full threat model.
 
 ## Dependency assessment (SCA MVP)
 
-`scanDependencies` inventories dependency files with an installed OSV-Scanner,
-then uses static `triage-finding` assessment for the matched advisories. Install
+`scanDependencies` runs an installed OSV-Scanner over supported dependency files,
+then uses `triage-finding` to assess matched advisories. Install
 OSV-Scanner v2.6.0 (the tested contract) or a compatible executable on PATH. It
 is not installed by the SDK. Files are discovered in nested projects too.
 
@@ -2745,9 +2745,10 @@ not proof of installed versions or a complete transitive graph. Requirements
 includes/ranges and parent-bearing POMs remain unsupported, as do older Go files
 that require auxiliary `go.sum` inventory. A modern toolchain can supply usable
 declared pins when the `go` directive is older than 1.17 or missing, but coverage
-remains partial because indirect requirements may be absent. These inputs are reported explicitly;
-other supported inputs still produce results. Local, workspace, Git, and direct
-URL origins retain uncertainty when registry identity cannot be established.
+remains partial because indirect requirements may be absent. These inputs are
+reported explicitly; other supported inputs still produce results. Local,
+workspace, Git, direct URL, and alternate Cargo registry origins retain
+uncertainty when registry identity cannot be established.
 
 ```ts
 import { createSecurity } from "@openai/codex-security";
@@ -2774,8 +2775,9 @@ JSON and stderr; `scanner.invocations` records their arguments, exit codes,
 and file paths. `osv-output.json` aggregates source records, while `scanner.argv`
 retains the first call. Per-file execution costs additional process and request
 overhead but preserves literal paths and source-specific exclusion evidence.
-Raw advisory matches and optional static assessments remain separate. A `not_actionable` assessment never removes a
-match, establishes VEX `not_affected`, or automatically changes merge policy.
+Raw advisory matches and optional static assessments remain separate. A
+`not_actionable` assessment never removes a match, establishes VEX `not_affected`,
+or automatically changes merge policy.
 `needs_review` is a completed uncertain assessment; `failed` means an assessment
 was unavailable. The run's coverage status describes advisory matching, while
 its overall status also accounts for assessment execution.
@@ -2784,9 +2786,10 @@ OSV sends package identities to its advisory service, not repository source.
 The assessment uses the existing Codex provider/model/authentication settings
 and the existing read-only, offline tool permission profile. It executes no
 application code or vulnerability reproductions. OSV configuration exclusions
-remain effective and are reported; exact suppressed counts and dependency
-introduction chains are unavailable. Unsupported lockfiles and unresolved
-local/Git/direct URL identities leave coverage incomplete. Git submodules are
+remain effective and are reported; a missing source inventory requires a scanner
+receipt showing empty input or package filtering. Exact suppressed counts and
+dependency introduction chains are unavailable. Unsupported lockfiles and
+unresolved source identities leave coverage incomplete. Git submodules are
 reported as uninspected and leave coverage incomplete; select an initialized
 submodule directly to assess its supported lockfiles.
 
@@ -2797,8 +2800,9 @@ prevents resolution claims, even with identical hashes and a frozen database:
 a group-based exclusion can start applying when a dependency changes groups.
 Results store configuration digests rather than effective exclusions, so this
 conservative rule also applies to configurations without exclusion rules.
-`createScaUpdateHandoff(result, matchIds, checks)` builds an explicit update request from advisory fixed-version
-candidates for the existing `patch` workflow. Ordinary dependency resolution
+`createScaUpdateHandoff(result, matchIds, checks)` builds an explicit update
+request from advisory fixed-version candidates for the existing `patch` workflow.
+Ordinary dependency resolution
 and build/test checks are still required before calling an update verified.
 
 See [local, CI, comparison, and handoff examples](../../examples/sca/README.md)

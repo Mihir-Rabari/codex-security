@@ -26,7 +26,7 @@ import { parse as parseToml } from "smol-toml";
 import semverValid from "semver/functions/valid.js";
 import { errorMessage } from "./errors.js";
 import {
-  additionalScaInput,
+  additionalScaFormat,
   inspectAdditionalScaInput,
   type ScaUnresolvedReference,
 } from "./sca-inputs.js";
@@ -330,7 +330,17 @@ function uncountedLocalReferences(
   ).length;
 }
 
-/** The scanner receipt already reflects config matching, groups, regexes, and expiry. */
+/** Scanner receipts reflect config matching, groups, regexes, and expiry. */
+function packageFilteringReceipts(stderr: string): string[] {
+  return stderr
+    .split(/\r?\n/u)
+    .filter(
+      (line) =>
+        line.startsWith("Package ") &&
+        line.includes(" has been filtered out because:"),
+    );
+}
+
 function excludedLocalReference(
   reference: DependencyLocalReference,
   components: ScaComponent[],
@@ -348,7 +358,7 @@ function excludedLocalReference(
   )
     return false;
   const prefix = `Package ${reference.ecosystem}/${packageName(reference.ecosystem, reference.name)}/`;
-  return stderr.split(/\r?\n/u).some((line) => {
+  return packageFilteringReceipts(stderr).some((line) => {
     // NuGet package IDs are case-insensitive; OSV receipts retain the lockfile spelling.
     const matchesPrefix =
       reference.ecosystem === "NuGet"
@@ -494,7 +504,6 @@ export async function discoverScaInputs(
   signal?: AbortSignal,
 ): Promise<
   Pick<ScaCoverage, "inputs" | "configFiles" | "limitations"> & {
-    packageExclusionSources: string[];
     localReferences: DependencyLocalReference[];
     diagnostics: string[];
   }
@@ -508,7 +517,7 @@ export async function discoverScaInputs(
   const candidates = files
     .filter(
       (path) =>
-        lockNames.has(basename(path)) || additionalScaInput(path) !== null,
+        lockNames.has(basename(path)) || additionalScaFormat(path) !== null,
     )
     .map(slash)
     .sort();
@@ -519,7 +528,6 @@ export async function discoverScaInputs(
     (path) =>
       `Git submodule ${path} is not inspected by dependency inventory; coverage is incomplete.`,
   );
-  const packageExclusions = new Map<string, boolean>();
   const limitations: string[] = [
     "Inventory covers observed package tuples in supported dependency files, not every installed instance, runtime, or a complete dependency graph.",
     ...diagnostics,
@@ -527,13 +535,12 @@ export async function discoverScaInputs(
   for (const candidate of candidates) {
     signal?.throwIfAborted();
     const path = join(repository, candidate);
-    const additional = additionalScaInput(path);
+    const additional = additionalScaFormat(path);
     const input: ScaInput = {
       path: slash(candidate),
       sha256: "",
       format:
-        additional?.format ??
-        (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
+        additional ?? (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
       status: "scanned",
       reason: null,
     };
@@ -588,7 +595,7 @@ export async function discoverScaInputs(
       if (additional !== null) {
         const inspected = inspectAdditionalScaInput(
           content.toString("utf8"),
-          additional.format,
+          additional,
           input.path,
         );
         input.status = inspected.status;
@@ -665,15 +672,6 @@ export async function discoverScaInputs(
       continue;
     }
     const overrides = caseInsensitiveField(config, "packageoverrides");
-    packageExclusions.set(
-      directory,
-      Array.isArray(overrides) &&
-        overrides.some(
-          (override) =>
-            record(override) &&
-            caseInsensitiveField(override, "ignore") === true,
-        ),
-    );
     if (
       caseInsensitiveField(config, "ignoredvulns") !== undefined ||
       overrides !== undefined
@@ -682,17 +680,10 @@ export async function discoverScaInputs(
         `OSV exclusions/overrides are configured in ${slash(relative(repository, path))}; results are evaluated after these settings. Exact suppressed counts are unavailable.`,
       );
   }
-  const packageExclusionSources = inputs
-    .filter(
-      (input) =>
-        packageExclusions.get(dirname(join(repository, input.path))) ?? false,
-    )
-    .map((input) => input.path);
   return {
     inputs,
     configFiles,
     limitations,
-    packageExclusionSources,
     localReferences,
     diagnostics,
   };
@@ -1092,7 +1083,6 @@ export async function runOsvScan(
       options.signal,
     );
     const {
-      packageExclusionSources,
       localReferences: discoveredLocalReferences,
       diagnostics,
       ...discovered
@@ -1216,7 +1206,7 @@ export async function runOsvScan(
             )
           ) {
             input.reason = "OSV extracted no packages from this lockfile.";
-          } else if (packageExclusionSources.includes(input.path)) {
+          } else if (packageFilteringReceipts(output.stderr).length > 0) {
             input.reason =
               "OSV returned no package tuples after applying configured package exclusions; suppressed counts are unavailable.";
           } else {

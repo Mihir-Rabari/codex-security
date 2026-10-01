@@ -1,10 +1,10 @@
 # SCA evaluation
 
-This harness evaluates **existing dependency advisory assessment**, using twelve
-fictional package/application snapshots. It does not discover vulnerabilities or
+This harness tests dependency advisory assessment using twelve fictional
+application snapshots. It does not discover vulnerabilities or
 execute affected code. Four advisory families each contain an affected, a
-not-affected, and an unresolved configuration. All labels come from the synthetic
-fixture specification. **There are zero independently human-adjudicated cases.**
+not-affected, and an unresolved configuration. The labels come from the fixture
+specification; none has independent human review.
 
 The suite distinguishes a correctly matched dependency advisory from application
 applicability. The original match remains in each frozen `osv.json`, including

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import {
-  additionalScaInput,
+  additionalScaFormat,
   inspectAdditionalScaInput,
   type AdditionalScaFormat,
 } from "../src/sca-inputs.js";
@@ -12,30 +12,24 @@ function inspect(content: string, format: AdditionalScaFormat) {
 
 describe("additional SCA input contracts", () => {
   test.each([
-    ["uv.lock", "uv", "PyPI"],
-    ["poetry.lock", "poetry", "PyPI"],
-    ["Pipfile.lock", "pipenv", "PyPI"],
-    ["requirements-dev.txt", "requirements", "PyPI"],
-    ["my-requirements.txt", "requirements", "PyPI"],
-    ["go.mod", "go", "Go"],
-    ["Cargo.lock", "cargo", "crates.io"],
-    ["pom.xml", "maven", "Maven"],
-    ["synthetic.pom", "maven", "Maven"],
-    ["gradle.lockfile", "gradle", "Maven"],
-    ["buildscript-gradle.lockfile", "gradle", "Maven"],
-    ["Gemfile.lock", "bundler", "RubyGems"],
-    ["gems.locked", "bundler", "RubyGems"],
-    ["composer.lock", "composer", "Packagist"],
-    ["packages.lock.json", "nuget", "NuGet"],
-  ] as const)(
-    "discovers the pinned extractor input %s",
-    (name, format, ecosystem) => {
-      expect(additionalScaInput(join("nested", name))).toEqual({
-        format,
-        ecosystem,
-      });
-    },
-  );
+    ["uv.lock", "uv"],
+    ["poetry.lock", "poetry"],
+    ["Pipfile.lock", "pipenv"],
+    ["requirements-dev.txt", "requirements"],
+    ["my-requirements.txt", "requirements"],
+    ["go.mod", "go"],
+    ["Cargo.lock", "cargo"],
+    ["pom.xml", "maven"],
+    ["synthetic.pom", "maven"],
+    ["gradle.lockfile", "gradle"],
+    ["buildscript-gradle.lockfile", "gradle"],
+    ["Gemfile.lock", "bundler"],
+    ["gems.locked", "bundler"],
+    ["composer.lock", "composer"],
+    ["packages.lock.json", "nuget"],
+  ] as const)("discovers the pinned extractor input %s", (name, format) => {
+    expect(additionalScaFormat(join("nested", name))).toBe(format);
+  });
 
   test.each([
     "go.sum",
@@ -47,7 +41,7 @@ describe("additional SCA input contracts", () => {
     "requirements.in",
     "__proto__",
   ])("does not treat %s as a supported resolved input", (name) =>
-    expect(additionalScaInput(name)).toBeNull(),
+    expect(additionalScaFormat(name)).toBeNull(),
   );
 
   test.each(["uv", "poetry"] as const)(
@@ -119,11 +113,12 @@ describe("additional SCA input contracts", () => {
     ]);
   });
 
-  test("keeps Cargo nonregistry origins unresolved without losing registry inventory", () => {
+  test("keeps alternate Cargo registries and local origins unresolved", () => {
     const result = inspect(
       [
         "version=4",
-        '[[package]]\nname="registry"\nversion="1.2.3"\nsource="registry+https://example.invalid/index"',
+        '[[package]]\nname="registry"\nversion="1.2.3"\nsource="registry+https://github.com/rust-lang/crates.io-index"',
+        '[[package]]\nname="alternate"\nversion="1.2.3"\nsource="registry+https://registry.example.test/index"',
         '[[package]]\nname="workspace"\nversion="1.0.0"',
         '[[package]]\nname="git"\nversion="1.2.3"\nsource="git+https://example.invalid/source#synthetic"',
       ].join("\n"),
@@ -131,9 +126,13 @@ describe("additional SCA input contracts", () => {
     );
     expect(result.status).toBe("scanned");
     expect(result.references.map((reference) => reference.name)).toEqual([
+      "alternate",
       "workspace",
       "git",
     ]);
+    expect(result.references[0]?.resolution).toBe(
+      "registry+https://registry.example.test/index",
+    );
   });
 
   test("accepts pinned requirements with hashes and markers but reports manifest coverage", () => {

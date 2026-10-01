@@ -22,33 +22,28 @@ export interface InputInspection {
   limitations: string[];
 }
 
-interface InputDescriptor {
-  format: AdditionalScaFormat;
-  ecosystem: string;
-}
-
-const filenames = new Map<string, InputDescriptor>([
-  ["uv.lock", { format: "uv", ecosystem: "PyPI" }],
-  ["poetry.lock", { format: "poetry", ecosystem: "PyPI" }],
-  ["Pipfile.lock", { format: "pipenv", ecosystem: "PyPI" }],
-  ["go.mod", { format: "go", ecosystem: "Go" }],
-  ["Cargo.lock", { format: "cargo", ecosystem: "crates.io" }],
-  ["pom.xml", { format: "maven", ecosystem: "Maven" }],
-  ["gradle.lockfile", { format: "gradle", ecosystem: "Maven" }],
-  ["buildscript-gradle.lockfile", { format: "gradle", ecosystem: "Maven" }],
-  ["Gemfile.lock", { format: "bundler", ecosystem: "RubyGems" }],
-  ["gems.locked", { format: "bundler", ecosystem: "RubyGems" }],
-  ["composer.lock", { format: "composer", ecosystem: "Packagist" }],
-  ["packages.lock.json", { format: "nuget", ecosystem: "NuGet" }],
+const filenames = new Map<string, AdditionalScaFormat>([
+  ["uv.lock", "uv"],
+  ["poetry.lock", "poetry"],
+  ["Pipfile.lock", "pipenv"],
+  ["go.mod", "go"],
+  ["Cargo.lock", "cargo"],
+  ["pom.xml", "maven"],
+  ["gradle.lockfile", "gradle"],
+  ["buildscript-gradle.lockfile", "gradle"],
+  ["Gemfile.lock", "bundler"],
+  ["gems.locked", "bundler"],
+  ["composer.lock", "composer"],
+  ["packages.lock.json", "nuget"],
 ]);
 
-export function additionalScaInput(path: string): InputDescriptor | null {
+export function additionalScaFormat(path: string): AdditionalScaFormat | null {
   const name = basename(path);
   const known = filenames.get(name);
-  if (known) return { ...known };
+  if (known) return known;
   if (name.endsWith(".txt") && name.includes("requirements"))
-    return { format: "requirements", ecosystem: "PyPI" };
-  if (name.endsWith(".pom")) return { format: "maven", ecosystem: "Maven" };
+    return "requirements";
+  if (name.endsWith(".pom")) return "maven";
   return null;
 }
 
@@ -205,8 +200,8 @@ function inspectCargo(content: string, sourcePath: string): InputInspection {
   for (const pkg of packagesInToml(content)) {
     const name = packageName(pkg);
     const source = text(pkg["source"]);
-    // The upstream extractor ignores source, including workspace/path/Git crates.
-    if (source === null || !source.startsWith("registry+"))
+    // The upstream extractor drops source identity, including alternate registries.
+    if (source !== "registry+https://github.com/rust-lang/crates.io-index")
       addReference(
         result,
         sourcePath,

@@ -1,6 +1,6 @@
-**SCA MVP implementation plan for Codex Security**
+# SCA MVP design
 
-Design recorded September 30, 2026, building on [the research note](sca-research.md). The SDK MVP and synthetic evaluation harness described here are implemented. This document preserves the design rationale and planned evaluation; [implementation QA](sca-qa.md) records completed checks and remaining work. The independently adjudicated corpus and developer pilot remain planned.
+This note records the September 30, 2026 design, building on [the research note](sca-research.md). The SDK workflow and synthetic evaluation harness are implemented. Independent corpus labeling and the developer pilot are pending; [implementation QA](sca-qa.md) records completed checks.
 
 **Product contract.** Given a local repository using supported JavaScript/TypeScript, Python, Go, Rust, Java/Kotlin, Ruby, PHP, or .NET dependency files, return the components visible to OSV, their known advisory matches, static application assessments, and a reviewable update handoff. Keep the advisory match and application assessment separate. The initial product assists developer decisions and reports incomplete evidence explicitly.
 
@@ -15,7 +15,7 @@ Design recorded September 30, 2026, building on [the research note](sca-research
 | Remediation    | User-selected handoff to the existing patch workflow; verify resolution and normal project checks separately.                                                                                                                                    |
 | Later work     | Full dependency graphs, general function-level reachability, containers, license policy, new-malware discovery, SBOM/VEX exports, continuous monitoring, and dashboard integration.                                                              |
 
-**The additive SDK surface is deliberately small.** The implemented entry point is:
+The SDK adds one method:
 
 ```ts
 import { createSecurity } from "@openai/codex-security";
@@ -33,7 +33,7 @@ try {
 }
 ```
 
-Options reuse `auth`, `outputDir`, `signal`, and `maxCostUsd` semantics from existing operations. Authentication defaults to the existing configured mechanism; output defaults to a per-run SCA directory under the existing state root; omitted signal/cost limit adds no new limit. Model, provider, permissions, environment, executable handling, and user-selected Codex configuration follow existing session preparation. Document the SDK addition and export its types in the same change. No new command, flag, public environment variable, scan mode, or default for existing operations is proposed.
+Options reuse `auth`, `outputDir`, `signal`, and `maxCostUsd` semantics from existing operations. Authentication defaults to the existing configured mechanism; output defaults to a per-run SCA directory under the existing state root; omitted signal/cost limit adds no new limit. Model, provider, permissions, environment, executable handling, and user-selected Codex configuration follow existing session preparation. No new command, flag, public environment variable, scan mode, or default for existing operations is proposed.
 
 The method runs matching first and invokes Codex only when there are advisory matches to assess. A complete zero-match result requires no model call or model authentication. It performs no dependency installation, source modification, dynamic validation, publication, or automatic dismissal. Existing `run()` and `ScanResult` retain their current meanings.
 
@@ -134,17 +134,9 @@ The default example is report-only for vulnerability matches. It signals incompl
 
 Existing `patch` accepts finding text/files and a validation-instruction file. Use a deliberate handoff for an update and ordinary compatibility checks; static triage itself does not execute them. An update is called verified only when the intended resolved version is observed and the stated checks actually pass. [Existing patch workflow](../sdk/typescript/README.md)
 
-**Implementation workstreams.** The SDK, reports, examples, contracts, and synthetic harness are implemented together. The table records their dependencies; independent corpus labeling and the developer pilot remain separate follow-up work.
+The adapter, SDK assessment, reports, examples, contracts, and synthetic harness are implemented. Independent corpus labeling and the developer pilot remain follow-up work.
 
-| Workstream                | Main work                                                                                                                                                                                                          | Acceptance and dependencies                                                                                                         |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 1: Contract and OSV spike | Add `plugins/codex-security/schemas/sca-result.schema.json`; promote the existing triage JSON schema; add synthetic scanner fixtures. Prove OSV arguments, effective npm inputs, exclusions, and failure behavior. | Compatible contract documented; clean, findings, no-input, malformed-input, and matcher-failure cases distinguished. No dependency. |
-| 2: Scanner adapter        | Add `sdk/typescript/src/sca-osv.ts` for invocation, diagnostics, normalization, alias grouping, and coverage.                                                                                                      | Pinned executable tests and process-boundary tests pass on supported platforms. Depends on workstream 1.                            |
-| 3: SDK assessment         | Add `src/sca.ts` and `src/sca-triage.ts`; wire `api.ts` and exports in `index.ts`; preserve partial artifacts and configuration.                                                                                   | One result per supplied match; zero-match bypass; failures/cancellation preserve evidence. Depends on workstreams 1–2.              |
-| 4: Reports and workflow   | Add `src/sca-report.ts`, `examples/sca/`, SDK documentation, conservative comparison, and explicit update handoff.                                                                                                 | Local and CI examples work; incomplete scans cannot resolve matches; no unsupported fix claims. Depends on workstream 3.            |
-| 5: Evaluation and pilot   | Add `evals/triage-finding/sca/`, dataset, assertions, scoring, and a pilot report.                                                                                                                                 | Frozen comparisons, adjudication, and launch criteria below are satisfied. Harness work can start after workstream 1.               |
-
-Workstream 3 reuses the standalone operation's session setup in [api.ts](../sdk/typescript/src/api.ts), and calls the static triage skill rather than `validate()` and its separate validation semantics. Keep the orchestration and result models small; do not extend `ScanMode`, `FindingWorkflow`, Deep Scan reducers, or the findings database to accommodate raw component data.
+The SDK assessment reuses the standalone operation's session setup in [api.ts](../sdk/typescript/src/api.ts), and calls the static triage skill rather than `validate()` and its separate validation semantics. Keep the orchestration and result models small; do not extend `ScanMode`, `FindingWorkflow`, Deep Scan reducers, or the findings database to accommodate raw component data.
 
 **Evaluation is three separate tracks.** Proposed sample sizes below are pilot-design choices, not claims about existing data or proof of production error rates.
 
@@ -185,5 +177,3 @@ Report a three-class confusion matrix plus execution errors. High decision accur
 Provisional learning targets are at least 90% confirmation precision and at least 20% lower paired median review time than the scanner-only workflow, while reporting recall, decision coverage, latency, and cost. Revisit these targets after measuring the baseline. They are not achieved results. Even zero incorrect dismissals among 30 affected cases gives only an approximately 9.5% one-sided 95% upper error bound; this pilot cannot justify automatic dismissal.
 
 Before submitting implementation changes, run focused tests and the SDK package checks required by [SDK AGENTS](../sdk/typescript/AGENTS.md). Any plugin/schema changes also require all five portable checks from [root AGENTS](../AGENTS.md): Ruff lint, Ruff format check, TypeScript `build:ci`, plugin source compatibility, and its Node test suite. Test inherited runtime settings at the process boundary; if shared runtime behavior changes, include discovery, reducer, and resumed Deep Scan workers. Observed implementation checks are recorded separately in [implementation QA](sca-qa.md).
-
-**Implementation status.** The SDK MVP and synthetic evaluation harness are implemented. See [the example](../examples/sca/README.md) for the executable workflow and [implementation QA](sca-qa.md) for observed checks and remaining evaluation work. The pinned OSV binary returned 127 with inventory for a missing local database and 130 with matches for invalid configuration; a Composer short-commit lookup returned zero despite skipped matching. The adapter still recognizes pinned error diagnostics when output and exit status disagree.

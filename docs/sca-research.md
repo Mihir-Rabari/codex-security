@@ -1,10 +1,10 @@
-**SCA research and a proposed direction for Codex Security**
+# SCA research and proposed scope
 
 Research date: September 30, 2026. This design research preceded implementation and is based on primary project documentation, public research, and inspection of the repository at that time. Project capabilities below are upstream claims unless explicitly described as paper-reported measurements. The research phase did not run a comparative benchmark or dependency scan. Subsequent implementation checks are recorded in [implementation QA](sca-qa.md).
 
-The follow-on [MVP implementation plan](sca-mvp-plan.md) specifies the initial scope, SDK entry point, OSV adapter, developer workflow, PR breakdown, and evaluation gates.
+The follow-on [MVP implementation plan](sca-mvp-plan.md) specifies the initial scope, SDK entry point, OSV adapter, developer workflow, and evaluation gates.
 
-**Recommendation.** Build a dependency assessment and remediation experience on top of established inventory and advisory tools. The useful product promise is: identify affected dependencies, explain their relevance to this application with inspectable evidence, and help the developer complete an appropriate update. Preserve the package/advisory match even when application relevance is unresolved. Start with known dependency vulnerabilities; treat license compliance and novel malicious-package detection as separate expansions.
+**Recommendation.** Use existing tools to identify affected dependencies, then use Codex to explain their application relevance with inspectable evidence and help with an update. Preserve the package/advisory match even when application relevance is unresolved. Start with known dependency vulnerabilities; treat license compliance and novel malicious-package detection as separate expansions.
 
 **What the current tools already do.** There is no single demonstrated winner across all ecosystems and tasks. A modern comparison needs to include inventory, application context, upgrades, and ongoing reassessment.
 

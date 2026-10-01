@@ -7,7 +7,6 @@ import {
   rm,
   symlink,
   writeFile,
-  watch,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -442,7 +441,12 @@ describe("SCA input selection", () => {
     "honors case-insensitive OSV %s and Ignore configuration",
     async (key) => {
       const result = await scanFixture(
-        { stdout: '{"results":[]}', stderr: "", exitCode: 0 },
+        {
+          stdout: '{"results":[]}',
+          stderr:
+            "Package npm/synthetic-lib/1.2.0 has been filtered out because: synthetic exclusion",
+          exitCode: 0,
+        },
         {
           "osv-scanner.toml": `[[${key}]]\nname="synthetic-lib"\nIgnore=true\n`,
         },
@@ -474,7 +478,6 @@ describe("SCA input selection", () => {
     const found = await discoverScaInputs(repository);
     expect(found.inputs[0]?.status).toBe("scanned");
     expect(found.configFiles).toEqual([]);
-    expect(found.packageExclusionSources).toEqual([]);
   });
   test("does not inherit root exclusions to explain missing nested inventory", async () => {
     const result = await scanFixture(
@@ -1168,7 +1171,8 @@ snapshots:
     const result = await scanFixture(
       {
         stdout: '{"results":[]}',
-        stderr: "Package npm/synthetic-lib/1.2.0 has been filtered out",
+        stderr:
+          "Package npm/synthetic-lib/1.2.0 has been filtered out because: synthetic exclusion",
         exitCode: 0,
       },
       {
@@ -1179,17 +1183,35 @@ snapshots:
     expect(result.status).toBe("completed");
     expect(result.components).toEqual([]);
   });
+  test.each([
+    ["unrelated", 'name="other-package"'],
+    ["expired", 'name="synthetic-lib"\neffectiveUntil=2000-01-01'],
+  ])(
+    "does not accept missing inventory based on an %s override without a receipt",
+    async (_label, fields) => {
+      const result = await scanFixture(
+        { stdout: '{"results":[]}', stderr: "", exitCode: 0 },
+        {
+          "osv-scanner.toml": `[[PackageOverrides]]\n${fields}\nignore=true\n`,
+        },
+      );
+      expect(result.status).toBe("failed");
+      expect(result.coverage.inputs[0]?.status).toBe("failed");
+      expect(result.diagnostics.join("\n")).toContain(
+        "absent from OSV output without evidence",
+      );
+    },
+  );
   test("streams native child output and preserves it on cancellation", async () => {
     const { repository, output } = await setup();
     const controller = new AbortController();
     const stdoutPath = join(output, "child.json");
     const stderrPath = join(output, "child.log");
-    const watcher = watch(output);
     const execution = runOsvProcess(
       process.execPath,
       [
         "-e",
-        'console.log(process.env.SCA_SYNTHETIC_SETTING); console.error("started"); setInterval(() => {}, 1000);',
+        'console.log(process.env.SCA_SYNTHETIC_SETTING); console.error("started"); setTimeout(() => {}, 15000);',
       ],
       {
         cwd: repository,
@@ -1199,16 +1221,27 @@ snapshots:
         stderrPath,
       },
     );
-    // File events establish that the child actually ran before cancellation.
-    for await (const _event of watcher) {
-      if (
-        (await readFile(stderrPath, "utf8").catch(() => "")).includes("started")
-      )
-        break;
+    const settled = execution.catch(() => {});
+    try {
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        const [stdout, stderr] = await Promise.all([
+          readFile(stdoutPath, "utf8").catch(() => ""),
+          readFile(stderrPath, "utf8").catch(() => ""),
+        ]);
+        if (stdout.includes("inherited") && stderr.includes("started")) break;
+        if (Date.now() >= deadline)
+          throw new Error("Synthetic child did not write its startup output.");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      controller.abort(new Error("requested stop"));
+      await expect(execution).rejects.toThrow();
+      expect(await readFile(stdoutPath, "utf8")).toContain("inherited");
+      expect(await readFile(stderrPath, "utf8")).toContain("started");
+    } finally {
+      controller.abort();
+      await settled;
     }
-    controller.abort(new Error("requested stop"));
-    await expect(execution).rejects.toThrow();
-    expect(await readFile(stdoutPath, "utf8")).toContain("inherited");
   });
   test("attaches partial scanner context to interruption for orchestration persistence", async () => {
     const { repository, output } = await setup();
