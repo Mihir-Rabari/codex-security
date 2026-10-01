@@ -1,13 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import type {
-  CodexOptions,
-  ThreadEvent,
-  ThreadOptions,
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  Codex,
+  type CodexOptions,
+  type ThreadEvent,
+  type ThreadOptions,
 } from "@openai/codex-sdk";
 import Ajv from "ajv";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
+import type { JsonObject } from "../src/config.js";
 import {
   ScanInterruptedError,
   ScanCostLimitExceededError,
@@ -18,6 +28,7 @@ import type { ScaResult, TriageFinding } from "../src/sca-types.js";
 import {
   resolveCodexCommand,
   resolvePluginPython,
+  runCodexCommand,
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
@@ -157,6 +168,9 @@ async function fixture(
     changeRevision?: boolean;
     snapshotErrorAt?: 1 | 2;
     workbenchSnapshot?: boolean;
+    mcpConfig?: string;
+    mcpOverrides?: JsonObject;
+    linkedCodex?: boolean;
   } = {},
 ) {
   const root = await temporaryDirectory();
@@ -167,6 +181,19 @@ async function fixture(
     mkdir(repository, { mode: 0o700 }),
     mkdir(codexHome, { mode: 0o700 }),
   ]);
+  if (options.mcpConfig !== undefined)
+    await writeFile(join(codexHome, "config.toml"), options.mcpConfig);
+  let codexPath: string | undefined;
+  if (options.linkedCodex) {
+    const nativePath = resolveCodexCommand({}).command;
+    const launcherDirectory = join(root, "linked-runtime");
+    await symlink(
+      dirname(nativePath),
+      launcherDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    codexPath = join(launcherDirectory, basename(nativePath));
+  }
   if (options.dirtyRepository)
     execFileSync("git", ["init", "--quiet"], { cwd: repository });
   const sourcePath = join(repository, "usage.txt");
@@ -187,8 +214,14 @@ async function fixture(
   const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
   const environment = {
     PATH: process.env["PATH"] ?? "",
+    ...Object.fromEntries(
+      ["SystemRoot", "TEMP", "TMP"].flatMap((name) =>
+        process.env[name] === undefined ? [] : [[name, process.env[name]!]],
+      ),
+    ),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
     OPENAI_API_KEY: "synthetic-sca-key",
+    ...(codexPath === undefined ? {} : { CODEX_CLI_PATH: codexPath }),
   };
   const sourceSnapshot = async (path: string) => {
     expect(path).toBe(repository);
@@ -206,6 +239,9 @@ async function fixture(
       codexOverrides: {
         model: options.model ?? "gpt-5.6-sol",
         model_reasoning_effort: "high",
+        ...(options.mcpOverrides === undefined
+          ? {}
+          : { mcp_servers: options.mcpOverrides }),
       },
     },
     {
@@ -341,8 +377,136 @@ async function fixture(
     sourceCalls,
     pythonResolutions,
     environment,
+    codexHome,
   };
 }
+
+test("dependency triage disables inherited MCP servers and grants the linked native runtime", async () => {
+  const mcpConfig =
+    '[mcp_servers."synthetic.inherited"]\ncommand = "synthetic-inherited"\n';
+  const f = await fixture({
+    mcpConfig,
+    mcpOverrides: {
+      "synthetic.configured": {
+        command: "synthetic-configured",
+        enabled: true,
+      },
+    },
+    linkedCodex: true,
+  });
+  await using security = f.client;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+  });
+  expect(result.status).toBe("completed");
+  const options = f.captured.codex!;
+  expect(options.env!["CODEX_HOME"]).toBe(f.codexHome);
+  expect(options.configOverrides!.map((value) => parseToml(value))).toEqual([
+    {
+      mcp_servers: {
+        "synthetic.inherited": { enabled: false },
+        "synthetic.configured": {
+          command: "synthetic-configured",
+          enabled: false,
+        },
+      },
+    },
+  ]);
+  const effective = await runCodexCommand(
+    resolveCodexCommand(f.environment),
+    [
+      "-C",
+      f.outputDir,
+      ...options.configOverrides!.flatMap((value) => ["--config", value]),
+      "mcp",
+      "list",
+      "--json",
+    ],
+    options.env!,
+  );
+  expect(effective.success).toBe(true);
+  expect(
+    JSON.parse(effective.stdout).map(
+      (server: { name: string; enabled: boolean }) => ({
+        name: server.name,
+        enabled: server.enabled,
+      }),
+    ),
+  ).toEqual([
+    { name: "synthetic.configured", enabled: false },
+    { name: "synthetic.inherited", enabled: false },
+  ]);
+  expect(await readFile(join(f.codexHome, "config.toml"), "utf8")).toBe(
+    mcpConfig,
+  );
+  const launcherPath = f.environment.CODEX_CLI_PATH!;
+  const runtimeDirectory = dirname(await realpath(launcherPath));
+  expect(runtimeDirectory).not.toBe(dirname(launcherPath));
+  expect(f.captured.thread!.additionalDirectories).toEqual([
+    f.repository,
+    PLUGIN_ROOT,
+    dirname(launcherPath),
+    runtimeDirectory,
+  ]);
+
+  // Exercise the pinned SDK's argument/environment boundary without a model call.
+  const receipt = join(f.outputDir, "child.json");
+  const preload = join(f.outputDir, "synthetic-codex.mjs");
+  await writeFile(
+    preload,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ argv: process.argv.slice(2), home: process.env.CODEX_HOME }));
+for (const event of [
+  { type: "thread.started", thread_id: "synthetic-thread" },
+  { type: "item.completed", item: { id: "message", type: "agent_message", text: "synthetic response" } },
+  { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }
+]) console.log(JSON.stringify(event));
+process.exit(0);
+`,
+  );
+  const node = execFileSync("node", ["-p", "process.execPath"], {
+    encoding: "utf8",
+  }).trim();
+  const turn = await new Codex({
+    ...options,
+    codexPathOverride: node,
+    env: {
+      ...options.env,
+      NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+    },
+  })
+    .startThread(f.captured.thread)
+    .run("synthetic SDK boundary probe");
+  expect(turn.finalResponse).toBe("synthetic response");
+  const child = JSON.parse(await readFile(receipt, "utf8"));
+  expect(child.home).toBe(f.codexHome);
+  expect(child.argv).toContain(options.configOverrides![0]);
+  expect(
+    child.argv.flatMap((value: string, index: number, argv: string[]) =>
+      value === "--add-dir" ? [argv[index + 1]] : [],
+    ),
+  ).toEqual(f.captured.thread!.additionalDirectories);
+  expect(await readFile(join(f.codexHome, "config.toml"), "utf8")).toBe(
+    mcpConfig,
+  );
+});
+
+test("dependency triage preserves scanner evidence when MCP configuration cannot be read", async () => {
+  const f = await fixture({ mcpConfig: "[invalid TOML\n" });
+  await using security = f.client;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+  });
+  expect(result.status).toBe("partial");
+  expect(result.matches).toHaveLength(1);
+  expect(result.assessments[0]!.status).toBe("failed");
+  expect(f.calls.model).toBe(0);
+  expect(result.diagnostics.join("\n")).toContain(
+    "Could not read MCP configuration for a read-only helper",
+  );
+});
 
 test.each([
   { path: "package-lock.json", format: "npm", ecosystem: "npm" },

@@ -399,7 +399,11 @@ async function repositoryFiles(
   repository: string,
   environment: Record<string, string | undefined>,
   signal?: AbortSignal,
-): Promise<{ files: string[]; submodules: string[] }> {
+): Promise<{
+  files: string[];
+  submodules: string[];
+  nestedRepositories: string[];
+}> {
   const worktree = await enclosingGitWorktreeRoot(repository, signal, {
     requireIfPresent: true,
   });
@@ -472,8 +476,15 @@ async function repositoryFiles(
       }
       return unique(result);
     };
+    const listedPaths = listed.stdout.split("\0").filter(Boolean);
     return {
-      files: await selected(listed.stdout.split("\0").filter(Boolean)),
+      files: await selected(listedPaths.filter((path) => !path.endsWith("/"))),
+      // Git lists an untracked nested checkout as a directory, not its contents.
+      nestedRepositories: await selected(
+        listedPaths
+          .filter((path) => path.endsWith("/"))
+          .map((path) => path.slice(0, -1)),
+      ),
       submodules: await selected(
         staged.stdout
           .split("\0")
@@ -494,7 +505,7 @@ async function repositoryFiles(
       else files.push(relative(repository, path));
     }
   }
-  return { files, submodules: [] };
+  return { files, submodules: [], nestedRepositories: [] };
 }
 
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
@@ -509,7 +520,7 @@ export async function discoverScaInputs(
   }
 > {
   const repository = await normalizeRepository(repositoryPath, signal);
-  const { files, submodules } = await repositoryFiles(
+  const { files, submodules, nestedRepositories } = await repositoryFiles(
     repository,
     environment,
     signal,
@@ -524,10 +535,16 @@ export async function discoverScaInputs(
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
   const localReferences: DependencyLocalReference[] = [];
-  const diagnostics = submodules.map(
-    (path) =>
-      `Git submodule ${path} is not inspected by dependency inventory; coverage is incomplete.`,
-  );
+  const diagnostics = [
+    ...submodules.map(
+      (path) =>
+        `Git submodule ${path} is not inspected by dependency inventory; coverage is incomplete.`,
+    ),
+    ...nestedRepositories.map(
+      (path) =>
+        `Untracked nested Git repository ${path} is not inspected by dependency inventory; coverage is incomplete.`,
+    ),
+  ];
   const limitations: string[] = [
     "Inventory covers observed package tuples in supported dependency files, not every installed instance, runtime, or a complete dependency graph.",
     ...diagnostics,

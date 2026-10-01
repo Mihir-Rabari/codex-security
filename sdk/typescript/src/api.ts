@@ -165,6 +165,7 @@ import {
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
+  disabledMcpServers,
   matchCompletedScan,
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
@@ -772,6 +773,17 @@ export class CodexSecurity {
           runtime.plugin.pluginRoot,
         );
         result.model.skillDigest = contract.skillDigest;
+        const command = this.#codexCommand();
+        const nativeCodexPath = await realpath(command.command);
+        const mcpServers = await disabledMcpServers(
+          command,
+          session.sessionConfig,
+          definedEnvironment({
+            ...withoutCodexHome(runtime.environment),
+            CODEX_HOME: runtime.codexHome,
+          }),
+          { workingDirectory: outputDir, signal },
+        );
         const { codex } = this.#createSessionCodex(
           session,
           {
@@ -782,15 +794,19 @@ export class CodexSecurity {
           options.auth,
           undefined,
           policyCodexConfig(session.sessionConfig),
+          [`mcp_servers=${inlineToml(mcpServers)}`],
         );
         const thread = codex.startThread({
           threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
           workingDirectory: outputDir,
           additionalDirectories: [
-            inputs.repository,
-            runtime.plugin.pluginRoot,
-            // The read-only profile must also expose the native shell-tool runtime.
-            dirname(this.#codexCommand().command),
+            ...new Set([
+              inputs.repository,
+              runtime.plugin.pluginRoot,
+              // Linked launchers also need the native shell-tool runtime.
+              dirname(command.command),
+              dirname(nativeCodexPath),
+            ]),
           ],
           skipGitRepoCheck: true,
           approvalPolicy: "never",

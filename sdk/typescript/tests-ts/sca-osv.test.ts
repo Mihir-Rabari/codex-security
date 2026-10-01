@@ -220,6 +220,56 @@ describe("SCA input selection", () => {
       );
     },
   );
+  test.each([".", "selected"])(
+    "untracked nested Git checkouts leave coverage incomplete for scope %s",
+    async (scope) => {
+      const { repository, output } = await setup();
+      await execFile("git", ["init", "--quiet", repository]);
+      const selected = join(repository, scope);
+      const nested = join(selected, "nested-checkout");
+      const ignored = join(selected, "ignored-checkout");
+      await mkdir(nested, { recursive: true });
+      await mkdir(ignored);
+      await writeFile(join(selected, "package-lock.json"), npmLock());
+      await writeFile(join(selected, ".gitignore"), "ignored-checkout/\n");
+      for (const checkout of [nested, ignored]) {
+        await execFile("git", ["init", "--quiet", checkout]);
+        await writeFile(join(checkout, "package-lock.json"), npmLock());
+      }
+      const result = await runOsvScan(
+        { repositoryPath: selected, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+              : {
+                  stdout: JSON.stringify(rawOutput("package-lock.json")),
+                  stderr: "",
+                  exitCode: 0,
+                },
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.status).toBe("partial");
+      expect(result.coverage.inputs.map((item) => item.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.components).toHaveLength(1);
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]).toContain(
+        "Untracked nested Git repository nested-checkout",
+      );
+      expect(result.coverage.limitations.join("\n")).toContain(
+        "coverage is incomplete",
+      );
+      const direct = await discoverScaInputs(nested);
+      expect(direct.inputs.map((item) => item.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(direct.diagnostics).toEqual([]);
+    },
+  );
   test("selected directory inventory does not include sibling files or gitlinks", async () => {
     const { repository, output } = await setup();
     await initializedSubmodule(repository);

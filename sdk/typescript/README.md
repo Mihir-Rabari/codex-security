@@ -2789,9 +2789,11 @@ application code or vulnerability reproductions. OSV configuration exclusions
 remain effective and are reported; a missing source inventory requires a scanner
 receipt showing empty input or package filtering. Exact suppressed counts and
 dependency introduction chains are unavailable. Unsupported lockfiles and
-unresolved source identities leave coverage incomplete. Git submodules are
-reported as uninspected and leave coverage incomplete; select an initialized
-submodule directly to assess its supported lockfiles.
+unresolved source identities leave coverage incomplete. Git submodules and
+separate untracked Git checkouts nested in the selected repository are reported
+as uninspected and leave coverage incomplete. Select an initialized submodule or
+nested checkout directly to assess its supported lockfiles. Ordinary nested
+projects remain part of the selected repository's inventory.
 
 `compareScaResults(base, head)` returns alias-aware changes with conservative
 resolution semantics. Live OSV runs have no atomic database snapshot, so a
