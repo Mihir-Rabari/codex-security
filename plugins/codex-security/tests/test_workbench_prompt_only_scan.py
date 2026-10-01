@@ -5,6 +5,7 @@ import json
 import os
 import runpy
 import sqlite3
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -382,6 +383,7 @@ def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -
     "directory",
     [
         "café",
+        "name-\x7f",
         pytest.param(
             "1:module", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory name")
         ),
@@ -427,6 +429,7 @@ def test_prompt_driven_scans_join_literal_directory_selection(
     "selected",
     [
         ["app/[id]", "library"],
+        ["library", "name-\x7f"],
         pytest.param(
             ["1:module", "library"],
             marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory name"),
@@ -490,11 +493,51 @@ def test_headless_directory_set_survives_completion(tmp_path: Path, selected: li
     assert coverage["excludePaths"] == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux non-UTF-8 directory name")
+def test_headless_directory_selection_rejects_non_utf8_before_creating_scan(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", "bad-\udcff"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    state = tmp_path / "state"
+    run_workbench(state, "database-info")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        before = list(connection.iterdump())
+
+    scan_root = tmp_path / "scans"
+    rejected = run_workbench(
+        state,
+        "start-headless-standard-scan",
+        "--thread-id",
+        "invalid-selection-scan",
+        "--target-path",
+        str(target),
+        "--include-paths-json",
+        json.dumps(["service", "bad-\udcff"]),
+        "--scan-root",
+        str(scan_root),
+        check=False,
+    )
+
+    assert rejected["returncode"] != 0
+    assert "UTF-8 directory paths" in rejected["stderr"]
+    assert not scan_root.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert list(connection.iterdump()) == before
+
+
 def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    target.mkdir()
+    (target / "service").mkdir(parents=True)
+    (target / "service" / "code.py").write_text("pass\n")
+    (target / "root.py").write_text("pass\n")
     scan_ids = []
-    for selection in ((), ("--include-paths-json", '["."]'), ("--scope", ".")):
+    for selection in (
+        (),
+        ("--include-paths-json", '["."]'),
+        ("--include-paths-json", '["service", ".", "service"]'),
+        ("--scope", "."),
+    ):
         started = run_workbench(
             tmp_path / "state",
             "start-headless-standard-scan",
@@ -507,6 +550,7 @@ def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) 
             *selection,
         )
         assert started["scan"]["contract"]["scope"]["requiredIncludePaths"] == ["."]
+        assert started["scan"]["progress"]["coverage"]["filesTotal"] == 2
         scan_ids.append(started["scan"]["scanId"])
     assert len(set(scan_ids)) == 1
 
@@ -605,6 +649,8 @@ def test_workspace_restart_revalidates_saved_directory_selection(tmp_path: Path)
         (("--include-paths-json", '["a:module"]'), "literal repository-relative"),
         (("--include-paths-json", '["./a:module/"]'), "literal repository-relative"),
         (("--include-paths-json", '["./ /"]'), "literal repository-relative"),
+        (("--include-paths-json", '[".", ".."]'), "literal repository-relative"),
+        (("--include-paths-json", '[".", "missing"]'), "existing directory"),
         (("--scope", ".", "--include-paths-json", '["."]'), "not allowed with argument"),
     ],
 )

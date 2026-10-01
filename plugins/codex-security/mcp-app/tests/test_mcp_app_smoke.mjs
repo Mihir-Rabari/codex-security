@@ -621,11 +621,12 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   if (process.platform === "linux") assert.ok(longDirectory.length > 1024);
   const selectedDirectories = [
     "service",
-    "café",
+    "CAFÉ",
     longDirectory,
     " leading",
     process.platform === "win32" ? "trailing" : "trailing ",
-    ...Array.from({ length: 28 }, (_, index) => `directory-${index}`),
+    "name-\u007f",
+    ...Array.from({ length: 27 }, (_, index) => `directory-${index}`),
   ].sort();
   const largeSelection = Array.from(
     { length: 512 },
@@ -715,6 +716,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: target,
+        include_paths: ["src", ".", "src"],
         userContext: headlessContext,
       },
       _meta: { "openai/threadId": ownerThread },
@@ -749,6 +751,23 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.deepEqual(scopedResult.scan.executionThreadIds, []);
     assert.equal(scopedResult.scan.userContext, scopedContext);
     assert.equal(scopedResult.workspace.userContext, scopedContext);
+    const invalidSelection = await headlessServer.requestAndWait(
+      54,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: scopedTarget,
+          include_paths: ["service", "bad-\udcff"],
+        },
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assert.equal(invalidSelection.result.isError, true);
+    assert.match(
+      invalidSelection.result.content[0].text,
+      /UTF-8 directory paths/,
+    );
     const scopedHistory = await headlessServer.requestAndWait(
       50,
       "tools/call",

@@ -846,13 +846,17 @@ def require_include_paths(value: str, target: Path) -> list[str]:
     for path in paths:
         if not isinstance(path, str) or not path:
             raise SystemExit("include_paths must contain literal repository-relative directories.")
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise SystemExit("include_paths must contain UTF-8 directory paths.") from exc
         canonical = "/".join(part for part in path.split("/") if part not in {"", "."}) or "."
         if (
             not canonical.strip()
             or path.startswith("/")
             or (len(canonical) > 1 and canonical[0].isalpha() and canonical[1] == ":")
             or "\\" in path
-            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or any(ord(character) < 32 for character in path)
             or ".." in path.split("/")
             or any(part.casefold() == ".git" for part in path.split("/"))
         ):
@@ -861,8 +865,8 @@ def require_include_paths(value: str, target: Path) -> list[str]:
         if Path(resolved) != Path(canonical):
             raise SystemExit("include_paths must not resolve through a directory symlink.")
         normalized.add(resolved)
-    if "." in normalized and len(normalized) != 1:
-        raise SystemExit("Whole repository cannot be combined with selected directories.")
+    if "." in normalized:
+        return ["."]
     result: list[str] = []
     for path in sorted(normalized):
         if not any(path.startswith(parent + "/") for parent in result):
