@@ -57,14 +57,14 @@ export function unresolvedCandidates(
     ...coverage.surfaces,
     ...coverage.explicitExclusions,
   ]) {
+    const owner = surface["sourceWorkerId"];
     if (
       typeof surface["candidateId"] === "string" &&
+      (owner == null || typeof owner === "string") &&
       (surface["disposition"] === "rejected" ||
         surface["disposition"] === "not_applicable")
     ) {
-      resolved.add(
-        candidateIdentity(surface["candidateId"], surface["sourceWorkerId"]),
-      );
+      resolved.add(candidateIdentity(surface["candidateId"], owner));
     }
   }
   const pending = new Map<string, DeferredCoverage>();

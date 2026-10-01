@@ -94,7 +94,7 @@ def test_saved_findings_retain_nonstring_ownership_metadata(
         assert retained[0]["provenance"][owner_field] == metadata
     assert retained[0]["summary"] == original["summary"]
     candidates = [row for row in result[2]["deferred"] if row.get("candidateId")]
-    assert len(candidates) == (0 if source == "worker" else 1)
+    assert len(candidates) == (1 if source == "checkpoint" else 0)
     if candidates:
         assert candidates[0]["candidateId"] == pending["candidateId"]
         assert candidates[0]["reason"] == pending["reason"]
@@ -118,13 +118,19 @@ def test_unsealed_coverage_retains_nonstring_owner_for_finalizer_recovery(
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     row = {
+        "id": "imported-decision",
         "candidateId": "candidate-one",
         "sourceWorkerId": metadata,
+        "label": "Imported coverage decision",
         "disposition": "rejected",
         "reason": "Retained imported coverage evidence.",
+        "receiptRefs": [],
     }
     coverage = {"completeness": "partial", "surfaces": [], "explicitExclusions": [], "deferred": []}
     coverage[field] = [row]
+    pending = {"candidateId": "candidate-one", "reason": "Valid review still needs evidence."}
+    if field != "deferred":
+        coverage["deferred"] = [pending]
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     binding = {
         "status": "failed",
@@ -140,6 +146,8 @@ def test_unsealed_coverage_retains_nonstring_owner_for_finalizer_recovery(
 
     assert result is not None
     assert any(item.get("sourceWorkerId") == metadata for item in result[2][field])
+    if field != "deferred":
+        assert pending in result[2]["deferred"]
 
 
 def test_retained_source_finding_resolves_its_worker_candidate_without_current_result(

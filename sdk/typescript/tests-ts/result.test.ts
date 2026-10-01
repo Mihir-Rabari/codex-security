@@ -193,6 +193,34 @@ describe("ScanResult", () => {
     },
   );
 
+  test.each([{ metadata: ["worker"] }, { metadata: { imported: "worker" } }])(
+    "keeps candidates pending when a coverage decision has structured owner metadata: %j",
+    ({ metadata }) => {
+      const result = fakeResult([]);
+      result.coverage.explicitExclusions = [
+        {
+          pattern: "src/other.py",
+          reason: "Imported decision for an unspecified owner.",
+          candidateId: "pending",
+          disposition: "rejected",
+          sourceWorkerId: metadata,
+        },
+      ];
+      result.coverage.deferred = [
+        {
+          id: "pending-row",
+          candidateId: "pending",
+          reason: "Current candidate still needs review.",
+        },
+      ];
+      const savedCoverage = structuredClone(result.coverage);
+
+      expect(result.unresolvedCandidateCount).toBe(1);
+      expect(result.unresolvedCandidates).toEqual(result.coverage.deferred);
+      expect(result.coverage).toEqual(savedCoverage);
+    },
+  );
+
   test("excludes blank candidate identities without changing saved deferred work", () => {
     const result = fakeResult([]);
     result.coverage.deferred = [

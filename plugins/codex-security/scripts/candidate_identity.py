@@ -54,9 +54,11 @@ def finding_candidate_key(finding: dict[str, Any], owner: str | None = None) -> 
 
 
 def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> CandidateKey | None:
-    return candidate_key(
-        item.get("candidateId"), candidate_owner(owner, item.get("sourceWorkerId"))
-    )
+    source_owner = candidate_owner(owner) or item.get("sourceWorkerId")
+    # A malformed coverage owner cannot resolve valid candidates before draft recovery.
+    if source_owner is not None and not isinstance(source_owner, str):
+        return None
+    return candidate_key(item.get("candidateId"), source_owner)
 
 
 def surface_reference_key(

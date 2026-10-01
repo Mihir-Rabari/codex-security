@@ -508,6 +508,12 @@ def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) ->
     return result
 
 
+def _diff_candidate_phase_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        phase: candidate[phase] for phase in ("validation", "attack_path") if phase in candidate
+    }
+
+
 def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
     validation = candidate.get("validation") or {}
@@ -594,7 +600,11 @@ def preserve_budget_candidates(
     }
 
     def available_id(prefix: str, items: list[dict[str, Any]]) -> str:
-        existing = {item.get("id") for item in items if isinstance(item, dict)}
+        existing = {
+            item["id"]
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
         result, suffix = prefix, 1
         while result in existing:
             suffix += 1
@@ -627,13 +637,16 @@ def preserve_budget_candidates(
             surface_reference_key(surface_id, item, coverage["surfaces"])
             for item in coverage["deferred"]
             if isinstance(item, dict)
-            for surface_id in item.get("surfaceIds", [])
+            for surface_ids in [item.get("surfaceIds", [])]
+            if isinstance(surface_ids, list)
+            for surface_id in surface_ids
         }
         surfaces = [
             item
             for item in coverage["surfaces"]
             if isinstance(item, dict)
             and coverage_candidate_key(item) == key
+            and (item.get("disposition") != "reported" or disposition == "reported")
             and candidate_key(item.get("id"), item.get("sourceWorkerId")) not in referenced
         ]
         if not surfaces:
@@ -654,9 +667,18 @@ def preserve_budget_candidates(
                 retained_candidate.update(
                     {k: v for k, v in previous.items() if k not in {"validation", "attack_path"}}
                 )
+        previous_findings = [
+            item["finding"] for item in deferred if isinstance(item.get("finding"), dict)
+        ]
         for surface in surfaces:
             surface["disposition"] = disposition
             surface["candidate"] = {**retained_candidate, **candidate}
+            if previous_findings:
+                if not isinstance(surface.get("previousFindings"), list):
+                    surface["previousFindings"] = []
+                for finding in previous_findings:
+                    if finding not in surface["previousFindings"]:
+                        surface["previousFindings"].append(finding)
         if disposition != "needs_follow_up":
             continue
         paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
@@ -728,6 +750,11 @@ def _stopped_diff_candidate_decisions(
         and key[0] is None
         and key[1] not in finding_ids | authored_ids
         and isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
+        and (
+            key[1] not in generated
+            or finding["provenance"]["diffCandidateDecision"]
+            == _diff_candidate_phase_snapshot(generated[key[1]]["candidate"])
+        )
     )
     finding_ids = {finding_candidate_id(finding) for finding in findings}
     marked_ids = {
@@ -779,24 +806,23 @@ def _stopped_diff_candidate_decisions(
                     or not candidate["summary"].strip()
                 ):
                     raise ValueError("Diff candidate summary is missing.")
+                phase_snapshot = _diff_candidate_phase_snapshot(candidate)
+                # A current ledger snapshot can establish that a finding checkpoint
+                # supersedes an older marked parent or generated terminal decision.
+                for finding in checkpoint_findings:
+                    if (
+                        finding_candidate_key(finding) == (None, candidate_id)
+                        and finding.get("provenance", {}).get("diffCandidateDecision")
+                        == phase_snapshot
+                        and finding not in findings
+                        and candidate_id not in authored_ids
+                    ):
+                        findings.append(finding)
+                        finding_ids.add(candidate_id)
+                        authoritative.add(candidate_id)
+                        decisions.pop(candidate_id, None)
+                        pending.pop(candidate_id, None)
                 if candidate_id in authoritative:
-                    phase_snapshot = {
-                        phase: candidate[phase]
-                        for phase in ("validation", "attack_path")
-                        if phase in candidate
-                    }
-                    # A newer explicit checkpoint may coexist with an older
-                    # marked parent after publication failed. The matching phase
-                    # snapshot, rather than checkpoint filename order, decides.
-                    for finding in checkpoint_findings:
-                        if (
-                            finding_candidate_key(finding) == (None, candidate_id)
-                            and finding.get("provenance", {}).get("diffCandidateDecision")
-                            == phase_snapshot
-                            and finding not in findings
-                            and candidate_id not in authored_ids
-                        ):
-                            findings.append(finding)
                     overrides = [
                         finding
                         for finding in findings
@@ -913,7 +939,9 @@ def _reconcile_stopped_diff_sources(
                     and isinstance(current_marker, dict)
                     and marker != current_marker
                 ):
-                    history = state[1]["provenance"].setdefault("previousFindings", [])
+                    if not isinstance(state[1]["provenance"].get("previousFindings"), list):
+                        state[1]["provenance"]["previousFindings"] = []
+                    history = state[1]["provenance"]["previousFindings"]
                     if finding not in history:
                         history.append(finding)
                 else:

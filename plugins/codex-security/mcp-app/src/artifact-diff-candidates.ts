@@ -239,6 +239,7 @@ export function preserveDiffCandidateDecisions(
     currentFindings.map((finding) => findingCandidateKey(finding)),
   );
   const accepted = new Set(currentFindingKeys);
+  accepted.delete(undefined);
   const ledger = new Map(
     candidates.map((candidate) => [
       candidateKey(candidate.candidate_id)!,

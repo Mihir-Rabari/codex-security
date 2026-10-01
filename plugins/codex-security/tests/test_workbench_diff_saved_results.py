@@ -610,8 +610,9 @@ def test_stopped_diff_scopes_checkpoint_override_and_preserves_current_authored_
     assert saved.read_bytes() == original
 
 
+@pytest.mark.parametrize("null_history", [False, True])
 def test_stopped_diff_uses_current_checkpoint_override_over_older_marked_parent(
-    tmp_path: Path,
+    tmp_path: Path, null_history: bool
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -622,6 +623,8 @@ def test_stopped_diff_uses_current_checkpoint_override_over_older_marked_parent(
     ledger.write_text(json.dumps(candidate) + "\n")
     finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
     finding["provenance"]["diffCandidateDecision"] = {"validation": candidate["validation"]}
+    if null_history:
+        finding["provenance"]["previousFindings"] = None
     older = copy.deepcopy(finding)
     older["summary"] = "Earlier saved finding evidence."
     older["provenance"]["diffCandidateDecision"]["validation"]["counterevidence_or_proof_gap"] = (
@@ -651,6 +654,73 @@ def test_stopped_diff_uses_current_checkpoint_override_over_older_marked_parent(
     ledger.write_text("{later incomplete ledger")
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert_current_override()
+    assert saved.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "ledger_state", ["missing", "malformed", "matching-checkpoint", "current-decision"]
+)
+@pytest.mark.parametrize("current_phase", ["same", "newer"])
+def test_stopped_diff_keeps_saved_terminal_snapshot_over_stale_checkpoint(
+    tmp_path: Path, workbench_api, ledger_state: str, current_phase: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": "suppressed",
+        "counterevidence_or_proof_gap": "Earlier ledger review.",
+    }
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = {
+        "validation": copy.deepcopy(candidate["validation"])
+    }
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original = saved.read_bytes()
+    current = copy.deepcopy(candidate)
+    if current_phase == "newer":
+        current["validation"]["counterevidence_or_proof_gap"] = "Newer saved terminal review."
+    decision = workbench_api["saved_results"]._diff_candidate_decision(current)
+    decision.update(id="current-terminal", receiptRefs=[])
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[decision], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    if ledger_state == "missing":
+        ledger.unlink()
+    elif ledger_state == "malformed":
+        ledger.write_text("{incomplete ledger")
+    else:
+        ledger.write_text(
+            json.dumps(candidate if ledger_state == "matching-checkpoint" else current) + "\n"
+        )
+    reported = current_phase == "same" or ledger_state == "matching-checkpoint"
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    def assert_saved_decision() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == int(reported)
+        assert scan["progress"]["candidates"]["unresolved"] == 0
+        recovered = json.loads(coverage_path.read_text())
+        terminal = [
+            row
+            for row in recovered["surfaces"]
+            if row.get("candidateId") == candidate["candidate_id"]
+            and row["disposition"] == "rejected"
+        ]
+        if reported:
+            assert terminal == []
+        else:
+            assert len(terminal) == 1
+            assert terminal[0]["candidate"] == current
+            assert finding in terminal[0]["previousFindings"]
+
+    assert_saved_decision()
+    ledger.write_text(json.dumps(candidate) + "\n")
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_saved_decision()
     assert saved.read_bytes() == original
 
 

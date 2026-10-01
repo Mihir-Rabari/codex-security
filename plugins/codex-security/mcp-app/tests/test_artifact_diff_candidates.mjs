@@ -419,6 +419,31 @@ test("bound worker ownership overrides imported metadata and preserves its evide
   }
 });
 
+test("structured exclusion owner metadata does not resolve an unowned candidate", async (t) => {
+  const pending = candidate("pending", "deferred");
+  const context = await fixture(t, [pending]);
+  const exclusion = {
+    pattern: "src/other.ts",
+    reason: "Keep this imported review decision.",
+    candidateId: pending.candidate_id,
+    sourceWorkerId: { label: "legacy-owner" },
+    disposition: "rejected",
+  };
+  const unrelated = finding("unrelated");
+  delete unrelated.provenance.candidateId;
+  const initial = { ...draft(), complete: false, findings: [unrelated] };
+  initial.coverage.explicitExclusions = [exclusion];
+  await recordCodexSecurityScanDraft(context, initial);
+  for (const complete of [true, false]) {
+    const saved = await readCoverage(context);
+    assert.deepEqual(saved.explicitExclusions, [exclusion]);
+    assert.equal(saved.deferred.length, 1);
+    assert.equal(saved.deferred[0].candidateId, pending.candidate_id);
+    assert.equal(saved.completeness, "partial");
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+  }
+});
+
 test("final findings and explicit candidate resolutions are not reopened", async (t) => {
   const context = await fixture(t, [
     candidate("confirmed"),
