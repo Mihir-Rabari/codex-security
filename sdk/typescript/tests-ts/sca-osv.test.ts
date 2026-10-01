@@ -804,6 +804,21 @@ describe("SCA scanner execution", () => {
       ),
     ).toHaveLength(1);
   });
+  test("keeps matching partial when OSV skips a short commit query", async () => {
+    const stderr =
+      'Skipping synthetic-lib: short commit hash "abc1234" cannot be queried; OSV API requires a full 40-character SHA.\n';
+    const result = await scanFixture({
+      stdout: JSON.stringify(rawOutput("package-lock.json")),
+      stderr,
+      exitCode: 0,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("partial");
+    expect(result.coverage.inputs[0]?.status).toBe("failed");
+    expect(result.components).toHaveLength(1);
+    expect(result.matches).toHaveLength(0);
+    expect(result.diagnostics).toContain(stderr.trim());
+  });
   test("retains matches when another scanner stage fails", async () => {
     const result = await scanFixture({
       stdout: JSON.stringify(rawOutput("package-lock.json", [advisory("A")])),

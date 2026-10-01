@@ -67,7 +67,7 @@ const version = {
   exitCode: 0,
 };
 
-test("passes comma-bearing selected filenames literally and records each actual invocation", async () => {
+test("passes comma-bearing filenames literally, retaining each invocation before merging final artifacts", async () => {
   const paths = [
     "-nested, workspace/package-lock.json",
     "another, workspace/package-lock.json",
@@ -80,6 +80,20 @@ test("passes comma-bearing selected filenames literally and records each actual 
       executable: process.execPath,
       runProcess: async (_executable, argv) => {
         calls.push(argv);
+        if (calls.length === 3) {
+          expect(
+            await readFile(join(output, "osv-invocation-1.json"), "utf8"),
+          ).toBe(outputFor(calls[1]!.at(-1)!));
+          expect(
+            await readFile(join(output, "osv-invocation-1.stderr.log"), "utf8"),
+          ).toBe(`Synthetic receipt: ${calls[1]!.at(-1)}`);
+          expect(await readFile(join(output, "osv-output.json"), "utf8")).toBe(
+            "",
+          );
+          expect(await readFile(join(output, "osv-stderr.log"), "utf8")).toBe(
+            "",
+          );
+        }
         return argv[0] === "--version"
           ? version
           : {

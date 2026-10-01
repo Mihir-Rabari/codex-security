@@ -2641,16 +2641,16 @@ then uses static `triage-finding` assessment for the matched advisories. Install
 OSV-Scanner v2.6.0 (the tested contract) or a compatible executable on PATH. It
 is not installed by the SDK. Files are discovered in nested projects too.
 
-| Language                | Dependency files                                                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| JavaScript / TypeScript | `package-lock.json` / `npm-shrinkwrap.json` v2/v3, `pnpm-lock.yaml` v9                                              |
-| Python                  | `uv.lock`, `poetry.lock`, `Pipfile.lock`, fully pinned `*requirements*.txt`                                         |
-| Go                      | `go.mod` with an effective Go or toolchain version of 1.17 or newer                                                 |
-| Rust                    | `Cargo.lock`                                                                                                        |
-| Java / Kotlin           | `gradle.lockfile`, `buildscript-gradle.lockfile`, parent-free `pom.xml` / `*.pom` with explicit dependency versions |
-| Ruby                    | `Gemfile.lock`, `gems.locked`                                                                                       |
-| PHP                     | `composer.lock`                                                                                                     |
-| .NET                    | `packages.lock.json`                                                                                                |
+| Language                | Dependency files                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| JavaScript / TypeScript | `package-lock.json` / `npm-shrinkwrap.json` v2/v3, `pnpm-lock.yaml` v9                                                      |
+| Python                  | `uv.lock`, `poetry.lock`, `Pipfile.lock`, fully pinned `*requirements*.txt`                                                 |
+| Go                      | `go.mod` with an effective Go or toolchain version of 1.17 or newer; older or missing `go` directives give partial coverage |
+| Rust                    | `Cargo.lock`                                                                                                                |
+| Java / Kotlin           | `gradle.lockfile`, `buildscript-gradle.lockfile`, parent-free `pom.xml` / `*.pom` with explicit dependency versions         |
+| Ruby                    | `Gemfile.lock`, `gems.locked`                                                                                               |
+| PHP                     | `composer.lock`                                                                                                             |
+| .NET                    | `packages.lock.json`                                                                                                        |
 
 Package versions retain their ecosystem's syntax; npm semver rules are not
 applied to Python, Maven, NuGet, or other ecosystems. The adapter reads dependency
@@ -2658,7 +2658,9 @@ files without installing dependencies, building projects, or resolving manifests
 Pinned requirements and eligible Maven POMs provide partial declaration inventory,
 not proof of installed versions or a complete transitive graph. Requirements
 includes/ranges and parent-bearing POMs remain unsupported, as do older Go files
-that require auxiliary `go.sum` inventory. These inputs are reported explicitly;
+that require auxiliary `go.sum` inventory. A modern toolchain can supply usable
+declared pins when the `go` directive is older than 1.17 or missing, but coverage
+remains partial because indirect requirements may be absent. These inputs are reported explicitly;
 other supported inputs still produce results. Local, workspace, Git, and direct
 URL origins retain uncertainty when registry identity cannot be established.
 

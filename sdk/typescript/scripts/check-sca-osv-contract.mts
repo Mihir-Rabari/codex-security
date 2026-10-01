@@ -855,6 +855,32 @@ snapshots:
       assertEcosystemFacts(result, fixture, version);
     }
   }
+  for (const [name, directive] of [
+    ["legacy", "go 1.16\n"],
+    ["unspecified", ""],
+  ]) {
+    const fixture = ecosystemFixtures.go;
+    const result = await scan(`ecosystem-go-${name}-modern-toolchain`, {
+      [fixture.path]: fixture
+        .content("1.2.0")
+        .replace("go 1.20\n", `${directive}toolchain go1.23.0\n`),
+    });
+    assert.equal(result.status, "partial");
+    assert.equal(result.coverage.status, "partial");
+    assert.equal(result.coverage.inputs[0]?.status, "scanned");
+    assert.equal(result.scanner.exitCode, 1);
+    assert.ok(
+      result.diagnostics.some((message) =>
+        message.includes("may omit transitive dependencies"),
+      ),
+    );
+    assert.ok(
+      result.coverage.limitations.some((message) =>
+        message.includes("may omit transitive dependencies"),
+      ),
+    );
+    assertEcosystemFacts(result, fixture, "1.2.0");
+  }
   for (const [format, path] of [
     ["gradle", "buildscript-gradle.lockfile"],
     ["bundler", "gems.locked"],
@@ -918,6 +944,32 @@ snapshots:
       ),
     );
   }
+  const skippedComposer = await scan("ecosystem-composer-short-commit", {
+    "composer.lock": JSON.stringify({
+      packages: [
+        {
+          name: ecosystemFixtures.composer.name,
+          version: "1.2.0",
+          dist: {
+            type: "zip",
+            url: "https://example.invalid/synthetic.zip",
+            reference: "abc1234",
+          },
+        },
+      ],
+      "packages-dev": [],
+    }),
+  });
+  assert.equal(skippedComposer.status, "partial");
+  assert.equal(skippedComposer.coverage.status, "partial");
+  assert.equal(skippedComposer.coverage.inputs[0]?.status, "failed");
+  assert.equal(skippedComposer.components.length, 1);
+  assert.equal(skippedComposer.matches.length, 0);
+  assert.ok(
+    skippedComposer.diagnostics.some((line) =>
+      line.includes('short commit hash "abc1234" cannot be queried;'),
+    ),
+  );
   const resolvedProjectContent = ecosystemFixtures.nuget
     .content("1.2.0")
     .replace('"type":"Direct"', '"type":"Project"');

@@ -13,8 +13,8 @@ Implementation and isolated PR checks completed on Linux on October 1, 2026:
 
 | Check                          | Observed result                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Focused SDK regressions        | 247 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
-| Actual OSV-Scanner v2.6.0      | 101 offline synthetic contract cases passed under Node 24; 100 under Bun 1.3.14.                                          |
+| Focused SDK regressions        | 254 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
+| Actual OSV-Scanner v2.6.0      | 104 offline synthetic contract cases passed under Node 24; 103 under Bun 1.3.14.                                          |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                          |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                              |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                                |
@@ -32,7 +32,12 @@ versions, local origins, explicit exclusions, mixed repositories, and coverage
 limits. SDK orchestration tests exercise each ecosystem through persisted
 artifacts and the model prompt. Requirements and Maven declarations remain
 partial; Maven parent projects, requirement includes, and older Go module
-formats are not treated as complete inventories.
+formats are not treated as complete inventories. Legacy or missing Go directives
+with a usable modern toolchain retain matching but remain partial because indirect
+requirements may be absent. Composer short-commit skips retain inventory while
+marking matching incomplete. Multi-input tests verify per-invocation artifacts
+are retained immediately and combined artifacts are written on completion or
+interruption, including a 400-input case.
 
 The live SDK smoke used a synthetic scanner executable and a real Codex session.
 The separate pinned OSV tests exercised the real scanner against a fictional

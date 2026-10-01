@@ -174,6 +174,33 @@ describe("additional SCA input contracts", () => {
       ).toBe("unsupported"),
   );
 
+  test.each(["1.16", "1.17rc1", ""])(
+    "preserves declared Go %s pins with partial coverage despite a newer toolchain",
+    (version) => {
+      const result = inspect(
+        `module example.test/app\n${version ? `go ${version}\n` : ""}toolchain go1.23.0\nrequire example.test/pkg v1.2.3`,
+        "go",
+      );
+      expect(result.status).toBe("scanned");
+      expect(result.diagnostics).toEqual([
+        expect.stringContaining("may omit transitive dependencies"),
+      ]);
+      expect(result.limitations).toEqual(result.diagnostics);
+    },
+  );
+
+  test.each(["go1.16", "go1.17rc1", "default"])(
+    "does not pass effective toolchain %s to a scanner that might read go.sum",
+    (toolchain) => {
+      expect(
+        inspect(
+          `module example.test/app\ngo 1.20\ntoolchain ${toolchain}`,
+          "go",
+        ).status,
+      ).toBe("unsupported");
+    },
+  );
+
   test("supports current Go pins and mirrors upstream toolchain precedence", () => {
     expect(
       inspect(
@@ -181,14 +208,13 @@ describe("additional SCA input contracts", () => {
         "go",
       ).status,
     ).toBe("scanned");
-    expect(
-      inspect("module example.test/app\ngo 1.16\ntoolchain go1.20.3", "go")
-        .status,
-    ).toBe("scanned");
-    expect(
-      inspect("module example.test/app\ngo 1.20\ntoolchain default", "go")
-        .status,
-    ).toBe("unsupported");
+    const modern = inspect(
+      "module example.test/app\ngo 1.20\ntoolchain go1.23.0",
+      "go",
+    );
+    expect(modern.status).toBe("scanned");
+    expect(modern.diagnostics).toEqual([]);
+    expect(modern.limitations).toEqual([]);
     expect(
       inspect(
         "module example.test/app\ngo 1.20\nexclude example.test/pkg v1.2.3",

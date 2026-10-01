@@ -701,7 +701,7 @@ export function osvErrorDiagnostics(stderr: string): string[] {
   return stderr
     .split(/\r?\n/u)
     .filter((line) =>
-      /Error during extraction:|could not load db for .+ ecosystem:|Ignored invalid config file at /u.test(
+      /Error during extraction:|could not load db for .+ ecosystem:|Ignored invalid config file at |Skipping .+: short commit hash .+ cannot be queried;/u.test(
         line,
       ),
     );
@@ -1227,7 +1227,6 @@ export async function runOsvScan(
       } else if (output.exitCode !== 128)
         result.diagnostics.push("OSV returned no JSON output.");
       pending = null;
-      await persistAggregate();
       if (output.exitCode === 128 && !emptyInput)
         result.diagnostics.push(
           `${input.path}: OSV found no packages in the selected effective input; this is not a clean-repository result.`,
@@ -1288,6 +1287,7 @@ export async function runOsvScan(
       : "completed";
     result.coverage.status =
       result.status === "completed" ? "complete" : result.status;
+    await persistAggregate();
     return result;
   } catch (error) {
     // A later process may fail or be cancelled after writing valid JSON. Preserve

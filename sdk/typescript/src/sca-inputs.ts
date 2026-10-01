@@ -253,6 +253,17 @@ function inspectRequirements(
   return result;
 }
 
+function goVersionAtLeast117(value: string | null | undefined): boolean {
+  const parsed = /^(\d+)\.(\d+)(?:\.\d+)?(?:(rc|beta)\d+)?$/u.exec(value ?? "");
+  return (
+    parsed !== null &&
+    (Number(parsed[1]) > 1 ||
+      (Number(parsed[1]) === 1 &&
+        (Number(parsed[2]) > 17 ||
+          (Number(parsed[2]) === 17 && parsed[3] === undefined))))
+  );
+}
+
 function inspectGo(content: string, sourcePath: string): InputInspection {
   let goVersion: string | null = null;
   let toolchain: string | null = null;
@@ -270,20 +281,18 @@ function inspectGo(content: string, sourcePath: string): InputInspection {
           "-",
           1,
         )[0];
-  const parsed = /^(\d+)\.(\d+)(?:\.\d+)?(?:(rc|beta)\d+)?$/u.exec(
-    effective ?? "",
-  );
-  if (
-    parsed === null ||
-    Number(parsed[1]) < 1 ||
-    (Number(parsed[1]) === 1 &&
-      (Number(parsed[2]) < 17 ||
-        (Number(parsed[2]) === 17 && parsed[3] !== undefined)))
-  )
+  if (!goVersionAtLeast117(effective))
     return unsupported(
       `${sourcePath} requires Go 1.17 or newer; older or unspecified versions do not provide the supported go.mod inventory and may read go.sum.`,
     );
   const result = inspection();
+  // Toolchain precedence determines upstream's go.sum reads, but the original
+  // go directive determines whether indirect requirements are comprehensive.
+  if (!goVersionAtLeast117(goVersion)) {
+    const limitation = `${sourcePath} does not declare Go 1.17 or newer; its declared requirements may omit transitive dependencies despite the selected toolchain.`;
+    result.limitations.push(limitation);
+    result.diagnostics.push(limitation);
+  }
   if (/^\s*exclude\s/mu.test(content)) {
     const limitation = `${sourcePath} contains exclude directives that OSV does not apply to its declared module inventory.`;
     result.limitations.push(limitation);
