@@ -234,3 +234,110 @@ def test_budget_exhaustion_keeps_failure_recovery_for_malformed_coverage(
     assert scan["findingCount"] == 1
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
     assert invalid not in json.loads(coverage_path.read_text())["deferred"]
+
+
+@pytest.mark.parametrize("disposition", [{}, []])
+def test_budget_exhaustion_preserves_structured_exclusion_extensions(
+    tmp_path: Path, disposition: Any
+) -> None:
+    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, candidates=[])
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    exclusion = {
+        "pattern": "synthetic-exclusion/**",
+        "reason": "Unrelated scope exclusion.",
+        "disposition": disposition,
+    }
+    coverage["explicitExclusions"] = [exclusion]
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+
+
+def test_budget_exhaustion_retains_ledger_candidate_when_recovering_nonobject_surface(
+    tmp_path: Path,
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"].append(None)
+    generic = {
+        "id": "general-review",
+        "reason": "Unrelated review remains pending.",
+        "surfaceIds": [coverage["surfaces"][0]["id"]],
+    }
+    coverage["deferred"] = [generic]
+    coverage_path.write_text(json.dumps(coverage))
+
+    result = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert result["returncode"] != 0
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["status"] == "failed"
+    assert scan["findingCount"] == 1
+    assert scan["progress"]["candidates"]["unresolved"] == 1
+    recovered = json.loads(coverage_path.read_text())
+    assert generic in recovered["deferred"]
+    pending = next(row for row in recovered["deferred"] if row.get("candidateId"))
+    assert pending["candidate"] == candidate
+    assert None not in recovered["surfaces"]
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+
+
+def test_budget_candidate_projection_preserves_owner_references_and_unique_ids_at_scale(
+    workbench_api,
+) -> None:
+    candidates = [
+        {
+            "candidate_id": f"synthetic-{index}",
+            "summary": "Synthetic candidate review.",
+            "evidence": "Synthetic source context.",
+            "locations": [{"path": "app.py"}],
+        }
+        for index in range(1000)
+    ]
+    shared = {
+        "id": "shared-surface",
+        "candidateId": candidates[0]["candidate_id"],
+        "disposition": "needs_follow_up",
+        "notes": "Keep shared evidence.",
+    }
+    worker = {**shared, "sourceWorkerId": "worker-other"}
+    generic = {"id": "generic-review", "surfaceIds": [shared["id"]]}
+    collision = {"id": "candidate-synthetic-1", "notes": "Unrelated coverage."}
+    coverage = {
+        "surfaces": [shared, worker, collision],
+        "deferred": [generic, {"id": "synthetic-1", "reason": "Unrelated review."}],
+        "explicitExclusions": [],
+    }
+
+    workbench_api["saved_results"].preserve_budget_candidates(coverage, [], candidates)
+
+    assert shared in coverage["surfaces"]
+    assert worker in coverage["surfaces"]
+    assert collision in coverage["surfaces"]
+    assert "candidate" not in shared
+    assert "candidate" not in worker
+    assert generic in coverage["deferred"]
+    pending = [row for row in coverage["deferred"] if row.get("candidateId")]
+    assert len(pending) == len(candidates)
+    assert {row["candidateId"] for row in pending} == {
+        candidate["candidate_id"] for candidate in candidates
+    }
+    for field in ("surfaces", "deferred"):
+        keys = {(row.get("sourceWorkerId"), row["id"]) for row in coverage[field]}
+        assert len(keys) == len(coverage[field])
+    surface_ids = {row["id"] for row in coverage["surfaces"]}
+    assert all(set(row["surfaceIds"]) <= surface_ids for row in pending)

@@ -724,6 +724,63 @@ def test_stopped_diff_keeps_saved_terminal_snapshot_over_stale_checkpoint(
     assert saved.read_bytes() == original
 
 
+@pytest.mark.parametrize("ledger_state", ["missing", "malformed"])
+def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_checkpoint(
+    tmp_path: Path, ledger_state: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = {
+        "validation": copy.deepcopy(candidate["validation"])
+    }
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original = saved.read_bytes()
+    candidate["validation"] = {
+        "disposition": "deferred",
+        "counterevidence_or_proof_gap": "New evidence requires further review.",
+    }
+    reopened = {
+        "id": "reopened-candidate",
+        "candidateId": candidate["candidate_id"],
+        "candidate": candidate,
+        "finding": finding,
+        "reason": "Reopened after newer review.",
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], deferred=[reopened])
+    coverage_path.write_text(json.dumps(coverage))
+    if ledger_state == "missing":
+        ledger.unlink()
+    else:
+        ledger.write_text("{incomplete ledger")
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    def assert_reopened() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 0
+        assert scan["progress"]["candidates"]["unresolved"] == 1
+        pending = next(
+            item
+            for item in json.loads(coverage_path.read_text())["deferred"]
+            if item.get("candidateId") == candidate["candidate_id"]
+        )
+        assert pending["candidate"] == candidate
+        assert pending["finding"] == finding
+        assert pending["reason"] == reopened["reason"]
+
+    assert_reopened()
+    ledger.write_text(json.dumps({**candidate, "validation": {"disposition": "suppressed"}}))
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_reopened()
+    assert saved.read_bytes() == original
+
+
 def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
     tmp_path: Path, workbench_api
 ) -> None:
