@@ -417,6 +417,16 @@ export async function runCustomValidation(options: {
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
+    const candidateId = findingCandidateIds(candidate.finding)[0];
+    const sourceWorkerId = findingCandidateOwner(candidate.finding);
+    const key =
+      candidateId === undefined
+        ? undefined
+        : candidateIdentity(candidateId, sourceWorkerId);
+    const reason =
+      validation.counterevidence_or_proof_gap ||
+      validation.remaining_uncertainty ||
+      validation.evidence.join("\n");
     for (const id of candidate.surfaceIds) {
       const values = decisions.get(id) ?? [];
       values.push(update);
@@ -424,12 +434,6 @@ export async function runCustomValidation(options: {
     }
     if (validation.disposition === "deferred") {
       coverage.completeness = "partial";
-      const candidateId = findingCandidateIds(candidate.finding)[0];
-      const sourceWorkerId = findingCandidateOwner(candidate.finding);
-      const key =
-        candidateId === undefined
-          ? undefined
-          : candidateIdentity(candidateId, sourceWorkerId);
       const uniqueIdentity =
         key !== undefined && candidateIdentityCounts.get(key) === 1;
       const previous = uniqueIdentity ? previousDeferred.get(key) : undefined;
@@ -447,13 +451,37 @@ export async function runCustomValidation(options: {
         candidateId: uniqueIdentity ? candidateId : deferredId,
         ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
         candidate: candidate.finding,
-        reason:
-          validation.counterevidence_or_proof_gap ||
-          validation.remaining_uncertainty ||
-          validation.evidence.join("\n"),
+        reason,
         paths: candidate.finding.locations.map((location) => location.path),
         surfaceIds: candidate.surfaceIds,
       });
+    }
+    if (
+      validation.disposition === "suppressed" ||
+      validation.disposition === "not_applicable"
+    ) {
+      const previous =
+        key === undefined ? undefined : previousDeferred.get(key);
+      if (previous !== undefined) {
+        const baseId = `custom-validation-${candidate.candidateId}`;
+        let id = baseId;
+        let suffix = 2;
+        while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+        reservedIds.add(id);
+        coverage.surfaces.push({
+          ...previous,
+          id,
+          label: candidate.finding.title,
+          disposition:
+            validation.disposition === "suppressed"
+              ? "rejected"
+              : "not_applicable",
+          reason,
+          notes: reason,
+          finding: candidate.finding,
+          receiptRefs: [RESULTS, ...validation.artifact_paths],
+        });
+      }
     }
     if (validation.disposition !== "reportable") continue;
     const finding = candidate.finding;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -533,3 +534,102 @@ def test_budget_exhaustion_preserves_authored_terminal_decisions(
             assert retained["disposition"] in {"rejected", "not_applicable"}
         else:
             assert retained["disposition"] == saved_disposition
+
+
+@pytest.mark.parametrize("decision", ["deferred", "reportable", "not_applicable"])
+@pytest.mark.parametrize("saved_pending", [False, True])
+def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
+    tmp_path: Path, workbench_api: dict[str, Any], decision: str, saved_pending: bool
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    original = json.loads(ledger.read_text())
+    original["validation"] = {"disposition": "suppressed"}
+    original["context"] = "Retained discovery context."
+    run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
+    # Leave the real budget writer's output unsealed, as when completion is interrupted.
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+    resumed = run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", scan_id)
+    assert resumed["scanId"] == scan_id
+    assert "sealedProducerVersion" not in resumed
+
+    candidate = {
+        **original,
+        "summary": "Updated candidate review",
+        "evidence": "Current review evidence.",
+        "validation": {"disposition": decision},
+    }
+    candidate.pop("context")
+    if decision == "reportable":
+        candidate["attack_path"] = {"decision": "reportable"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    surface = coverage["surfaces"][0]
+    surface["reviewContext"] = "Keep this independent annotation."
+    other_owner = {**surface, "id": "other-owner-review", "sourceWorkerId": "worker-other"}
+    coverage["surfaces"].append(other_owner)
+    generic = {
+        "id": "shared-review",
+        "reason": "Independent unfinished work on the same surface.",
+        "surfaceIds": [surface["id"]],
+    }
+    coverage["deferred"].append(generic)
+    if saved_pending:
+        coverage["deferred"].append(
+            {
+                "id": "pending-candidate",
+                "candidateId": candidate["candidate_id"],
+                "candidate": candidate,
+                "reason": "Saved review gap.",
+                "surfaceIds": [surface["id"]],
+            }
+        )
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 0
+    assert completed["progress"]["candidates"]["unresolved"] == int(decision != "not_applicable")
+    preserved = json.loads(coverage_path.read_text())
+    assert generic in preserved["deferred"]
+    assert other_owner in preserved["surfaces"]
+    refreshed = next(row for row in preserved["surfaces"] if row["id"] == surface["id"])
+    assert refreshed["disposition"] == (
+        "not_applicable" if decision == "not_applicable" else "needs_follow_up"
+    )
+    assert refreshed["label"] == candidate["summary"]
+    assert refreshed["notes"] == candidate["evidence"]
+    assert refreshed["reviewContext"] == surface["reviewContext"]
+    assert refreshed["candidate"] == {**candidate, "context": original["context"]}
+    pending = [
+        row for row in preserved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert bool(pending) is (decision != "not_applicable")
+
+
+@pytest.mark.parametrize("field", ["label", "notes"])
+def test_budget_exhaustion_preserves_authored_changes_to_generated_decisions(
+    workbench_api: dict[str, Any], field: str
+) -> None:
+    preserve = workbench_api["saved_results"].preserve_budget_candidates
+    candidate = {
+        "candidate_id": "candidate-1",
+        "summary": "Synthetic candidate",
+        "evidence": "Saved review evidence.",
+        "locations": [{"path": "app.py"}],
+        "validation": {"disposition": "not_applicable"},
+    }
+    coverage = {"surfaces": [], "explicitExclusions": [], "deferred": []}
+    preserve(coverage, [], [candidate])
+    surface = coverage["surfaces"][0]
+    surface[field] = "Authored decision detail."
+
+    preserve(coverage, [], [{**candidate, "validation": {"disposition": "deferred"}}])
+
+    assert surface["disposition"] == "not_applicable"
+    assert surface[field] == "Authored decision detail."
+    assert coverage["deferred"] == []

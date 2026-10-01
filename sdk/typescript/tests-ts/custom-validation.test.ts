@@ -298,6 +298,81 @@ describe("custom validation", () => {
     },
   );
 
+  test.each([
+    { disposition: "suppressed", shared: false },
+    { disposition: "not_applicable", shared: false },
+    { disposition: "suppressed", shared: true },
+    { disposition: "not_applicable", shared: true },
+  ] as const)(
+    "retains terminal candidate evidence for $disposition (shared surface: $shared)",
+    async ({ disposition, shared }) => {
+      const f = await fixture(shared ? 2 : 1);
+      const finding = f.findings.findings[0]!;
+      finding.provenance["candidateId"] = "source-terminal";
+      finding.provenance["sourceWorkerId"] = "worker-current";
+      if (shared) {
+        const reported = f.findings.findings[1]!;
+        reported.provenance["candidateId"] = "source-reported";
+        reported.extensions!["customValidationSurfaceIds"] = ["surface-0"];
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      coverage.surfaces = [coverage.surfaces[0]!];
+      const previous = {
+        id: "previous-candidate",
+        candidateId: "source-terminal",
+        sourceWorkerId: "worker-current",
+        candidate: {
+          summary: "Saved candidate",
+          evidence: "Saved source evidence.",
+        },
+        reason: "Obsolete checkpoint proof gap.",
+        surfaceIds: ["surface-0"],
+      };
+      const unrelated = {
+        ...previous,
+        id: "other-owner",
+        sourceWorkerId: "worker-other",
+      };
+      coverage.completeness = "partial";
+      coverage.deferred = [previous, unrelated];
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () =>
+          JSON.stringify(
+            shared ? result(disposition, "reportable") : result(disposition),
+          ),
+      });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.findings.findings).toHaveLength(shared ? 1 : 0);
+      expect(saved.coverage.deferred).toEqual([unrelated]);
+      expect(saved.unresolvedCandidateCount).toBe(1);
+      const terminal = saved.coverage.surfaces.find(
+        (surface) =>
+          surface.candidateId === previous.candidateId &&
+          surface.sourceWorkerId === previous.sourceWorkerId,
+      );
+      expect(terminal).toMatchObject({
+        candidateId: previous.candidateId,
+        sourceWorkerId: previous.sourceWorkerId,
+        candidate: previous.candidate,
+        finding,
+        disposition:
+          disposition === "suppressed" ? "rejected" : "not_applicable",
+        notes: "The test returned the observed result.",
+        receiptRefs: [resultName],
+      });
+      expect(terminal!.id).not.toBe("surface-0");
+      expect(saved.coverage.surfaces[0]!.disposition).toBe(
+        shared ? "reported" : terminal!.disposition,
+      );
+      expect(saved.coverage.surfaces[0]).not.toHaveProperty("candidateId");
+    },
+  );
+
   test("retains a deferred candidate when another finding reports their shared surface", async () => {
     const f = await fixture(2);
     for (const [index, finding] of f.findings.findings.entries()) {
@@ -653,6 +728,16 @@ describe("custom validation", () => {
       staleDeferred: true,
     },
     {
+      scenario: "existing-suppressed",
+      dispositions: ["suppressed"],
+      staleDeferred: true,
+    },
+    {
+      scenario: "existing-not-applicable",
+      dispositions: ["not_applicable"],
+      staleDeferred: true,
+    },
+    {
       scenario: "siblings-mixed",
       dispositions: ["reportable", "deferred"],
       siblings: true,
@@ -991,7 +1076,20 @@ describe("custom validation", () => {
           const report = await readFile(completed.reportPath, "utf8");
           expect(report).not.toContain("Obsolete checkpoint proof gap.");
           expect(report).not.toContain("Older candidate payload");
-          expect(report).toContain("The required service was unavailable.");
+          if (expectedPending > 0)
+            expect(report).toContain("The required service was unavailable.");
+          else
+            expect(completed.coverage.surfaces).toContainEqual(
+              expect.objectContaining({
+                candidateId: "candidate-shared",
+                candidate: { title: "Older candidate payload" },
+                finding: expect.objectContaining({ title: "Fixture 0" }),
+                disposition:
+                  dispositions[0] === "suppressed"
+                    ? "rejected"
+                    : "not_applicable",
+              }),
+            );
           for (const [index, disposition] of dispositions.entries()) {
             if (disposition === "deferred")
               expect(report).toContain(`Fixture ${index}`);

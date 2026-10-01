@@ -600,6 +600,18 @@ def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
     )
 
 
+def _generated_budget_candidate_decision(item: dict[str, Any]) -> bool:
+    candidate = item.get("candidate")
+    return (
+        isinstance(candidate, dict)
+        and item.get("candidateId") == candidate.get("candidate_id")
+        and item.get("disposition") in ("rejected", "not_applicable")
+        and item["disposition"] == diff_candidate_disposition(candidate)
+        and item.get("label") == candidate.get("summary")
+        and item.get("notes") == candidate.get("evidence")
+    )
+
+
 def preserve_budget_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]], candidates: list[dict[str, Any]]
 ) -> None:
@@ -614,7 +626,9 @@ def preserve_budget_candidates(
         coverage_candidate_key(item): item["disposition"]
         for field in ("surfaces", "explicitExclusions")
         for item in coverage[field]
-        if isinstance(item, dict) and item.get("disposition") in ("rejected", "not_applicable")
+        if isinstance(item, dict)
+        and item.get("disposition") in ("rejected", "not_applicable")
+        and (field != "surfaces" or not _generated_budget_candidate_decision(item))
     }
     dispositions = {
         (None, candidate["candidate_id"]): (
@@ -679,6 +693,23 @@ def preserve_budget_candidates(
         key = (None, candidate_id)
         deferred = deferred_by_candidate.get(key, [])
         disposition = dispositions[key]
+        # An interrupted budget completion can leave generated terminal rows.
+        # Refresh them before retaining pending work, including shared surfaces.
+        for surface in surfaces_by_candidate.get(key, []):
+            if _generated_budget_candidate_decision(surface):
+                surface.update(
+                    label=candidate["summary"],
+                    disposition=disposition,
+                    notes=candidate["evidence"],
+                    candidate={
+                        **{
+                            k: v
+                            for k, v in surface["candidate"].items()
+                            if k not in {"validation", "attack_path"}
+                        },
+                        **candidate,
+                    },
+                )
         if disposition == "needs_follow_up" and deferred:
             for item in deferred:
                 item.setdefault("candidate", candidate)
