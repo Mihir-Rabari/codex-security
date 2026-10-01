@@ -56,7 +56,7 @@ The runner stages only the skill runtime and label-free case files in a temporar
 directory. The provider uses the same named filesystem-permission pattern as the
 existing SastBench harness, reads only that runtime plus the installed native
 Codex CLI package required to launch sandboxed tools, disables external network
-access for tools, and disables inherited MCP servers, apps, and global
+access for tools, and disables web search, inherited MCP servers, apps, and global
 plugin/memory context. Per-run provider overrides keep these integrations disabled
 while using the existing Codex home for saved logins and token refreshes. Gold
 labels, scoring scripts, and the corpus manifest stay outside the model's readable

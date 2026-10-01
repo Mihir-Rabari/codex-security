@@ -15,6 +15,7 @@
       "NO_PROXY": "{{env.NO_PROXY}}"
     },
     "cli_config": {
+      "web_search": "disabled",
       "default_permissions": "sca_eval_runtime_only",
       "permissions": {
         "sca_eval_runtime_only": {

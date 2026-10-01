@@ -403,12 +403,14 @@ test("model staging contains source and skill runtime without the gold corpus or
   }
 });
 
-test("disables inherited MCP servers while retaining the persistent Codex home", () => {
+test("disables inherited integrations while retaining the persistent Codex home", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-provider-"));
   const runtime = path.join(root, "runtime");
   const codexHome = path.join(root, "saved-login");
   fs.mkdirSync(runtime);
   fs.mkdirSync(codexHome);
+  const savedConfig = 'web_search = "live"\n';
+  fs.writeFileSync(path.join(codexHome, "config.toml"), savedConfig);
   const receipt = path.join(codexHome, "invocation.json");
   const codexScript = path.join(root, "codex.cjs");
   fs.writeFileSync(
@@ -445,7 +447,15 @@ test("disables inherited MCP servers while retaining the persistent Codex home",
       "{{env.SCA_EVAL_CODEX_HOME}}",
     );
     assert.equal(provider.config.cli_config.features.apps, false);
-    assert.deepEqual(fs.readdirSync(codexHome), ["invocation.json"]);
+    assert.equal(provider.config.cli_config.web_search, "disabled");
+    assert.equal(
+      fs.readFileSync(path.join(codexHome, "config.toml"), "utf8"),
+      savedConfig,
+    );
+    assert.deepEqual(fs.readdirSync(codexHome), [
+      "config.toml",
+      "invocation.json",
+    ]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
