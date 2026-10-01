@@ -813,8 +813,8 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
     return metadata
 
 
-def require_scope(scope: str, mode: str, target: Path) -> str:
-    value = scope.strip() or "."
+def require_scope(scope: str, mode: str, target: Path, *, strip_whitespace: bool = True) -> str:
+    value = (scope.strip() if strip_whitespace else scope) or "."
     requested_scope = Path(value)
     if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
         raise SystemExit("Scan scope must use repository-relative POSIX paths.")
@@ -844,19 +844,20 @@ def require_include_paths(value: str, target: Path) -> list[str]:
         raise SystemExit("include_paths must be a nonempty JSON array of directories.")
     normalized: set[str] = set()
     for path in paths:
+        if not isinstance(path, str) or not path:
+            raise SystemExit("include_paths must contain literal repository-relative directories.")
+        canonical = "/".join(part for part in path.split("/") if part not in {"", "."}) or "."
         if (
-            not isinstance(path, str)
-            or not path
+            not canonical.strip()
             or path.startswith("/")
-            or (len(path) > 1 and path[0].isalpha() and path[1] == ":")
+            or (len(canonical) > 1 and canonical[0].isalpha() and canonical[1] == ":")
             or "\\" in path
             or any(ord(character) < 32 or ord(character) == 127 for character in path)
             or ".." in path.split("/")
             or any(part.casefold() == ".git" for part in path.split("/"))
         ):
             raise SystemExit("include_paths must contain literal repository-relative directories.")
-        canonical = "/".join(part for part in path.split("/") if part not in {"", "."}) or "."
-        resolved = require_scope(canonical, "standard", target)
+        resolved = require_scope(canonical, "standard", target, strip_whitespace=False)
         if Path(resolved) != Path(canonical):
             raise SystemExit("include_paths must not resolve through a directory symlink.")
         normalized.add(resolved)

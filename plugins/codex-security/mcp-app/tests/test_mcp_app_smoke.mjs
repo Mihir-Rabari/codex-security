@@ -613,15 +613,19 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const distinctTarget = await mkdtemp(
     path.join(tmpdir(), "codex-security-distinct-target-"),
   );
-  const longDirectory = Array.from({ length: 12 }, () => "é".repeat(90)).join(
-    "/",
-  );
-  assert.ok(longDirectory.length > 1024);
+  // Other supported platforms cannot consistently create paths this long.
+  const longDirectory =
+    process.platform === "linux"
+      ? Array.from({ length: 12 }, () => "é".repeat(90)).join("/")
+      : "library";
+  if (process.platform === "linux") assert.ok(longDirectory.length > 1024);
   const selectedDirectories = [
     "service",
     "café",
     longDirectory,
-    ...Array.from({ length: 30 }, (_, index) => `directory-${index}`),
+    " leading",
+    process.platform === "win32" ? "trailing" : "trailing ",
+    ...Array.from({ length: 28 }, (_, index) => `directory-${index}`),
   ].sort();
   const largeSelection = Array.from(
     { length: 512 },

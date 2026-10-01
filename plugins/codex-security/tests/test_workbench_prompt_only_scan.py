@@ -403,7 +403,7 @@ def test_prompt_driven_scans_join_literal_directory_selection(
             "--target-path",
             str(target),
             selection,
-            directory if selection == "--scope" else json.dumps([directory]),
+            f" {directory} " if selection == "--scope" else json.dumps([directory]),
             "--scan-root",
             str(tmp_path / "scans"),
             *(("--mode", "standard") if command == "start-prompt-only-scan" else ()),
@@ -431,6 +431,10 @@ def test_prompt_driven_scans_join_literal_directory_selection(
             ["1:module", "library"],
             marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory name"),
         ),
+        pytest.param(
+            [" leading", "trailing "],
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX trailing-space directory"),
+        ),
     ],
 )
 def test_headless_directory_set_survives_completion(tmp_path: Path, selected: list[str]) -> None:
@@ -447,7 +451,7 @@ def test_headless_directory_set_survives_completion(tmp_path: Path, selected: li
         "--target-path",
         str(target),
         "--include-paths-json",
-        json.dumps(selected),
+        json.dumps([f"./{directory}/" for directory in selected]),
         "--scan-root",
         str(tmp_path / "scans"),
     )
@@ -513,6 +517,8 @@ def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) 
         (("--include-paths-json", "{"), "must be a JSON array"),
         (("--include-paths-json", "[]"), "must be a nonempty JSON array"),
         (("--include-paths-json", '["a:module"]'), "literal repository-relative"),
+        (("--include-paths-json", '["./a:module/"]'), "literal repository-relative"),
+        (("--include-paths-json", '["./ /"]'), "literal repository-relative"),
         (("--scope", ".", "--include-paths-json", '["."]'), "not allowed with argument"),
     ],
 )
