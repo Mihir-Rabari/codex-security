@@ -92,7 +92,7 @@ async function observe(operation: "status" | "inventory" | "scan") {
         const stdout = argv.includes("--show-toplevel")
           ? paths.project + "\\n"
           : argv.includes("ls-files")
-            ? "package-lock.json\\0"
+            ? (argv.includes("-t") ? "H package-lock.json\\0" : "")
             : "";
         callback(null, { stdout, stderr: "" });
       },

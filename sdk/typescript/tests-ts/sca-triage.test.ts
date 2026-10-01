@@ -236,6 +236,21 @@ describe("SCA static triage contract", () => {
     expect(result.diagnostics[0]).toContain("match-99");
   });
 
+  test("keeps accepted assessment IDs unique across separate match responses", () => {
+    const result = fixture();
+    result.assessments = contract.parse(response([finding(1)]), {
+      ...result,
+      matches: [result.matches[0]!],
+    });
+    const assessments = contract.parse(
+      response([{ ...finding(2), triage_item_id: "assessment-1" }]),
+      { ...result, matches: [result.matches[1]!] },
+    );
+    expect(assessments[0]!.status).toBe("failed");
+    expect(assessments[0]!.error).toContain("reused");
+    expect(result.assessments[0]!.status).toBe("completed");
+  });
+
   test("handles unidentified and empty responses as missing assessments", () => {
     const result = fixture();
     const assessments = contract.parse(
@@ -290,8 +305,13 @@ describe("SCA static triage contract", () => {
 
   test("prompt references saved evidence and current source context", () => {
     const result = fixture();
-    const prompt = dependencyTriagePrompt(result, contract.skillPath);
+    const prompt = dependencyTriagePrompt(
+      result,
+      contract.skillPath,
+      result.matches[1]!,
+    );
     for (const value of [
+      "match-2",
       "synthetic-project",
       "synthetic-revision",
       JSON.stringify(join(result.outputDir, "sca-result.json")),

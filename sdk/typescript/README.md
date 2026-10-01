@@ -2782,7 +2782,8 @@ reported explicitly; other supported inputs still produce results. Local,
 workspace, Git, direct URL, and alternate Cargo registry origins retain
 uncertainty when registry identity cannot be established. Non-PyPI indexes in
 Pipenv, uv, and Poetry lockfiles leave the affected package origins unresolved
-and coverage incomplete.
+and coverage incomplete. Bundler GEM sections with custom or mixed registry
+remotes also leave package origins unresolved.
 
 ```ts
 import { createSecurity } from "@openai/codex-security";
@@ -2799,6 +2800,11 @@ console.log(result.status, result.matches.length, result.outputDir);
 Options also accept the existing `auth` mode and `signal`. Source matching runs
 before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
+Each matched advisory gets a separate assessment turn. The SDK saves completed
+assessments before continuing, and an invalid response affects only its match.
+The cost limit applies to the total across assessment turns. If source files
+change, assessment stops; earlier results describe the original source and the
+run is partial.
 Invalid arguments, cancellation, and exceeded budgets use the existing SDK
 errors; interruption errors include the directory containing partial output.
 
@@ -2827,7 +2833,9 @@ unresolved source identities leave coverage incomplete. Git submodules and
 separate untracked Git checkouts nested in the selected repository are reported
 as uninspected and leave coverage incomplete. Select an initialized submodule or
 nested checkout directly to assess its supported lockfiles. Ordinary nested
-projects remain part of the selected repository's inventory.
+projects remain part of the selected repository's inventory. Tracked lockfiles
+omitted by sparse checkout are reported as unavailable and leave coverage
+incomplete; ordinary working-tree deletions remain outside inventory.
 
 `compareScaResults(base, head)` returns alias-aware changes with conservative
 resolution semantics. Live OSV runs have no atomic database snapshot, so a

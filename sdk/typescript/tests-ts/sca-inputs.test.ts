@@ -355,7 +355,7 @@ describe("additional SCA input contracts", () => {
 
   test("retains Bundler PATH provenance with upstream platform-version normalization", () => {
     const result = inspect(
-      "GEM\n  remote: https://example.invalid/registry\n  specs:\n    registry (1.2.3)\nPATH\n  specs:\n    local (1.2.3-x64-mingw)\n  remote: local/source\nPLATFORMS\n  x64-mingw\n",
+      "GEM\n  remote: https://rubygems.org/\n  specs:\n    registry (1.2.3)\nPATH\n  specs:\n    local (1.2.3-x64-mingw)\n  remote: local/source\nPLATFORMS\n  x64-mingw\n",
       "bundler",
     );
     expect(result.status).toBe("scanned");
@@ -381,6 +381,38 @@ describe("additional SCA input contracts", () => {
         .status,
     ).toBe("unsupported");
   });
+
+  test.each([
+    { remotes: ["https://rubygems.org/"], unresolved: false },
+    { remotes: ["http://rubygems.org"], unresolved: false },
+    { remotes: ["https://gems.example.test"], unresolved: true },
+    {
+      remotes: ["https://rubygems.org/", "https://gems.example.test"],
+      unresolved: true,
+    },
+    { remotes: [], unresolved: true },
+  ])(
+    "retains Bundler GEM registry provenance: $remotes",
+    ({ remotes, unresolved }) => {
+      const result = inspect(
+        `GEM\n${remotes.map((remote) => `  remote: ${remote}\n`).join("")}  specs:\n    synthetic (1.2.3)\n`,
+        "bundler",
+      );
+      expect(result.status).toBe("scanned");
+      expect(result.references).toEqual(
+        unresolved
+          ? [
+              expect.objectContaining({
+                ecosystem: "RubyGems",
+                name: "synthetic",
+                version: "1.2.3",
+                resolution: `gem:${remotes.join(",")}`,
+              }),
+            ]
+          : [],
+      );
+    },
+  );
 
   test("distinguishes Composer registry distribution metadata from local origin", () => {
     const result = inspect(

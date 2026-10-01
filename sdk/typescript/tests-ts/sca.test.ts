@@ -18,7 +18,7 @@ import Ajv from "ajv";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
-import { ScanCostTracker } from "../src/cost.js";
+import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import {
   ScanInterruptedError,
   ScanCostLimitExceededError,
@@ -151,6 +151,16 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     matched?: boolean;
+    turns?: (
+      | "completed"
+      | "truncated"
+      | "malformed"
+      | "cancelled"
+      | "source_changed"
+      | "duplicate_id"
+      | "unauthorized"
+      | "forbidden"
+    )[];
     dependencyInput?: {
       path: string;
       format: ScaResult["coverage"]["inputs"][number]["format"];
@@ -213,6 +223,11 @@ async function fixture(
     prompt?: string;
     evidence?: ScaResult;
   } = {};
+  const turns: {
+    options: ThreadOptions | undefined;
+    prompt: string;
+    evidence: ScaResult;
+  }[] = [];
   const sourceCalls: WorkbenchCommandOptions[] = [];
   const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
   const environment = {
@@ -272,6 +287,11 @@ async function fixture(
         if (options.abortAt === "scanner")
           options.controller!.abort("cancel after scanner");
         const result = scanner(input.outputDir, options.matched ?? true);
+        if (options.turns !== undefined)
+          result.matches = options.turns.map((_, index) => ({
+            ...result.matches[0]!,
+            id: `match-${index + 1}`,
+          }));
         if (options.advisoryDetails !== undefined)
           result.matches[0]!.sourceAdvisories[0]!["details"] =
             options.advisoryDetails;
@@ -306,7 +326,7 @@ async function fixture(
         const saved = JSON.parse(
           await readFile(join(outputDir, "sca-result.json"), "utf8"),
         );
-        expect(saved.matches).toHaveLength(1);
+        expect(saved.matches).toHaveLength(options.turns?.length ?? 1);
         expect(saved.status).toBe("partial");
         expect(saved.assessments[0].status).toBe("not_started");
         if (options.runtimeError)
@@ -331,9 +351,49 @@ async function fixture(
                 captured.evidence = JSON.parse(
                   await readFile(join(outputDir, "sca-result.json"), "utf8"),
                 );
+                turns.push({
+                  options: thread,
+                  prompt: String(prompt),
+                  evidence: captured.evidence!,
+                });
+                const turnNumber = turns.length;
+                const behavior = options.turns?.[turnNumber - 1];
+                const finding = {
+                  ...triage(),
+                  input_id: `match-${turnNumber}`,
+                  triage_item_id: `triage-${behavior === "duplicate_id" ? 1 : turnNumber}`,
+                };
                 return {
                   events: (async function* (): AsyncGenerator<ThreadEvent> {
-                    yield { type: "thread.started", thread_id: "sca-thread" };
+                    yield {
+                      type: "thread.started",
+                      thread_id:
+                        turnNumber === 1
+                          ? "sca-thread"
+                          : `sca-thread-${turnNumber}`,
+                    };
+                    if (behavior === "cancelled") {
+                      options.controller!.abort("cancel during later triage");
+                      throw new Error("interrupted");
+                    }
+                    if (behavior === "source_changed") await changeSource();
+                    if (
+                      behavior === "unauthorized" ||
+                      behavior === "forbidden"
+                    ) {
+                      yield {
+                        type: "error",
+                        message: `synthetic ${behavior === "unauthorized" ? "401 Unauthorized" : "403 Forbidden"}`,
+                      };
+                      return;
+                    }
+                    if (behavior === "truncated") {
+                      yield {
+                        type: "turn.failed",
+                        error: { message: "synthetic output truncated" },
+                      };
+                      return;
+                    }
                     if (options.abortAt === "model") {
                       options.controller!.abort("cancel during triage");
                       throw new Error("interrupted");
@@ -346,16 +406,17 @@ async function fixture(
                       item: {
                         id: "message",
                         type: "agent_message",
-                        text: options.malformed
-                          ? "invalid JSON"
-                          : JSON.stringify({
-                              schema_version: "triage-finding/v0",
-                              repository: {
-                                path: repository,
-                                revision: "synthetic-revision",
-                              },
-                              findings: options.missing ? [] : [triage()],
-                            }),
+                        text:
+                          options.malformed || behavior === "malformed"
+                            ? "invalid JSON"
+                            : JSON.stringify({
+                                schema_version: "triage-finding/v0",
+                                repository: {
+                                  path: repository,
+                                  revision: "synthetic-revision",
+                                },
+                                findings: options.missing ? [] : [finding],
+                              }),
                       },
                     };
                     yield {
@@ -383,6 +444,7 @@ async function fixture(
     outputDir,
     calls,
     captured,
+    turns,
     sourceCalls,
     pythonResolutions,
     environment,
@@ -746,6 +808,147 @@ test("requested cost limit interrupts while retaining completed evidence", async
   expect(saved.status).toBe("partial");
   expect(saved.model.costUsd).toBeGreaterThan(0.000001);
 });
+
+test.each(["truncated", "malformed", "duplicate_id"] as const)(
+  "a later %s response preserves saved assessments and continues independent matches",
+  async (failure) => {
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", failure, "completed"],
+    });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "failed",
+      "completed",
+    ]);
+    expect(turns).toHaveLength(3);
+    expect(turns[1]!.evidence.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "not_started",
+      "not_started",
+    ]);
+    expect(turns[2]!.evidence.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "failed",
+      "not_started",
+    ]);
+    for (const [index, turn] of turns.entries()) {
+      expect(turn.evidence.matches).toHaveLength(3);
+      expect(turn.prompt).toContain(JSON.stringify(`match-${index + 1}`));
+      expect(turn.options).toEqual(turns[0]!.options);
+      expect(turn.options).toMatchObject({
+        workingDirectory: outputDir,
+        approvalPolicy: "never",
+        networkAccessEnabled: false,
+        webSearchMode: "disabled",
+      });
+      expect(turn.options!.additionalDirectories).toContain(repository);
+      expect(turn.options!.additionalDirectories).toContain(PLUGIN_ROOT);
+    }
+    expect(
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
+  },
+);
+
+test("cumulative match costs stop the next thread without discarding completed assessments", async () => {
+  const { client, repository, outputDir, turns } = await fixture({
+    turns: ["completed", "completed", "completed"],
+  });
+  const perTurn = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 1000,
+    reasoning_output_tokens: 0,
+  })!.estimatedUsd;
+  await using security = client;
+  await expect(
+    security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      maxCostUsd: perTurn * 1.5,
+    }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  expect(turns).toHaveLength(2);
+  const saved = JSON.parse(
+    await readFile(join(outputDir, "sca-result.json"), "utf8"),
+  ) as ScaResult;
+  expect(saved.status).toBe("partial");
+  expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
+  expect(saved.assessments.map((item) => item.status)).toEqual([
+    "completed",
+    "completed",
+    "cancelled",
+  ]);
+});
+
+test.each(["unauthorized", "forbidden"] as const)(
+  "a later %s event stops assessment without retrying the remaining matches",
+  async (failure) => {
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", failure, "completed"],
+    });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    expect(turns).toHaveLength(2);
+    expect(result.status).toBe("partial");
+    expect(result.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "failed",
+      "failed",
+    ]);
+    expect(result.assessments[1]!.error).toContain(
+      failure === "unauthorized" ? "401 Unauthorized" : "403 Forbidden",
+    );
+    expect(
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
+  },
+);
+
+test.each(["source_changed", "cancelled"] as const)(
+  "a later %s turn stops remaining work and preserves assessments of the original source",
+  async (failure) => {
+    const controller = new AbortController();
+    const { client, repository, outputDir, turns } = await fixture({
+      controller,
+      turns: ["completed", failure, "completed"],
+    });
+    await using security = client;
+    const operation = security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      signal: controller.signal,
+    });
+    if (failure === "cancelled")
+      await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
+    else expect((await operation).status).toBe("partial");
+    expect(turns).toHaveLength(2);
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.matches).toHaveLength(3);
+    expect(saved.status).toBe("partial");
+    expect(saved.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      failure === "cancelled" ? "cancelled" : "failed",
+      failure === "cancelled" ? "cancelled" : "failed",
+    ]);
+    if (failure === "source_changed")
+      expect(saved.diagnostics.join("\n")).toContain(
+        "earlier assessments describe the original source",
+      );
+  },
+);
 
 test.each([
   { failure: "throw", requested: true },

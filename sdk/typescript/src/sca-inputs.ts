@@ -502,8 +502,13 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
   let sourceSeen = false;
   const finishSection = () => {
     if (!sourceNames.has(section)) return;
-    const local = remotes.some((remote) => localDistribution(remote) !== null);
-    if (section === "GEM" && !local) return;
+    // The pinned extractor drops GEM remotes and always emits RubyGems identities.
+    if (
+      section === "GEM" &&
+      remotes.length > 0 &&
+      remotes.every((remote) => /^https?:\/\/rubygems\.org\/?$/i.test(remote))
+    )
+      return;
     const resolution = `${section.toLowerCase()}:${remotes.join(",")}${revision ? `#${revision}` : ""}`;
     for (const spec of specs) {
       addReference(
@@ -558,7 +563,7 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
     );
   if (result.references.length > 0) {
     result.limitations.push(
-      "Bundler local, Git, or plugin sources are reported by OSV as RubyGems versions; their source contents were not matched.",
+      "Bundler custom registries and local, Git, or plugin sources are reported by OSV as RubyGems versions; their source contents were not matched.",
     );
   }
   return result;

@@ -403,6 +403,7 @@ async function repositoryFiles(
   files: string[];
   submodules: string[];
   nestedRepositories: string[];
+  skipWorktree: string[];
 }> {
   const worktree = await enclosingGitWorktreeRoot(repository, signal, {
     requireIfPresent: true,
@@ -435,7 +436,13 @@ async function repositoryFiles(
         { env: git.environment, signal, maxBuffer: Infinity },
       );
     const [listed, staged] = await Promise.all([
-      listing(["--cached", "--others", "--exclude-standard", "--deduplicate"]),
+      listing([
+        "-t",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--deduplicate",
+      ]),
       listing(["--stage"]),
     ]);
     const scope = relative(worktree, repository);
@@ -476,9 +483,15 @@ async function repositoryFiles(
       }
       return unique(result);
     };
-    const listedPaths = listed.stdout.split("\0").filter(Boolean);
+    const listedEntries = listed.stdout.split("\0").filter(Boolean);
+    const listedPaths = listedEntries.map((entry) => entry.slice(2));
     return {
       files: await selected(listedPaths.filter((path) => !path.endsWith("/"))),
+      skipWorktree: await selected(
+        listedEntries
+          .filter((entry) => entry.startsWith("S "))
+          .map((entry) => entry.slice(2)),
+      ),
       // Git lists an untracked nested checkout as a directory, not its contents.
       nestedRepositories: await selected(
         listedPaths
@@ -505,7 +518,7 @@ async function repositoryFiles(
       else files.push(relative(repository, path));
     }
   }
-  return { files, submodules: [], nestedRepositories: [] };
+  return { files, submodules: [], nestedRepositories: [], skipWorktree: [] };
 }
 
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
@@ -520,11 +533,8 @@ export async function discoverScaInputs(
   }
 > {
   const repository = await normalizeRepository(repositoryPath, signal);
-  const { files, submodules, nestedRepositories } = await repositoryFiles(
-    repository,
-    environment,
-    signal,
-  );
+  const { files, submodules, nestedRepositories, skipWorktree } =
+    await repositoryFiles(repository, environment, signal);
   const candidates = files
     .filter(
       (path) =>
@@ -570,6 +580,12 @@ export async function discoverScaInputs(
         },
       );
       if (metadata === null) {
+        if (skipWorktree.includes(candidate)) {
+          input.status = "unsupported";
+          input.reason =
+            "Tracked lockfile is unavailable in this sparse checkout; coverage is incomplete.";
+          continue;
+        }
         // The Git index can still list a file deleted from the working tree.
         inputs.pop();
         continue;

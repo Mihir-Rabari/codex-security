@@ -158,6 +158,72 @@ async function initializedSubmodule(
 }
 
 describe("SCA input selection", () => {
+  test("retains absent sparse-checkout lockfiles without counting ordinary deletions or unselected paths", async () => {
+    const { repository, output } = await setup();
+    const git = (...args: string[]) =>
+      execFile("git", [
+        "-c",
+        "core.hooksPath=",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "user.name=Synthetic",
+        "-c",
+        "user.email=synthetic@example.test",
+        "-C",
+        repository,
+        ...args,
+      ]);
+    for (const directory of ["included", "omitted"]) {
+      await mkdir(join(repository, directory));
+      await writeFile(
+        join(repository, directory, "package-lock.json"),
+        npmLock(),
+      );
+    }
+    await git("init", "--quiet");
+    await git("add", ".");
+    await git("commit", "--quiet", "-m", "Synthetic sparse inventory");
+    await git("sparse-checkout", "init", "--cone");
+    await git("sparse-checkout", "set", "included");
+    expect((await git("status", "--porcelain")).stdout).toBe("");
+    const discovered = await discoverScaInputs(repository);
+    expect(
+      discovered.inputs.map(({ path, status }) => ({ path, status })),
+    ).toEqual([
+      { path: "included/package-lock.json", status: "scanned" },
+      { path: "omitted/package-lock.json", status: "unsupported" },
+    ]);
+    expect(discovered.inputs[1]!.reason).toContain("sparse checkout");
+    expect(
+      (await discoverScaInputs(join(repository, "included"))).inputs,
+    ).toMatchObject([{ path: "package-lock.json", status: "scanned" }]);
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) => ({
+          stdout:
+            argv[0] === "--version"
+              ? "2.6.0"
+              : JSON.stringify(rawOutput("included/package-lock.json")),
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    );
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("partial");
+    expect(result.coverage.inputs).toEqual(discovered.inputs);
+    expect(result.components).toHaveLength(1);
+    await rm(join(repository, "included", "package-lock.json"));
+    expect((await discoverScaInputs(repository)).inputs).toEqual([
+      discovered.inputs[1]!,
+    ]);
+    expect(
+      (await discoverScaInputs(join(repository, "included"))).inputs,
+    ).toEqual([]);
+  });
   test("selects npm v2/v3 and pnpm v9 across nested workspaces, excluding installed trees", async () => {
     const { repository } = await setup();
     await Promise.all([
@@ -969,18 +1035,29 @@ describe("SCA scanner execution", () => {
         content:
           '[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource={type="legacy",url="https://index.example.test/simple"}',
       },
+      ...[
+        ["https://gems.example.test"],
+        ["https://rubygems.org/", "https://gems.example.test"],
+      ].map((remotes) => ({
+        path: "Gemfile.lock",
+        content: `GEM\n${remotes.map((remote) => `  remote: ${remote}\n`).join("")}  specs:\n    synthetic-lib (1.2.0)\n`,
+      })),
     ].flatMap((input) =>
-      [false, true].map((matched) => ({ ...input, matched })),
+      [false, true].map((matched) => ({
+        ...input,
+        matched,
+        ecosystem: input.path === "Gemfile.lock" ? "RubyGems" : "PyPI",
+      })),
     ),
   )(
-    "keeps $path alternate-index coverage incomplete with advisory matches: $matched",
-    async ({ path, content, matched }) => {
+    "keeps $path alternate-registry coverage incomplete with advisory matches: $matched",
+    async ({ path, content, matched, ecosystem }) => {
       const { repository, output } = await setup();
       await writeFile(join(repository, path), content);
-      const vulnerability = advisory("SYNTHETIC-PYPI-1");
-      vulnerability.affected[0]!.package.ecosystem = "PyPI";
+      const vulnerability = advisory("SYNTHETIC-REGISTRY-1");
+      vulnerability.affected[0]!.package.ecosystem = ecosystem;
       const raw = rawOutput(path, matched ? [vulnerability] : []);
-      raw.results[0]!.packages[0]!.package.ecosystem = "PyPI";
+      raw.results[0]!.packages[0]!.package.ecosystem = ecosystem;
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
         {
@@ -995,7 +1072,9 @@ describe("SCA scanner execution", () => {
       expect(result.status).toBe("partial");
       expect(result.coverage.unresolvedPackages).toBe(1);
       expect(result.coverage.limitations.join("\n")).toContain(
-        "https://index.example.test/simple",
+        ecosystem === "RubyGems"
+          ? "https://gems.example.test"
+          : "https://index.example.test/simple",
       );
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },

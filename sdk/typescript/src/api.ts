@@ -10,7 +10,7 @@ import {
   dependencyTriageContract,
   dependencyTriagePrompt,
 } from "./sca-triage.js";
-import type { ScaResult } from "./sca-types.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
 import { statSync } from "node:fs";
 import {
   chmod,
@@ -795,7 +795,7 @@ export class CodexSecurity {
           policyCodexConfig(session.sessionConfig),
           [`mcp_servers=${inlineToml(mcpServers)}`],
         );
-        const thread = codex.startThread({
+        const threadOptions: ThreadOptions = {
           threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
           workingDirectory: outputDir,
           additionalDirectories: [
@@ -811,7 +811,7 @@ export class CodexSecurity {
           approvalPolicy: "never",
           networkAccessEnabled: false,
           webSearchMode: "disabled",
-        });
+        };
         const reportCost = (cost: Readonly<ScanCost>): void => {
           result!.model.costUsd = cost.estimatedUsd;
           if (
@@ -826,6 +826,22 @@ export class CodexSecurity {
               ),
             );
         };
+        const reportTrackingError = (error: unknown): void => {
+          if (options.maxCostUsd !== undefined) budgetController.abort(error);
+          else
+            result!.diagnostics.push(
+              `Cost tracking: ${safeErrorMessage(error)}`,
+            );
+        };
+        const verifyCost = (cost: Readonly<ScanCost> | null): void => {
+          if (cost !== null) reportCost(cost);
+          else if (options.maxCostUsd !== undefined)
+            budgetController.abort(
+              new CodexSecurityError(
+                "Could not verify the dependency assessment cost limit.",
+              ),
+            );
+        };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
@@ -833,73 +849,88 @@ export class CodexSecurity {
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
           onCost: reportCost,
-          onError: (error) => {
-            if (options.maxCostUsd !== undefined) budgetController.abort(error);
-            else
-              result!.diagnostics.push(
-                `Cost tracking: ${safeErrorMessage(error)}`,
-              );
-          },
+          onError: reportTrackingError,
         });
-        let usage: unknown = null;
         try {
-          const { events } = await thread.runStreamed(
-            dependencyTriagePrompt(result, contract.skillPath),
-            {
-              signal,
-              outputSchema: contract.schema,
-            },
-          );
-          const turn = await readCodexTurn({
-            thread,
-            events,
-            onEvent: (event) => {
-              if (
-                event.type === "thread.started" &&
-                typeof event["thread_id"] === "string"
-              ) {
-                result!.model.threadId = event["thread_id"];
-                tracker.start(event["thread_id"]);
-              }
+          for (const [index, match] of result.matches.entries()) {
+            throwIfAborted(signal, outputDir);
+            const thread = codex.startThread(threadOptions);
+            let assessment: ScaAssessment;
+            try {
+              const { events } = await thread.runStreamed(
+                dependencyTriagePrompt(result, contract.skillPath, match),
+                { signal, outputSchema: contract.schema },
+              );
+              const turn = await readCodexTurn({
+                thread,
+                events,
+                onEvent: (event) => {
+                  if (
+                    event.type === "thread.started" &&
+                    typeof event["thread_id"] === "string"
+                  ) {
+                    result!.model.threadId = event["thread_id"];
+                    tracker.recordUsage(null, event["thread_id"]);
+                    tracker.start(event["thread_id"]);
+                  }
+                  throwIfAborted(signal, outputDir);
+                },
+              });
+              tracker.recordUsage(turn.usage, turn.threadId);
+              result.model.threadId = turn.threadId;
               throwIfAborted(signal, outputDir);
-            },
-          });
-          usage = turn.usage;
-          result.model.threadId = turn.threadId;
-          throwIfAborted(signal, outputDir);
-          if (turn.status !== "completed")
-            throw new CodexSecurityError("Dependency triage did not complete.");
-          const assessments = contract.parse(turn.finalResponse, result);
-          if (workflowDigest(await snapshotSource()) !== source.digest)
-            throw new CodexSecurityError(
-              "Source changed during dependency assessment; rerun the dependency scan.",
-            );
-          throwIfAborted(signal, outputDir);
-          result.assessments = assessments;
+              if (turn.status !== "completed")
+                throw new CodexSecurityError(
+                  "Dependency triage did not complete.",
+                );
+              assessment = contract.parse(turn.finalResponse, {
+                ...result,
+                matches: [match],
+              })[0]!;
+            } catch (error) {
+              throwIfAborted(signal, outputDir);
+              const message = safeErrorMessage(error);
+              const failure = classifyConnectionFailure(message);
+              if (failure === "unauthorized" || failure === "forbidden")
+                throw error;
+              result.diagnostics.push(
+                `Static assessment ${match.id}: ${message}`,
+              );
+              assessment = {
+                matchId: match.id,
+                status: "failed",
+                verdict: null,
+                triage: null,
+                error: message,
+              };
+            }
+            if (workflowDigest(await snapshotSource()) !== source.digest)
+              throw new CodexSecurityError(
+                "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
+              );
+            throwIfAborted(signal, outputDir);
+            result.assessments[index] = assessment;
+            await saveDependencyScan(result);
+            const snapshot = await tracker.refresh().catch((error: unknown) => {
+              reportTrackingError(error);
+              if (options.maxCostUsd !== undefined) throw error;
+              return { cost: null };
+            });
+            verifyCost(snapshot.cost);
+            throwIfAborted(signal, outputDir);
+          }
           if (
             result.coverage.status === "complete" &&
             result.assessments.every((item) => item.status === "completed")
           )
             result.status = "completed";
         } finally {
-          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
-            if (options.maxCostUsd !== undefined) {
-              budgetController.abort(error);
-              throw error;
-            }
-            result!.diagnostics.push(
-              `Cost tracking: ${safeErrorMessage(error)}`,
-            );
-            return { cost: estimateScanCost(model, usage) };
+          const snapshot = await tracker.stop().catch((error: unknown) => {
+            reportTrackingError(error);
+            if (options.maxCostUsd !== undefined) throw error;
+            return { cost: null };
           });
-          if (snapshot.cost !== null) reportCost(snapshot.cost);
-          else if (options.maxCostUsd !== undefined) {
-            const error = new CodexSecurityError(
-              "Could not verify the dependency assessment cost limit.",
-            );
-            budgetController.abort(error);
-            throw error;
-          }
+          verifyCost(snapshot.cost);
         }
         throwIfAborted(signal, outputDir);
       } catch (error) {
