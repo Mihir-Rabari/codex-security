@@ -341,3 +341,92 @@ def test_budget_candidate_projection_preserves_owner_references_and_unique_ids_a
         assert len(keys) == len(coverage[field])
     surface_ids = {row["id"] for row in coverage["surfaces"]}
     assert all(set(row["surfaceIds"]) <= surface_ids for row in pending)
+
+
+@pytest.mark.parametrize("saved_id", [{}, {"id": None}, {"id": {}}, {"id": " "}])
+def test_budget_exhaustion_retains_candidate_when_saved_surface_has_no_usable_id(
+    tmp_path: Path, saved_id: dict[str, Any]
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"] = [
+        {
+            "candidateId": candidate["candidate_id"],
+            "label": "Unfinished candidate surface",
+            "disposition": "needs_follow_up",
+            "notes": "Saved source context.",
+            "receiptRefs": [],
+            **saved_id,
+        }
+    ]
+    coverage["deferred"] = []
+    coverage_path.write_text(json.dumps(coverage))
+
+    result = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert result["returncode"] != 0
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["status"] == "failed"
+    assert scan["findingCount"] == 1
+    assert scan["progress"]["candidates"]["unresolved"] == 1
+    recovered = json.loads(coverage_path.read_text())
+    pending = next(row for row in recovered["deferred"] if row.get("candidateId"))
+    assert pending["candidate"] == candidate
+    assert pending["surfaceIds"]
+    assert set(pending["surfaceIds"]) <= {row["id"] for row in recovered["surfaces"]}
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+
+
+@pytest.mark.parametrize("missing_rule_id", [True, False])
+def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
+    tmp_path: Path, missing_rule_id: bool
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["provenance"]["candidateId"] = candidate["candidate_id"]
+    if missing_rule_id:
+        finding.pop("ruleId")
+    else:
+        finding["ruleId"] = "Synthetic Candidate Review"
+    findings_path.write_text(json.dumps(findings))
+    pending = {
+        "id": "saved-candidate-review",
+        "candidateId": candidate["candidate_id"],
+        "candidate": candidate,
+        "reason": "Saved validation gap.",
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [pending]
+    coverage_path.write_text(json.dumps(coverage))
+
+    result = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert result["returncode"] != 0
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["status"] == "failed"
+    assert scan["findingCount"] == int(not missing_rule_id)
+    assert scan["progress"]["candidates"]["unresolved"] == int(missing_rule_id)
+    recovered = json.loads(coverage_path.read_text())
+    if missing_rule_id:
+        assert pending in recovered["deferred"]
+    else:
+        assert not any(
+            row.get("candidateId") == candidate["candidate_id"] for row in recovered["deferred"]
+        )
+        assert (
+            json.loads(findings_path.read_text())["findings"][0]["ruleId"]
+            == "synthetic-candidate-review"
+        )
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]

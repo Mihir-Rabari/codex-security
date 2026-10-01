@@ -443,6 +443,24 @@ def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> N
     finding["identity"] = {"anchor": anchor}
 
 
+def recoverable_findings(
+    scan_dir: Path, scan_id: str, target: dict[str, Any], values: list[Any]
+) -> list[dict[str, Any]]:
+    """Use finalizer recovery before findings can resolve saved candidate state."""
+    document = {"scanId": scan_id, "findings": copy.deepcopy(values)}
+    for finding in document["findings"]:
+        if isinstance(finding, dict):
+            _ensure_finding_identity(finding, candidate_only=True)
+    _recover_unsealed_findings(
+        {"scan": {"id": scan_id, "target": target}},
+        document,
+        Path(__file__).resolve().parent.parent / "schemas",
+        scan_dir,
+        [],
+    )
+    return document["findings"]
+
+
 def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Yield canonical and historical findings without trusting candidate IDs."""
     pending = [finding]
@@ -669,8 +687,10 @@ def preserve_budget_candidates(
         surfaces = [
             item
             for item in surfaces_by_candidate.get(key, [])
-            if (item.get("disposition") != "reported" or disposition == "reported")
-            and candidate_key(item.get("id"), item.get("sourceWorkerId")) not in referenced
+            if isinstance(item.get("id"), str)
+            and item["id"].strip()
+            and (item.get("disposition") != "reported" or disposition == "reported")
+            and candidate_key(item["id"], item.get("sourceWorkerId")) not in referenced
         ]
         if not surfaces:
             surface = {
@@ -732,12 +752,28 @@ def _stopped_diff_candidate_decisions(
 ) -> dict[str, Any] | None:
     """Freeze current candidate state before historical evidence is recovered."""
     pending = {}
-    current_pending = {
-        item["candidateId"]: item
+    current_pending_ids = {
+        item["candidateId"]
         for item in unresolved_candidates(current_coverage, current_findings)
         if candidate_owner(item.get("sourceWorkerId")) is None
     }
-    current_pending_ids = set(current_pending)
+    demoted_findings = {}
+    # Count identities once, but inspect every current row and supported payload:
+    # writers retain demoted findings on pending rows and later terminal surfaces.
+    for field in ("deferred", "surfaces", "explicitExclusions"):
+        items = current_coverage.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if (
+                not isinstance(item, dict)
+                or (key := coverage_candidate_key(item)) is None
+                or key[0] is not None
+            ):
+                continue
+            for payload in (item.get("finding"), item.get("candidate")):
+                if isinstance(payload, dict):
+                    for retained in _retained_findings(payload):
+                        if finding_candidate_key(retained) == key:
+                            demoted_findings.setdefault(key, []).append(retained)
     for draft in drafts:
         items = draft["coverage"].get("deferred", [])
         for item in items if isinstance(items, list) else []:
@@ -766,22 +802,18 @@ def _stopped_diff_candidate_decisions(
     authored_ids = {item["candidateId"] for _, item in authored}
     finding_ids = {finding_candidate_id(finding) for finding in findings}
 
-    def was_demoted(finding: dict[str, Any], candidate_id: str) -> bool:
-        previous = current_pending.get(candidate_id, {}).get("finding")
-        if not isinstance(previous, dict):
-            return False
+    def was_demoted(finding: dict[str, Any]) -> bool:
         return any(
-            finding_candidate_key(retained) == finding_candidate_key(finding)
-            and isinstance(retained.get("provenance"), dict)
+            isinstance(retained.get("provenance"), dict)
             and retained["provenance"].get("diffCandidateDecision")
             == finding["provenance"]["diffCandidateDecision"]
             and _finding_content(retained) == _finding_content(finding)
-            for retained in _retained_findings(previous)
+            for retained in demoted_findings.get(finding_candidate_key(finding), [])
         )
 
     # Publication can stop after checkpointing an explicit finding override but
     # before replacing the parent. Its phase snapshot still establishes ordering.
-    # A current pending row that retains the finding records a later demotion.
+    # Current coverage retaining that finding records a later demotion.
     findings.extend(
         finding
         for finding in checkpoint_findings
@@ -789,7 +821,7 @@ def _stopped_diff_candidate_decisions(
         and key[0] is None
         and key[1] not in finding_ids | authored_ids
         and isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
-        and not was_demoted(finding, key[1])
+        and not was_demoted(finding)
         and (
             key[1] not in generated
             or finding["provenance"]["diffCandidateDecision"]
@@ -856,6 +888,7 @@ def _stopped_diff_candidate_decisions(
                         == phase_snapshot
                         and finding not in findings
                         and candidate_id not in authored_ids
+                        and not was_demoted(finding)
                     ):
                         findings.append(finding)
                         finding_ids.add(candidate_id)
@@ -1190,19 +1223,8 @@ def merge_saved_results(
         ]
 
     def valid_finding(value: Any) -> bool:
-        # Use the finalizer's own per-record recovery before a draft can suppress
-        # an earlier checkpoint. Invalid latest records must not hide valid history.
-        document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
-        if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0], candidate_only=True)
-        _recover_unsealed_findings(
-            {"scan": {"id": scan_id, "target": binding["target"]}},
-            document,
-            Path(__file__).resolve().parent.parent / "schemas",
-            scan_dir,
-            [],
-        )
-        return bool(document["findings"])
+        # Invalid latest records must not hide valid history.
+        return bool(recoverable_findings(scan_dir, scan_id, binding["target"], [value]))
 
     decision_drafts = [
         draft

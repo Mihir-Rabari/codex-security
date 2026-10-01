@@ -790,6 +790,95 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
     assert all(path.read_bytes() == original for path, original in originals.items())
 
 
+@pytest.mark.parametrize("ledger_state", ["missing", "malformed", "matching"])
+@pytest.mark.parametrize(
+    "evidence_location", ["finding", "candidate", "second-row", "surface", "other-owner"]
+)
+def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_admission(
+    tmp_path: Path, workbench_api, ledger_state: str, evidence_location: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = {
+        "validation": copy.deepcopy(candidate["validation"])
+    }
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original = saved.read_bytes()
+    current = {
+        **candidate,
+        "validation": {"disposition": "deferred"},
+    }
+    pending = {
+        "id": "current-review",
+        "candidateId": candidate["candidate_id"],
+        "candidate": current,
+        "reason": "Current review remains unresolved.",
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], deferred=[pending])
+    if evidence_location == "surface":
+        # The writer carries pending.finding onto the terminal surface when a
+        # reopened candidate closes, even when phase values return to the original.
+        surface = workbench_api["saved_results"]._diff_candidate_decision(candidate)
+        surface.update(id="closed-review", receiptRefs=[], finding=finding)
+        coverage.update(surfaces=[surface], deferred=[])
+    elif evidence_location == "candidate":
+        # Custom validation stores the demoted finding in this supported field.
+        pending["candidate"] = finding
+    elif evidence_location in {"second-row", "other-owner"}:
+        coverage["deferred"].append(
+            {
+                **pending,
+                "id": "retained-finding-review",
+                "finding": finding,
+                **(
+                    {"sourceWorkerId": "worker-other"} if evidence_location == "other-owner" else {}
+                ),
+            }
+        )
+    else:
+        pending["finding"] = finding
+    coverage_path.write_text(json.dumps(coverage))
+    if ledger_state == "missing":
+        ledger.unlink()
+    elif ledger_state == "malformed":
+        ledger.write_text("{incomplete ledger")
+    else:
+        ledger.write_text(json.dumps(candidate) + "\n")
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    def assert_current_state() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == int(evidence_location == "other-owner")
+        assert scan["progress"]["candidates"]["unresolved"] == int(
+            evidence_location == "other-owner"
+            or (evidence_location != "surface" and ledger_state != "matching")
+        )
+        recovered = json.loads(coverage_path.read_text())
+        if evidence_location != "other-owner" and (
+            evidence_location == "surface" or ledger_state == "matching"
+        ):
+            terminal = next(
+                row
+                for row in recovered["surfaces"]
+                if row.get("candidateId") == candidate["candidate_id"]
+                and row["disposition"] == "rejected"
+            )
+            assert {key: terminal["candidate"][key] for key in candidate} == candidate
+        assert saved.read_bytes() == original
+
+    assert_current_state()
+    ledger.write_text(json.dumps(current) + "\n")
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_current_state()
+
+
 def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
     tmp_path: Path, workbench_api
 ) -> None:

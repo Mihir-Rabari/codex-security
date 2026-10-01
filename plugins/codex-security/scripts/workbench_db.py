@@ -1340,7 +1340,10 @@ def budget_exhausted_draft(
             "deferred": [],
         }
 
-    saved_results.preserve_budget_candidates(coverage, findings["findings"], candidates)
+    valid_findings = saved_results.recoverable_findings(
+        scan_dir, scan["id"], {"targetId": scan["target_id"]}, findings["findings"]
+    )
+    saved_results.preserve_budget_candidates(coverage, valid_findings, candidates)
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)
