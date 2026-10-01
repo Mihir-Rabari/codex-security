@@ -6,7 +6,6 @@ import {
   createScaUpdateHandoff,
   renderScaReport,
 } from "../src/sca-report.js";
-import { dependencyTriagePrompt } from "../src/sca-triage.js";
 import type { ScaInput } from "../src/sca-types.js";
 
 const cases = [
@@ -185,16 +184,6 @@ test.each([...cases])(
     const comparison = compareScaResults(result, structuredClone(result));
     expect(comparison.introduced).toEqual([]);
     expect(comparison.noLongerObserved).toEqual([]);
-    result.coverage.status = "partial";
-    result.coverage.limitations.push(
-      "Synthetic manifest contains only direct declarations.",
-    );
-    const prompt = dependencyTriagePrompt(result, "/synthetic/triage/SKILL.md");
-    expect(prompt).toContain(item.ecosystem);
-    expect(prompt).toContain(item.version);
-    expect(prompt).toContain(
-      "Synthetic manifest contains only direct declarations.",
-    );
   },
 );
 

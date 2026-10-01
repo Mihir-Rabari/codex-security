@@ -171,6 +171,7 @@ async function fixture(
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
     linkedCodex?: boolean;
+    advisoryDetails?: string;
   } = {},
 ) {
   const root = await temporaryDirectory();
@@ -209,6 +210,7 @@ async function fixture(
     codex?: CodexOptions;
     thread?: ThreadOptions;
     prompt?: string;
+    evidence?: ScaResult;
   } = {};
   const sourceCalls: WorkbenchCommandOptions[] = [];
   const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
@@ -269,6 +271,9 @@ async function fixture(
         if (options.abortAt === "scanner")
           options.controller!.abort("cancel after scanner");
         const result = scanner(input.outputDir, options.matched ?? true);
+        if (options.advisoryDetails !== undefined)
+          result.matches[0]!.sourceAdvisories[0]!["details"] =
+            options.advisoryDetails;
         if (options.dependencyInput) {
           const dependency = options.dependencyInput;
           Object.assign(result.coverage.inputs[0]!, {
@@ -322,6 +327,9 @@ async function fixture(
               id: null,
               async runStreamed(prompt) {
                 captured.prompt = String(prompt);
+                captured.evidence = JSON.parse(
+                  await readFile(join(outputDir, "sca-result.json"), "utf8"),
+                );
                 return {
                   events: (async function* (): AsyncGenerator<ThreadEvent> {
                     yield { type: "thread.started", thread_id: "sca-thread" };
@@ -508,6 +516,29 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
   );
 });
 
+test("large advisory records stay readable without exceeding Codex's input limit", async () => {
+  const advisoryDetails = "Synthetic advisory detail. ".repeat(50_000);
+  const f = await fixture({ advisoryDetails });
+  await using security = f.client;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+  });
+  expect(result.status).toBe("completed");
+  expect(JSON.stringify(f.captured.evidence).length).toBeGreaterThan(1 << 20);
+  expect(Array.from(f.captured.prompt!).length).toBeLessThan(1 << 20);
+  expect(f.captured.prompt).toContain(
+    JSON.stringify(join(f.outputDir, "sca-result.json")),
+  );
+  expect(f.captured.thread!.workingDirectory).toBe(f.outputDir);
+  expect(f.captured.evidence!.matches).toHaveLength(1);
+  expect(
+    f.captured.evidence!.matches[0]!.sourceAdvisories[0]!["details"] ===
+      advisoryDetails,
+  ).toBe(true);
+  expect(f.captured.evidence!.assessments[0]!.status).toBe("not_started");
+});
+
 test.each([
   { path: "package-lock.json", format: "npm", ecosystem: "npm" },
   { path: "uv.lock", format: "uv", ecosystem: "PyPI" },
@@ -553,9 +584,16 @@ test.each([
       ],
     });
     expect(captured.prompt).toContain("triage-finding");
-    expect(captured.prompt).toContain("match-1");
-    expect(captured.prompt).toContain(dependencyInput.ecosystem);
-    expect(captured.prompt).toContain(dependencyInput.path);
+    expect(captured.prompt).toContain(
+      JSON.stringify(join(outputDir, "sca-result.json")),
+    );
+    expect(captured.evidence!.matches[0]!.id).toBe("match-1");
+    expect(captured.evidence!.components[0]!.ecosystem).toBe(
+      dependencyInput.ecosystem,
+    );
+    expect(captured.evidence!.components[0]!.sourcePath).toBe(
+      dependencyInput.path,
+    );
     expect(result.components[0]?.ecosystem).toBe(dependencyInput.ecosystem);
     expect(result.coverage.inputs[0]?.format).toBe(dependencyInput.format);
     expect(result.model.threadId).toBe("sca-thread");

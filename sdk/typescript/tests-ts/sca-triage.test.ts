@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   dependencyTriageContract,
@@ -264,15 +265,13 @@ describe("SCA static triage contract", () => {
     ).toThrow("triage-finding/v0");
   });
 
-  test("prompt includes typed package/advisory inputs and current source context", () => {
-    const prompt = dependencyTriagePrompt(fixture(), contract.skillPath);
+  test("prompt references saved evidence and current source context", () => {
+    const result = fixture();
+    const prompt = dependencyTriagePrompt(result, contract.skillPath);
     for (const value of [
       "synthetic-project",
       "synthetic-revision",
-      "synthetic-package-1",
-      "SYNTHETIC-1",
-      "match-1",
-      "package-lock.json",
+      JSON.stringify(join(result.outputDir, "sca-result.json")),
     ])
       expect(prompt).toContain(value);
     expect(contract.skillDigest).toMatch(/^[a-f0-9]{64}$/);
