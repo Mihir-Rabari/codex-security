@@ -946,17 +946,19 @@ Interactive scans show full-screen progress; CI, redirected output, and
 diagnostics to stderr. Add `--verbose` for diagnostics. Check logs for
 sensitive information before sharing them.
 
-The final `CANDIDATES` line shows how many saved candidates remain unresolved:
+The final `FINDINGS` line appends `+ N candidates` when saved candidates remain
+unresolved, keeping the existing findings count and breakdown:
 
 ```text
-CANDIDATES  3 unresolved
+FINDINGS  2 (1 high, 1 medium) + 3 candidates
 ```
 
-A candidate is unresolved until it has a saved finding or terminal disposition.
-`FINDINGS` continues to count reportable findings. Unresolved candidates do not
-contribute to severity totals or finding-based exit thresholds. JSON results and
-the SDK expose `unresolvedCandidateCount` and `unresolvedCandidates`; the report
-lists their saved details and reasons for follow-up.
+The suffix is omitted when there are no unresolved candidates. Candidates are
+potential security issues that the scan has not confirmed or ruled out. They do
+not contribute to the findings count, severity totals, or finding-based exit
+thresholds. JSON results and the SDK expose `unresolvedCandidateCount` and
+`unresolvedCandidates`; the report lists their saved details and reasons for
+follow-up.
 
 Candidates are counted once by `candidateId` within each logical Deep worker,
 including resumed workers. Rejected and not-applicable candidates, generic

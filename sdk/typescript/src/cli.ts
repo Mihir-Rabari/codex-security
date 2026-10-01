@@ -9259,6 +9259,10 @@ function printScanSummary(
       : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
   const findingCount = findings.length;
   const unresolvedCount = result.unresolvedCandidateCount;
+  const candidateSuffix =
+    unresolvedCount > 0
+      ? ` + ${unresolvedCount} candidate${unresolvedCount === 1 ? "" : "s"}`
+      : "";
   const confirmedCount =
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
@@ -9275,8 +9279,7 @@ function printScanSummary(
           : 36;
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
-      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("CANDIDATES", 1)}  ${unresolvedCount} unresolved\n` +
+      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}${candidateSuffix}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       (deepScanStop === undefined
         ? ""
