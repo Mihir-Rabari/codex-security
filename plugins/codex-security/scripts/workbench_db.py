@@ -111,7 +111,6 @@ from workbench_schema import (
 from workbench_schema import (
     sql_statements as sql_statements,
 )
-from workbench_scope import require_include_paths, require_scope
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
@@ -129,8 +128,10 @@ from workbench_target import (
     git_worktree_context,
     remediation_checkout_snapshot,
     require_git_worktree_head,
+    require_include_paths,
     require_remediation_target,
     require_scan_target_identity,
+    require_scope,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -971,7 +972,7 @@ def _start_prompt_driven_scan(
             raise SystemExit(
                 "The selected scan target changed while the scan was starting. Try again."
             )
-        existing = connection.execute(
+        candidates = connection.execute(
             """
             SELECT scans.* FROM scans
             JOIN workspaces ON workspaces.active_scan_id = scans.id
@@ -984,7 +985,6 @@ def _start_prompt_driven_scan(
                 AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
                 AND scans.target_inode = ? AND scans.status = 'running'
                 AND scans.handoff_status = 'delivered'
-                AND COALESCE(scans.include_paths_json, json_extract(scans.recipe_json, '$.target.paths'), json_array(scans.scope)) = json(?)
                 AND (
                     (? = 0 AND scans.handoff_claim_token IS NULL)
                     OR (
@@ -992,7 +992,7 @@ def _start_prompt_driven_scan(
                         AND scans.continuation_thread_id = ?
                     )
                 )
-            ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
+            ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id
             """,
             (
                 thread_id,
@@ -1003,12 +1003,14 @@ def _start_prompt_driven_scan(
                 target_summary,
                 *diff_identity,
                 *target_identity,
-                json.dumps(include_paths),
                 int(headless_standard),
                 int(headless_standard),
                 thread_id,
             ),
-        ).fetchone()
+        )
+        existing = next(
+            (scan for scan in candidates if requested_scan_paths(scan) == include_paths), None
+        )
         if existing is not None:
             connection.commit()
             return {

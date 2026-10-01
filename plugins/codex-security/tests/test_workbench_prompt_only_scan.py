@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import runpy
 import sqlite3
@@ -9,11 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from test_workbench_db import (
     SCRIPT,
     create_saved_workspace,
     initialize_git_repository,
     run_workbench,
+    write_completed_contract,
 )
 
 
@@ -328,11 +331,9 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
 
 
 def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -> None:
-    import json
-
     target = tmp_path / "target"
     initialize_git_repository(target)
-    for directory in ("service", "library", "dependency"):
+    for directory in ("service", "service/nested", "library", "dependency"):
         (target / directory).mkdir()
         (target / directory / "code.py").write_text("pass\n")
     state = tmp_path / "state"
@@ -353,9 +354,154 @@ def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -
 
     first = start(["service", "library"])
     assert first["scan"]["executionThreadIds"] == []
-    joined = start(["library", "service", "service"])
+    joined = start(["./library/", "service/nested", "service", "service"])
     other = start(["dependency", "library"])
     assert joined["startDisposition"] == "joined"
     assert first["scan"]["scanId"] == joined["scan"]["scanId"]
     assert other["scan"]["scanId"] != first["scan"]["scanId"]
     assert first["scan"]["contract"]["scope"]["requiredIncludePaths"] == ["library", "service"]
+    assert first["scan"]["progress"]["coverage"]["filesTotal"] == 3
+    rejoined = start(["service", "library"])
+    assert rejoined["startDisposition"] == "joined"
+    assert rejoined["scan"]["scanId"] == first["scan"]["scanId"]
+
+
+@pytest.mark.parametrize(
+    ("command", "first_selection"),
+    [
+        ("start-headless-standard-scan", "--scope"),
+        ("start-headless-standard-scan", "--include-paths-json"),
+        ("start-prompt-only-scan", "--scope"),
+    ],
+)
+def test_prompt_driven_scans_join_unicode_directory_selection(
+    tmp_path: Path, command: str, first_selection: str
+) -> None:
+    target = tmp_path / "target"
+    (target / "café").mkdir(parents=True)
+    (target / "café" / "code.py").write_text("pass\n")
+
+    def start(selection: str) -> dict[str, object]:
+        return run_workbench(
+            tmp_path / "state",
+            command,
+            "--thread-id",
+            "unicode-directory-scan",
+            "--target-path",
+            str(target),
+            selection,
+            "café" if selection == "--scope" else json.dumps(["café"]),
+            "--scan-root",
+            str(tmp_path / "scans"),
+            *(("--mode", "standard") if command == "start-prompt-only-scan" else ()),
+        )
+
+    first = start(first_selection)
+    selections = (
+        ["--scope"] if command == "start-prompt-only-scan" else ["--scope", "--include-paths-json"]
+    )
+    for selection in selections:
+        joined = start(selection)
+        assert joined["startDisposition"] == "joined"
+        assert joined["scan"]["scanId"] == first["scan"]["scanId"]
+
+
+def test_headless_directory_set_survives_completion(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", "library", "dependency"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    state = tmp_path / "state"
+    started = run_workbench(
+        state,
+        "start-headless-standard-scan",
+        "--thread-id",
+        "directory-scan",
+        "--target-path",
+        str(target),
+        "--include-paths-json",
+        json.dumps(["service", "library"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
+    scan = started["scan"]
+    scan_id = str(scan["scanId"])
+    scan_dir = Path(str(scan["scanDir"]))
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    del draft["scan"]["scope"]
+    manifest_path.write_text(json.dumps(draft))
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+
+    completed = run_workbench(
+        state,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        str(scan["handoffClaimToken"]),
+    )["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["contract"]["scope"]["requiredIncludePaths"] == ["library", "service"]
+    manifest = json.loads(manifest_path.read_text())
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert manifest["scan"]["scope"] == {
+        "includePaths": ["library", "service"],
+        "excludePaths": [],
+    }
+    assert coverage["mode"] == "scoped_path"
+    assert coverage["includePaths"] == ["library", "service"]
+    assert coverage["excludePaths"] == []
+
+
+def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    scan_ids = []
+    for selection in ((), ("--include-paths-json", '["."]'), ("--scope", ".")):
+        started = run_workbench(
+            tmp_path / "state",
+            "start-headless-standard-scan",
+            "--thread-id",
+            "whole-repository-scan",
+            "--target-path",
+            str(target),
+            "--scan-root",
+            str(tmp_path / "scans"),
+            *selection,
+        )
+        assert started["scan"]["contract"]["scope"]["requiredIncludePaths"] == ["."]
+        scan_ids.append(started["scan"]["scanId"])
+    assert len(set(scan_ids)) == 1
+
+
+@pytest.mark.parametrize(
+    ("selection", "error"),
+    [
+        (("--include-paths-json", "{"), "must be a JSON array"),
+        (("--include-paths-json", "[]"), "must contain between"),
+        (("--scope", ".", "--include-paths-json", '["."]'), "not allowed with argument"),
+    ],
+)
+def test_headless_directory_selection_rejects_invalid_arguments(
+    tmp_path: Path, selection: tuple[str, ...], error: str
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    rejected = run_workbench(
+        tmp_path / "state",
+        "start-headless-standard-scan",
+        "--thread-id",
+        "invalid-selection-scan",
+        "--target-path",
+        str(target),
+        *selection,
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert error in rejected["stderr"]

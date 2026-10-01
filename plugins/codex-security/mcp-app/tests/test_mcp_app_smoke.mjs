@@ -610,7 +610,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const scopedTarget = await mkdtemp(
     path.join(tmpdir(), "codex-security-scoped-target-"),
   );
-  for (const directory of ["service", "library"]) {
+  for (const directory of ["service", "library", "other"]) {
     await mkdir(path.join(scopedTarget, directory), { recursive: true });
     await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
   }
@@ -690,14 +690,13 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(scoped);
-    assert.deepEqual(
-      scoped.result.structuredContent.scan.contract.scope.requiredIncludePaths,
-      ["library", "service"],
-    );
-    assert.deepEqual(
-      scoped.result.structuredContent.scan.executionThreadIds,
-      [],
-    );
+    const scopedResult = scoped.result.structuredContent;
+    assert.deepEqual(scopedResult.scan.contract.scope.requiredIncludePaths, [
+      "library",
+      "service",
+    ]);
+    assert.equal(scopedResult.scan.progress.coverage.filesTotal, 2);
+    assert.deepEqual(scopedResult.scan.executionThreadIds, []);
     const conflict = await headlessServer.requestAndWait(41, "tools/call", {
       name: "start_codex_security_standard_scan",
       arguments: {
@@ -708,6 +707,73 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assert.equal(conflict.result.isError, true);
+
+    const scopedClaim = {
+      scanId: scopedResult.scanId,
+      handoffClaimToken: scopedResult.handoffClaimToken,
+    };
+    assertNoError(
+      await headlessServer.requestAndWait(42, "tools/call", {
+        name: "update_codex_security_scan_progress",
+        arguments: { ...scopedClaim, preflightChecks: [] },
+        _meta: { "openai/threadId": ownerThread },
+      }),
+    );
+    assertNoError(
+      await headlessServer.requestAndWait(43, "tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          ...scopedClaim,
+          complete: true,
+          findings: [],
+          coverage: {
+            completeness: "complete",
+            surfaces: [
+              { label: "Service and library", disposition: "rejected" },
+            ],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        },
+        _meta: { "openai/threadId": ownerThread },
+      }),
+    );
+    const scopedCompletion = await headlessServer.requestAndWait(
+      44,
+      "tools/call",
+      {
+        name: "complete_codex_security_scan",
+        arguments: scopedClaim,
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(scopedCompletion);
+    assert.equal(
+      scopedCompletion.result.structuredContent.scan.progress.status,
+      "complete",
+    );
+    const scopedCompleted = await headlessServer.requestAndWait(
+      45,
+      "tools/call",
+      {
+        name: "get_codex_security_completed_scan",
+        arguments: scopedClaim,
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(scopedCompleted);
+    const scopedArtifacts = scopedCompleted.result.structuredContent;
+    assert.deepEqual(scopedArtifacts.manifest.scan.scope.includePaths, [
+      "library",
+      "service",
+    ]);
+    assert.deepEqual(scopedArtifacts.coverage.includePaths, [
+      "library",
+      "service",
+    ]);
+    assert.equal(scopedArtifacts.coverage.mode, "scoped_path");
+    assert.equal(scopedArtifacts.coverage.inventoryStrategy, "scoped_path");
+    assert.ok(scopedArtifacts.manifest.scan.sealedAt);
 
     const wrongThread = await headlessServer.requestAndWait(6, "tools/call", {
       name: "list_codex_security_review_items",
