@@ -2273,6 +2273,38 @@ try {
     [partialDeferredFinding],
   );
 
+  for (const [field, metadata] of [
+    ["workerId", ["worker-one", "worker-two"]],
+    ["sourceWorkerId", { group: "synthetic-group", index: 1 }],
+  ]) {
+    const metadataRoot = path.join(root, `owner-metadata-${field}`);
+    await mkdir(metadataRoot);
+    const metadataContext = { ...context, root: metadataRoot };
+    const metadataFinding = {
+      ...finding,
+      provenance: { ...finding.provenance, [field]: metadata },
+    };
+    await recordCodexSecurityScanDraft(metadataContext, {
+      ...input,
+      findings: [metadataFinding],
+    });
+    for (const complete of [false, true, false]) {
+      await recordCodexSecurityScanDraft(metadataContext, {
+        ...input,
+        complete,
+        findings: [],
+      });
+      const saved = await readJson(metadataRoot, "findings.json");
+      assert.equal(
+        saved.findings.length,
+        1,
+        "Structured ownership metadata must not duplicate findings on replay.",
+      );
+      assert.deepEqual(saved.findings[0].provenance[field], metadata);
+    }
+    assert.deepEqual(metadataFinding.provenance[field], metadata);
+  }
+
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
     scanId,

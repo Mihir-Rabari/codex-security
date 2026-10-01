@@ -24,6 +24,7 @@ from candidate_identity import (
     coverage_candidate_key,
     diff_candidate_disposition,
     finding_candidate_key,
+    surface_reference_key,
     unresolved_candidates,
 )
 from finalize_scan_contract import (
@@ -1496,13 +1497,14 @@ def merge_saved_results(
     if diff_resolved and isinstance(coverage.get("surfaces"), list):
         # Shared evidence belongs to surviving candidates and explicit references.
         deferred = coverage.get("deferred", [])
+        surfaces = [item for item in coverage["surfaces"] if isinstance(item, dict)]
         pending_candidate_keys = {
             key
             for item in (deferred if isinstance(deferred, list) else [])
             if isinstance(item, dict) and (key := coverage_candidate_key(item)) is not None
         }
         pending_surface_keys = {
-            candidate_key(surface_id, item.get("sourceWorkerId"))
+            surface_reference_key(surface_id, item, surfaces)
             for item in (deferred if isinstance(deferred, list) else [])
             if isinstance(item, dict)
             for surface_ids in [item.get("surfaceIds", [])]
@@ -1537,6 +1539,11 @@ def merge_saved_results(
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
             identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
         identities[key] = variant
+    surfaces = coverage.get("surfaces", [])
+    surfaces = (
+        [item for item in surfaces if isinstance(item, dict)] if isinstance(surfaces, list) else []
+    )
+    original_surfaces = [dict(item) for item in surfaces]
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
@@ -1553,6 +1560,17 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
+    renamed_surfaces = {}
+    for original, surface in zip(original_surfaces, surfaces):
+        if (key := candidate_key(original.get("id"), original.get("sourceWorkerId"))) is not None:
+            renamed_surfaces.setdefault(key, surface["id"])
+    deferred = coverage.get("deferred", [])
+    for item in deferred if isinstance(deferred, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("surfaceIds"), list):
+            item["surfaceIds"] = [
+                renamed_surfaces.get(surface_reference_key(value, item, original_surfaces), value)
+                for value in item["surfaceIds"]
+            ]
     if stopped or any(warning not in initial_warnings for warning in warnings):
         coverage["completeness"] = "partial"
     if stopped:

@@ -691,6 +691,7 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
         "linked-all-resolved",
         "other-owner",
         "direct-pending-owner",
+        "cross-owner-reference",
     ],
 )
 def test_stopped_diff_preserves_shared_follow_up_evidence(
@@ -727,6 +728,8 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
     ]
     if scenario in {"direct-only", "other-owner", "direct-pending-owner"}:
         deferred[1]["surfaceIds"] = []
+    if scenario == "cross-owner-reference":
+        deferred[1]["sourceWorkerId"] = "different-worker"
     checkpoint["coverage"].update(surfaces=[shared], deferred=deferred)
     staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     staged.write_text(
@@ -765,10 +768,19 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
             [] if scenario in {"all-resolved", "linked-all-resolved"} else [second["candidate_id"]]
         )
         retained = [row for row in coverage["surfaces"] if row["id"] == shared["id"]]
-        if scenario in {"shared", "linked-only", "other-owner", "direct-pending-owner"}:
+        if scenario in {
+            "shared",
+            "linked-only",
+            "other-owner",
+            "direct-pending-owner",
+            "cross-owner-reference",
+        }:
             assert retained == [shared]
         else:
             assert retained == []
+        for item in pending:
+            for surface_id in item["surfaceIds"]:
+                assert any(row["id"] == surface_id for row in coverage["surfaces"])
         assert checkpoint_path.read_bytes() == checkpoint_bytes
         assert receipt_path.read_text() == "Synthetic shared route evidence.\n"
 

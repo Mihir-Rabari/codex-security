@@ -57,6 +57,22 @@ def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> Ca
     return candidate_key(item.get("candidateId"), owner or item.get("sourceWorkerId"))
 
 
+def surface_reference_key(
+    surface_id: Any, source: dict[str, Any], surfaces: list[dict[str, Any]]
+) -> CandidateKey | None:
+    """Prefer the matching owner for duplicate IDs; unique references may be shared."""
+    matches = [surface for surface in surfaces if surface.get("id") == surface_id]
+    target = next(
+        (
+            surface
+            for surface in matches
+            if surface.get("sourceWorkerId") == source.get("sourceWorkerId")
+        ),
+        matches[0] if len(matches) == 1 else source,
+    )
+    return candidate_key(surface_id, target.get("sourceWorkerId"))
+
+
 def unresolved_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:

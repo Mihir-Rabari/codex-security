@@ -275,3 +275,72 @@ def test_rejected_finding_history_stays_with_its_logical_worker(
     assert surfaces["worker-b"] == other_decision
     assert surfaces["worker-a"]["previousFindings"] == [finding]
     assert checkpoint.read_bytes() == original
+
+
+def test_saved_surface_collision_updates_links_for_the_matching_owner(
+    tmp_path: Path, workbench_api
+) -> None:
+    scan_id = "owned-surface-links"
+    scan_dir, manifest, _, coverage = saved_parent(tmp_path, scan_id)
+    manifest["scan"]["complete"] = False
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    surfaces = [
+        {
+            "id": "shared-surface-id",
+            "candidateId": f"candidate-{owner}",
+            "sourceWorkerId": owner,
+            "label": f"Saved evidence for {owner}",
+            "disposition": "needs_follow_up",
+            "notes": "Independent review remains pending.",
+            "receiptRefs": [f"artifacts/{owner}.txt"],
+        }
+        for owner in ("worker-a", "worker-b")
+    ]
+    deferred = [
+        {
+            "id": surface["candidateId"],
+            "candidateId": surface["candidateId"],
+            "sourceWorkerId": surface["sourceWorkerId"],
+            "reason": "Saved evidence requires review.",
+            "surfaceIds": [surface["id"]],
+        }
+        for surface in surfaces
+    ]
+    coverage.update(completeness="partial", surfaces=surfaces[:1], deferred=deferred[:1])
+    coverage_path = scan_dir / "coverage.json"
+    coverage_path.write_text(json.dumps(coverage))
+    parent_bytes = coverage_path.read_bytes()
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {**coverage, "surfaces": surfaces[1:], "deferred": deferred[1:]},
+        },
+    )
+    checkpoint_bytes = checkpoint.read_bytes()
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+
+    result = workbench_api["saved_results"].merge_saved_results(
+        scan_dir, scan_id, binding, [], [], stopped=True, reason="Stopped after review."
+    )
+
+    assert result is not None
+    retained = {item["sourceWorkerId"]: item for item in result[2]["surfaces"]}
+    assert retained["worker-a"] == surfaces[0]
+    assert retained["worker-b"]["id"] != surfaces[1]["id"]
+    assert retained["worker-b"] == {**surfaces[1], "id": retained["worker-b"]["id"]}
+    pending = [item for item in result[2]["deferred"] if item.get("candidateId")]
+    assert len(pending) == 2
+    for item in pending:
+        assert item["surfaceIds"] == [retained[item["sourceWorkerId"]]["id"]]
+    assert coverage_path.read_bytes() == parent_bytes
+    assert checkpoint.read_bytes() == checkpoint_bytes

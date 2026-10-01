@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
@@ -100,7 +101,7 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   if (context.mode === "diff")
-    parsed.coverage = normalizeCoverageEntries(parsed.coverage);
+    parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
   requireBoundScan(context, parsed, true);
   for (;;) {
     const candidates = await readDiffCandidates(context);
@@ -1102,8 +1103,10 @@ function sameSavedFinding(
   if (left.ruleId !== right.ruleId) return false;
   if (
     owner === undefined &&
-    (findingCandidateOwner(left) ?? null) !==
-      (findingCandidateOwner(right) ?? null)
+    !isDeepStrictEqual(
+      findingCandidateOwner(left) ?? null,
+      findingCandidateOwner(right) ?? null,
+    )
   )
     return false;
   if (left.identity && right.identity)
@@ -1905,6 +1908,23 @@ function buildCoverage(
           ),
         }),
   };
+}
+
+function normalizeCheckpointCoverage(coverage: JsonObject): JsonObject {
+  const normalized = normalizeCoverageEntries(coverage);
+  // Explicit IDs and references are normalized together. Missing IDs still use
+  // semantic identity until historical coverage has been reconciled.
+  for (const section of ["surfaces", "deferred"]) {
+    const original = coverage[section] as JsonObject[];
+    normalized[section] = (normalized[section] as JsonObject[]).map(
+      (item, index) => {
+        if (typeof original[index]!.id === "string") return item;
+        const { id: _id, ...semantic } = item;
+        return semantic;
+      },
+    );
+  }
+  return normalized;
 }
 
 function normalizeCoverageEntries(coverage: JsonObject): JsonObject {

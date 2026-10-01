@@ -920,7 +920,10 @@ def test_malformed_current_finding_does_not_override_worker_rejection(tmp_path: 
     assert failed["findingCount"] == 0
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["surfaces"][0]["disposition"] == "rejected"
-    assert len(coverage["surfaces"][0]["previousFindings"]) == 1
+    history = coverage["surfaces"][0]["previousFindings"]
+    assert len(history) == 2
+    assert checkpoint["findings"][0] in history
+    assert current["findings"][0] in history
 
 
 def test_stopped_recovery_accepts_trailing_slash_scope(tmp_path: Path) -> None:

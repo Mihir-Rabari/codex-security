@@ -1637,3 +1637,62 @@ test("owned surface references survive canonical ID collisions and local resolut
     assert.equal(saved.deferred[0].sourceWorkerId, "other-worker");
   }
 });
+
+for (const complete of [false, true]) {
+  test(`id-less ${complete ? "final drafts" : "checkpoints"} retain same-label surfaces with distinct risk areas`, async (t) => {
+    const context = await fixture(t, []);
+    const unfinished = {
+      label: "Access review",
+      riskArea: "administrative-api",
+      disposition: "needs_follow_up",
+      notes: "The administrative boundary still needs evidence.",
+      receiptRefs: ["artifacts/review/administrative.json"],
+    };
+    const reviewed = {
+      label: unfinished.label,
+      riskArea: "public-api",
+      disposition: "no_issue_found",
+      notes: "The public boundary review is complete.",
+      receiptRefs: ["artifacts/review/public.json"],
+    };
+    const first = { ...draft(), complete };
+    first.coverage.completeness = "partial";
+    first.coverage.surfaces.push(unfinished);
+    await recordCodexSecurityScanDraft(context, first);
+    const second = { ...draft(), complete };
+    second.coverage.surfaces.push(reviewed);
+    await recordCodexSecurityScanDraft(context, second);
+    const expected = await readCoverage(context);
+    assert.equal(expected.completeness, "partial");
+    assert.equal(expected.surfaces.length, 2);
+    assert.equal(
+      new Set(expected.surfaces.map((surface) => surface.id)).size,
+      2,
+    );
+    for (const original of [unfinished, reviewed]) {
+      const { id: _id, ...saved } = expected.surfaces.find(
+        (surface) => surface.riskArea === original.riskArea,
+      );
+      assert.deepEqual(saved, original);
+    }
+    for (const nextComplete of [false, true, false]) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: nextComplete,
+      });
+      const saved = await readCoverage(context);
+      assert.equal(saved.completeness, "partial");
+      assert.deepEqual(saved.surfaces, expected.surfaces);
+    }
+    for (const name of await readdir(path.join(context.root, "checkpoints"))) {
+      const checkpoint = JSON.parse(
+        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
+      );
+      assert.ok(
+        checkpoint.coverage.surfaces.every(
+          (surface) => surface.id === undefined,
+        ),
+      );
+    }
+  });
+}
