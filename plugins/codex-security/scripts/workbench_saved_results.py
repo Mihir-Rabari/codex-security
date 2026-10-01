@@ -24,6 +24,7 @@ from candidate_identity import (
     coverage_candidate_key,
     diff_candidate_disposition,
     finding_candidate_key,
+    unresolved_candidates,
 )
 from finalize_scan_contract import (
     ContractError,
@@ -500,17 +501,28 @@ def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _stopped_diff_candidate_decisions(
-    scan_dir: Path, scan_id: str, drafts: list[dict[str, Any]], warnings: list[str]
+    scan_dir: Path,
+    scan_id: str,
+    drafts: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    current_coverage: dict[str, Any],
+    current_findings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    pending_ids = {
-        item["candidateId"]
+    historical_deferred = [
+        item
         for draft in drafts
         for items in [draft["coverage"].get("deferred", [])]
         if isinstance(items, list)
         for item in items
-        if isinstance(item, dict)
-        and isinstance(item.get("candidateId"), str)
-        and item.get("sourceWorkerId") is None
+    ]
+    # Current saved decisions remain authoritative over obsolete pending checkpoints.
+    pending_ids = {
+        item["candidateId"]
+        for item in unresolved_candidates(
+            {**current_coverage, "deferred": historical_deferred}, current_findings
+        )
+        if item.get("sourceWorkerId") is None
     }
     if not pending_ids:
         return None
@@ -711,6 +723,21 @@ def merge_saved_results(
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
+    def valid_finding(value: Any) -> bool:
+        # Use the finalizer's own per-record recovery before a draft can suppress
+        # an earlier checkpoint. Invalid latest records must not hide valid history.
+        document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
+        if isinstance(document["findings"][0], dict):
+            _ensure_finding_identity(document["findings"][0], candidate_only=True)
+        _recover_unsealed_findings(
+            {"scan": {"id": scan_id, "target": binding["target"]}},
+            document,
+            Path(__file__).resolve().parent.parent / "schemas",
+            scan_dir,
+            [],
+        )
+        return bool(document["findings"])
+
     decision_drafts = [
         draft
         for _, draft, _ in sources
@@ -727,6 +754,10 @@ def merge_saved_results(
             scan_id,
             ([parent] if parent else []) + [draft for _, draft, _ in sources],
             warnings,
+            current_coverage=parent["coverage"] if parent else {},
+            current_findings=[finding for finding in parent["findings"] if valid_finding(finding)]
+            if parent
+            else [],
         )
         if decision_draft is not None:
             digest = _digest(decision_draft)
@@ -855,21 +886,6 @@ def merge_saved_results(
         ]
         for field in ("surfaces", "explicitExclusions", "deferred")
     }
-
-    def valid_finding(value: Any) -> bool:
-        # Use the finalizer's own per-record recovery before a draft can suppress
-        # an earlier checkpoint. Invalid latest records must not hide valid history.
-        document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
-        if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0], candidate_only=True)
-        _recover_unsealed_findings(
-            {"scan": {"id": scan_id, "target": binding["target"]}},
-            document,
-            Path(__file__).resolve().parent.parent / "schemas",
-            scan_dir,
-            [],
-        )
-        return bool(document["findings"])
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     current_drafts = [
@@ -1224,8 +1240,13 @@ def merge_saved_results(
         ]
 
     if diff_resolved and isinstance(coverage.get("surfaces"), list):
-        # Shared evidence still belongs to any surviving deferred reference.
+        # Shared evidence belongs to surviving candidates and explicit references.
         deferred = coverage.get("deferred", [])
+        pending_candidate_keys = {
+            key
+            for item in (deferred if isinstance(deferred, list) else [])
+            if isinstance(item, dict) and (key := coverage_candidate_key(item)) is not None
+        }
         pending_surface_keys = {
             candidate_key(surface_id, item.get("sourceWorkerId"))
             for item in (deferred if isinstance(deferred, list) else [])
@@ -1245,6 +1266,7 @@ def merge_saved_results(
                 and candidate_key(item.get("id"), item.get("sourceWorkerId"))
                 not in resolved_surface_keys
             )
+            or coverage_candidate_key(item) in pending_candidate_keys
             or candidate_key(item.get("id"), item.get("sourceWorkerId")) in pending_surface_keys
         ]
 

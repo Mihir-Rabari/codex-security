@@ -15,6 +15,7 @@ import {
   preserveDiffCandidateDecisions,
   preserveUnresolvedDiffCandidates,
   readDiffCandidates,
+  refreshDiffCandidateHistory,
   type DiffCandidates,
 } from "./artifact-diff-candidates.js";
 import {
@@ -361,9 +362,10 @@ async function preserveScanDraft(
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
-  const sources: ScanDraftInput[] = previous
-    ? [previous, ...current, ...archived]
-    : [...current, ...archived];
+  const sources = refreshDiffCandidateHistory(
+    previous ? [previous, ...current, ...archived] : [...current, ...archived],
+    diffCandidates,
+  );
   if (input.complete === false) {
     const final = sources.find((source) => source.complete !== false);
     if (final) result = structuredClone(final);
@@ -516,6 +518,19 @@ async function preserveScanDraft(
         ...candidateRows.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
+    const currentSurfaces = result.coverage.surfaces as JsonObject[];
+    // A shared surface keeps its own identity beside the candidate's terminal decision.
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      if (
+        surface.disposition === "needs_follow_up" &&
+        typeof surface.id === "string" &&
+        [...(pendingSurfaceCandidates.get(surface.id) ?? [])].some(
+          (id) => id === undefined || !resolvedCandidateIds.has(id),
+        ) &&
+        !currentSurfaces.some((current) => current.id === surface.id)
+      )
+        currentSurfaces.push(structuredClone(surface));
+    }
     const previousCoverage = {
       ...source.coverage,
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
@@ -532,14 +547,6 @@ async function preserveScanDraft(
           coverageEntryPresent(result.coverage.surfaces as unknown[], surface)
         )
           return false;
-        if (
-          surface.disposition === "needs_follow_up" &&
-          typeof surface.id === "string" &&
-          [...(pendingSurfaceCandidates.get(surface.id) ?? [])].some(
-            (id) => id === undefined || !resolvedCandidateIds.has(id),
-          )
-        )
-          return true;
         return (
           (typeof candidateId !== "string" ||
             !representedCandidateIds.has(candidateId)) &&

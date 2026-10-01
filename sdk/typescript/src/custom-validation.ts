@@ -11,8 +11,16 @@ import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { normalizePersistedFindings, requireScanFile } from "./contract.js";
 import { IncompleteScanError, safeErrorMessage } from "./errors.js";
-import { findingCandidateIds } from "./candidates.js";
-import type { CoverageDocument, FindingsDocument } from "./models.js";
+import {
+  candidateIdentity,
+  findingCandidateIds,
+  findingCandidateOwner,
+} from "./candidates.js";
+import type {
+  CoverageDocument,
+  DeferredCoverage,
+  FindingsDocument,
+} from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
 
@@ -376,14 +384,15 @@ export async function runCustomValidation(options: {
   );
   const decisions = new Map<string, CustomValidationResult["validations"]>();
   const reported: Finding[] = [];
-  const candidateIdCounts = new Map<string, number>();
+  const candidateIdentityCounts = new Map<string, number>();
   for (const finding of findings) {
     const candidateId = findingCandidateIds(finding)[0];
-    if (candidateId !== undefined)
-      candidateIdCounts.set(
-        candidateId,
-        (candidateIdCounts.get(candidateId) ?? 0) + 1,
-      );
+    if (candidateId === undefined) continue;
+    const key = candidateIdentity(candidateId, findingCandidateOwner(finding));
+    candidateIdentityCounts.set(
+      key,
+      (candidateIdentityCounts.get(key) ?? 0) + 1,
+    );
   }
   const reservedIds = new Set([
     ...findings.flatMap(findingCandidateIds),
@@ -397,6 +406,14 @@ export async function runCustomValidation(options: {
       ),
     ),
   ]);
+  const previousDeferred = new Map<string, DeferredCoverage>();
+  coverage.deferred = coverage.deferred.filter((item) => {
+    if (item.candidateId === undefined) return true;
+    const key = candidateIdentity(item.candidateId, item.sourceWorkerId);
+    if (!candidateIdentityCounts.has(key)) return true;
+    if (!previousDeferred.has(key)) previousDeferred.set(key, item);
+    return false;
+  });
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
@@ -407,18 +424,28 @@ export async function runCustomValidation(options: {
     }
     if (validation.disposition === "deferred") {
       coverage.completeness = "partial";
-      const baseId = `custom-validation-${candidate.candidateId}`;
-      let deferredId = baseId;
-      let suffix = 2;
-      while (reservedIds.has(deferredId)) deferredId = `${baseId}-${suffix++}`;
-      reservedIds.add(deferredId);
       const candidateId = findingCandidateIds(candidate.finding)[0];
+      const sourceWorkerId = findingCandidateOwner(candidate.finding);
+      const key =
+        candidateId === undefined
+          ? undefined
+          : candidateIdentity(candidateId, sourceWorkerId);
+      const uniqueIdentity =
+        key !== undefined && candidateIdentityCounts.get(key) === 1;
+      const previous = uniqueIdentity ? previousDeferred.get(key) : undefined;
+      const baseId = `custom-validation-${candidate.candidateId}`;
+      let deferredId = previous?.id ?? baseId;
+      let suffix = 2;
+      if (previous === undefined) {
+        while (reservedIds.has(deferredId))
+          deferredId = `${baseId}-${suffix++}`;
+      }
+      reservedIds.add(deferredId);
       coverage.deferred.push({
+        ...previous,
         id: deferredId,
-        candidateId:
-          candidateId !== undefined && candidateIdCounts.get(candidateId) === 1
-            ? candidateId
-            : deferredId,
+        candidateId: uniqueIdentity ? candidateId : deferredId,
+        ...(typeof sourceWorkerId === "string" ? { sourceWorkerId } : {}),
         candidate: candidate.finding,
         reason:
           validation.counterevidence_or_proof_gap ||

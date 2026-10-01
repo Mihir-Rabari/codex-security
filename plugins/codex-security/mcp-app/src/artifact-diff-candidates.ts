@@ -33,6 +33,110 @@ export async function readDiffCandidates(context: ArtifactContext) {
 
 export type DiffCandidates = Awaited<ReturnType<typeof readDiffCandidates>>;
 
+/** Keep generated historical decisions aligned with the current ledger. */
+export function refreshDiffCandidateHistory(
+  sources: ScanDraftInput[],
+  candidates: DiffCandidates,
+): ScanDraftInput[] {
+  if (candidates === undefined) return sources;
+  const ledger = new Map(
+    candidates.map((candidate) => [candidate.candidate_id, candidate]),
+  );
+  // A newer authored decision takes precedence over an older generated checkpoint.
+  const seen = new Set<string>();
+  const authoredResolutions = new Set<string>();
+  for (const source of sources) {
+    const authored = [
+      ...source.findings.map(findingCandidateId),
+      ...[
+        ...(source.coverage.surfaces as JsonObject[]),
+        ...(source.coverage.explicitExclusions as JsonObject[]),
+      ]
+        .filter(
+          (item) =>
+            isTerminalCandidateDecision(item) && !isGeneratedDecision(item),
+        )
+        .map((item) => item.candidateId),
+    ].filter((id): id is string => typeof id === "string");
+    for (const id of authored) if (!seen.has(id)) authoredResolutions.add(id);
+    for (const id of [
+      ...authored,
+      ...(source.coverage.surfaces as JsonObject[])
+        .filter(isTerminalCandidateDecision)
+        .map((item) => item.candidateId),
+      ...(source.coverage.deferred as JsonObject[]).map(
+        (item) => item.candidateId,
+      ),
+    ])
+      if (typeof id === "string") seen.add(id);
+  }
+  const reopened = new Map<string, JsonObject>();
+  const refreshed = sources.map((source) => {
+    const result = structuredClone(source);
+    const deferred = result.coverage.deferred as JsonObject[];
+    result.coverage.surfaces = (result.coverage.surfaces as JsonObject[]).map(
+      (surface) => {
+        const candidate = ledger.get(surface.candidateId as string);
+        if (!candidate || !isGeneratedDecision(surface)) return surface;
+        const disposition = candidateDisposition(candidate);
+        if (
+          disposition === undefined &&
+          authoredResolutions.has(candidate.candidate_id)
+        )
+          return surface;
+        if (disposition === undefined) {
+          const item = deferred.find(
+            (item) => item.candidateId === candidate.candidate_id,
+          ) ?? {
+            candidateId: candidate.candidate_id,
+            candidate,
+            reason: candidateReason(candidate),
+            ...(surface.finding === undefined
+              ? {}
+              : { finding: surface.finding }),
+          };
+          if (!deferred.includes(item)) deferred.push(item);
+          if (!reopened.has(candidate.candidate_id))
+            reopened.set(candidate.candidate_id, item);
+          result.coverage.completeness = "partial";
+        }
+        return {
+          ...surface,
+          candidate: { ...object(surface.candidate), ...candidate },
+          label: candidate.summary,
+          disposition: disposition ?? "needs_follow_up",
+          notes:
+            disposition === undefined
+              ? candidateReason(candidate)
+              : terminalReason(candidate),
+        };
+      },
+    );
+    return result;
+  });
+  for (const source of refreshed) {
+    source.findings = source.findings.filter((finding) => {
+      const pending = reopened.get(findingCandidateId(finding) ?? "");
+      if (!pending) return true;
+      pending.finding ??= finding;
+      return false;
+    });
+  }
+  return refreshed;
+}
+
+function isGeneratedDecision(surface: JsonObject): boolean {
+  const candidate = object(surface.candidate);
+  return (
+    candidate !== undefined &&
+    isTerminalCandidateDecision(surface) &&
+    surface.candidateId === candidate.candidate_id &&
+    surface.disposition === candidateDisposition(candidate) &&
+    surface.label === candidate.summary &&
+    surface.notes === terminalReason(candidate)
+  );
+}
+
 /**
  * Project ledger dismissals before historical findings and follow-ups are merged.
  * Current findings remain authoritative if a checkpoint inherits an older final draft.
@@ -176,6 +280,9 @@ export function preserveUnresolvedDiffCandidates(
       return surface;
     return {
       ...surface,
+      ...(object(surface.candidate)
+        ? { candidate: { ...object(surface.candidate), ...candidate } }
+        : {}),
       ...(surface.label === oldCandidate.summary
         ? { label: candidate.summary }
         : {}),

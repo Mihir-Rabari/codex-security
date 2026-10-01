@@ -241,6 +241,63 @@ describe("custom validation", () => {
     },
   );
 
+  test.each([undefined, "worker-current"])(
+    "replaces superseded candidate rows while preserving other owners (%s)",
+    async (sourceWorkerId) => {
+      const f = await fixture();
+      const finding = f.findings.findings[0]!;
+      finding.provenance["candidateId"] = "candidate-shared";
+      if (sourceWorkerId !== undefined)
+        finding.provenance["sourceWorkerId"] = sourceWorkerId;
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      const old = {
+        id: "previous-candidate",
+        candidateId: "candidate-shared",
+        ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+        reason: "Obsolete checkpoint proof gap.",
+        candidate: { title: "Older candidate payload" },
+      };
+      const unrelated = [
+        { id: "general-review", reason: "Unrelated review remains." },
+        {
+          id: "other-worker",
+          candidateId: "candidate-shared",
+          sourceWorkerId: "worker-other",
+          reason: "Independent worker review remains.",
+        },
+      ];
+      coverage.completeness = "partial";
+      coverage.deferred = [
+        old,
+        { ...old, id: "duplicate-checkpoint" },
+        ...unrelated,
+      ];
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result("deferred")),
+      });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.unresolvedCandidateCount).toBe(2);
+      expect(saved.coverage.deferred).toEqual([
+        ...unrelated,
+        {
+          ...old,
+          candidate: finding,
+          reason: "The required service was unavailable.",
+          paths: finding.locations.map((location) => location.path),
+          surfaceIds: ["surface-0"],
+        },
+      ]);
+      expect(saved.unresolvedCandidates).toContainEqual(
+        saved.coverage.deferred[2]!,
+      );
+    },
+  );
+
   test("retains a deferred candidate when another finding reports their shared surface", async () => {
     const f = await fixture(2);
     for (const [index, finding] of f.findings.findings.entries()) {
@@ -583,6 +640,7 @@ describe("custom validation", () => {
     scenario: string;
     dispositions: Parameters<typeof result>;
     siblings?: boolean;
+    staleDeferred?: boolean;
   }> = [
     { scenario: "standard", dispositions: ["reportable"] },
     { scenario: "diff", dispositions: ["reportable"] },
@@ -590,19 +648,31 @@ describe("custom validation", () => {
     { scenario: "incomplete", dispositions: ["reportable"] },
     { scenario: "dismissed", dispositions: ["suppressed"] },
     {
+      scenario: "existing-deferred",
+      dispositions: ["deferred"],
+      staleDeferred: true,
+    },
+    {
       scenario: "siblings-mixed",
       dispositions: ["reportable", "deferred"],
       siblings: true,
+      staleDeferred: true,
     },
     {
       scenario: "siblings-deferred",
       dispositions: ["deferred", "deferred"],
       siblings: true,
+      staleDeferred: true,
     },
   ];
   test.each(completionScenarios)(
     "SDK owns real workbench completion: $scenario",
-    async ({ scenario, dispositions, siblings = false }) => {
+    async ({
+      scenario,
+      dispositions,
+      siblings = false,
+      staleDeferred = false,
+    }) => {
       const diff = scenario === "diff";
       const count = dispositions.length;
       const expectedReported = dispositions.filter(
@@ -727,6 +797,23 @@ describe("custom validation", () => {
                           };
                         }
                         await save(join(scanDir, "findings.json"), provisional);
+                      }
+                      if (staleDeferred) {
+                        for (const finding of provisional.findings)
+                          finding.provenance["candidateId"] =
+                            "candidate-shared";
+                        await save(join(scanDir, "findings.json"), provisional);
+                        const coverage = await json<CoverageDocument>(
+                          join(scanDir, "coverage.json"),
+                        );
+                        coverage.completeness = "partial";
+                        coverage.deferred.push({
+                          id: "previous-candidate",
+                          candidateId: "candidate-shared",
+                          candidate: { title: "Older candidate payload" },
+                          reason: "Obsolete checkpoint proof gap.",
+                        });
+                        await save(join(scanDir, "coverage.json"), coverage);
                       }
                       await publishDraft(scanDir, scanId, workbench);
                       expect(commands).not.toContain("prepare-scan-completion");
@@ -889,6 +976,27 @@ describe("custom validation", () => {
           commands.indexOf("complete-scan"),
         );
         expect(completed.findings.findings).toHaveLength(expectedReported);
+        if (staleDeferred) {
+          const expectedPending = dispositions.filter(
+            (value) => value === "deferred",
+          ).length;
+          expect(completed.unresolvedCandidateCount).toBe(expectedPending);
+          expect(completed.coverage.deferred).toHaveLength(expectedPending);
+          expect(
+            completed.unresolvedCandidates.every(
+              (candidate) =>
+                candidate.reason === "The required service was unavailable.",
+            ),
+          ).toBe(true);
+          const report = await readFile(completed.reportPath, "utf8");
+          expect(report).not.toContain("Obsolete checkpoint proof gap.");
+          expect(report).not.toContain("Older candidate payload");
+          expect(report).toContain("The required service was unavailable.");
+          for (const [index, disposition] of dispositions.entries()) {
+            if (disposition === "deferred")
+              expect(report).toContain(`Fixture ${index}`);
+          }
+        }
         if (siblings) {
           const expectedPending = count - expectedReported;
           expect(completed.unresolvedCandidateCount).toBe(expectedPending);

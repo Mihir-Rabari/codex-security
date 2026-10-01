@@ -15,6 +15,7 @@ from workbench_test_support import (
     run_workbench,
     start_delivered_scan,
     write_checkpoint,
+    write_completed_contract,
 )
 
 
@@ -232,6 +233,82 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
         )
 
 
+@pytest.mark.parametrize(
+    ("resolution", "owner"),
+    [("finding", None), ("rejected", None), ("not_applicable", None), ("finding", "other-worker")],
+)
+def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions(
+    tmp_path: Path, resolution: str, owner: str | None
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate_id = candidate["candidate_id"]
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(
+        deferred=[],
+        surfaces=[
+            {
+                "id": "current-decision",
+                "candidateId": candidate_id,
+                **({"sourceWorkerId": owner} if owner else {}),
+                "label": "Current authored decision",
+                "disposition": "reported" if resolution == "finding" else resolution,
+                "notes": "Keep the current saved review conclusion.",
+                "receiptRefs": [],
+            }
+        ],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    if resolution == "finding":
+        template = tmp_path / "finding-template"
+        template.mkdir()
+        write_completed_contract(template, scan_id, tmp_path / "target", relative_path="README.md")
+        finding = json.loads((template / "findings.json").read_text())["findings"][0]
+        finding["provenance"].update(candidateId=candidate_id)
+        if owner:
+            finding["provenance"]["sourceWorkerId"] = owner
+        (scan_dir / "findings.json").write_text(
+            json.dumps({"scanId": scan_id, "findings": [finding]})
+        )
+    candidate["validation"] = {
+        "disposition": "not_applicable" if resolution == "rejected" else "suppressed",
+        "counterevidence_or_proof_gap": "An older ledger decision.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    run_workbench(
+        state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped after saving."
+    )
+
+    def assert_current_resolution() -> None:
+        result = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert result["findingCount"] == int(resolution == "finding")
+        assert result["progress"]["candidates"]["unresolved"] == 0
+        recovered = json.loads(coverage_path.read_text())
+        decisions = [
+            item for item in recovered["surfaces"] if item.get("candidateId") == candidate_id
+        ]
+        current = next(item for item in decisions if item["id"] == "current-decision")
+        assert current == coverage["surfaces"][0]
+        generated = [item for item in decisions if "candidate" in item]
+        assert len(generated) == int(owner is not None)
+        if generated:
+            # A different worker's finding cannot resolve this unscoped Diff candidate.
+            assert generated[0].get("sourceWorkerId") is None
+            assert generated[0]["disposition"] == "rejected"
+        assert "- Candidate review is incomplete." not in (scan_dir / "report.md").read_text()
+
+    assert_current_resolution()
+    ledger.unlink()
+    late = copy.deepcopy(checkpoint)
+    late["coverage"].update(
+        surfaces=[], deferred=[{"id": "late-review", "reason": "Later saved work."}]
+    )
+    write_checkpoint(scan_dir / "checkpoints", late)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_current_resolution()
+
+
 @pytest.mark.parametrize("publication_failure", ["before_freeze", "after_freeze"])
 def test_stopped_diff_retries_saved_decisions_after_publication_failure(
     tmp_path: Path, publication_failure: str
@@ -367,7 +444,15 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
 @pytest.mark.parametrize("source", ["parent", "checkpoint"])
 @pytest.mark.parametrize(
     "scenario",
-    ["shared", "direct-only", "all-resolved", "linked-only", "linked-all-resolved", "other-owner"],
+    [
+        "shared",
+        "direct-only",
+        "all-resolved",
+        "linked-only",
+        "linked-all-resolved",
+        "other-owner",
+        "direct-pending-owner",
+    ],
 )
 def test_stopped_diff_preserves_shared_follow_up_evidence(
     tmp_path: Path, termination: str, source: str, scenario: str
@@ -389,6 +474,8 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
         shared.pop("candidateId")
     elif scenario == "other-owner":
         shared["sourceWorkerId"] = "different-worker"
+    elif scenario == "direct-pending-owner":
+        shared["candidateId"] = second["candidate_id"]
     deferred = [
         {
             "id": candidate["candidate_id"],
@@ -399,7 +486,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
         }
         for candidate in (first, second)
     ]
-    if scenario in {"direct-only", "other-owner"}:
+    if scenario in {"direct-only", "other-owner", "direct-pending-owner"}:
         deferred[1]["surfaceIds"] = []
     checkpoint["coverage"].update(surfaces=[shared], deferred=deferred)
     staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
@@ -439,7 +526,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
             [] if scenario in {"all-resolved", "linked-all-resolved"} else [second["candidate_id"]]
         )
         retained = [row for row in coverage["surfaces"] if row["id"] == shared["id"]]
-        if scenario in {"shared", "linked-only", "other-owner"}:
+        if scenario in {"shared", "linked-only", "other-owner", "direct-pending-owner"}:
             assert retained == [shared]
         else:
             assert retained == []

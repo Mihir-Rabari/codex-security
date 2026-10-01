@@ -365,6 +365,7 @@ for (const remaining of [
   "shared checkpoint",
   "shared current",
   "shared direct candidate",
+  "shared dismissed candidate",
   "generic gap",
   "current follow-up",
 ]) {
@@ -373,16 +374,22 @@ for (const remaining of [
     const other = candidate("other-review");
     const context = await fixture(t, [
       pending,
-      ...(remaining === "shared direct candidate" ? [other] : []),
+      ...(remaining === "shared direct candidate" ||
+      remaining === "shared dismissed candidate"
+        ? [other]
+        : []),
     ]);
     const linkedSurface = {
       id: "shared-boundary",
       ...(remaining === "shared direct candidate"
         ? { candidateId: other.candidate_id }
-        : {}),
+        : remaining === "shared dismissed candidate"
+          ? { candidateId: pending.candidate_id }
+          : {}),
       label: "Synthetic review boundary",
       disposition: "needs_follow_up",
       notes: "The linked candidate needs validation.",
+      receiptRefs: ["artifacts/review/shared.json"],
     };
     const checkpoint = {
       ...draft([
@@ -396,10 +403,16 @@ for (const remaining of [
     };
     checkpoint.coverage.completeness = "partial";
     checkpoint.coverage.surfaces.push(linkedSurface);
-    if (remaining === "shared direct candidate") {
+    if (
+      remaining === "shared direct candidate" ||
+      remaining === "shared dismissed candidate"
+    ) {
       checkpoint.coverage.deferred.push({
         candidateId: other.candidate_id,
         reason: "The directly linked candidate still needs validation.",
+        ...(remaining === "shared dismissed candidate"
+          ? { surfaceIds: [linkedSurface.id] }
+          : {}),
       });
     }
     if (remaining === "generic gap") {
@@ -466,6 +479,14 @@ for (const remaining of [
             : [],
       );
       if (shared) {
+        const retainedSurface = saved.surfaces.find(
+          (surface) => surface.id === linkedSurface.id,
+        );
+        assert.equal(retainedSurface.notes, linkedSurface.notes);
+        assert.deepEqual(
+          retainedSurface.receiptRefs,
+          linkedSurface.receiptRefs,
+        );
         assert.deepEqual(
           saved.deferred.map((item) => item.candidateId),
           [other.candidate_id],
@@ -842,6 +863,120 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.surfaces, resolved.surfaces);
   });
+}
+
+for (const complete of [false, true]) {
+  for (const authored of [false, true]) {
+    test(`ledger transitions ${authored ? "preserve authored" : "refresh generated"} decisions in ${complete ? "final drafts" : "checkpoints"}`, async (t) => {
+      const candidateId = "changing-review";
+      const context = await fixture(t, [
+        candidate(candidateId, "reportable", "reportable"),
+      ]);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete,
+        findings: [finding(candidateId)],
+      });
+      const authoredDecision = {
+        candidateId,
+        label: "Authored final review label.",
+        disposition: "rejected",
+        notes: "The authored final decision remains authoritative.",
+        receiptRefs: ["artifacts/review/decision.json"],
+      };
+      for (const disposition of [
+        "suppressed",
+        "not_applicable",
+        "deferred",
+        "reportable",
+      ]) {
+        const reviewed = {
+          ...candidate(
+            candidateId,
+            disposition,
+            disposition === "reportable" ? "reportable" : undefined,
+          ),
+          summary: `Current ${disposition} candidate summary.`,
+          evidence: `Current ${disposition} candidate evidence.`,
+          validation: {
+            disposition,
+            counterevidence_or_proof_gap: `Current ${disposition} rationale.`,
+          },
+        };
+        await writeLedger(context, [reviewed]);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const input = { ...draft(), complete };
+          if (authored && disposition === "suppressed" && attempt === 0)
+            input.coverage.surfaces.push(authoredDecision);
+          await recordCodexSecurityScanDraft(context, input);
+          const saved = await readCoverage(context);
+          const reopened =
+            !authored && ["deferred", "reportable"].includes(disposition);
+          assert.equal(saved.completeness, reopened ? "partial" : "complete");
+          assert.equal(saved.deferred.length, reopened ? 1 : 0);
+          assert.equal(saved.surfaces.length, 1);
+          const surface = saved.surfaces[0];
+          assert.equal(
+            surface.disposition,
+            authored
+              ? "rejected"
+              : reopened
+                ? "needs_follow_up"
+                : disposition === "suppressed"
+                  ? "rejected"
+                  : "not_applicable",
+          );
+          assert.equal(
+            surface.label,
+            authored ? authoredDecision.label : reviewed.summary,
+          );
+          if (authored) {
+            assert.equal(surface.notes, authoredDecision.notes);
+            assert.deepEqual(surface.receiptRefs, authoredDecision.receiptRefs);
+          } else {
+            assert.deepEqual(surface.candidate, reviewed);
+            assert.equal(
+              surface.notes,
+              reopened
+                ? saved.deferred[0].reason
+                : reviewed.validation.counterevidence_or_proof_gap,
+            );
+          }
+          if (reopened) {
+            assert.deepEqual(saved.deferred[0].candidate, reviewed);
+            assert.equal(
+              saved.deferred[0].finding.provenance.candidateId,
+              candidateId,
+            );
+            if (disposition === "reportable")
+              assert.match(saved.deferred[0].reason, /no saved finding/u);
+          }
+          assert.deepEqual(
+            JSON.parse(
+              await readFile(path.join(context.root, "findings.json"), "utf8"),
+            ).findings,
+            [],
+          );
+        }
+      }
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+        findings: [finding(candidateId)],
+      });
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      assert.deepEqual((await readCoverage(context)).deferred, []);
+      assert.equal(
+        JSON.parse(
+          await readFile(path.join(context.root, "findings.json"), "utf8"),
+        ).findings.length,
+        1,
+      );
+    });
+  }
 }
 
 for (const [validation, attackPath, disposition] of [

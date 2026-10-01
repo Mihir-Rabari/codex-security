@@ -15,24 +15,34 @@ export function findingCandidateIds(
   );
 }
 
+export function findingCandidateOwner(
+  finding: Pick<Finding, "provenance" | "extensions">,
+): unknown {
+  return (
+    finding.provenance["sourceWorkerId"] ??
+    finding.provenance["workerId"] ??
+    finding.extensions?.["sourceWorkerId"]
+  );
+}
+
+export function candidateIdentity(
+  candidateId: string,
+  sourceWorkerId: unknown,
+): string {
+  return JSON.stringify([sourceWorkerId ?? null, candidateId]);
+}
+
 /** Saved candidate identities without a finding or terminal disposition. */
 export function unresolvedCandidates(
   coverage: CoverageDocument,
   findings: readonly Finding[],
 ): DeferredCoverage[] {
-  const identity = (candidateId: string, sourceWorkerId: unknown): string =>
-    JSON.stringify([sourceWorkerId ?? null, candidateId]);
   const resolved = new Set<string>();
   for (const finding of findings) {
     const candidateId = findingCandidateIds(finding)[0];
     if (candidateId !== undefined) {
       resolved.add(
-        identity(
-          candidateId,
-          finding.provenance["sourceWorkerId"] ??
-            finding.provenance["workerId"] ??
-            finding.extensions?.["sourceWorkerId"],
-        ),
+        candidateIdentity(candidateId, findingCandidateOwner(finding)),
       );
     }
   }
@@ -46,13 +56,18 @@ export function unresolvedCandidates(
       (surface["disposition"] === "rejected" ||
         surface["disposition"] === "not_applicable")
     ) {
-      resolved.add(identity(surface["candidateId"], surface["sourceWorkerId"]));
+      resolved.add(
+        candidateIdentity(surface["candidateId"], surface["sourceWorkerId"]),
+      );
     }
   }
   const pending = new Map<string, DeferredCoverage>();
   for (const candidate of coverage.deferred) {
     if (candidate.candidateId === undefined) continue;
-    const key = identity(candidate.candidateId, candidate.sourceWorkerId);
+    const key = candidateIdentity(
+      candidate.candidateId,
+      candidate.sourceWorkerId,
+    );
     if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
   }
   return [...pending.values()];
