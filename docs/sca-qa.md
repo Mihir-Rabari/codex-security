@@ -95,11 +95,10 @@ POSIX filenames. The real-scanner harness skips only that native-path case for
 that Bun version; it passes under Node 24, and the normalization regression stays
 enabled on both runtimes.
 
-Portable tests exercise Windows paths. Native Windows and macOS CI exposed a
-hang in the cancellation test's filesystem watcher. The test now polls for
-startup output with a deadline and always aborts and settles the child, which
-also has a finite lifetime. The repair still needs passing native CI on both
-platforms.
+Portable tests exercise Windows paths. The synthetic cancellation regression
+polls for retained stdout and stderr with a deadline, then checks that both
+survive cancellation. Cleanup always aborts and settles the child, which also
+has a finite lifetime. Validate this behavior in native Windows and macOS CI.
 
 The twelve-case model corpus is JavaScript-focused and has no independent
 human labels. Multilingual scanner and orchestration tests do not establish

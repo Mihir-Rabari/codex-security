@@ -4,6 +4,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
 const {
   CORPUS,
@@ -16,7 +17,7 @@ const {
   matchRetention,
 } = require("./sca-result.js");
 const { generateTests } = require("./generate-tests.js");
-const { stageRuntime } = require("./run-promptfoo.js");
+const { stageRuntime, stageProviderConfig } = require("./run-promptfoo.js");
 const assertion = require("../assertions/sca-evidence.js");
 const { afterEach } = require("../assertions/sca-metrics.js");
 const { buildBaselines } = require("./baselines.js");
@@ -399,6 +400,66 @@ test("model staging contains source and skill runtime without the gold corpus or
     if (previous === undefined) delete process.env.SCA_EVAL_RUNTIME_ROOT;
     else process.env.SCA_EVAL_RUNTIME_ROOT = previous;
     fs.rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test("disables inherited MCP servers while retaining the persistent Codex home", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-provider-"));
+  const runtime = path.join(root, "runtime");
+  const codexHome = path.join(root, "saved-login");
+  fs.mkdirSync(runtime);
+  fs.mkdirSync(codexHome);
+  const receipt = path.join(codexHome, "invocation.json");
+  const codexScript = path.join(root, "codex.cjs");
+  fs.writeFileSync(
+    codexScript,
+    `const fs = require("node:fs");
+     fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({
+       args: process.argv.slice(2), codexHome: process.env.CODEX_HOME,
+     }));
+     console.log(JSON.stringify([{name: "synthetic-files"}, {name: "synthetic-http"}]));`,
+  );
+  try {
+    const providerPath = stageProviderConfig(runtime, codexHome, codexScript);
+    const provider = JSON.parse(fs.readFileSync(providerPath, "utf8"));
+    assert.deepEqual(provider.config.cli_config.mcp_servers, {
+      "synthetic-files": { enabled: false },
+      "synthetic-http": { enabled: false },
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(receipt, "utf8")), {
+      args: [
+        "-C",
+        runtime,
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.apps=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+      codexHome,
+    });
+    assert.equal(
+      provider.config.cli_env.CODEX_HOME,
+      "{{env.SCA_EVAL_CODEX_HOME}}",
+    );
+    assert.equal(provider.config.cli_config.features.apps, false);
+    assert.deepEqual(fs.readdirSync(codexHome), ["invocation.json"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not stage an unrestricted provider when MCP discovery fails", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-provider-failure-"));
+  const codexScript = path.join(root, "codex.cjs");
+  fs.writeFileSync(codexScript, "process.exit(1);");
+  try {
+    assert.throws(() => stageProviderConfig(root, root, codexScript));
+    assert.equal(fs.existsSync(path.join(root, "provider.json")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
