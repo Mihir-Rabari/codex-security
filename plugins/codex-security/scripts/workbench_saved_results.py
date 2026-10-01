@@ -768,13 +768,15 @@ def _stopped_diff_candidate_decisions(
 
     def was_demoted(finding: dict[str, Any], candidate_id: str) -> bool:
         previous = current_pending.get(candidate_id, {}).get("finding")
-        return (
-            isinstance(previous, dict)
-            and finding_candidate_key(previous) == finding_candidate_key(finding)
-            and isinstance(previous.get("provenance"), dict)
-            and previous["provenance"].get("diffCandidateDecision")
+        if not isinstance(previous, dict):
+            return False
+        return any(
+            finding_candidate_key(retained) == finding_candidate_key(finding)
+            and isinstance(retained.get("provenance"), dict)
+            and retained["provenance"].get("diffCandidateDecision")
             == finding["provenance"]["diffCandidateDecision"]
-            and _finding_content(previous) == _finding_content(finding)
+            and _finding_content(retained) == _finding_content(finding)
+            for retained in _retained_findings(previous)
         )
 
     # Publication can stop after checkpointing an explicit finding override but

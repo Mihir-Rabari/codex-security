@@ -725,8 +725,9 @@ def test_stopped_diff_keeps_saved_terminal_snapshot_over_stale_checkpoint(
 
 
 @pytest.mark.parametrize("ledger_state", ["missing", "malformed"])
+@pytest.mark.parametrize("history_field", [None, "previousFindings", "sourceFindings"])
 def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_checkpoint(
-    tmp_path: Path, ledger_state: str
+    tmp_path: Path, ledger_state: str, history_field: str | None
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -738,7 +739,15 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
     checkpoint["findings"] = [finding]
     checkpoint["coverage"].update(surfaces=[], deferred=[])
     saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
-    original = saved.read_bytes()
+    originals = {saved: saved.read_bytes()}
+    if history_field is not None:
+        previous = copy.deepcopy(finding)
+        finding["summary"] = "Revised finding with additional review context."
+        finding["provenance"][history_field] = [
+            {"finding": previous} if history_field == "sourceFindings" else previous
+        ]
+        saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+        originals[saved] = saved.read_bytes()
     candidate["validation"] = {
         "disposition": "deferred",
         "counterevidence_or_proof_gap": "New evidence requires further review.",
@@ -778,7 +787,7 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
     ledger.write_text(json.dumps({**candidate, "validation": {"disposition": "suppressed"}}))
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert_reopened()
-    assert saved.read_bytes() == original
+    assert all(path.read_bytes() == original for path, original in originals.items())
 
 
 def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
