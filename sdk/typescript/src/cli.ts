@@ -9258,7 +9258,7 @@ function printScanSummary(
       ? `${elapsed}s`
       : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
   const findingCount = findings.length;
-  const unconfirmedCount = result.unconfirmedCandidateCount;
+  const unresolvedCount = result.unresolvedCandidateCount;
   const confirmedCount =
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
@@ -9276,8 +9276,8 @@ function printScanSummary(
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
+      `  ${paint("CANDIDATES", 1)}  ${unresolvedCount} unresolved\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
-      `  ${paint("UNCONFIRMED", 1)}  ${unconfirmedCount} saved candidate${unconfirmedCount === 1 ? "" : "s"}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +

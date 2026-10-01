@@ -271,7 +271,7 @@ def test_scan_list_probes_requested_repository_once(
     ],
     ids=["no-candidates", "general-review-work", "resolved-in-coverage"],
 )
-def test_scan_list_skips_findings_artifacts_without_unconfirmed_candidates(
+def test_scan_list_skips_findings_artifacts_without_unresolved_candidates(
     workbench_api, indexed_collections, monkeypatch, coverage
 ):
     connection, _ = indexed_collections
@@ -286,12 +286,13 @@ def test_scan_list_skips_findings_artifacts_without_unconfirmed_candidates(
     scans = history.list_scans(connection)["scans"]
 
     assert len(scans) == len(SCAN_IDS)
-    assert all(scan["progress"]["candidates"]["unconfirmed"] == 0 for scan in scans)
+    assert all(scan["progress"]["candidates"]["unresolved"] == 0 for scan in scans)
     assert sorted(reads) == [(scan_id, "coverage.json") for scan_id in SCAN_IDS]
 
 
+@pytest.mark.parametrize(("limit", "offset"), [(None, 0), (1, 0), (1, 1)])
 def test_scan_list_reads_findings_to_resolve_saved_candidates(
-    workbench_api, indexed_collections, monkeypatch
+    workbench_api, indexed_collections, monkeypatch, limit, offset
 ):
     connection, _ = indexed_collections
     history = workbench_api["scan_history"]
@@ -309,10 +310,72 @@ def test_scan_list_reads_findings_to_resolve_saved_candidates(
         return coverage if name == "coverage.json" else findings
 
     monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
-    scans = history.list_scans(connection)["scans"]
+    scans = history.list_scans(connection, query_args(limit=limit, offset=offset))["scans"]
 
-    assert len(scans) == len(SCAN_IDS)
-    assert all(scan["progress"]["candidates"]["unconfirmed"] == 1 for scan in scans)
+    expected_ids = SCAN_IDS if limit is None else SCAN_IDS[offset : offset + limit]
+    assert [scan["scanId"] for scan in scans] == expected_ids
+    assert all(scan["progress"]["candidates"]["unresolved"] == 1 for scan in scans)
     assert sorted(reads) == [
-        (scan_id, name) for scan_id in SCAN_IDS for name in ("coverage.json", "findings.json")
+        (scan_id, name) for scan_id in expected_ids for name in ("coverage.json", "findings.json")
     ]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_ids", "next_offset"),
+    [
+        (None, SCAN_IDS[::-1], None),
+        ({"limit": 1}, [SCAN_IDS[2]], 1),
+        ({"limit": 1, "offset": 1}, [SCAN_IDS[1]], 2),
+        ({"limit": 1, "query": "needle"}, [SCAN_IDS[1]], 1),
+        ({"query": "missing"}, [], None),
+        ({"status": "not_scanned"}, [], None),
+    ],
+)
+def test_repository_list_reads_artifacts_only_for_returned_latest_scans(
+    workbench_api, indexed_collections, monkeypatch, tmp_path, arguments, expected_ids, next_offset
+):
+    connection, _ = indexed_collections
+    for index, scan_id in enumerate(SCAN_IDS):
+        history_id = f"20000000-0000-4000-8000-{index:012d}"
+        connection.execute(
+            """
+            INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision,
+                scope, mode, scan_dir, status, phase, started_at, created_at, updated_at)
+            SELECT ?, workspace_id, target_id, target_path, target_revision,
+                scope, mode, ?, 'running', 'discovery', ?, created_at, updated_at
+            FROM scans WHERE id = ?
+            """,
+            (history_id, str(tmp_path / history_id), "2026-07-01T00:00:00Z", scan_id),
+        )
+        connection.execute(
+            "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+            (history_id, "2026-08-02T00:00:00Z"),
+        )
+    history = workbench_api["scan_history"]
+    reads = []
+
+    def read_artifact(scan_dir, name, label):
+        reads.append((scan_dir.name, name))
+        return (
+            {"deferred": [{"candidateId": "candidate-pending", "reason": "Review remains."}]}
+            if name == "coverage.json"
+            else {"findings": []}
+        )
+
+    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    result = workbench_api["native_indexes"].list_repositories(
+        connection, query_args(**arguments) if arguments is not None else None
+    )
+
+    assert [repository["latestScan"]["scanId"] for repository in result["repositories"]] == (
+        expected_ids
+    )
+    assert all(repository["scanCount"] == 2 for repository in result["repositories"])
+    assert all(
+        repository["latestScan"]["progress"]["candidates"]["unresolved"] == 1
+        for repository in result["repositories"]
+    )
+    assert reads == [
+        (scan_id, name) for scan_id in expected_ids for name in ("coverage.json", "findings.json")
+    ]
+    assert result.get("nextOffset") == next_offset

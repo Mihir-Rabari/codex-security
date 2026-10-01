@@ -134,7 +134,7 @@ try {
     scanId,
     findings: [canonical, legacyCanonical, noRefs],
     threatModel: { summary: largeText },
-    unconfirmedCandidates: [
+    unresolvedCandidates: [
       {
         candidateId: "earlier-review",
         sourceWorkerId: "previous-worker",
@@ -162,14 +162,14 @@ try {
 
   const full = await getCodexSecurityDeepReducerInputs(context);
   const projected = await readDocument(context);
-  assert.equal(full.discoveries[0].result.unconfirmedCandidates.length, 1);
-  assert.equal(full.previous.unconfirmedCandidates.length, 1);
+  assert.equal(full.discoveries[0].result.unresolvedCandidates.length, 1);
+  assert.equal(full.previous.unresolvedCandidates.length, 1);
   assert.equal(
-    Object.hasOwn(projected.discoveries[0].result, "unconfirmedCandidates"),
+    Object.hasOwn(projected.discoveries[0].result, "unresolvedCandidates"),
     false,
   );
   assert.equal(
-    Object.hasOwn(projected.previous, "unconfirmedCandidates"),
+    Object.hasOwn(projected.previous, "unresolvedCandidates"),
     false,
   );
   assert.equal(projected.discoveries[0].result.findings[0].summary, largeText);

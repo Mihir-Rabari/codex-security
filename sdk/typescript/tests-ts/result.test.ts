@@ -70,9 +70,9 @@ describe("ScanResult", () => {
         },
       ];
       expect(
-        result.unconfirmedCandidates.map((candidate) => candidate.candidateId),
+        result.unresolvedCandidates.map((candidate) => candidate.candidateId),
       ).toEqual(["pending"]);
-      expect(result.unconfirmedCandidateCount).toBe(1);
+      expect(result.unresolvedCandidateCount).toBe(1);
     },
   );
 
@@ -132,17 +132,17 @@ describe("ScanResult", () => {
         reason: "Worker B candidate.",
       },
     ];
-    expect(result.unconfirmedCandidateCount).toBe(3);
+    expect(result.unresolvedCandidateCount).toBe(3);
     expect(
-      result.unconfirmedCandidates.map((candidate) => candidate.id),
+      result.unresolvedCandidates.map((candidate) => candidate.id),
     ).toEqual(["old", "worker-a", "worker-b"]);
     expect(result.toJSON()).toMatchObject({
-      unconfirmedCandidateCount: 3,
-      unconfirmedCandidates: result.unconfirmedCandidates,
+      unresolvedCandidateCount: 3,
+      unresolvedCandidates: result.unresolvedCandidates,
     });
     expect(result.findings.findings).toHaveLength(1);
     expect(result.hasFindingsAtOrAbove("high")).toBe(true);
-    expect(fakeResult([]).unconfirmedCandidateCount).toBe(0);
+    expect(fakeResult([]).unresolvedCandidateCount).toBe(0);
   });
 
   test("rejects an unknown threshold with or without findings", () => {

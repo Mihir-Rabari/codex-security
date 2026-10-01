@@ -41,6 +41,7 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
+from candidate_identity import diff_candidate_disposition
 from filesystem_identity import (
     serialize_filesystem_identity as serialize_filesystem_identity,
 )
@@ -1348,7 +1349,7 @@ def budget_exhausted_draft(
         and isinstance(candidate_id := finding_candidate_id(finding), str)
     }
     existing_deferred = {
-        item.get("candidateId", item.get("id"))
+        item.get("candidateId", item.get("id")): item
         for item in coverage["deferred"]
         if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
     }
@@ -1359,27 +1360,20 @@ def budget_exhausted_draft(
     }
     for candidate in candidates:
         candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+        if candidate_id in findings_by_candidate:
+            continue
+        if candidate_id in existing_deferred:
+            existing_deferred[candidate_id].setdefault("candidateId", candidate_id)
+            existing_deferred[candidate_id].setdefault("candidate", candidate)
             continue
         paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
         surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
+        disposition = diff_candidate_disposition(candidate) or "needs_follow_up"
         if surface_id not in existing_surfaces:
             coverage["surfaces"].append(
                 {
                     "id": surface_id,
+                    "candidateId": candidate_id,
                     "label": candidate["summary"],
                     "disposition": disposition,
                     "notes": candidate["evidence"],
@@ -1393,6 +1387,7 @@ def budget_exhausted_draft(
             {
                 "id": candidate_id,
                 "candidateId": candidate_id,
+                "candidate": candidate,
                 "reason": (
                     "Validation was deferred because the scan reached its cost limit: "
                     f"{candidate['summary']}. Evidence: {candidate['evidence']}"
@@ -2805,7 +2800,7 @@ def scan_result(
     progress_result = {
         "candidates": {
             "reportable": progress["reportable_findings_count"],
-            "unconfirmed": len(scan_history.saved_unconfirmed_candidates(scan)),
+            "unresolved": scan_history.saved_unresolved_candidate_count(scan),
         },
         "coverage": {
             "closedRows": progress["review_items_completed"],

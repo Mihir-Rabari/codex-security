@@ -9,6 +9,7 @@ import type {
   SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
+import { unresolvedCandidates } from "./candidates.js";
 import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
@@ -113,58 +114,13 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
-  /** Saved candidates still awaiting a decision, distinct within each logical worker. */
-  public get unconfirmedCandidates(): readonly DeferredCoverage[] {
-    const identity = (candidateId: string, sourceWorkerId: unknown): string =>
-      JSON.stringify([sourceWorkerId ?? null, candidateId]);
-    const resolved = new Set<string>();
-    for (const finding of this.findings.findings) {
-      const candidateId = [
-        finding.provenance["candidateId"],
-        finding.extensions?.candidateId,
-        finding.extensions?.reportId,
-        finding.extensions?.ledgerRowId,
-      ].find(
-        (value): value is string =>
-          typeof value === "string" && value.trim() !== "",
-      );
-      if (candidateId !== undefined) {
-        resolved.add(
-          identity(
-            candidateId,
-            finding.provenance["sourceWorkerId"] ??
-              finding.provenance["workerId"] ??
-              finding.extensions?.["sourceWorkerId"],
-          ),
-        );
-      }
-    }
-    // A reported surface can cover multiple candidates; findings confirm identities.
-    for (const surface of [
-      ...this.coverage.surfaces,
-      ...this.coverage.explicitExclusions,
-    ]) {
-      if (
-        typeof surface["candidateId"] === "string" &&
-        (surface["disposition"] === "rejected" ||
-          surface["disposition"] === "not_applicable")
-      ) {
-        resolved.add(
-          identity(surface["candidateId"], surface["sourceWorkerId"]),
-        );
-      }
-    }
-    const pending = new Map<string, DeferredCoverage>();
-    for (const candidate of this.coverage.deferred) {
-      if (candidate.candidateId === undefined) continue;
-      const key = identity(candidate.candidateId, candidate.sourceWorkerId);
-      if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
-    }
-    return [...pending.values()];
+  /** Saved unresolved candidates, distinct within each logical worker. */
+  public get unresolvedCandidates(): readonly DeferredCoverage[] {
+    return unresolvedCandidates(this.coverage, this.findings.findings);
   }
 
-  public get unconfirmedCandidateCount(): number {
-    return this.unconfirmedCandidates.length;
+  public get unresolvedCandidateCount(): number {
+    return this.unresolvedCandidates.length;
   }
 
   public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
@@ -175,14 +131,14 @@ export class ScanResult {
   }
 
   public toJSON(): Record<string, unknown> {
-    const unconfirmedCandidates = this.unconfirmedCandidates;
+    const unresolvedCandidates = this.unresolvedCandidates;
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
-      unconfirmedCandidateCount: unconfirmedCandidates.length,
-      unconfirmedCandidates,
+      unresolvedCandidateCount: unresolvedCandidates.length,
+      unresolvedCandidates,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

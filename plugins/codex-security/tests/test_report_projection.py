@@ -21,6 +21,7 @@ def load_script(name: str) -> ModuleType:
 
 
 PROJECTION = load_script("report_projection")
+CANDIDATES = load_script("candidate_identity")
 
 
 def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
@@ -82,7 +83,14 @@ def test_projection_counts_saved_candidates_by_worker_and_separates_unfinished_w
         "id": "candidate-one",
         "candidateId": "candidate-one",
         "sourceWorkerId": "worker-one",
-        "candidate": {"title": "Review the parser boundary"},
+        "candidate": {
+            "title": "Review the parser boundary",
+            "evidence": "The request value reaches the parser.",
+            "locations": [
+                {"path": "src/parser.py", "start_line": 12, "end_line": 15},
+                {"path": "src/route.py", "startLine": 6},
+            ],
+        },
         "reason": "The parser call site still needs validation.",
     }
     coverage["deferred"] = [
@@ -94,12 +102,69 @@ def test_projection_counts_saved_candidates_by_worker_and_separates_unfinished_w
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "| Saved unconfirmed candidates | 2 |" in markdown
-    assert "## Saved Unconfirmed Candidates" in markdown
+    assert "| Unresolved candidates | 2 |" in markdown
+    assert "## Unresolved candidates" in markdown
     assert "| candidate-one | worker-one | Review the parser boundary |" in markdown
     assert "| candidate-one | worker-two | Review the parser boundary |" in markdown
     assert markdown.count("| candidate-one |") == 2
+    assert "src/parser.py:12-15, src/route.py:6" in markdown
+    assert "The request value reaches the parser." in markdown
+    assert markdown.count("- The parser call site still needs validation.") == 2
+    assert "Review deferred unit candidate-one-copy" not in markdown
     assert "The remaining files were not reviewed." in markdown
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {
+            "title": "Review a saved finding",
+            "validation": {"evidence": ["The request value reaches the parser."]},
+            "locations": [{"path": "src/parser.py", "startLine": 12, "endLine": 15}],
+        },
+        {
+            "title": "Review a Deep candidate",
+            "evidence": [
+                {
+                    "path": "src/parser.py",
+                    "startLine": 12,
+                    "endLine": 15,
+                    "code": "parse(request.value)",
+                    "explanation": "The request value reaches the parser.",
+                }
+            ],
+        },
+        {
+            "title": "Review a saved candidate",
+            "evidence": [{"receiptRef": "artifacts/review.txt"}],
+            "sourceEvidence": [
+                {
+                    "path": "src/parser.py",
+                    "startLine": 12,
+                    "endLine": 15,
+                    "code": "parse(request.value)",
+                    "explanation": "The request value reaches the parser.",
+                }
+            ],
+        },
+    ],
+)
+def test_projection_renders_saved_candidate_evidence_shapes(candidate: dict) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["deferred"] = [
+        {
+            "candidateId": "candidate-one",
+            "reason": "Review remains incomplete.",
+            "candidate": candidate,
+        }
+    ]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "The request value reaches the parser." in markdown
+    assert "src/parser.py:12-15" in markdown
+    if "validation" not in candidate:
+        assert "parse(request.value)" in markdown
 
 
 def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:
@@ -143,10 +208,14 @@ def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "| Saved unconfirmed candidates | 1 |" in markdown
+    assert "| Unresolved candidates | 1 |" in markdown
     assert "| confirmed | worker-two |" in markdown
     assert "| confirmed | worker-one |" not in markdown
     assert "| rejected | worker-one |" not in markdown
+    assert "Review deferred unit worker-one-confirmed" not in markdown
+    assert "Review deferred unit worker-one-rejected" not in markdown
+    assert "Review deferred unit None-not-applicable" not in markdown
+    assert "Review deferred unit worker-two-confirmed" in markdown
 
 
 def test_reported_shared_surface_does_not_resolve_an_explicit_deferred_candidate() -> None:
@@ -167,10 +236,10 @@ def test_reported_shared_surface_does_not_resolve_an_explicit_deferred_candidate
         for candidate_id in ["pending", "confirmed"]
     ]
 
-    pending = PROJECTION.unconfirmed_candidates(coverage, findings["findings"])
+    pending = PROJECTION.unresolved_candidates(coverage, findings["findings"])
     assert [item["candidateId"] for item in pending] == ["pending"]
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
-    assert "| Saved unconfirmed candidates | 1 |" in markdown
+    assert "| Unresolved candidates | 1 |" in markdown
 
 
 def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> None:
@@ -180,8 +249,8 @@ def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> No
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "| Saved unconfirmed candidates | 0 |" in markdown
-    assert "## Saved Unconfirmed Candidates" not in markdown
+    assert "| Unresolved candidates | 0 |" in markdown
+    assert "## Unresolved candidates" not in markdown
     assert "A saved question." in markdown
 
 
@@ -195,7 +264,7 @@ def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> No
         ({}, {"ledgerRowId": "ledger-id"}, "ledger-id"),
     ],
 )
-def test_projection_resolves_saved_candidates_using_existing_finding_identity_order(
+def test_candidate_selection_uses_existing_finding_identity_order(
     provenance: dict[str, str], extensions: dict[str, str], resolved_id: str
 ) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -206,8 +275,7 @@ def test_projection_resolves_saved_candidates_using_existing_finding_identity_or
         for value in ("provenance-id", "extension-id", "report-id", "ledger-id")
     ]
 
-    remaining = PROJECTION.unconfirmed_candidates(coverage, findings["findings"])
-    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    remaining = CANDIDATES.unresolved_candidates(coverage, findings["findings"])
 
     assert {row["candidateId"] for row in remaining} == {
         "provenance-id",
@@ -215,7 +283,6 @@ def test_projection_resolves_saved_candidates_using_existing_finding_identity_or
         "report-id",
         "ledger-id",
     } - {resolved_id}
-    assert "| Saved unconfirmed candidates | 3 |" in markdown
 
 
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:

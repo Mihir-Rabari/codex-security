@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import Counter
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import coverage_candidate_key, unresolved_candidates
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -23,66 +28,6 @@ WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
-
-
-def unconfirmed_candidates(
-    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
-) -> list[dict[str, Any]]:
-    """Return distinct saved candidates that still need validation, scoped to their worker."""
-
-    def objects(value: Any) -> list[dict[str, Any]]:
-        # Progress also reads incomplete, unsealed drafts before finalizer recovery.
-        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-    def identity(candidate_id: Any, owner: Any) -> tuple[str | None, str] | None:
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id.strip()
-            or (owner is not None and not isinstance(owner, str))
-        ):
-            return None
-        return owner, candidate_id
-
-    resolved: set[tuple[str | None, str]] = set()
-    for finding in objects(findings):
-        provenance = finding.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        extensions = finding.get("extensions")
-        extensions = extensions if isinstance(extensions, dict) else {}
-        candidate_id = next(
-            (
-                value
-                for value in [
-                    provenance.get("candidateId"),
-                    extensions.get("candidateId"),
-                    extensions.get("reportId"),
-                    extensions.get("ledgerRowId"),
-                ]
-                if isinstance(value, str) and value.strip()
-            ),
-            None,
-        )
-        owner = (
-            provenance.get("sourceWorkerId")
-            or provenance.get("workerId")
-            or extensions.get("sourceWorkerId")
-        )
-        if (key := identity(candidate_id, owner)) is not None:
-            resolved.add(key)
-    for field in ("surfaces", "explicitExclusions"):
-        for item in objects(coverage.get(field)):
-            if (
-                item.get("disposition") in ("rejected", "not_applicable")
-                and (key := identity(item.get("candidateId"), item.get("sourceWorkerId")))
-                is not None
-            ):
-                resolved.add(key)
-    candidates: dict[tuple[str | None, str], dict[str, Any]] = {}
-    for item in objects(coverage.get("deferred")):
-        key = identity(item.get("candidateId"), item.get("sourceWorkerId"))
-        if key is not None and key not in resolved:
-            candidates.setdefault(key, item)
-    return list(candidates.values())
 
 
 def _text(value: Any, fallback: str) -> str:
@@ -482,8 +427,8 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     if isinstance(location, dict):
         item = location
     path = item.get("path")
-    start = item.get("startLine")
-    end = item.get("endLine", start)
+    start = item.get("startLine", item.get("start_line"))
+    end = item.get("endLine", item.get("end_line", start))
     if not isinstance(path, str) or not path:
         return ""
     if not isinstance(start, int):
@@ -542,6 +487,41 @@ def _locations(finding: dict[str, Any]) -> str:
         suffix = f":{start}" if end == start else f":{start}-{end}"
         rendered.append(f"{location['path']}{suffix}")
     return ", ".join(rendered)
+
+
+def _candidate_details(candidate: dict[str, Any], saved: dict[str, Any]) -> tuple[str, str]:
+    """Render the evidence shapes saved by discovery and finding validation."""
+    locations = []
+    evidence = []
+    validation = candidate.get("validation")
+    for value in (
+        candidate.get("evidence"),
+        validation.get("evidence") if isinstance(validation, dict) else None,
+    ):
+        evidence.extend(
+            item
+            for item in (value if isinstance(value, list) else [value])
+            if isinstance(item, str) and item.strip()
+        )
+    for field in ("locations", "sourceEvidence", "codeEvidence", "evidence"):
+        items = candidate.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if location := _code_evidence_location(item):
+                locations.append(location)
+            if field != "locations":
+                evidence.extend(
+                    value
+                    for key in ("explanation", "code")
+                    if isinstance(value := item.get(key), str) and value.strip()
+                )
+    paths = saved.get("paths", [])
+    return (
+        ", ".join(dict.fromkeys(locations))
+        or ", ".join(path for path in paths if isinstance(path, str)),
+        "; ".join(dict.fromkeys(evidence)) or candidate.get("summary", ""),
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -861,7 +841,7 @@ def build_report_markdown(
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = _uses_deep_presentation(coverage, findings)
-    pending_candidates = unconfirmed_candidates(coverage, findings_document["findings"])
+    pending_candidates = unresolved_candidates(coverage, findings_document["findings"])
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
@@ -921,7 +901,7 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
-            f"| Saved unconfirmed candidates | {len(pending_candidates)} |",
+            f"| Unresolved candidates | {len(pending_candidates)} |",
             f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
@@ -1072,26 +1052,26 @@ def build_report_markdown(
         lines.extend(
             [
                 "",
-                "## Saved Unconfirmed Candidates",
+                "## Unresolved candidates",
                 "",
-                "These saved candidates still require validation. They are not confirmed findings.",
+                "These saved candidates have not resolved into a saved finding or a terminal disposition.",
                 "",
-                "| Candidate | Source worker | Title | Remaining validation |",
-                "| --- | --- | --- | --- |",
+                "| Candidate | Source worker | Title | Remaining review | Locations | Evidence |",
+                "| --- | --- | --- | --- | --- | --- |",
             ]
         )
         for candidate in pending_candidates:
             original = candidate.get("candidate", candidate.get("finding", {}))
-            title = (
-                original.get("title", original.get("summary"))
-                if isinstance(original, dict)
-                else None
-            )
+            original = original if isinstance(original, dict) else {}
+            title = original.get("title", original.get("summary"))
+            locations, evidence = _candidate_details(original, candidate)
             lines.append(
                 f"| {_cell(candidate['candidateId'])} "
                 f"| {_cell(candidate.get('sourceWorkerId'))} "
                 f"| {_cell(title or candidate.get('title', candidate['candidateId']))} "
-                f"| {_cell(candidate.get('reason'))} |"
+                f"| {_cell(candidate.get('reason'))} "
+                f"| {_cell(locations)} "
+                f"| {_cell(evidence)} |"
             )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
@@ -1126,7 +1106,17 @@ def build_report_markdown(
     open_questions = coverage.get("openQuestions", [])
     questions = list(open_questions) if isinstance(open_questions, list) else []
     deferred = coverage.get("deferred", [])
-    if isinstance(deferred, list):
+    follow_ups = (
+        [
+            item
+            for item in deferred
+            if isinstance(item, dict) and coverage_candidate_key(item) is None
+        ]
+        if isinstance(deferred, list)
+        else []
+    )
+    follow_ups.extend(pending_candidates)
+    if follow_ups:
         questions.extend(
             {
                 "question": item.get("reason", "Deferred review requires follow-up."),
@@ -1142,8 +1132,7 @@ def build_report_markdown(
                     )
                 ).strip(),
             }
-            for item in deferred
-            if isinstance(item, dict)
+            for item in follow_ups
         )
     if questions:
         lines.extend(["", "## Open Questions And Follow Up", ""])

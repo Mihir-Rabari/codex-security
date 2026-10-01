@@ -18,7 +18,7 @@ import {
 } from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
-  test("reports saved unconfirmed candidates separately from reportable findings", async () => {
+  test("reports saved unresolved candidates separately from reportable findings", async () => {
     const result = fakeResult(["high"]);
     result.coverage.completeness = "partial";
     result.coverage.deferred = [
@@ -40,10 +40,10 @@ describe("CLI workbench", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("FINDINGS  1 (1 high)");
-    expect(stderr.text()).toContain("UNCONFIRMED  1 saved candidate\n");
+    expect(stderr.text()).toContain("CANDIDATES  1 unresolved\n");
     expect(JSON.parse(stdout.text())).toMatchObject({
-      unconfirmedCandidateCount: 1,
-      unconfirmedCandidates: [{ candidateId: "candidate-1" }],
+      unresolvedCandidateCount: 1,
+      unresolvedCandidates: [{ candidateId: "candidate-1" }],
     });
   });
 

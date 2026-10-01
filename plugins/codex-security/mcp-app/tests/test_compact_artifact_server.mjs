@@ -315,6 +315,13 @@ async function testCompactDiffScanCompletion(bundle, runtimeLabel) {
     assert.equal(completed.findings.findings.length, 0);
     assert.equal(completed.coverage.completeness, "partial");
     assert.equal(completed.coverage.deferred.length, 1);
+    assert.ok(
+      completed.coverage.surfaces.some(
+        (surface) =>
+          surface.candidateId === pending.candidate_id &&
+          surface.disposition === "needs_follow_up",
+      ),
+    );
     assert.equal(
       completed.coverage.deferred[0].candidateId,
       pending.candidate_id,

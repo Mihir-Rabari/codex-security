@@ -12,43 +12,67 @@ import path from "node:path";
 import { test } from "node:test";
 import { build } from "esbuild";
 
-const bundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-diff-candidates.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { preserveUnconfirmedDiffCandidates } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+async function loadModule(file) {
+  const bundle = await build({
+    bundle: true,
+    entryPoints: [new URL(`../src/${file}`, import.meta.url).pathname],
+    format: "esm",
+    platform: "node",
+    write: false,
+  });
+  return import(
+    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+  );
+}
+
+const {
+  preserveDiffCandidateDecisions,
+  preserveUnresolvedDiffCandidates,
+  readDiffCandidates,
+} = await loadModule("artifact-diff-candidates.ts");
+const { recordCodexSecurityScanDraft } = await loadModule(
+  "artifact-scan-draft.ts",
 );
-const draftBundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { recordCodexSecurityScanDraft } = await import(
-  `data:text/javascript;base64,${Buffer.from(draftBundle.outputFiles[0].contents).toString("base64")}`
+const { recordCodexSecurityCandidateValidations } = await loadModule(
+  "artifact-validation-phase.ts",
 );
 
-const validationBundle = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  platform: "node",
-  write: false,
-});
-const { recordCodexSecurityCandidateValidations } = await import(
-  `data:text/javascript;base64,${Buffer.from(validationBundle.outputFiles[0].contents).toString("base64")}`
-);
+async function reconcileDiffCandidates(context, input) {
+  const candidates = await readDiffCandidates(context);
+  return preserveUnresolvedDiffCandidates(
+    preserveDiffCandidateDecisions(input, candidates),
+    candidates,
+  );
+}
+
+async function writeLedger(context, candidates) {
+  const directory = path.join(context.root, "artifacts", "02_discovery");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    path.join(directory, "candidate_ledger.jsonl"),
+    candidates.map((row) => JSON.stringify(row)).join("\n"),
+  );
+}
+
+async function readCoverage(context) {
+  return JSON.parse(
+    await readFile(path.join(context.root, "coverage.json"), "utf8"),
+  );
+}
+
+function finding(candidateId) {
+  return {
+    ruleId: "synthetic-review",
+    title: "Synthetic reviewed finding",
+    summary: "The synthetic review has reached a final finding.",
+    severity: { level: "low" },
+    confidence: { level: "high", rationale: "Synthetic review evidence." },
+    taxonomy: { category: "synthetic", cwe: [] },
+    locations: [{ path: "src/handler.ts", startLine: 1 }],
+    remediation: "Apply the synthetic remediation.",
+    provenance: { source: "local_plugin", candidateId },
+  };
+}
 
 function candidate(candidateId, validation, attackPath) {
   return {
@@ -80,14 +104,7 @@ function draft(deferred = []) {
 async function fixture(t, candidates) {
   const root = await mkdtemp(path.join(tmpdir(), "diff-candidates-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  if (candidates !== undefined) {
-    const discovery = path.join(root, "artifacts", "02_discovery");
-    await mkdir(discovery, { recursive: true });
-    await writeFile(
-      path.join(discovery, "candidate_ledger.jsonl"),
-      candidates.map((row) => JSON.stringify(row)).join("\n"),
-    );
-  }
+  if (candidates !== undefined) await writeLedger({ root }, candidates);
   return {
     root,
     repoRoot: root,
@@ -132,7 +149,7 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
   );
   const input = draft();
   const context = await fixture(t, candidates);
-  const result = await preserveUnconfirmedDiffCandidates(context, input);
+  const result = await reconcileDiffCandidates(context, input);
   const expected = candidates.filter((_, index) => outcomes[index][2]);
   assert.deepEqual(
     result.coverage.deferred.map((item) => item.candidateId),
@@ -144,7 +161,9 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
   );
   assert.equal(result.coverage.completeness, "partial");
   assert.deepEqual(
-    result.coverage.surfaces,
+    result.coverage.surfaces.filter(
+      (item) => item.disposition === "needs_follow_up",
+    ),
     expected.map((item) => ({
       candidateId: item.candidate_id,
       label: item.summary,
@@ -154,9 +173,19 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
       ).reason,
     })),
   );
+  assert.deepEqual(
+    result.coverage.surfaces
+      .filter((item) => item.disposition !== "needs_follow_up")
+      .map((item) => [item.candidateId, item.disposition]),
+    [
+      ["candidate-9", "rejected"],
+      ["candidate-10", "rejected"],
+      ["candidate-11", "not_applicable"],
+    ],
+  );
   assert.deepEqual(input, draft());
   assert.deepEqual(
-    await preserveUnconfirmedDiffCandidates(context, result),
+    await reconcileDiffCandidates(context, result),
     result,
     "Repeated checkpoints must not append the same pending candidates again.",
   );
@@ -172,7 +201,7 @@ test("diff reconciliation enriches pending records and retains general coverage 
     candidate("ignored", "reportable", "ignore"),
   ]);
   const general = { reason: "A source directory still needs review." };
-  const result = await preserveUnconfirmedDiffCandidates(
+  const result = await reconcileDiffCandidates(
     context,
     draft([
       { id: "pending", reason: "Keep the original follow-up question." },
@@ -189,7 +218,7 @@ test("diff reconciliation enriches pending records and retains general coverage 
     },
     general,
   ]);
-  const added = await preserveUnconfirmedDiffCandidates(context, draft());
+  const added = await reconcileDiffCandidates(context, draft());
   assert.equal(
     added.coverage.deferred[0].reason,
     pending.attack_path.proof_gap,
@@ -208,10 +237,7 @@ test("final findings and explicit candidate resolutions are not reopened", async
     { candidateId: "rejected", disposition: "rejected" },
     { candidateId: "not-applicable", disposition: "not_applicable" },
   ];
-  assert.deepEqual(
-    await preserveUnconfirmedDiffCandidates(context, input),
-    input,
-  );
+  assert.deepEqual(await reconcileDiffCandidates(context, input), input);
 });
 
 test("pending diff candidates retain their authored follow-up surfaces", async (t) => {
@@ -226,7 +252,7 @@ test("pending diff candidates retain their authored follow-up surfaces", async (
       notes: "Keep the analyst's coverage evidence.",
     },
   ];
-  const result = await preserveUnconfirmedDiffCandidates(context, input);
+  const result = await reconcileDiffCandidates(context, input);
   assert.deepEqual(result.coverage.surfaces, input.coverage.surfaces);
   assert.equal(result.coverage.deferred.length, 1);
 });
@@ -254,7 +280,7 @@ for (const mapping of ["candidateId", "surfaceIds"]) {
         notes: "The shared surface contains a retained finding.",
       },
     ];
-    const result = await preserveUnconfirmedDiffCandidates(context, input);
+    const result = await reconcileDiffCandidates(context, input);
     assert.deepEqual(result.coverage.surfaces, input.coverage.surfaces);
     assert.equal(result.coverage.deferred.length, 1);
     assert.equal(result.coverage.completeness, "partial");
@@ -264,12 +290,9 @@ for (const mapping of ["candidateId", "surfaceIds"]) {
 test("legacy diff drafts without a ledger and other modes retain their behavior", async (t) => {
   const context = await fixture(t);
   const input = draft();
-  assert.equal(await preserveUnconfirmedDiffCandidates(context, input), input);
+  assert.equal(await reconcileDiffCandidates(context, input), input);
   assert.equal(
-    await preserveUnconfirmedDiffCandidates(
-      { ...context, mode: "standard" },
-      input,
-    ),
+    await reconcileDiffCandidates({ ...context, mode: "standard" }, input),
     input,
   );
 });
@@ -293,9 +316,7 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
       });
     }
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const savedCheckpoint = JSON.parse(
-      await readFile(path.join(context.root, "coverage.json"), "utf8"),
-    );
+    const savedCheckpoint = await readCoverage(context);
     assert.equal(savedCheckpoint.completeness, "partial");
     assert.ok(
       savedCheckpoint.deferred.some(
@@ -310,22 +331,14 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
       ),
     );
 
-    await writeFile(
-      path.join(
-        context.root,
-        "artifacts",
-        "02_discovery",
-        "candidate_ledger.jsonl",
-      ),
-      JSON.stringify({ ...pending, validation: { disposition: "suppressed" } }),
-    );
+    await writeLedger(context, [
+      { ...pending, validation: { disposition: "suppressed" } },
+    ]);
     const finalDraft = { ...draft(), complete: true };
     if (remaining === "explicit partial")
       finalDraft.coverage.completeness = "partial";
     await recordCodexSecurityScanDraft(context, finalDraft);
-    const saved = JSON.parse(
-      await readFile(path.join(context.root, "coverage.json"), "utf8"),
-    );
+    const saved = await readCoverage(context);
     assert.equal(
       saved.completeness,
       remaining === "none" ? "complete" : "partial",
@@ -335,11 +348,15 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
       false,
     );
     assert.equal(
-      saved.surfaces.some((item) => item.candidateId === pending.candidate_id),
-      false,
+      saved.surfaces.some(
+        (item) =>
+          item.candidateId === pending.candidate_id &&
+          item.disposition === "rejected",
+      ),
+      true,
     );
     if (remaining === "deferred") assert.equal(saved.deferred.length, 1);
-    if (remaining === "surface") assert.equal(saved.surfaces.length, 1);
+    if (remaining === "surface") assert.equal(saved.surfaces.length, 2);
   });
 }
 
@@ -397,36 +414,22 @@ for (const remaining of [
       });
     }
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const ledger = path.join(
-      context.root,
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    );
     const otherDeferred = {
       candidateId: other.candidate_id,
       reason: "A second candidate still needs validation.",
       surfaceIds: [linkedSurface.id],
     };
     if (remaining === "shared checkpoint") {
-      await writeFile(
-        ledger,
-        [pending, other].map((row) => JSON.stringify(row)).join("\n"),
-      );
+      await writeLedger(context, [pending, other]);
       const sharedCheckpoint = { ...draft([otherDeferred]), complete: false };
       sharedCheckpoint.coverage.completeness = "partial";
       await recordCodexSecurityScanDraft(context, sharedCheckpoint);
     }
     const shared = remaining.startsWith("shared");
-    await writeFile(
-      ledger,
-      [
-        { ...pending, validation: { disposition: "suppressed" } },
-        ...(shared ? [other] : []),
-      ]
-        .map((row) => JSON.stringify(row))
-        .join("\n"),
-    );
+    await writeLedger(context, [
+      { ...pending, validation: { disposition: "suppressed" } },
+      ...(shared ? [other] : []),
+    ]);
     const finalDraft = {
       ...draft(remaining === "shared current" ? [otherDeferred] : []),
       complete: true,
@@ -441,9 +444,7 @@ for (const remaining of [
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, finalDraft);
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      );
+      const saved = await readCoverage(context);
       assert.equal(
         saved.completeness,
         remaining === "none" ? "complete" : "partial",
@@ -455,7 +456,9 @@ for (const remaining of [
         false,
       );
       assert.deepEqual(
-        saved.surfaces.map((surface) => surface.id),
+        saved.surfaces
+          .filter((surface) => surface.disposition === "needs_follow_up")
+          .map((surface) => surface.id),
         remaining === "generic gap"
           ? ["generic-boundary"]
           : shared || remaining === "current follow-up"
@@ -471,7 +474,8 @@ for (const remaining of [
       if (remaining === "generic gap") assert.equal(saved.deferred.length, 1);
       if (remaining === "current follow-up") {
         assert.equal(
-          saved.surfaces[0].notes,
+          saved.surfaces.find((surface) => surface.id === linkedSurface.id)
+            .notes,
           finalDraft.coverage.surfaces[0].notes,
         );
       }
@@ -504,20 +508,7 @@ for (const resolution of ["finding", "exclusion"]) {
 
     const resolved = { ...draft(), complete: false };
     if (resolution === "finding") {
-      resolved.findings.push({
-        ruleId: "synthetic-review",
-        title: "Synthetic reviewed finding",
-        summary: "The synthetic review has reached a final finding.",
-        severity: { level: "low" },
-        confidence: { level: "high", rationale: "Synthetic review evidence." },
-        taxonomy: { category: "synthetic", cwe: [] },
-        locations: [{ path: "src/handler.ts", startLine: 1 }],
-        remediation: "Apply the synthetic remediation.",
-        provenance: {
-          source: "local_plugin",
-          candidateId: linked.candidate_id,
-        },
-      });
+      resolved.findings.push(finding(linked.candidate_id));
     } else {
       resolved.coverage.explicitExclusions.push({
         candidateId: linked.candidate_id,
@@ -527,28 +518,22 @@ for (const resolution of ["finding", "exclusion"]) {
       });
     }
     await recordCodexSecurityScanDraft(context, resolved);
-    await writeFile(
-      path.join(
-        context.root,
-        "artifacts",
-        "02_discovery",
-        "candidate_ledger.jsonl",
-      ),
-      [{ ...automatic, validation: { disposition: "suppressed" } }, linked]
-        .map((row) => JSON.stringify(row))
-        .join("\n"),
-    );
+    await writeLedger(context, [
+      { ...automatic, validation: { disposition: "suppressed" } },
+      linked,
+    ]);
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, {
         ...resolved,
         complete: true,
       });
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      );
+      const saved = await readCoverage(context);
       assert.equal(saved.completeness, "complete");
       assert.deepEqual(saved.deferred, []);
-      assert.deepEqual(saved.surfaces, []);
+      assert.deepEqual(
+        saved.surfaces.map((item) => [item.candidateId, item.disposition]),
+        [[automatic.candidate_id, "rejected"]],
+      );
       if (resolution === "exclusion") {
         assert.equal(
           saved.explicitExclusions[0].candidateId,
@@ -590,17 +575,7 @@ for (const resolution of ["finding", "exclusion"]) {
     await recordCodexSecurityScanDraft(context, checkpoint);
     const finalDraft = { ...draft(), complete: true };
     if (resolution === "finding") {
-      finalDraft.findings.push({
-        ruleId: "synthetic-review",
-        title: "Synthetic reviewed finding",
-        summary: "The synthetic review has reached a final finding.",
-        severity: { level: "low" },
-        confidence: { level: "high", rationale: "Synthetic review evidence." },
-        taxonomy: { category: "synthetic", cwe: [] },
-        locations: [{ path: "src/handler.ts", startLine: 1 }],
-        remediation: "Apply the synthetic remediation.",
-        provenance: { source: "local_plugin", candidateId: "resolved-review" },
-      });
+      finalDraft.findings.push(finding("resolved-review"));
     } else {
       finalDraft.coverage.explicitExclusions.push({
         candidateId: "resolved-review",
@@ -615,9 +590,7 @@ for (const resolution of ["finding", "exclusion"]) {
         ...draft(),
         complete: true,
       });
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      );
+      const saved = await readCoverage(context);
       assert.equal(saved.completeness, "complete");
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(saved.surfaces, []);
@@ -653,9 +626,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     });
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, finalDraft);
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      );
+      const saved = await readCoverage(context);
       assert.equal(saved.completeness, "partial");
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(saved.surfaces, [unrelated]);
@@ -717,9 +688,7 @@ for (const mapping of ["surfaceIds", "candidateId"]) {
       if (currentSurface) finalDraft.coverage.surfaces.push(expectedSurface);
       for (let attempt = 0; attempt < 2; attempt++) {
         await recordCodexSecurityScanDraft(context, finalDraft);
-        const saved = JSON.parse(
-          await readFile(path.join(context.root, "coverage.json"), "utf8"),
-        );
+        const saved = await readCoverage(context);
         assert.equal(saved.completeness, "partial");
         assert.deepEqual(
           saved.deferred,
@@ -750,15 +719,14 @@ for (const disposition of ["rejected", "not_applicable"]) {
       reason: "The synthetic candidate was resolved during source review.",
     });
     await recordCodexSecurityScanDraft(context, finalDraft);
-    const coveragePath = path.join(context.root, "coverage.json");
-    const resolved = JSON.parse(await readFile(coveragePath, "utf8"));
+    const resolved = await readCoverage(context);
     assert.equal(resolved.completeness, "complete");
     assert.deepEqual(resolved.deferred, []);
     assert.deepEqual(resolved.explicitExclusions[0].candidate, pending);
     assert.equal(resolved.explicitExclusions[0].disposition, disposition);
 
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-    const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+    const retained = await readCoverage(context);
     assert.equal(retained.completeness, "complete");
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.explicitExclusions, resolved.explicitExclusions);
@@ -816,9 +784,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     followup.coverage.explicitExclusions.push(currentExclusion);
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, followup);
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      );
+      const saved = await readCoverage(context);
       assert.deepEqual(
         saved.deferred.map((item) => item.candidateId),
         [pending.candidate_id],
@@ -852,15 +818,9 @@ for (const disposition of ["rejected", "not_applicable"]) {
       disposition: "needs_follow_up",
     });
     await recordCodexSecurityScanDraft(context, checkpoint);
-    await writeFile(
-      path.join(
-        context.root,
-        "artifacts",
-        "02_discovery",
-        "candidate_ledger.jsonl",
-      ),
-      JSON.stringify({ ...pending, validation: { disposition: "suppressed" } }),
-    );
+    await writeLedger(context, [
+      { ...pending, validation: { disposition: "suppressed" } },
+    ]);
     const finalDraft = { ...draft(), complete: true };
     finalDraft.coverage.surfaces.push({
       candidateId: pending.candidate_id,
@@ -869,8 +829,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
       notes: "Source review established the candidate's terminal disposition.",
     });
     await recordCodexSecurityScanDraft(context, finalDraft);
-    const coveragePath = path.join(context.root, "coverage.json");
-    const resolved = JSON.parse(await readFile(coveragePath, "utf8"));
+    const resolved = await readCoverage(context);
     assert.equal(resolved.completeness, "complete");
     assert.deepEqual(resolved.deferred, []);
     assert.equal(resolved.surfaces.length, 1);
@@ -878,10 +837,56 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.deepEqual(resolved.surfaces[0].candidate, pending);
 
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-    const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+    const retained = await readCoverage(context);
     assert.equal(retained.completeness, "complete");
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.surfaces, resolved.surfaces);
+  });
+}
+
+for (const [validation, attackPath, disposition] of [
+  ["suppressed", undefined, "rejected"],
+  ["not_applicable", undefined, "not_applicable"],
+  ["reportable", "ignore", "rejected"],
+]) {
+  test(`terminal ${validation}/${attackPath ?? "unreviewed"} ledger decisions demote saved findings`, async (t) => {
+    const pending = candidate("resolved-finding", "reportable", "reportable");
+    const context = await fixture(t, [pending]);
+    const earlier = {
+      ...draft(),
+      complete: true,
+      findings: [finding(pending.candidate_id)],
+    };
+    await recordCodexSecurityScanDraft(context, earlier);
+    const terminal = candidate(pending.candidate_id, validation, attackPath);
+    const reason = "Synthetic source evidence resolved this candidate.";
+    terminal.validation.counterevidence_or_proof_gap = reason;
+    if (terminal.attack_path) terminal.attack_path.counterevidence = reason;
+    await writeLedger(context, [terminal]);
+    for (const complete of [false, true, true]) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete,
+      });
+      const saved = await readCoverage(context);
+      assert.equal(saved.completeness, "complete");
+      assert.deepEqual(saved.deferred, []);
+      assert.equal(saved.surfaces.length, 1);
+      assert.equal(saved.surfaces[0].candidateId, pending.candidate_id);
+      assert.equal(saved.surfaces[0].disposition, disposition);
+      assert.equal(saved.surfaces[0].notes, reason);
+      assert.deepEqual(saved.surfaces[0].candidate, terminal);
+      assert.equal(
+        saved.surfaces[0].finding.provenance.candidateId,
+        pending.candidate_id,
+      );
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(path.join(context.root, "findings.json"), "utf8"),
+        ).findings,
+        [],
+      );
+    }
   });
 }
 
@@ -889,21 +894,14 @@ test("reportable diff ledger rows remain pending until a finding is saved", asyn
   const pending = candidate("reportable-review");
   const context = await fixture(t, [pending]);
   await recordCodexSecurityScanDraft(context, { ...draft(), complete: false });
-  const ledgerPath = path.join(
-    context.root,
-    "artifacts",
-    "02_discovery",
-    "candidate_ledger.jsonl",
-  );
   const reportable = candidate(
     pending.candidate_id,
     "reportable",
     "reportable",
   );
-  await writeFile(ledgerPath, JSON.stringify(reportable));
+  await writeLedger(context, [reportable]);
   await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-  const coveragePath = path.join(context.root, "coverage.json");
-  const missingFinding = JSON.parse(await readFile(coveragePath, "utf8"));
+  const missingFinding = await readCoverage(context);
   assert.equal(missingFinding.completeness, "partial");
   assert.equal(missingFinding.deferred.length, 1);
   assert.equal(missingFinding.deferred[0].candidateId, pending.candidate_id);
@@ -911,23 +909,13 @@ test("reportable diff ledger rows remain pending until a finding is saved", asyn
   assert.match(missingFinding.deferred[0].reason, /no saved finding/u);
 
   const finalDraft = { ...draft(), complete: true };
-  finalDraft.findings.push({
-    ruleId: "synthetic-review",
-    title: "Synthetic reviewed finding",
-    summary: "The synthetic review has reached a final finding.",
-    severity: { level: "low" },
-    confidence: { level: "high", rationale: "Synthetic review evidence." },
-    taxonomy: { category: "synthetic", cwe: [] },
-    locations: [{ path: "src/handler.ts", startLine: 1 }],
-    remediation: "Apply the synthetic remediation.",
-    provenance: { source: "local_plugin", candidateId: pending.candidate_id },
-  });
+  finalDraft.findings.push(finding(pending.candidate_id));
   await recordCodexSecurityScanDraft(context, finalDraft);
-  const saved = JSON.parse(await readFile(coveragePath, "utf8"));
+  const saved = await readCoverage(context);
   assert.equal(saved.completeness, "complete");
   assert.deepEqual(saved.deferred, []);
   await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-  const retained = JSON.parse(await readFile(coveragePath, "utf8"));
+  const retained = await readCoverage(context);
   assert.equal(retained.completeness, "complete");
   assert.deepEqual(retained.deferred, []);
   const findings = JSON.parse(
@@ -941,14 +929,21 @@ test("reportable diff ledger rows remain pending until a finding is saved", asyn
 });
 
 for (const authored of [false, true]) {
-  test(`diff checkpoints refresh ledger evidence and ${authored ? "retain authored" : "update generated"} reasons`, async (t) => {
+  test(`diff checkpoints refresh ledger evidence and ${authored ? "retain authored" : "update generated"} coverage`, async (t) => {
     const pending = candidate("updated-review");
     const context = await fixture(t, [pending]);
     const checkpoint = { ...draft(), complete: false };
     const authoredReason = "Retain the analyst's specific follow-up request.";
     const authoredNote = "Keep the analyst's candidate annotation.";
+    const authoredSurface = {
+      candidateId: pending.candidate_id,
+      label: "Keep the analyst's review label.",
+      disposition: "needs_follow_up",
+      notes: "Keep the analyst's coverage annotation.",
+    };
     if (authored) {
       checkpoint.coverage.completeness = "partial";
+      checkpoint.coverage.surfaces.push(authoredSurface);
       checkpoint.coverage.deferred.push({
         candidateId: pending.candidate_id,
         reason: authoredReason,
@@ -957,15 +952,9 @@ for (const authored of [false, true]) {
       });
     }
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const ledgerPath = path.join(
-      context.root,
-      "artifacts",
-      "02_discovery",
-      "candidate_ledger.jsonl",
-    );
-    const coveragePath = path.join(context.root, "coverage.json");
     const validation = {
       ...pending,
+      summary: "Updated candidate summary after validation.",
       evidence: "Updated source evidence after validation.",
       validation: {
         disposition: "deferred",
@@ -975,6 +964,7 @@ for (const authored of [false, true]) {
     };
     const attackPath = {
       ...validation,
+      summary: "Updated candidate summary after attack-path review.",
       evidence: "Updated source evidence after attack-path review.",
       attack_path: {
         decision: "deferred",
@@ -982,12 +972,12 @@ for (const authored of [false, true]) {
       },
     };
     for (const reviewed of [validation, attackPath]) {
-      await writeFile(ledgerPath, JSON.stringify(reviewed));
+      await writeLedger(context, [reviewed]);
       await recordCodexSecurityScanDraft(context, {
         ...draft(),
         complete: true,
       });
-      const saved = JSON.parse(await readFile(coveragePath, "utf8"));
+      const saved = await readCoverage(context);
       assert.equal(saved.completeness, "partial");
       assert.equal(saved.deferred.length, 1);
       const item = saved.deferred[0];
@@ -1001,6 +991,14 @@ for (const authored of [false, true]) {
           ? authoredReason
           : (reviewed.attack_path?.proof_gap ??
               reviewed.validation.counterevidence_or_proof_gap),
+      );
+      assert.equal(
+        saved.surfaces[0].label,
+        authored ? authoredSurface.label : reviewed.summary,
+      );
+      assert.equal(
+        saved.surfaces[0].notes,
+        authored ? authoredSurface.notes : item.reason,
       );
       if (authored)
         assert.equal(item.notes, checkpoint.coverage.deferred[0].notes);
@@ -1033,9 +1031,7 @@ for (const uncertainty of ["  A runtime check is still required.\n", " \t "]) {
     });
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
 
-    const saved = JSON.parse(
-      await readFile(path.join(context.root, "coverage.json"), "utf8"),
-    );
+    const saved = await readCoverage(context);
     const expectedReason = uncertainty.trim()
       ? uncertainty
       : `Candidate review is incomplete: ${pending.summary}`;

@@ -107,8 +107,50 @@ def saved_diff_candidate(
     )
     run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert scan["progress"]["candidates"]["unconfirmed"] == int(pending)
+    assert scan["progress"]["candidates"]["unresolved"] == int(pending)
     return state_dir, scan_dir, scan_id, ledger, checkpoint
+
+
+@pytest.mark.parametrize(
+    ("validation", "attack_path", "disposition"),
+    [
+        ("suppressed", None, "rejected"),
+        ("not_applicable", None, "not_applicable"),
+        ("reportable", "ignore", "rejected"),
+        ("suppressed", "deferred", None),
+        ("not_applicable", "deferred", None),
+        ("deferred", "ignore", None),
+        ("reportable", "reportable", None),
+    ],
+)
+def test_diff_candidate_decision_precedence(
+    workbench_api, validation: str, attack_path: str | None, disposition: str | None
+) -> None:
+    candidate = {
+        "candidate_id": "candidate-one",
+        "summary": "Saved candidate review",
+        "validation": {
+            "disposition": validation,
+            "counterevidence_or_proof_gap": "Validation evidence.",
+        },
+    }
+    if attack_path:
+        candidate["attack_path"] = {
+            "decision": attack_path,
+            "counterevidence": "Path counterevidence.",
+            "severity_rationale": "Path severity rationale.",
+        }
+
+    decision = workbench_api["saved_results"]._diff_candidate_decision(candidate)
+
+    if disposition is None:
+        assert decision is None
+    else:
+        assert decision["disposition"] == disposition
+        assert decision["candidate"] == candidate
+        assert decision["notes"] == (
+            "Path counterevidence." if attack_path == "ignore" else "Validation evidence."
+        )
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
@@ -118,9 +160,6 @@ def saved_diff_candidate(
         ("suppressed", None, 0, "rejected"),
         ("not_applicable", None, 0, "not_applicable"),
         ("reportable", "ignore", 0, "rejected"),
-        ("suppressed", "deferred", 1, "needs_follow_up"),
-        ("not_applicable", "deferred", 1, "needs_follow_up"),
-        ("deferred", "ignore", 1, "needs_follow_up"),
         ("reportable", "reportable", 1, "needs_follow_up"),
     ],
 )
@@ -149,7 +188,7 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
 
     def assert_retained() -> None:
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-        assert scan["progress"]["candidates"]["unconfirmed"] == expected_count
+        assert scan["progress"]["candidates"]["unresolved"] == expected_count
         coverage = json.loads((scan_dir / "coverage.json").read_text())
         candidate_surfaces = [
             item
@@ -235,7 +274,7 @@ def test_stopped_diff_retries_saved_decisions_after_publication_failure(
     ledger.unlink()
     run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert scan["progress"]["candidates"]["unconfirmed"] == 0
+    assert scan["progress"]["candidates"]["unresolved"] == 0
     assert not any("publication needs follow-up" in warning for warning in scan["warnings"])
 
 
@@ -266,7 +305,7 @@ def test_stopped_diff_preserves_pending_evidence_when_ledger_is_unusable(
     ledger.write_text("{incomplete" if invalid == "json" else json.dumps(candidate) + "\n")
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert scan["progress"]["candidates"]["unconfirmed"] == 1
+    assert scan["progress"]["candidates"]["unresolved"] == 1
     assert any(
         "Could not reconcile the saved Diff candidates" in warning for warning in scan["warnings"]
     )
@@ -278,7 +317,7 @@ def test_stopped_diff_without_saved_candidates_does_not_consult_ledger(tmp_path:
     ledger.write_text("{unrelated incomplete ledger")
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert scan["progress"]["candidates"]["unconfirmed"] == 0
+    assert scan["progress"]["candidates"]["unresolved"] == 0
     assert not any("Diff candidates" in warning for warning in scan["warnings"])
     assert not any(
         json.loads(path.read_text())["coverage"].get("stoppedDiffCandidateDecisions")
@@ -313,7 +352,7 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
     )
 
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert stopped["progress"]["candidates"]["unconfirmed"] == 0
+    assert stopped["progress"]["candidates"]["unresolved"] == 0
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert any(
         imported_surface in json.loads((scan_dir / path).read_text())["coverage"]["surfaces"]
@@ -327,7 +366,8 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
 @pytest.mark.parametrize("source", ["parent", "checkpoint"])
 @pytest.mark.parametrize(
-    "scenario", ["shared", "direct-only", "all-resolved", "linked-only", "other-owner"]
+    "scenario",
+    ["shared", "direct-only", "all-resolved", "linked-only", "linked-all-resolved", "other-owner"],
 )
 def test_stopped_diff_preserves_shared_follow_up_evidence(
     tmp_path: Path, termination: str, source: str, scenario: str
@@ -345,7 +385,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
         "notes": "Both candidates depend on this saved route evidence.",
         "receiptRefs": ["artifacts/shared-evidence.txt"],
     }
-    if scenario == "linked-only":
+    if scenario in {"linked-only", "linked-all-resolved"}:
         shared.pop("candidateId")
     elif scenario == "other-owner":
         shared["sourceWorkerId"] = "different-worker"
@@ -380,7 +420,9 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
             (scan_dir / name).unlink()
     first["validation"] = {"disposition": "suppressed"}
     second["validation"] = {
-        "disposition": "suppressed" if scenario == "all-resolved" else "deferred"
+        "disposition": "suppressed"
+        if scenario in {"all-resolved", "linked-all-resolved"}
+        else "deferred"
     }
     ledger.write_text("\n".join(json.dumps(candidate) for candidate in (first, second)) + "\n")
     arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
@@ -388,11 +430,13 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
 
     def assert_retained() -> None:
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-        assert scan["progress"]["candidates"]["unconfirmed"] == int(scenario != "all-resolved")
+        assert scan["progress"]["candidates"]["unresolved"] == int(
+            scenario not in {"all-resolved", "linked-all-resolved"}
+        )
         coverage = json.loads((scan_dir / "coverage.json").read_text())
         pending = [row for row in coverage["deferred"] if row.get("candidateId")]
         assert [row["candidateId"] for row in pending] == (
-            [] if scenario == "all-resolved" else [second["candidate_id"]]
+            [] if scenario in {"all-resolved", "linked-all-resolved"} else [second["candidate_id"]]
         )
         retained = [row for row in coverage["surfaces"] if row["id"] == shared["id"]]
         if scenario in {"shared", "linked-only", "other-owner"}:

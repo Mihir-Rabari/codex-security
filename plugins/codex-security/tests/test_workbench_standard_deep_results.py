@@ -86,9 +86,9 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
         ]
         == worker_id
     )
-    assert stopped["progress"]["candidates"]["unconfirmed"] == 1
+    assert stopped["progress"]["candidates"]["unresolved"] == 1
     history = run_workbench(state_dir, "list-scans")["scans"]
-    assert history[0]["progress"]["candidates"]["unconfirmed"] == 1
+    assert history[0]["progress"]["candidates"]["unresolved"] == 1
     assert result_path.read_text() == "{incomplete"
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == termination
@@ -1560,7 +1560,7 @@ def test_stopped_reducer_candidates_without_coverage_preserve_scope(
         connection.execute("UPDATE scans SET scope = ? WHERE id = ?", (scope, scan_id))
     reduced = json.loads(reducer_path.read_text())
     reduced.pop("coverage")
-    reduced["unconfirmedCandidates"] = [
+    reduced["unresolvedCandidates"] = [
         {
             "candidateId": "pending-reducer",
             "sourceWorkerId": worker_id,
@@ -1582,7 +1582,7 @@ def test_stopped_reducer_candidates_without_coverage_preserve_scope(
     )
 
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert stopped["progress"]["candidates"]["unconfirmed"] == 1
+    assert stopped["progress"]["candidates"]["unresolved"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["inventoryStrategy"] == ("repository" if scope == "." else "scoped_path")
     assert coverage["includePaths"] == [scope]
@@ -1594,7 +1594,7 @@ def test_stopped_reducer_candidates_without_coverage_preserve_scope(
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["sealedAt"]
     assert manifest["scan"]["status"] == "failed"
-    assert "| Saved unconfirmed candidates | 1 |" in (scan_dir / "report.md").read_text()
+    assert "| Unresolved candidates | 1 |" in (scan_dir / "report.md").read_text()
     assert reducer_path.read_bytes() == reducer_bytes
 
 
@@ -1898,7 +1898,7 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(
     reduced["findings"][0]["summary"] = "The reducer retained stronger merged evidence."
     reduced["coverage"]["surfaces"][0]["notes"] = "Reducer-validated merged evidence."
     if pending_candidate:
-        reduced["unconfirmedCandidates"] = [
+        reduced["unresolvedCandidates"] = [
             {
                 "candidateId": "pending-reducer",
                 "sourceWorkerId": worker_id,
@@ -1935,7 +1935,7 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(
         assert len(pending) == 1
         assert pending[0]["candidateId"] == "pending-reducer"
         assert pending[0]["sourceWorkerId"] == worker_id
-        assert "| Saved unconfirmed candidates | 1 |" in (scan_dir / "report.md").read_text()
+        assert "| Unresolved candidates | 1 |" in (scan_dir / "report.md").read_text()
 
 
 @pytest.mark.parametrize("resolve_first", [False, True])
@@ -1990,7 +1990,7 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
     expected_owners = {workers[1][0]} if resolve_first else {worker[0] for worker in workers}
     assert {item["sourceWorkerId"] for item in pending} == expected_owners
-    assert stopped["progress"]["candidates"]["unconfirmed"] == len(expected_owners)
+    assert stopped["progress"]["candidates"]["unresolved"] == len(expected_owners)
 
 
 @pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])

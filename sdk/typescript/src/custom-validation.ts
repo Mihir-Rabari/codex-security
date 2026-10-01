@@ -11,6 +11,7 @@ import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { normalizePersistedFindings, requireScanFile } from "./contract.js";
 import { IncompleteScanError, safeErrorMessage } from "./errors.js";
+import { findingCandidateIds } from "./candidates.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
@@ -59,18 +60,6 @@ const DOCUMENTS = [
   "findings.json",
   "coverage.json",
 ] as const;
-
-function candidateIdentities(finding: Finding): string[] {
-  return [
-    finding.provenance["candidateId"],
-    finding.extensions?.candidateId,
-    finding.extensions?.reportId,
-    finding.extensions?.ledgerRowId,
-  ].filter(
-    (value): value is string =>
-      typeof value === "string" && value.trim() !== "",
-  );
-}
 
 interface Schema {
   $id?: string;
@@ -389,7 +378,7 @@ export async function runCustomValidation(options: {
   const reported: Finding[] = [];
   const candidateIdCounts = new Map<string, number>();
   for (const finding of findings) {
-    const candidateId = candidateIdentities(finding)[0];
+    const candidateId = findingCandidateIds(finding)[0];
     if (candidateId !== undefined)
       candidateIdCounts.set(
         candidateId,
@@ -397,7 +386,7 @@ export async function runCustomValidation(options: {
       );
   }
   const reservedIds = new Set([
-    ...findings.flatMap(candidateIdentities),
+    ...findings.flatMap(findingCandidateIds),
     ...[
       ...coverage.deferred,
       ...coverage.surfaces,
@@ -423,7 +412,7 @@ export async function runCustomValidation(options: {
       let suffix = 2;
       while (reservedIds.has(deferredId)) deferredId = `${baseId}-${suffix++}`;
       reservedIds.add(deferredId);
-      const candidateId = candidateIdentities(candidate.finding)[0];
+      const candidateId = findingCandidateIds(candidate.finding)[0];
       coverage.deferred.push({
         id: deferredId,
         candidateId:

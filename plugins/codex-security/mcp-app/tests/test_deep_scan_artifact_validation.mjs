@@ -43,14 +43,14 @@ try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
-  await testUnconfirmedCandidates(root);
+  await testUnresolvedCandidates(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
 
-async function testUnconfirmedCandidates(root) {
+async function testUnresolvedCandidates(root) {
   const candidate = {
     candidateId: "candidate-review",
     reason: "Validation remains pending.",
@@ -86,7 +86,7 @@ async function testUnconfirmedCandidates(root) {
     },
   });
   assert.deepEqual(
-    discoveryReductionInput(worker, "worker-1").unconfirmedCandidates,
+    discoveryReductionInput(worker, "worker-1").unresolvedCandidates,
     [{ ...candidate, sourceWorkerId: "worker-1" }],
   );
   const pendingWorker = draft([], {
@@ -103,7 +103,7 @@ async function testUnconfirmedCandidates(root) {
     null,
   );
   assert.deepEqual(
-    aggregate.unconfirmedCandidates,
+    aggregate.unresolvedCandidates,
     [
       { ...candidate, sourceWorkerId: "worker-1" },
       { ...candidate, sourceWorkerId: "worker-2" },
@@ -117,7 +117,7 @@ async function testUnconfirmedCandidates(root) {
     parseDeepReduction(aggregate, true),
   );
   assert.equal(
-    resumed.unconfirmedCandidates.length,
+    resumed.unresolvedCandidates.length,
     2,
     "replaying one logical worker does not increase the count",
   );
@@ -131,13 +131,13 @@ async function testUnconfirmedCandidates(root) {
     ],
     resumed,
   );
-  assert.deepEqual(resolved.unconfirmedCandidates, [
+  assert.deepEqual(resolved.unresolvedCandidates, [
     { ...candidate, sourceWorkerId: "worker-2" },
   ]);
   const published = deepReductionScanDraft(resolved);
   assert.equal(published.coverage.completeness, "partial");
-  assert.deepEqual(published.coverage.deferred, resolved.unconfirmedCandidates);
-  assert.equal(Object.hasOwn(published, "unconfirmedCandidates"), false);
+  assert.deepEqual(published.coverage.deferred, resolved.unresolvedCandidates);
+  assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
 
   const artifacts = await createLayout(path.join(root, "pending-candidates"));
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
@@ -149,8 +149,8 @@ async function testUnconfirmedCandidates(root) {
     scanId,
   );
   assert.deepEqual(
-    restored.result.unconfirmedCandidates,
-    resolved.unconfirmedCandidates,
+    restored.result.unresolvedCandidates,
+    resolved.unresolvedCandidates,
     "coordinator recovery restores candidate state from the persisted aggregate",
   );
 }

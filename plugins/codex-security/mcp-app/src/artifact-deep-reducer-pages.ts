@@ -112,7 +112,7 @@ function createDocuments(sources: DeepReductionSources): ReducerDocuments {
 }
 
 function semanticReduction(input: DeepReductionInput): DeepReductionInput {
-  const { unconfirmedCandidates: _pending, ...semantic } = input;
+  const { unresolvedCandidates: _pending, ...semantic } = input;
   return semantic;
 }
 

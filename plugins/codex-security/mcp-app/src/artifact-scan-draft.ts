@@ -4,11 +4,18 @@ import { dirname, join, sep } from "node:path";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
+import {
+  findingCandidateId,
+  isTerminalCandidateDecision,
+  resolvedCandidateIds as collectResolvedCandidateIds,
+} from "./artifact-candidates.js";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
-  preserveUnconfirmedDiffCandidates,
-  resolvedDiffCandidateIds,
+  preserveDiffCandidateDecisions,
+  preserveUnresolvedDiffCandidates,
+  readDiffCandidates,
+  type DiffCandidates,
 } from "./artifact-diff-candidates.js";
 import {
   artifactDestination,
@@ -88,10 +95,13 @@ export async function recordCodexSecurityScanDraft(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
-  const checkpoint = await preserveUnconfirmedDiffCandidates(context, parsed);
-  if (!publishDraft) await saveScanDraftCheckpoint(context, checkpoint);
-
   for (;;) {
+    const candidates = await readDiffCandidates(context);
+    const checkpoint = preserveUnresolvedDiffCandidates(
+      preserveDiffCandidateDecisions(parsed, candidates),
+      candidates,
+    );
+    if (!publishDraft) await saveScanDraftCheckpoint(context, checkpoint);
     signal?.throwIfAborted();
     // Deep results are ready to save. Do not merge older drafts or
     // checkpoints into them.
@@ -103,10 +113,11 @@ export async function recordCodexSecurityScanDraft(
             parsed,
             false,
             scanDraftCheckpointName(checkpoint),
+            candidates,
           );
-    const reconciled = await preserveUnconfirmedDiffCandidates(
-      context,
+    const reconciled = preserveUnresolvedDiffCandidates(
       preserved.input,
+      candidates,
     );
     const contract = requireObject(
       context.targetContract,
@@ -335,6 +346,7 @@ async function preserveScanDraft(
   input: ScanDraftInput,
   saveCheckpoint = true,
   currentCheckpointName = scanDraftCheckpointName(input),
+  diffCandidates?: DiffCandidates,
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
@@ -369,30 +381,22 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
-  const diffResolvedCandidateIds = new Set(
-    await resolvedDiffCandidateIds(context),
-  );
-  const resolvedFollowUpCandidateIds = new Set(
+  // Ledger decisions clear candidate-linked work, not unlinked legacy follow-ups.
+  const legacyResolvedFollowUpCandidateIds = new Set(
     [
       ...result.findings.map(findingCandidateId),
       ...(result.coverage.surfaces as JsonObject[])
-        .filter(
-          (surface) =>
-            surface.disposition === "rejected" ||
-            surface.disposition === "not_applicable",
-        )
+        .filter(isTerminalCandidateDecision)
         .map((surface) => surface.candidateId),
     ].filter((value): value is string => typeof value === "string"),
   );
-  const resolvedCandidateIds = new Set(resolvedFollowUpCandidateIds);
-  for (const exclusion of result.coverage.explicitExclusions as JsonObject[]) {
-    if (
-      (exclusion.disposition === "rejected" ||
-        exclusion.disposition === "not_applicable") &&
-      typeof exclusion.candidateId === "string"
-    )
-      resolvedCandidateIds.add(exclusion.candidateId);
-  }
+  result = preserveDiffCandidateDecisions(
+    result,
+    diffCandidates,
+    sources,
+    input.findings,
+  );
+  const resolvedCandidateIds = collectResolvedCandidateIds(result);
   const resolvedSurfaceIds = new Set<string>();
   const pendingSurfaceCandidates = new Map<string, Set<string | undefined>>();
   const pendingCandidateIds = new Set<string>();
@@ -401,8 +405,7 @@ async function preserveScanDraft(
       const candidateId = item.candidateId ?? item.id;
       const resolved =
         typeof candidateId === "string" &&
-        (diffResolvedCandidateIds.has(candidateId) ||
-          resolvedCandidateIds.has(candidateId));
+        resolvedCandidateIds.has(candidateId);
       if (!resolved && typeof candidateId === "string")
         pendingCandidateIds.add(candidateId);
       for (const id of Array.isArray(item.surfaceIds) ? item.surfaceIds : []) {
@@ -427,7 +430,7 @@ async function preserveScanDraft(
         const candidateId = item.candidateId ?? item.id;
         return (
           typeof candidateId !== "string" ||
-          !resolvedFollowUpCandidateIds.has(candidateId)
+          !legacyResolvedFollowUpCandidateIds.has(candidateId)
         );
       })
     )
@@ -442,12 +445,7 @@ async function preserveScanDraft(
     const dispositions = [
       ...(result.coverage.surfaces as JsonObject[]),
       ...(result.coverage.explicitExclusions as JsonObject[]),
-    ].filter(
-      (surface) =>
-        (surface.disposition === "rejected" ||
-          surface.disposition === "not_applicable") &&
-        typeof surface.candidateId === "string",
-    );
+    ].filter(isTerminalCandidateDecision);
     const candidateRows = [...deferred, ...dispositions];
     for (const pending of source.coverage.deferred as JsonObject[]) {
       const candidateId = pending.candidateId ?? pending.id;
@@ -512,7 +510,7 @@ async function preserveScanDraft(
       if (typeof candidateId === "string")
         resolvedCandidateIds.add(candidateId);
     }
-    const resolvedIds = new Set(
+    const representedCandidateIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
         ...candidateRows.map((item) => item.candidateId ?? item.id),
@@ -524,8 +522,7 @@ async function preserveScanDraft(
         const candidateId = item.candidateId ?? item.id;
         return (
           (typeof candidateId !== "string" ||
-            (!resolvedIds.has(candidateId) &&
-              !diffResolvedCandidateIds.has(candidateId))) &&
+            !representedCandidateIds.has(candidateId)) &&
           !coverageEntryPresent(result.coverage.deferred as unknown[], item)
         );
       }),
@@ -544,11 +541,12 @@ async function preserveScanDraft(
         )
           return true;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (typeof candidateId !== "string" ||
+            !representedCandidateIds.has(candidateId)) &&
           !(
             surface.disposition === "needs_follow_up" &&
             ((typeof candidateId === "string" &&
-              diffResolvedCandidateIds.has(candidateId)) ||
+              resolvedCandidateIds.has(candidateId)) ||
               (typeof surface.id === "string" &&
                 resolvedSurfaceIds.has(surface.id))) &&
             !(
@@ -567,7 +565,8 @@ async function preserveScanDraft(
       ).filter((exclusion) => {
         const candidateId = exclusion.candidateId ?? exclusion.id;
         return (
-          (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          (typeof candidateId !== "string" ||
+            !representedCandidateIds.has(candidateId)) &&
           !coverageEntryPresent(
             result.coverage.explicitExclusions as unknown[],
             exclusion,
@@ -1267,25 +1266,6 @@ export function scanFindingIdentity(finding: JsonObject): string {
     location.startLine,
     location.endLine ?? null,
   ]);
-}
-
-export function findingCandidateId(finding: JsonObject): string | undefined {
-  const provenance = finding.provenance;
-  if (
-    isObject(provenance) &&
-    typeof provenance.candidateId === "string" &&
-    provenance.candidateId.trim()
-  ) {
-    return provenance.candidateId;
-  }
-  const extensions = finding.extensions;
-  if (isObject(extensions)) {
-    for (const field of ["candidateId", "reportId", "ledgerRowId"] as const) {
-      const value = extensions[field];
-      if (typeof value === "string" && value.trim()) return value;
-    }
-  }
-  return undefined;
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */

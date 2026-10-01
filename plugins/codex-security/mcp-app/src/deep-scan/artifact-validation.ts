@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { resolvedCandidateIds } from "../artifact-candidates.js";
 import {
-  findingCandidateId,
   parsePersistedScanDraft,
   parseScanDraft,
   preserveFindingDetails,
@@ -15,13 +15,13 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export interface UnconfirmedCandidate extends Record<string, unknown> {
+export interface UnresolvedCandidate extends Record<string, unknown> {
   candidateId: string;
   sourceWorkerId: string;
 }
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
-  unconfirmedCandidates?: UnconfirmedCandidate[];
+  unresolvedCandidates?: UnresolvedCandidate[];
 };
 
 export interface DeepReductionSources {
@@ -42,14 +42,14 @@ export function parseDeepReduction(
   input: Record<string, unknown>,
   persisted = false,
 ): DeepReductionInput {
-  const { unconfirmedCandidates, ...semantic } = input;
+  const { unresolvedCandidates, ...semantic } = input;
   const standard = {
     ...semantic,
     coverage: {
-      completeness: persisted && unconfirmedCandidates ? "partial" : "complete",
+      completeness: persisted && unresolvedCandidates ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: persisted ? (unconfirmedCandidates ?? []) : [],
+      deferred: persisted ? (unresolvedCandidates ?? []) : [],
     },
   };
   const { coverage, ...parsed } = persisted
@@ -58,7 +58,7 @@ export function parseDeepReduction(
   return {
     ...parsed,
     ...((coverage.deferred as unknown[]).length > 0
-      ? { unconfirmedCandidates: coverage.deferred as UnconfirmedCandidate[] }
+      ? { unresolvedCandidates: coverage.deferred as UnresolvedCandidate[] }
       : {}),
   };
 }
@@ -69,18 +69,8 @@ export function discoveryReductionInput(
   workerId: string,
 ): DeepReductionInput {
   const { coverage, ...result } = input;
-  const resolved = new Set([
-    ...result.findings.map(findingCandidateId),
-    ...[
-      ...(coverage.surfaces as Record<string, unknown>[]),
-      ...(coverage.explicitExclusions as Record<string, unknown>[]),
-    ]
-      .filter((item) =>
-        ["rejected", "not_applicable"].includes(item.disposition as string),
-      )
-      .map((item) => item.candidateId),
-  ]);
-  const unconfirmedCandidates = (coverage.deferred as Record<string, unknown>[])
+  const resolved = resolvedCandidateIds(input);
+  const unresolvedCandidates = (coverage.deferred as Record<string, unknown>[])
     .filter(
       (item) =>
         typeof item.candidateId === "string" && !resolved.has(item.candidateId),
@@ -92,21 +82,21 @@ export function discoveryReductionInput(
     }));
   return {
     ...result,
-    ...(unconfirmedCandidates.length > 0 ? { unconfirmedCandidates } : {}),
+    ...(unresolvedCandidates.length > 0 ? { unresolvedCandidates } : {}),
   };
 }
 
 export function deepReductionScanDraft(
   input: DeepReductionInput,
 ): ScanDraftInput {
-  const { unconfirmedCandidates = [], ...result } = structuredClone(input);
+  const { unresolvedCandidates = [], ...result } = structuredClone(input);
   return {
     ...result,
     coverage: {
-      completeness: unconfirmedCandidates.length > 0 ? "partial" : "complete",
+      completeness: unresolvedCandidates.length > 0 ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: unconfirmedCandidates,
+      deferred: unresolvedCandidates,
     },
   };
 }
@@ -222,13 +212,13 @@ export function reconcileDeepReduction(
       );
   }
   const currentWorkers = new Set(discoveries.map((source) => source.workerId));
-  const pending = new Map<string, UnconfirmedCandidate>();
+  const pending = new Map<string, UnresolvedCandidate>();
   for (const candidate of [
-    ...(previous?.unconfirmedCandidates ?? []).filter(
+    ...(previous?.unresolvedCandidates ?? []).filter(
       (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
     ),
     ...discoveries.flatMap(
-      (source) => source.result.unconfirmedCandidates ?? [],
+      (source) => source.result.unresolvedCandidates ?? [],
     ),
   ]) {
     pending.set(
@@ -236,8 +226,8 @@ export function reconcileDeepReduction(
       structuredClone(candidate),
     );
   }
-  delete result.unconfirmedCandidates;
-  if (pending.size > 0) result.unconfirmedCandidates = [...pending.values()];
+  delete result.unresolvedCandidates;
+  if (pending.size > 0) result.unresolvedCandidates = [...pending.values()];
   validateRetainedFindings(
     result,
     discoveries.map((discovery) => discovery.result),

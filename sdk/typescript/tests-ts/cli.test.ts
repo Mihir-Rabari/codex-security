@@ -4410,8 +4410,8 @@ describe("CLI", () => {
         `  REPORT    ${result.reportPath}`,
         "",
         "  FINDINGS  1 (1 high)",
+        "  CANDIDATES  0 unresolved",
         "  COVERAGE  complete",
-        "  UNCONFIRMED  0 saved candidates",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",
@@ -5160,7 +5160,9 @@ describe("CLI", () => {
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
+    expect(stderr.text()).toContain(
+      "FINDINGS  0\n  CANDIDATES  0 unresolved\n  COVERAGE  complete",
+    );
   });
 
   test("validates a dry run without starting a scan", async () => {

@@ -42,6 +42,18 @@ async function json<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
+async function loadResult(scanDir: string): Promise<ScanResult> {
+  return new ScanResult({
+    manifest: await json<ScanManifest>(join(scanDir, "scan-manifest.json")),
+    findings: await json<FindingsDocument>(join(scanDir, "findings.json")),
+    coverage: await json<CoverageDocument>(join(scanDir, "coverage.json")),
+    scanDir,
+    threadId: "synthetic-custom-validation",
+    turnResult: {},
+    sarifPath: null,
+  });
+}
+
 async function save(path: string, value: unknown) {
   await writeFile(path, JSON.stringify(value));
 }
@@ -220,23 +232,9 @@ describe("custom validation", () => {
         ...f,
         run: async () => JSON.stringify(result("reportable", "deferred")),
       });
-      const saved = new ScanResult({
-        manifest: await json<ScanManifest>(
-          join(f.scanDir, "scan-manifest.json"),
-        ),
-        findings: await json<FindingsDocument>(
-          join(f.scanDir, "findings.json"),
-        ),
-        coverage: await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
-        ),
-        scanDir: f.scanDir,
-        threadId: "synthetic-custom-validation",
-        turnResult: {},
-        sarifPath: null,
-      });
-      expect(saved.unconfirmedCandidateCount).toBe(1);
-      expect(saved.unconfirmedCandidates[0]).toMatchObject({
+      const saved = await loadResult(f.scanDir);
+      expect(saved.unresolvedCandidateCount).toBe(1);
+      expect(saved.unresolvedCandidates[0]).toMatchObject({
         candidateId: "candidate-1",
         candidate: f.findings.findings[1],
       });
@@ -259,19 +257,11 @@ describe("custom validation", () => {
       ...f,
       run: async () => JSON.stringify(result("deferred", "reportable")),
     });
-    const saved = new ScanResult({
-      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
-      findings: await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-      coverage: await json<CoverageDocument>(join(f.scanDir, "coverage.json")),
-      scanDir: f.scanDir,
-      threadId: "synthetic-custom-validation",
-      turnResult: {},
-      sarifPath: null,
-    });
+    const saved = await loadResult(f.scanDir);
     expect(saved.findings.findings).toHaveLength(1);
     expect(saved.coverage.surfaces[0]!.disposition).toBe("reported");
-    expect(saved.unconfirmedCandidateCount).toBe(1);
-    expect(saved.unconfirmedCandidates[0]).toMatchObject({
+    expect(saved.unresolvedCandidateCount).toBe(1);
+    expect(saved.unresolvedCandidates[0]).toMatchObject({
       candidateId: "source-0",
       candidate: f.findings.findings[0],
     });
@@ -302,17 +292,9 @@ describe("custom validation", () => {
           result("reportable", "reportable", "reportable", "deferred"),
         ),
     });
-    const saved = new ScanResult({
-      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
-      findings: await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-      coverage: await json<CoverageDocument>(join(f.scanDir, "coverage.json")),
-      scanDir: f.scanDir,
-      threadId: "synthetic-custom-validation",
-      turnResult: {},
-      sarifPath: null,
-    });
-    expect(saved.unconfirmedCandidateCount).toBe(1);
-    expect(saved.unconfirmedCandidates[0]).toMatchObject({
+    const saved = await loadResult(f.scanDir);
+    expect(saved.unresolvedCandidateCount).toBe(1);
+    expect(saved.unresolvedCandidates[0]).toMatchObject({
       id: "custom-validation-candidate-4-5",
       candidateId: "custom-validation-candidate-4-5",
       candidate: f.findings.findings[3],
@@ -597,31 +579,35 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  const completionScenarios = [
-    "standard",
-    "diff",
-    "empty",
-    "incomplete",
-    "dismissed",
-    "siblings-mixed",
-    "siblings-deferred",
+  const completionScenarios: Array<{
+    scenario: string;
+    dispositions: Parameters<typeof result>;
+    siblings?: boolean;
+  }> = [
+    { scenario: "standard", dispositions: ["reportable"] },
+    { scenario: "diff", dispositions: ["reportable"] },
+    { scenario: "empty", dispositions: [] },
+    { scenario: "incomplete", dispositions: ["reportable"] },
+    { scenario: "dismissed", dispositions: ["suppressed"] },
+    {
+      scenario: "siblings-mixed",
+      dispositions: ["reportable", "deferred"],
+      siblings: true,
+    },
+    {
+      scenario: "siblings-deferred",
+      dispositions: ["deferred", "deferred"],
+      siblings: true,
+    },
   ];
   test.each(completionScenarios)(
-    "SDK owns real workbench completion: %s",
-    async (scenario) => {
+    "SDK owns real workbench completion: $scenario",
+    async ({ scenario, dispositions, siblings = false }) => {
       const diff = scenario === "diff";
-      const siblings = scenario.startsWith("siblings-");
-      const count = scenario === "empty" ? 0 : siblings ? 2 : 1;
-      const dispositions: CustomValidationResult["validations"][number]["validation"]["disposition"][] =
-        scenario === "siblings-mixed"
-          ? ["reportable", "deferred"]
-          : scenario === "siblings-deferred"
-            ? ["deferred", "deferred"]
-            : [scenario === "dismissed" ? "suppressed" : "reportable"];
-      const expectedReported =
-        count === 0
-          ? 0
-          : dispositions.filter((value) => value === "reportable").length;
+      const count = dispositions.length;
+      const expectedReported = dispositions.filter(
+        (value) => value === "reportable",
+      ).length;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -905,17 +891,17 @@ describe("custom validation", () => {
         expect(completed.findings.findings).toHaveLength(expectedReported);
         if (siblings) {
           const expectedPending = count - expectedReported;
-          expect(completed.unconfirmedCandidateCount).toBe(expectedPending);
+          expect(completed.unresolvedCandidateCount).toBe(expectedPending);
           expect(completed.coverage.deferred).toHaveLength(expectedPending);
           expect(completed.coverage.completeness).toBe("partial");
           expect(
             new Set(
-              completed.unconfirmedCandidates.map((item) => item.candidateId),
+              completed.unresolvedCandidates.map((item) => item.candidateId),
             ).size,
           ).toBe(expectedPending);
           for (const [index, disposition] of dispositions.entries()) {
             if (disposition !== "deferred") continue;
-            expect(completed.unconfirmedCandidates).toContainEqual(
+            expect(completed.unresolvedCandidates).toContainEqual(
               expect.objectContaining({
                 candidateId: `custom-validation-candidate-${index + 1}`,
                 candidate: expect.objectContaining({

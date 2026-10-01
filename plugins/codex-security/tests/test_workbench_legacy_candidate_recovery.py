@@ -24,7 +24,7 @@ def test_recovery_scopes_matching_legacy_parent_candidate_without_duplication(
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
-    from report_projection import unconfirmed_candidates
+    from report_projection import unresolved_candidates
     from workbench_saved_results import _digest, merge_saved_results
 
     scan_id = "legacy-candidate-scan"
@@ -125,7 +125,7 @@ def test_recovery_scopes_matching_legacy_parent_candidate_without_duplication(
     assert result is not None
     assert warnings == []
     for iteration in range(2):
-        pending_rows = unconfirmed_candidates(result[2])
+        pending_rows = unresolved_candidates(result[2])
         assert len(pending_rows) == len(expected_owners)
         assert {row.get("sourceWorkerId") for row in pending_rows} == expected_owners
         candidate_surfaces = [row for row in result[2]["surfaces"] if row.get("candidateId")]
