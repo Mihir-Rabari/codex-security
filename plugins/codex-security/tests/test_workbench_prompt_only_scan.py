@@ -408,7 +408,8 @@ def test_prompt_driven_scans_join_unicode_directory_selection(
 
 def test_headless_directory_set_survives_completion(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    for directory in ("service", "library", "dependency"):
+    selected = ["app/[id]", "library"]
+    for directory in (*selected, "dependency"):
         (target / directory).mkdir(parents=True)
         (target / directory / "code.py").write_text("pass\n")
     state = tmp_path / "state"
@@ -420,7 +421,7 @@ def test_headless_directory_set_survives_completion(tmp_path: Path) -> None:
         "--target-path",
         str(target),
         "--include-paths-json",
-        json.dumps(["service", "library"]),
+        json.dumps(selected),
         "--scan-root",
         str(tmp_path / "scans"),
     )
@@ -447,15 +448,15 @@ def test_headless_directory_set_survives_completion(tmp_path: Path) -> None:
     )["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    assert completed["contract"]["scope"]["requiredIncludePaths"] == ["library", "service"]
+    assert completed["contract"]["scope"]["requiredIncludePaths"] == selected
     manifest = json.loads(manifest_path.read_text())
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert manifest["scan"]["scope"] == {
-        "includePaths": ["library", "service"],
+        "includePaths": selected,
         "excludePaths": [],
     }
     assert coverage["mode"] == "scoped_path"
-    assert coverage["includePaths"] == ["library", "service"]
+    assert coverage["includePaths"] == selected
     assert coverage["excludePaths"] == []
 
 

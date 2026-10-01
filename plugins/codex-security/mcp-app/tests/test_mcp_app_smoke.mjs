@@ -615,6 +615,12 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     "library",
     ...Array.from({ length: 31 }, (_, index) => `directory-${index}`),
   ].sort();
+  const largeSelection = Array.from(
+    { length: 512 },
+    () => selectedDirectories,
+  ).flat();
+  assert.ok(Buffer.byteLength(JSON.stringify(largeSelection)) > 128 * 1024);
+  const scopedContext = headlessContext + "\nUnicode context: café.";
   for (const directory of [...selectedDirectories, "other"]) {
     await mkdir(path.join(scopedTarget, directory), { recursive: true });
     await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
@@ -690,7 +696,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: scopedTarget,
-        include_paths: selectedDirectories,
+        include_paths: largeSelection,
+        userContext: scopedContext,
       },
       _meta: { "openai/threadId": ownerThread },
     });
@@ -705,6 +712,30 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       selectedDirectories.length,
     );
     assert.deepEqual(scopedResult.scan.executionThreadIds, []);
+    assert.equal(scopedResult.scan.userContext, scopedContext);
+    assert.equal(scopedResult.workspace.userContext, scopedContext);
+    const scopedJoined = await headlessServer.requestAndWait(46, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: scopedTarget,
+        include_paths: largeSelection.toReversed(),
+        userContext: scopedContext,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(scopedJoined);
+    assert.equal(
+      scopedJoined.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      scopedJoined.result.structuredContent.scanId,
+      scopedResult.scanId,
+    );
+    assert.equal(
+      scopedJoined.result.structuredContent.scan.userContext,
+      scopedContext,
+    );
     const conflict = await headlessServer.requestAndWait(41, "tools/call", {
       name: "start_codex_security_standard_scan",
       arguments: {

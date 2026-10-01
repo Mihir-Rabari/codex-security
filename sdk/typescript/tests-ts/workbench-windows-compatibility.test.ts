@@ -25,7 +25,7 @@ function probe(program: string, ...args: string[]): void {
   expect(result.exitCode, result.stderr.toString()).toBe(0);
 }
 
-test("normalizes absolute Windows scopes without accepting escapes", () => {
+test("normalizes Windows scopes and case aliases without accepting escapes", () => {
   probe(
     [
       "import sys",
@@ -34,11 +34,15 @@ test("normalizes absolute Windows scopes without accepting escapes", () => {
       "sys.path.insert(0, sys.argv[1])",
       "import workbench_db as workbench",
       "class WindowsPath(PureWindowsPath):",
-      "    def resolve(self): return self",
+      "    def resolve(self): return WindowsPath(*('src' if part in {'SRC', 'linked'} else part for part in self.parts))",
       "    def is_dir(self): return True",
       "workbench.require_scope.__globals__['Path'] = WindowsPath",
       "workbench.require_scope.__globals__['os'] = SimpleNamespace(name='nt')",
       "target = WindowsPath('C:/repository')",
+      'assert workbench.require_include_paths(\'["SRC", "src/nested", "src"]\', target) == [\'src\']',
+      "try: workbench.require_include_paths('[\"linked\"]', target)",
+      "except SystemExit as error: assert 'symlink' in str(error)",
+      "else: raise AssertionError('directory link was accepted')",
       "assert workbench.require_scope(r'C:\\repository\\src', 'standard', target) == 'src'",
       "assert workbench.require_scope('src/nested', 'standard', target) == 'src/nested'",
       "assert workbench.require_scope(r'C:\\repository', 'deep', target) == '.'",

@@ -2607,46 +2607,55 @@ async function executeWorkbench(
   if (userContextIndex !== -1) {
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
-  const workbenchInput = input ?? userContext;
-  const execution = execFileAsync(
-    pythonCommand,
-    [workbenchScriptPath(), ...workbenchArgs],
-    {
-      cwd: PLUGIN_ROOT,
-      env: stateDir
-        ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
-        : process.env,
-      encoding: "utf8" as const,
-      // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
-      maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: [
-        "begin-deep-scan",
-        "claim-deep-scan-dedup",
-        "commit-deep-scan-dedup",
-        "complete-scan",
-        "export-findings",
-        "finish-deep-scan",
-        "get-scan",
-        "get-deep-scan",
-        "get-workspace",
-        "inspect-setup",
-        "list-findings",
-        "preserve-scan-results",
-        "recover-scan-results",
-        "request-finding-remediation",
-        "request-finding-remediation-action",
-        "save-workspace",
-        "set-finding-triage",
-        "set-finding-remediation",
-        "start-headless-standard-scan",
-        "start-prompt-only-scan",
-        "start-scan",
-        "upsert-deep-scan-worker",
-      ].includes(args[0] ?? "")
-        ? 300_000
-        : 30_000,
-    },
-  );
+  let workbenchInput = input ?? userContext;
+  let pythonArgs = [workbenchScriptPath(), ...workbenchArgs];
+  if (workbenchArgs.includes("--include-paths-json")) {
+    // Directory selections can exceed argv limits; preserve the remaining stdin for user context.
+    pythonArgs = [
+      "-c",
+      "import json, runpy, sys; sys.argv = [sys.argv[1], *json.loads(sys.stdin.buffer.readline())]; runpy.run_path(sys.argv[0], run_name='__main__')",
+      workbenchScriptPath(),
+    ];
+    workbenchInput = Buffer.concat([
+      Buffer.from(JSON.stringify(workbenchArgs) + "\n"),
+      Buffer.from(workbenchInput ?? ""),
+    ]);
+  }
+  const execution = execFileAsync(pythonCommand, pythonArgs, {
+    cwd: PLUGIN_ROOT,
+    env: stateDir
+      ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
+      : process.env,
+    encoding: "utf8" as const,
+    // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
+    maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
+    timeout: [
+      "begin-deep-scan",
+      "claim-deep-scan-dedup",
+      "commit-deep-scan-dedup",
+      "complete-scan",
+      "export-findings",
+      "finish-deep-scan",
+      "get-scan",
+      "get-deep-scan",
+      "get-workspace",
+      "inspect-setup",
+      "list-findings",
+      "preserve-scan-results",
+      "recover-scan-results",
+      "request-finding-remediation",
+      "request-finding-remediation-action",
+      "save-workspace",
+      "set-finding-triage",
+      "set-finding-remediation",
+      "start-headless-standard-scan",
+      "start-prompt-only-scan",
+      "start-scan",
+      "upsert-deep-scan-worker",
+    ].includes(args[0] ?? "")
+      ? 300_000
+      : 30_000,
+  });
   if (workbenchInput !== undefined) {
     execution.child.stdin!.on("error", () => {
       // The workbench may exit before consuming stdin; surface its process error.

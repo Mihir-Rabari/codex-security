@@ -821,16 +821,17 @@ def require_include_paths(value: str, target: Path) -> list[str]:
             or len(path.encode()) > 1024
             or path.startswith("/")
             or (len(path) > 1 and path[1] == ":")
-            or any(character in path for character in "\\*?[]")
+            or "\\" in path
             or any(ord(character) < 32 or ord(character) == 127 for character in path)
             or ".." in path.split("/")
             or any(part.casefold() == ".git" for part in path.split("/"))
         ):
             raise SystemExit("include_paths must contain literal repository-relative directories.")
         canonical = "/".join(part for part in path.split("/") if part not in {"", "."}) or "."
-        if require_scope(canonical, "standard", target) != canonical:
+        resolved = require_scope(canonical, "standard", target)
+        if Path(resolved) != Path(canonical):
             raise SystemExit("include_paths must not resolve through a directory symlink.")
-        normalized.add(canonical)
+        normalized.add(resolved)
     if "." in normalized and len(normalized) != 1:
         raise SystemExit("Whole repository cannot be combined with selected directories.")
     result: list[str] = []
