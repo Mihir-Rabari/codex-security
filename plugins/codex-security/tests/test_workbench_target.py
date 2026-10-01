@@ -255,6 +255,7 @@ def test_selected_non_git_case_aliases_count_each_file_once(
     (target / "src" / "code.py").write_text("pass\n")
     (target / "src" / "nested" / "code.py").write_text("pass\n")
     native_stat = Path.stat
+    native_is_dir = Path.is_dir
     native_rglob = Path.rglob
 
     def physical_path(path: Path) -> Path:
@@ -268,6 +269,11 @@ def test_selected_non_git_case_aliases_count_each_file_once(
         Path,
         "stat",
         lambda path, *args, **kwargs: native_stat(physical_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path, *args, **kwargs: native_is_dir(physical_path(path), *args, **kwargs),
     )
     monkeypatch.setattr(
         Path,
@@ -296,14 +302,28 @@ def test_selected_directory_rejects_git_metadata_case_aliases(
         (target / directory).mkdir(parents=True)
     if not (target / selection).exists():
         native_stat = Path.stat
+        native_is_dir = Path.is_dir
 
-        def alias_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-            path = Path(*(".git" if part == ".GIT" else part for part in path.parts))
-            return native_stat(path, *args, **kwargs)
+        def physical_path(path: Path) -> Path:
+            return Path(*(".git" if part == ".GIT" else part for part in path.parts))
 
-        monkeypatch.setattr(Path, "stat", alias_stat)
+        monkeypatch.setattr(
+            Path,
+            "stat",
+            lambda path, *args, **kwargs: native_stat(physical_path(path), *args, **kwargs),
+        )
+        monkeypatch.setattr(
+            Path,
+            "is_dir",
+            lambda path, *args, **kwargs: native_is_dir(physical_path(path), *args, **kwargs),
+        )
 
-    with pytest.raises(SystemExit):
+    expected = (
+        "include_paths must not select Git metadata"
+        if ".GIT" in selection.split("/")
+        else "include_paths must contain literal repository-relative directories"
+    )
+    with pytest.raises(SystemExit, match=expected):
         WORKBENCH_TARGET["require_include_paths"](json.dumps([selection]), target)
 
 
