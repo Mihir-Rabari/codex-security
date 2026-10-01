@@ -1,5 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
-import { resolvedCandidateIds } from "../artifact-candidates.js";
+import {
+  coverageCandidateKey,
+  findingCandidateId,
+  findingCandidateOwner,
+  resolvedCandidateKeys,
+} from "../artifact-candidates.js";
 import {
   parsePersistedScanDraft,
   parseScanDraft,
@@ -69,11 +74,12 @@ export function discoveryReductionInput(
   workerId: string,
 ): DeepReductionInput {
   const { coverage, ...result } = input;
-  const resolved = resolvedCandidateIds(input);
+  const resolved = resolvedCandidateKeys(input, workerId);
   const unresolvedCandidates = (coverage.deferred as Record<string, unknown>[])
     .filter(
       (item) =>
-        typeof item.candidateId === "string" && !resolved.has(item.candidateId),
+        typeof item.candidateId === "string" &&
+        !resolved.has(coverageCandidateKey(item, workerId)!),
     )
     .map((item) => ({
       ...structuredClone(item),
@@ -82,6 +88,18 @@ export function discoveryReductionInput(
     }));
   return {
     ...result,
+    findings: result.findings.map((finding) => {
+      if (findingCandidateId(finding) === undefined) return finding;
+      const normalized = structuredClone(finding);
+      normalized.provenance = {
+        ...(normalized.provenance as Record<string, unknown>),
+        sourceWorkerId: workerId,
+      };
+      const previousOwner = findingCandidateOwner(finding);
+      if (previousOwner !== undefined && previousOwner !== workerId)
+        preserveFindingDetails(normalized, finding);
+      return normalized;
+    }),
     ...(unresolvedCandidates.length > 0 ? { unresolvedCandidates } : {}),
   };
 }

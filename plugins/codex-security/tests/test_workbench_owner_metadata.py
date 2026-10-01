@@ -86,7 +86,12 @@ def test_saved_findings_retain_nonstring_ownership_metadata(
     assert warnings == []
     retained = result[1]["findings"]
     assert len(retained) == 1
-    assert retained[0]["provenance"][owner_field] == metadata
+    if source == "worker" and owner_field == "sourceWorkerId":
+        assert retained[0]["provenance"]["sourceWorkerId"] == "worker-one"
+        assert original in retained[0]["provenance"]["previousFindings"]
+        assert json.loads(result_path.read_text())["findings"][0] == original
+    else:
+        assert retained[0]["provenance"][owner_field] == metadata
     assert retained[0]["summary"] == original["summary"]
     candidates = [row for row in result[2]["deferred"] if row.get("candidateId")]
     assert len(candidates) == (0 if source == "worker" else 1)
@@ -194,4 +199,79 @@ def test_retained_source_finding_resolves_its_worker_candidate_without_current_r
     assert warnings == []
     assert len(result[1]["findings"]) == 1
     assert not any(item.get("candidateId") for item in result[2]["deferred"])
+    assert checkpoint.read_bytes() == original
+
+
+def test_rejected_finding_history_stays_with_its_logical_worker(
+    tmp_path: Path, workbench_api
+) -> None:
+    scan_id = "owned-terminal-history"
+    scan_dir, manifest, finding, coverage = saved_parent(tmp_path, scan_id)
+    finding["provenance"]["candidateId"] = "shared-candidate"
+    other_decision = {
+        "id": "other-worker-decision",
+        "candidateId": "shared-candidate",
+        "sourceWorkerId": "worker-b",
+        "label": "Independent worker decision",
+        "disposition": "rejected",
+        "notes": "Worker B review concluded.",
+        "receiptRefs": [],
+    }
+    coverage.update(surfaces=[other_decision], deferred=[])
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    artifact_dir = scan_dir / "worker-a"
+    artifact_dir.mkdir()
+    old = {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": [finding],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        },
+    }
+    checkpoint = write_checkpoint(artifact_dir / "checkpoints", old)
+    original = checkpoint.read_bytes()
+    current = copy.deepcopy(old)
+    current["findings"] = []
+    current["coverage"]["surfaces"] = [
+        {
+            "candidateId": "shared-candidate",
+            "label": "Worker A decision",
+            "disposition": "rejected",
+            "notes": "Worker A review concluded.",
+        }
+    ]
+    result_path = artifact_dir / "result.json"
+    result_path.write_text(json.dumps(current))
+    workers = [
+        {
+            "id": "worker-a",
+            "kind": "discovery",
+            "status": "succeeded",
+            "attempt": 1,
+            "artifact_dir": str(artifact_dir),
+            "result_manifest_path": str(result_path),
+        }
+    ]
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+
+    result = workbench_api["saved_results"].merge_saved_results(
+        scan_dir, scan_id, binding, workers, [], stopped=True, reason="Stopped after review."
+    )
+
+    assert result is not None
+    assert result[1]["findings"] == []
+    surfaces = {item["sourceWorkerId"]: item for item in result[2]["surfaces"]}
+    assert surfaces["worker-b"] == other_decision
+    assert surfaces["worker-a"]["previousFindings"] == [finding]
     assert checkpoint.read_bytes() == original

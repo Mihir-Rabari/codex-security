@@ -1993,6 +1993,146 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
     assert stopped["progress"]["candidates"]["unresolved"] == len(expected_owners)
 
 
+@pytest.mark.parametrize("owner_field", ["workerId", "sourceWorkerId"])
+@pytest.mark.parametrize("termination", ["failed", "canceled"])
+@pytest.mark.parametrize("source", ["worker", "legacy-reducer"])
+def test_recovery_preserves_bound_worker_owner_over_imported_metadata(
+    tmp_path: Path, owner_field: str, termination: str, source: str
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    workers = [
+        accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id, name=f"worker-{index}")
+        for index in range(2)
+    ]
+    owner_a, result_a = workers[0]
+    owner_b, result_b = workers[1]
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(candidateId="shared-candidate", **{owner_field: owner_b})
+    finding["summary"] = "Stronger current worker finding."
+    draft_a = json.loads(result_a.read_text())
+    draft_a["findings"] = [finding]
+    earlier = copy.deepcopy(draft_a)
+    earlier["findings"][0]["severity"]["level"] = "low"
+    earlier["findings"][0]["summary"] = "Earlier weaker worker finding."
+    checkpoint = write_checkpoint(result_a.parent / "checkpoints", earlier)
+    result_a.write_text(json.dumps(draft_a))
+    draft_b = json.loads(result_b.read_text())
+    draft_b["coverage"].update(
+        completeness="partial",
+        deferred=[
+            {
+                "candidateId": "shared-candidate",
+                "reason": "Independent worker review remains pending.",
+                "candidate": {"title": "Independent saved candidate"},
+            }
+        ],
+    )
+    result_b.write_text(json.dumps(draft_b))
+    source_paths = [result_a, result_b, checkpoint]
+    if source == "legacy-reducer":
+        _, reducer_path, _ = committed_standard_reducer(
+            state_dir,
+            codex_home,
+            scan_dir,
+            scan_id,
+            owner_a,
+            result_a,
+            additional_worker_ids=(owner_b,),
+        )
+        reduced = copy.deepcopy(draft_a)
+        reduced["findings"][0]["provenance"]["sourceFindings"] = [
+            {"id": f"{owner_a}:0", "finding": copy.deepcopy(finding)}
+        ]
+        reduced["coverage"] = copy.deepcopy(draft_b["coverage"])
+        reduced["coverage"]["deferred"][0]["sourceWorkerId"] = owner_b
+        reducer_path.write_text(json.dumps(reduced))
+        source_paths.extend(
+            [reducer_path, write_checkpoint(reducer_path.parent / "checkpoints", reduced)]
+        )
+    originals = {path: path.read_bytes() for path in source_paths}
+    environment = {"CODEX_HOME": str(codex_home)}
+    if termination == "canceled":
+        run_workbench(
+            state_dir,
+            "cancel-scan",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment=environment,
+        )
+    else:
+        run_workbench(
+            state_dir,
+            "fail-deep-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Stopped after worker review.",
+            environment=environment,
+        )
+
+    def assert_owned_results() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 1
+        assert scan["progress"]["candidates"]["unresolved"] == 1
+        assert (
+            run_workbench(state_dir, "list-scans")["scans"][0]["progress"]["candidates"][
+                "unresolved"
+            ]
+            == 1
+        )
+        retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+        assert retained["summary"] == finding["summary"]
+        assert retained["provenance"]["sourceWorkerId"] == owner_a
+        if owner_field == "workerId":
+            assert retained["provenance"][owner_field] == owner_b
+        else:
+            originals_in_history = retained["provenance"].get("previousFindings", []) + [
+                source["finding"] for source in retained["provenance"].get("sourceFindings", [])
+            ]
+            assert finding in originals_in_history
+        if source == "legacy-reducer":
+            assert (
+                retained["provenance"]["sourceFindings"]
+                == reduced["findings"][0]["provenance"]["sourceFindings"]
+            )
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        pending = [item for item in coverage["deferred"] if item.get("candidateId")]
+        assert len(pending) == 1
+        assert pending[0]["sourceWorkerId"] == owner_b
+        report = (scan_dir / "report.md").read_text()
+        assert "| Unresolved candidates | 1 |" in report
+        assert f"| shared-candidate | {owner_b} |" in report
+        assert "- Independent worker review remains pending." in report
+        assert all(path.read_bytes() == content for path, content in originals.items())
+
+    assert_owned_results()
+    frozen = {
+        scan_dir / relative: (scan_dir / relative).read_bytes()
+        for relative in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+            "preservedSources"
+        ]
+    }
+    if termination == "failed":
+        later = copy.deepcopy(draft_a)
+        later.update(complete=False, findings=[])
+        later["coverage"]["deferred"] = [{"id": "later-work", "reason": "Later saved work."}]
+        write_checkpoint(result_a.parent / "checkpoints", later)
+        run_workbench(
+            state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
+        )
+    else:
+        run_workbench(
+            state_dir, "preserve-scan-results", "--scan-id", scan_id, environment=environment
+        )
+    assert_owned_results()
+    assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
 @pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
 @pytest.mark.parametrize("owner_field", ["workerId", "sourceWorkerId"])
 @pytest.mark.parametrize("same_worker", [False, True])

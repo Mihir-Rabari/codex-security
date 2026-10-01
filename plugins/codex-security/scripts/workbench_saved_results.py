@@ -467,6 +467,45 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
+def _bind_finding_worker(
+    finding: dict[str, Any], worker_id: str, original: dict[str, Any] | None = None
+) -> None:
+    provenance = finding["provenance"]
+    if "sourceWorkerId" in provenance and provenance["sourceWorkerId"] != worker_id:
+        # Imported ownership remains evidence; the bound source owns the candidate.
+        previous = copy.deepcopy(original if original is not None else finding)
+        if not isinstance(provenance.get("previousFindings"), list):
+            provenance["previousFindings"] = []
+        if previous not in provenance["previousFindings"]:
+            provenance["previousFindings"].append(previous)
+    provenance["sourceWorkerId"] = worker_id
+    provenance.setdefault("workerId", worker_id)
+
+
+def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) -> dict[str, Any]:
+    result = copy.deepcopy(draft)
+    for finding in result["findings"]:
+        if not isinstance(finding, dict) or not isinstance(finding.get("provenance"), dict):
+            continue
+        candidate_id = finding_candidate_id(finding)
+        originals = finding["provenance"].get("sourceFindings")
+        if candidate_id is None or not isinstance(originals, list):
+            continue
+        owners = {
+            source["id"].rsplit(":", 1)[0]
+            for source in originals
+            if isinstance(source, dict)
+            and isinstance(source.get("id"), str)
+            and ":" in source["id"]
+            and source["id"].rsplit(":", 1)[0] in worker_ids
+            and isinstance(source.get("finding"), dict)
+            and finding_candidate_id(source["finding"]) == candidate_id
+        }
+        if len(owners) == 1:
+            _bind_finding_worker(finding, next(iter(owners)))
+    return result
+
+
 def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
     validation = candidate.get("validation") or {}
@@ -562,6 +601,11 @@ def _stopped_diff_candidate_decisions(
         if (key := finding_candidate_key(finding)) is not None and key[0] is None
     ]
     finding_ids = {finding_candidate_id(finding) for finding in findings}
+    marked_ids = {
+        finding_candidate_id(finding)
+        for finding in findings
+        if isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
+    }
     authored = []
     generated = {}
     for field in ("surfaces", "explicitExclusions"):
@@ -577,7 +621,8 @@ def _stopped_diff_candidate_decisions(
                     generated[key[1]] = copy.deepcopy(item)
                 else:
                     authored.append((field, copy.deepcopy(item)))
-    authoritative = finding_ids | {item["candidateId"] for _, item in authored}
+    authored_ids = {item["candidateId"] for _, item in authored}
+    authoritative = finding_ids | authored_ids
     tracked = pending.keys() | generated.keys() | authoritative
     if not tracked:
         return None
@@ -589,9 +634,6 @@ def _stopped_diff_candidate_decisions(
         # Keep the existing checkpoint marker so frozen older scans remain readable.
         "stoppedDiffCandidateDecisions": True,
     }
-    for field, item in authored:
-        if item["candidateId"] not in finding_ids:
-            coverage[field].append(item)
     decisions = {
         candidate_id: item
         for candidate_id, item in generated.items()
@@ -604,7 +646,7 @@ def _stopped_diff_candidate_decisions(
     }
     relative = "artifacts/02_discovery/candidate_ledger.jsonl"
     try:
-        if tracked - authoritative and (scan_dir / relative).exists():
+        if (tracked - authoritative or marked_ids) and (scan_dir / relative).exists():
             descriptor = open_scan_local_file_descriptor(
                 scan_dir, relative, "Diff candidate ledger"
             )
@@ -615,7 +657,7 @@ def _stopped_diff_candidate_decisions(
                     not isinstance(candidate, dict)
                     or not isinstance(candidate.get("candidate_id"), str)
                     or (candidate_id := candidate["candidate_id"]) not in tracked
-                    or candidate_id in authoritative
+                    or (candidate_id in authoritative and candidate_id not in marked_ids)
                 ):
                     continue
                 decision = _diff_candidate_decision(candidate)
@@ -624,6 +666,30 @@ def _stopped_diff_candidate_decisions(
                     or not candidate["summary"].strip()
                 ):
                     raise ValueError("Diff candidate summary is missing.")
+                if candidate_id in authoritative:
+                    phase_snapshot = {
+                        phase: candidate[phase]
+                        for phase in ("validation", "attack_path")
+                        if phase in candidate
+                    }
+                    overrides = [
+                        finding
+                        for finding in findings
+                        if finding_candidate_id(finding) == candidate_id
+                    ]
+                    if candidate_id in authored_ids or any(
+                        not isinstance(
+                            marker := finding["provenance"].get("diffCandidateDecision"), dict
+                        )
+                        or marker == phase_snapshot
+                        for finding in overrides
+                    ):
+                        continue
+                    # Only a recorded override supplies ordering evidence for a
+                    # newer phase change. Legacy explicit findings keep precedence.
+                    findings = [finding for finding in findings if finding not in overrides]
+                    finding_ids.discard(candidate_id)
+                    authoritative.discard(candidate_id)
                 prior = pending.get(candidate_id, generated.get(candidate_id, {}))
                 previous = prior.get("candidate")
                 previous = previous if isinstance(previous, dict) else {}
@@ -657,6 +723,9 @@ def _stopped_diff_candidate_decisions(
                     )
     except (ContractError, OSError, ValueError) as exc:
         warnings.append(f"Could not reconcile the saved Diff candidates: {exc}")
+    for field, item in authored:
+        if item["candidateId"] not in finding_ids:
+            coverage[field].append(item)
     coverage["surfaces"].extend(decisions.values())
     coverage["deferred"].extend(
         item for candidate_id, item in pending.items() if candidate_id in current_pending_ids
@@ -889,6 +958,19 @@ def merge_saved_results(
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
+    worker_ids = {worker["id"] for worker in workers if worker["kind"] == "discovery"}
+    if worker_ids:
+        if parent is not None:
+            parent = _bind_retained_source_owners(parent, worker_ids)
+        sources = [
+            (
+                relative,
+                _bind_retained_source_owners(draft, worker_ids) if owner is None else draft,
+                owner,
+            )
+            for relative, draft, owner in sources
+        ]
+
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
@@ -1044,7 +1126,7 @@ def merge_saved_results(
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
-    rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    rejected_history: dict[tuple[str | None, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
@@ -1181,16 +1263,14 @@ def merge_saved_results(
             if relative == "parent" and parent_manifest:
                 finding = copy.deepcopy(value)
                 _ensure_finding_identity(finding, candidate_only=True)
-                provenance = finding.get("provenance") if isinstance(finding, dict) else None
-                owner = provenance.get("workerId") if isinstance(provenance, dict) else None
-                candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
+                candidate = finding_candidate_key(finding) if isinstance(finding, dict) else None
                 if (
                     stopped_parent_seal
-                    and isinstance(owner, str)
-                    and candidate_id
-                    and resolved.get((owner, candidate_id)) in {"rejected", "not_applicable"}
+                    and candidate is not None
+                    and candidate[0] is not None
+                    and resolved.get(candidate) in {"rejected", "not_applicable"}
                 ):
-                    rejected_history.setdefault((owner, candidate_id), []).append(finding)
+                    rejected_history.setdefault(candidate, []).append(finding)
                     continue
                 if valid_finding(finding):
                     finding_positions.setdefault(_finding_key(finding), len(findings))
@@ -1204,13 +1284,12 @@ def merge_saved_results(
             source_value = copy.deepcopy(value)
             finding = copy.deepcopy(value)
             candidate_id = finding_candidate_id(finding)
-            if relative != "parent" and resolved.get(finding_candidate_key(finding, worker_id)) in {
-                "rejected",
-                "not_applicable",
-            }:
+            candidate = finding_candidate_key(finding, worker_id)
+            if relative != "parent" and resolved.get(candidate) in {"rejected", "not_applicable"}:
+                rejected_history.setdefault(candidate, []).append(copy.deepcopy(finding))
                 surfaces = coverage.get("surfaces")
                 for item in surfaces if isinstance(surfaces, list) else []:
-                    if isinstance(item, dict) and item.get("candidateId") == candidate_id:
+                    if isinstance(item, dict) and coverage_candidate_key(item) == candidate:
                         if not isinstance(item.get("previousFindings"), list):
                             item["previousFindings"] = []
                         history = item["previousFindings"]
@@ -1242,7 +1321,7 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             if worker_id:
-                provenance.setdefault("workerId", worker_id)
+                _bind_finding_worker(finding, worker_id, source_value)
             _ensure_finding_identity(finding)
             if not valid_finding(finding):
                 findings.append(finding)
@@ -1363,7 +1442,11 @@ def merge_saved_results(
                     and isinstance(item, dict)
                     and item.get("disposition") in {"rejected", "not_applicable"}
                     and isinstance(item.get("candidateId"), str)
-                    and (history_findings := rejected_history.get((worker_id, item["candidateId"])))
+                    and (
+                        history_findings := rejected_history.get(
+                            coverage_candidate_key(item, worker_id)
+                        )
+                    )
                 ):
                     item = copy.deepcopy(item)
                     if not isinstance(item.get("previousFindings"), list):

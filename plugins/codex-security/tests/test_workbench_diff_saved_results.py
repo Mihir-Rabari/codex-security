@@ -476,6 +476,78 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
     )
 
 
+@pytest.mark.parametrize(
+    "ledger_state", ["unchanged", "terminal", "deferred", "missing", "malformed"]
+)
+def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
+    tmp_path: Path, ledger_state: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    phases = {
+        "validation": {
+            "disposition": "suppressed",
+            "counterevidence_or_proof_gap": "Earlier ledger review.",
+        },
+        "attack_path": {"decision": "reportable", "severity_rationale": "Earlier path review."},
+    }
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = copy.deepcopy(phases)
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": [finding]}))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    # Object key order does not change a phase snapshot's meaning.
+    candidate.update({key: dict(reversed(list(value.items()))) for key, value in phases.items()})
+    if ledger_state in {"terminal", "deferred"}:
+        candidate["validation"]["counterevidence_or_proof_gap"] = "Newer saved review."
+        if ledger_state == "deferred":
+            candidate["validation"]["disposition"] = "deferred"
+    if ledger_state == "missing":
+        ledger.unlink()
+    elif ledger_state == "malformed":
+        candidate["validation"] = "Incomplete phase record"
+        ledger.write_text(json.dumps(candidate) + "\n")
+    else:
+        ledger.write_text(json.dumps(candidate) + "\n")
+    run_workbench(
+        state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped after review."
+    )
+
+    def assert_override_state() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == int(ledger_state in {"unchanged", "missing", "malformed"})
+        assert scan["progress"]["candidates"]["unresolved"] == int(ledger_state == "deferred")
+        findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        recovered = json.loads(coverage_path.read_text())
+        if findings:
+            assert findings[0]["provenance"]["diffCandidateDecision"] == phases
+        elif ledger_state == "deferred":
+            pending = next(item for item in recovered["deferred"] if item.get("candidateId"))
+            assert pending["candidate"] == candidate
+            assert pending["finding"] == finding
+        else:
+            decision = next(item for item in recovered["surfaces"] if item.get("candidateId"))
+            assert decision["disposition"] == "rejected"
+            assert finding in decision["previousFindings"]
+
+    assert_override_state()
+    frozen = {
+        scan_dir / relative: (scan_dir / relative).read_bytes()
+        for relative in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+            "preservedSources"
+        ]
+    }
+    ledger.write_text("{later incomplete ledger")
+    late = copy.deepcopy(checkpoint)
+    late["coverage"].update(surfaces=[], deferred=[{"id": "later-work", "reason": "Later work."}])
+    write_checkpoint(scan_dir / "checkpoints", late)
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_override_state()
+    assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
 @pytest.mark.parametrize("publication_failure", ["before_freeze", "after_freeze"])
 def test_stopped_diff_retries_saved_decisions_after_publication_failure(
     tmp_path: Path, publication_failure: str

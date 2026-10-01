@@ -13,6 +13,59 @@ export function findingCandidateId(finding: JsonObject): string | undefined {
   );
 }
 
+export function candidateKey(id: unknown, owner?: unknown): string | undefined {
+  return typeof id === "string" && id.trim()
+    ? JSON.stringify([owner ?? null, id])
+    : undefined;
+}
+
+export function findingCandidateOwner(finding: JsonObject): unknown {
+  const provenance = finding.provenance as JsonObject | undefined;
+  const extensions = finding.extensions as JsonObject | undefined;
+  return (
+    provenance?.sourceWorkerId ??
+    provenance?.workerId ??
+    extensions?.sourceWorkerId
+  );
+}
+
+export function findingCandidateKey(
+  finding: JsonObject,
+  owner?: string,
+): string | undefined {
+  return candidateKey(
+    findingCandidateId(finding),
+    owner ?? findingCandidateOwner(finding),
+  );
+}
+
+export function coverageCandidateKey(
+  item: JsonObject,
+  owner?: string,
+): string | undefined {
+  return candidateKey(
+    item.candidateId ?? item.id,
+    owner ?? item.sourceWorkerId,
+  );
+}
+
+/** Prefer the matching owner for duplicate raw IDs; unique references may be shared. */
+export function surfaceReferenceKey(
+  id: unknown,
+  source: JsonObject,
+  surfaces: JsonObject[],
+  owner?: string,
+): string | undefined {
+  const matches = surfaces.filter((surface) => surface.id === id);
+  const sameOwner = matches.find(
+    (surface) =>
+      (owner ?? surface.sourceWorkerId ?? null) ===
+      (owner ?? source.sourceWorkerId ?? null),
+  );
+  const target = sameOwner ?? (matches.length === 1 ? matches[0]! : source);
+  return candidateKey(id, owner ?? target.sourceWorkerId);
+}
+
 export function isTerminalCandidateDecision(
   item: JsonObject,
 ): item is JsonObject & { candidateId: string } {
@@ -22,19 +75,22 @@ export function isTerminalCandidateDecision(
   );
 }
 
-export function resolvedCandidateIds(input: {
-  findings: JsonObject[];
-  coverage: JsonObject;
-}): Set<string> {
+export function resolvedCandidateKeys(
+  input: {
+    findings: JsonObject[];
+    coverage: JsonObject;
+  },
+  owner?: string,
+): Set<string> {
   return new Set(
     [
-      ...input.findings.map(findingCandidateId),
+      ...input.findings.map((finding) => findingCandidateKey(finding, owner)),
       ...[
         ...(input.coverage.surfaces as JsonObject[]),
         ...(input.coverage.explicitExclusions as JsonObject[]),
       ]
         .filter(isTerminalCandidateDecision)
-        .map((item) => item.candidateId),
+        .map((item) => coverageCandidateKey(item, owner)),
     ].filter((value): value is string => typeof value === "string"),
   );
 }

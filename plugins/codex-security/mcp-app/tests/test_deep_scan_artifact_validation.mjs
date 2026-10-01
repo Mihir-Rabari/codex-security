@@ -89,6 +89,56 @@ async function testUnresolvedCandidates(root) {
     discoveryReductionInput(worker, "worker-1").unresolvedCandidates,
     [{ ...candidate, sourceWorkerId: "worker-1" }],
   );
+  const importedFinding = {
+    ...finding("imported-owner", "src/imported.ts"),
+    provenance: {
+      source: "local_plugin",
+      candidateId: candidate.candidateId,
+      sourceWorkerId: "worker-2",
+    },
+  };
+  const importedWorker = draft([importedFinding], {
+    coverage: { ...worker.coverage, deferred: [candidate] },
+  });
+  const normalizedWorker = discoveryReductionInput(importedWorker, "worker-1");
+  assert.equal(normalizedWorker.unresolvedCandidates, undefined);
+  assert.equal(
+    normalizedWorker.findings[0].provenance.sourceWorkerId,
+    "worker-1",
+  );
+  assert.equal(importedFinding.provenance.sourceWorkerId, "worker-2");
+  assert.equal(
+    normalizedWorker.findings[0].provenance.previousFindings[0].provenance
+      .sourceWorkerId,
+    "worker-2",
+  );
+  const otherWorker = discoveryReductionInput(
+    draft([], {
+      coverage: { ...worker.coverage, deferred: [candidate] },
+    }),
+    "worker-2",
+  );
+  const normalizedFinding = structuredClone(normalizedWorker.findings[0]);
+  normalizedFinding.provenance.sourceFindingIds = ["worker-1:0"];
+  const ownerSafeResult = deepReductionScanDraft(
+    reconcileDeepReduction(
+      { scanId, findings: [normalizedFinding] },
+      [
+        { workerId: "worker-1", result: normalizedWorker },
+        { workerId: "worker-2", result: otherWorker },
+      ],
+      null,
+    ),
+  );
+  assert.equal(
+    ownerSafeResult.findings[0].provenance.sourceWorkerId,
+    "worker-1",
+  );
+  assert.equal(ownerSafeResult.coverage.deferred[0].sourceWorkerId, "worker-2");
+  assert.equal(
+    ownerSafeResult.coverage.deferred[0].candidateId,
+    candidate.candidateId,
+  );
   const pendingWorker = draft([], {
     coverage: { ...worker.coverage, deferred: [candidate, candidate] },
   });
