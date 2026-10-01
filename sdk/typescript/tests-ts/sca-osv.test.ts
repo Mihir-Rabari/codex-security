@@ -837,7 +837,7 @@ describe("SCA scanner execution", () => {
     expect(result.coverage.unresolvedPackages).toBe(1);
     expect(
       result.diagnostics.some((line) =>
-        line.includes("npm registry identities"),
+        line.includes("unsupported ecosystem GIT"),
       ),
     ).toBe(true);
   });

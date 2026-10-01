@@ -18,12 +18,15 @@ authentication. OSV queries its advisory service with package identities;
 repository source is not uploaded to OSV. Model assessment follows the existing
 Codex provider configuration.
 
-The MVP handles npm package-lock v2/v3, effective npm-shrinkwrap v2/v3, and
-pnpm-lock v9, including nested projects. Git-ignored files and node_modules are
-outside inventory. Unsupported formats and unresolved/local/Git identities
-leave coverage incomplete. OSV configuration exclusions remain in effect and
-are described in the report. The scanner does not provide a full dependency
-graph or package introduction chain.
+The same SDK workflow handles JavaScript/TypeScript, Python, Go, Rust,
+Java/Kotlin, Ruby, PHP, and .NET dependency files, including mixed repositories.
+See the [supported file matrix and limitations](../../sdk/typescript/README.md#dependency-assessment-sca-mvp).
+Untracked Git-ignored files and node_modules are outside inventory. Unsupported
+inputs and unresolved local/Git/URL identities leave coverage incomplete.
+Requirements and Maven manifest results explicitly retain partial coverage;
+projects are never built to discover dependencies. OSV configuration exclusions
+remain in effect and are described in the report. The scanner does not provide
+a full dependency graph or package introduction chain.
 
 Read `report.md` and `sca-result.json`. Raw scanner stdout and diagnostics are
 `osv-output.json` and `osv-stderr.log`. Every advisory match remains visible,

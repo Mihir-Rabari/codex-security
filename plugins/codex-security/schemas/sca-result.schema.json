@@ -151,7 +151,21 @@
                 "type": "string"
               },
               "format": {
-                "enum": ["npm", "pnpm"]
+                "enum": [
+                  "npm",
+                  "pnpm",
+                  "uv",
+                  "poetry",
+                  "pipenv",
+                  "requirements",
+                  "go",
+                  "cargo",
+                  "gradle",
+                  "maven",
+                  "bundler",
+                  "composer",
+                  "nuget"
+                ]
               },
               "status": {
                 "enum": ["scanned", "excluded", "unsupported", "failed"]

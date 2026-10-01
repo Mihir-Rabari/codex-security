@@ -25,6 +25,11 @@ import { parse as parseYaml } from "yaml";
 import { parse as parseToml } from "smol-toml";
 import semverValid from "semver/functions/valid.js";
 import { errorMessage } from "./errors.js";
+import {
+  additionalScaInput,
+  inspectAdditionalScaInput,
+  type ScaUnresolvedReference,
+} from "./sca-inputs.js";
 import { executablePathForSpawn } from "./runtime.js";
 import type {
   ScaComponent,
@@ -103,11 +108,55 @@ function unique(values: string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-interface DependencyLocalReference {
-  sourcePath: string;
-  name: string;
-  version: string | null;
-  resolution: string;
+type DependencyLocalReference = ScaUnresolvedReference;
+
+const supportedEcosystems = new Set([
+  "npm",
+  "PyPI",
+  "Go",
+  "crates.io",
+  "Maven",
+  "RubyGems",
+  "Packagist",
+  "NuGet",
+]);
+function resolvedPackage(
+  ecosystem: string | null,
+  version: string | null,
+): boolean {
+  return (
+    ecosystem !== null &&
+    supportedEcosystems.has(ecosystem) &&
+    version !== null &&
+    version !== "" &&
+    (ecosystem !== "npm" || semverValid(version) !== null)
+  );
+}
+function packageName(ecosystem: string | null, name: string): string {
+  if (ecosystem === "PyPI") return name.toLowerCase().replace(/[-_.]+/gu, "-");
+  if (ecosystem === "NuGet") return name.toLowerCase();
+  return name;
+}
+function sameReferenceName(
+  reference: DependencyLocalReference,
+  component: ScaComponent,
+): boolean {
+  return (
+    packageName(reference.ecosystem, component.name) ===
+    packageName(reference.ecosystem, reference.name)
+  );
+}
+function referenceVersionMatches(
+  reference: DependencyLocalReference,
+  version: string | null,
+): boolean {
+  return (
+    version === reference.version ||
+    (reference.ecosystem === "npm" &&
+      reference.version !== null &&
+      version !== null &&
+      reference.version.startsWith(`${version}(`))
+  );
 }
 
 /** OSV omits pnpm links and loses direct URL provenance from declared versions. */
@@ -161,6 +210,7 @@ function pnpmLocalReferences(
       if (!name || !version) continue;
       references.set(JSON.stringify([name, version, resolution]), {
         sourcePath,
+        ecosystem: "npm",
         name,
         version,
         resolution,
@@ -197,6 +247,7 @@ function pnpmLocalReferences(
             continue;
           references.set(JSON.stringify([name, version, version]), {
             sourcePath,
+            ecosystem: "npm",
             name,
             version,
             resolution: version,
@@ -252,6 +303,7 @@ function npmLocalReferences(
       typeof resolved === "string" ? resolved : "workspace link";
     references.set(JSON.stringify([name, version, resolution]), {
       sourcePath,
+      ecosystem: "npm",
       name,
       version,
       resolution,
@@ -271,14 +323,9 @@ function uncountedLocalReferences(
       !components.some(
         (component) =>
           component.sourcePath === reference.sourcePath &&
-          component.name === reference.name &&
-          (component.ecosystem !== "npm" ||
-            component.version === null ||
-            semverValid(component.version) === null) &&
-          (component.version === reference.version ||
-            (reference.version !== null &&
-              component.version !== null &&
-              reference.version.startsWith(`${component.version}(`))),
+          sameReferenceName(reference, component) &&
+          !resolvedPackage(component.ecosystem, component.version) &&
+          referenceVersionMatches(reference, component.version),
       ),
   ).length;
 }
@@ -295,24 +342,23 @@ function excludedLocalReference(
     components.some(
       (component) =>
         component.sourcePath === reference.sourcePath &&
-        component.name === reference.name &&
-        component.version !== null &&
-        (component.version === referenceVersion ||
-          referenceVersion.startsWith(`${component.version}(`)),
+        sameReferenceName(reference, component) &&
+        referenceVersionMatches(reference, component.version),
     )
   )
     return false;
-  const prefix = `Package npm/${reference.name}/`;
+  const prefix = `Package ${reference.ecosystem}/${packageName(reference.ecosystem, reference.name)}/`;
   return stderr.split(/\r?\n/u).some((line) => {
-    if (!line.startsWith(prefix)) return false;
+    // NuGet package IDs are case-insensitive; OSV receipts retain the lockfile spelling.
+    const matchesPrefix =
+      reference.ecosystem === "NuGet"
+        ? line.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+        : line.startsWith(prefix);
+    if (!matchesPrefix) return false;
     const end = line.indexOf(" has been filtered out because:", prefix.length);
     if (end === -1) return false;
     const version = line.slice(prefix.length, end);
-    return (
-      version !== "" &&
-      (referenceVersion === version ||
-        referenceVersion.startsWith(`${version}(`))
-    );
+    return version !== "" && referenceVersionMatches(reference, version);
   });
 }
 
@@ -458,7 +504,10 @@ export async function discoverScaInputs(
     signal,
   );
   const candidates = files
-    .filter((path) => lockNames.has(basename(path)))
+    .filter(
+      (path) =>
+        lockNames.has(basename(path)) || additionalScaInput(path) !== null,
+    )
     .map(slash)
     .sort();
   const inputs: ScaInput[] = [];
@@ -470,16 +519,19 @@ export async function discoverScaInputs(
   );
   const packageExclusions = new Map<string, boolean>();
   const limitations: string[] = [
-    "Inventory covers observed package tuples in npm v2/v3 and pnpm v9 lockfiles, not every installed instance or a complete dependency graph.",
+    "Inventory covers observed package tuples in supported dependency files, not every installed instance, runtime, or a complete dependency graph.",
     ...diagnostics,
   ];
   for (const candidate of candidates) {
     signal?.throwIfAborted();
     const path = join(repository, candidate);
+    const additional = additionalScaInput(path);
     const input: ScaInput = {
       path: slash(candidate),
       sha256: "",
-      format: basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm",
+      format:
+        additional?.format ??
+        (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
       status: "scanned",
       reason: null,
     };
@@ -529,6 +581,23 @@ export async function discoverScaInputs(
           input.reason =
             "An npm-shrinkwrap.json outside the selected file scope takes precedence; the package-lock.json cannot be assessed as effective input.";
         }
+        continue;
+      }
+      if (additional !== null) {
+        const inspected = inspectAdditionalScaInput(
+          content.toString("utf8"),
+          additional.format,
+          input.path,
+        );
+        input.status = inspected.status;
+        input.reason = inspected.reason;
+        localReferences.push(...inspected.references);
+        diagnostics.push(...inspected.diagnostics);
+        limitations.push(...inspected.limitations);
+        if (inspected.references.length > 0)
+          limitations.push(
+            `${input.path} includes unresolved dependency origins: ${inspected.references.map((reference) => `${reference.ecosystem}/${reference.name}@${reference.version ?? "unresolved"} (${reference.resolution})`).join(", ")}.`,
+          );
         continue;
       }
       const parsed: unknown =
@@ -710,13 +779,12 @@ export function normalizeOsvOutput(
       if (
         name === "" ||
         version === null ||
-        ecosystem !== "npm" ||
-        semverValid(version) === null
+        !resolvedPackage(ecosystem, version)
       )
         unresolvedPackages++;
-      if (ecosystem !== null && ecosystem !== "npm")
+      if (ecosystem !== null && !supportedEcosystems.has(ecosystem))
         diagnostics.push(
-          `Package ${name} in ${sourcePath} uses ${ecosystem}; the MVP supports resolved npm registry identities. Raw scanner evidence is retained.`,
+          `Package ${name} in ${sourcePath} uses unsupported ecosystem ${ecosystem}. Raw scanner evidence is retained.`,
         );
       const id = stableId("component", [
         sourcePath,
@@ -820,7 +888,9 @@ export function normalizeOsvOutput(
             if (
               !record(affected) ||
               !record(affected["package"]) ||
-              affected["package"]["name"] !== name ||
+              typeof affected["package"]["name"] !== "string" ||
+              packageName(ecosystem, affected["package"]["name"]) !==
+                packageName(ecosystem, name) ||
               affected["package"]["ecosystem"] !== ecosystem ||
               !Array.isArray(affected["ranges"])
             )
@@ -1203,7 +1273,7 @@ export async function runOsvScan(
       );
     if (result.coverage.unresolvedPackages > 0)
       result.coverage.limitations.push(
-        `${result.coverage.unresolvedPackages} package identities or dependency references lack a resolved npm registry version; their advisory coverage is incomplete.`,
+        `${result.coverage.unresolvedPackages} package identities or dependency references lack an established package ecosystem and resolved version; their advisory coverage is incomplete.`,
       );
     const incomplete =
       result.diagnostics.length > 0 ||

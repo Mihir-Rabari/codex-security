@@ -55,7 +55,20 @@ export interface ScaCoverage {
 export interface ScaInput {
   path: string;
   sha256: string;
-  format: "npm" | "pnpm";
+  format:
+    | "npm"
+    | "pnpm"
+    | "uv"
+    | "poetry"
+    | "pipenv"
+    | "requirements"
+    | "go"
+    | "cargo"
+    | "gradle"
+    | "maven"
+    | "bundler"
+    | "composer"
+    | "nuget";
   status: "scanned" | "excluded" | "unsupported" | "failed";
   reason: string | null;
 }

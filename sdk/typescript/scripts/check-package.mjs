@@ -217,6 +217,7 @@ const distFiles = new Set(
     "result",
     "runtime",
     "sca",
+    "sca-inputs",
     "sca-osv",
     "sca-report",
     "sca-triage",

@@ -139,6 +139,11 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     matched?: boolean;
+    dependencyInput?: {
+      path: string;
+      format: ScaResult["coverage"]["inputs"][number]["format"];
+      ecosystem: string;
+    };
     scannerStatus?: OsvScanResult["status"];
     missing?: boolean;
     error?: string;
@@ -228,6 +233,23 @@ async function fixture(
         if (options.abortAt === "scanner")
           options.controller!.abort("cancel after scanner");
         const result = scanner(input.outputDir, options.matched ?? true);
+        if (options.dependencyInput) {
+          const dependency = options.dependencyInput;
+          Object.assign(result.coverage.inputs[0]!, {
+            path: dependency.path,
+            format: dependency.format,
+          });
+          Object.assign(result.components[0]!, {
+            sourcePath: dependency.path,
+            ecosystem: dependency.ecosystem,
+          });
+          result.scanner.invocations![0]!.argv = [
+            "scan",
+            "source",
+            "--",
+            dependency.path,
+          ];
+        }
         if (options.scannerStatus !== undefined) {
           result.status = options.scannerStatus;
           result.coverage.status =
@@ -322,69 +344,87 @@ async function fixture(
   };
 }
 
-test("dependency scan saves scanner facts before auth, assesses inline, and produces schema-valid artifacts", async () => {
-  const { client, repository, outputDir, calls, captured } = await fixture();
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
-  expect(result.status).toBe("completed");
-  expect(result.assessments[0]).toMatchObject({
-    status: "completed",
-    verdict: "needs_review",
-  });
-  expect(calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
-  expect(captured.codex!.config).toMatchObject({
-    model: "gpt-5.6-sol",
-    model_reasoning_effort: "high",
-    default_permissions: "codex_security_policy",
-    features: { plugins: false, apps: false },
-    mcp_servers: {},
-  });
-  expect(captured.thread).toMatchObject({
-    threadSource: "security_dependency_triage",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-    additionalDirectories: [
-      repository,
-      PLUGIN_ROOT,
-      dirname(resolveCodexCommand().command),
-    ],
-  });
-  expect(captured.prompt).toContain("triage-finding");
-  expect(captured.prompt).toContain("match-1");
-  expect(result.model.threadId).toBe("sca-thread");
-  expect(typeof result.model.skillDigest).toBe("string");
-  expect(result.model.costUsd).toBeGreaterThan(0);
-  const ajv = new Ajv({ strict: false });
-  ajv.addSchema(
-    JSON.parse(
-      await readFile(
-        join(PLUGIN_ROOT, "schemas/triage-result.schema.json"),
-        "utf8",
+test.each([
+  { path: "package-lock.json", format: "npm", ecosystem: "npm" },
+  { path: "uv.lock", format: "uv", ecosystem: "PyPI" },
+  { path: "go.mod", format: "go", ecosystem: "Go" },
+  { path: "Cargo.lock", format: "cargo", ecosystem: "crates.io" },
+  { path: "gradle.lockfile", format: "gradle", ecosystem: "Maven" },
+  { path: "Gemfile.lock", format: "bundler", ecosystem: "RubyGems" },
+  { path: "composer.lock", format: "composer", ecosystem: "Packagist" },
+  { path: "packages.lock.json", format: "nuget", ecosystem: "NuGet" },
+] as const)(
+  "dependency scan persists and assesses $ecosystem with schema-valid artifacts",
+  async (dependencyInput) => {
+    const { client, repository, outputDir, calls, captured } = await fixture({
+      dependencyInput,
+    });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    expect(result.status).toBe("completed");
+    expect(result.assessments[0]).toMatchObject({
+      status: "completed",
+      verdict: "needs_review",
+    });
+    expect(calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+    expect(captured.codex!.config).toMatchObject({
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: "high",
+      default_permissions: "codex_security_policy",
+      features: { plugins: false, apps: false },
+      mcp_servers: {},
+    });
+    expect(captured.thread).toMatchObject({
+      threadSource: "security_dependency_triage",
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+      additionalDirectories: [
+        repository,
+        PLUGIN_ROOT,
+        dirname(resolveCodexCommand().command),
+      ],
+    });
+    expect(captured.prompt).toContain("triage-finding");
+    expect(captured.prompt).toContain("match-1");
+    expect(captured.prompt).toContain(dependencyInput.ecosystem);
+    expect(captured.prompt).toContain(dependencyInput.path);
+    expect(result.components[0]?.ecosystem).toBe(dependencyInput.ecosystem);
+    expect(result.coverage.inputs[0]?.format).toBe(dependencyInput.format);
+    expect(result.model.threadId).toBe("sca-thread");
+    expect(typeof result.model.skillDigest).toBe("string");
+    expect(result.model.costUsd).toBeGreaterThan(0);
+    const ajv = new Ajv({ strict: false });
+    ajv.addSchema(
+      JSON.parse(
+        await readFile(
+          join(PLUGIN_ROOT, "schemas/triage-result.schema.json"),
+          "utf8",
+        ),
       ),
-    ),
-    "triage-result.schema.json",
-  );
-  const validate = ajv.compile(
-    JSON.parse(
-      await readFile(
-        join(PLUGIN_ROOT, "schemas/sca-result.schema.json"),
-        "utf8",
+      "triage-result.schema.json",
+    );
+    const validate = ajv.compile(
+      JSON.parse(
+        await readFile(
+          join(PLUGIN_ROOT, "schemas/sca-result.schema.json"),
+          "utf8",
+        ),
       ),
-    ),
-  );
-  validate(result);
-  expect(validate.errors).toBeNull();
-  expect(
-    JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
-  ).toEqual(result);
-  expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain(
-    "SYNTHETIC-1",
-  );
-});
+    );
+    validate(result);
+    expect(validate.errors).toBeNull();
+    expect(
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
+    expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain(
+      "SYNTHETIC-1",
+    );
+  },
+);
 
 test("complete zero-match scan needs no authentication or model", async () => {
   const { client, repository, outputDir, calls } = await fixture({

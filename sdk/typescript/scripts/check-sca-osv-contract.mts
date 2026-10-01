@@ -11,7 +11,18 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strToU8, zipSync } from "fflate";
-import { runOsvProcess, runOsvScan } from "../src/sca-osv.js";
+import {
+  runOsvProcess,
+  runOsvScan,
+  type OsvScanResult,
+} from "../src/sca-osv.js";
+import {
+  ecosystemAdvisoryId,
+  ecosystemFixtures,
+  localOriginFixtures,
+  unsupportedEcosystemInputs,
+  type EcosystemFixture,
+} from "./sca-osv-ecosystem-fixtures.mjs";
 
 const executable = process.argv[2];
 if (!executable)
@@ -100,6 +111,49 @@ async function scan(
   });
   return result;
 }
+function assertEcosystemFacts(
+  result: OsvScanResult,
+  fixture: EcosystemFixture,
+  version: string,
+  sourcePath = fixture.path,
+) {
+  const component = result.components.find(
+    (item) => item.sourcePath === sourcePath && item.name === fixture.name,
+  );
+  assert.ok(component, `${sourcePath}: expected ${fixture.name} inventory`);
+  assert.deepEqual(
+    {
+      ecosystem: component.ecosystem,
+      name: component.name,
+      version: component.version,
+      sourcePath: component.sourcePath,
+    },
+    { ecosystem: fixture.ecosystem, name: fixture.name, version, sourcePath },
+  );
+  const matches = result.matches.filter(
+    (match) => match.componentId === component.id,
+  );
+  assert.equal(matches.length, version === "1.2.0" ? 1 : 0);
+  if (version === "1.2.0") {
+    assert.deepEqual(matches[0]!.advisoryIds, [
+      ecosystemAdvisoryId(fixture.ecosystem),
+    ]);
+    assert.deepEqual(matches[0]!.fixedVersions, ["1.3.0"]);
+    assert.deepEqual(matches[0]!.sourceAdvisories[0]!["affected"], [
+      {
+        package: { name: fixture.name, ecosystem: fixture.ecosystem },
+        ranges: [
+          {
+            type: ["Go", "crates.io"].includes(fixture.ecosystem)
+              ? "SEMVER"
+              : "ECOSYSTEM",
+            events: [{ introduced: "0" }, { fixed: "1.3.0" }],
+          },
+        ],
+      },
+    ]);
+  }
+}
 try {
   await mkdir(archiveDirectory, { recursive: true });
   await writeFile(
@@ -108,6 +162,36 @@ try {
       "SYNTHETIC-2026-001.json": strToU8(JSON.stringify(syntheticAdvisory)),
     }),
   );
+  const ecosystemAdvisories = new Map<string, EcosystemFixture>();
+  for (const fixture of Object.values(ecosystemFixtures))
+    ecosystemAdvisories.set(fixture.ecosystem, fixture);
+  for (const [ecosystem, fixture] of ecosystemAdvisories) {
+    const directory = join(database, "osv-scalibr", ecosystem);
+    await mkdir(directory, { recursive: true });
+    const advisory = {
+      schema_version: "1.7.0",
+      id: ecosystemAdvisoryId(ecosystem),
+      modified: "2026-01-01T00:00:00Z",
+      summary: "Synthetic scanner contract fixture; not a real advisory.",
+      affected: [
+        {
+          package: { name: fixture.name, ecosystem },
+          ranges: [
+            {
+              type: ["Go", "crates.io"].includes(ecosystem)
+                ? "SEMVER"
+                : "ECOSYSTEM",
+              events: [{ introduced: "0" }, { fixed: "1.3.0" }],
+            },
+          ],
+        },
+      ],
+    };
+    await writeFile(
+      join(directory, "all.zip"),
+      zipSync({ [`${advisory.id}.json`]: strToU8(JSON.stringify(advisory)) }),
+    );
+  }
   for (const version of [2, 3]) {
     const match = await scan(`npm-v${version}`, {
       "package-lock.json": npmLock(version),
@@ -744,6 +828,174 @@ snapshots:
   });
   assert.equal(malformed.status, "failed");
   assert.equal(malformed.scanner.exitCode, 128);
+  for (const [format, fixture] of Object.entries(ecosystemFixtures)) {
+    for (const version of ["1.2.0", "1.3.0"]) {
+      const result = await scan(
+        `ecosystem-${format}-${version === "1.2.0" ? "vulnerable" : "fixed"}`,
+        { [fixture.path]: fixture.content(version) },
+      );
+      assert.equal(
+        result.status,
+        fixture.declaration ? "partial" : "completed",
+        `${format}: ${result.diagnostics.join("; ")}`,
+      );
+      assert.equal(
+        result.coverage.status,
+        fixture.declaration ? "partial" : "complete",
+      );
+      assert.equal(result.scanner.exitCode, version === "1.2.0" ? 1 : 0);
+      assert.deepEqual(
+        result.coverage.inputs.map((input) => [
+          input.path,
+          input.format,
+          input.status,
+        ]),
+        [[fixture.path, format, "scanned"]],
+      );
+      assertEcosystemFacts(result, fixture, version);
+    }
+  }
+  for (const [format, path] of [
+    ["gradle", "buildscript-gradle.lockfile"],
+    ["bundler", "gems.locked"],
+  ] as const) {
+    const fixture = ecosystemFixtures[format];
+    const result = await scan(`ecosystem-${format}-alternate-filename`, {
+      [path]: fixture.content("1.2.0"),
+    });
+    assert.equal(result.status, "completed");
+    assertEcosystemFacts(result, fixture, "1.2.0", path);
+  }
+  for (const origin of localOriginFixtures) {
+    const fixture = ecosystemFixtures[origin.format];
+    const result = await scan(`ecosystem-${origin.format}-local-origin`, {
+      [fixture.path]: origin.content,
+    });
+    assert.equal(
+      result.status,
+      "partial",
+      `${origin.format}: ${result.diagnostics.join("; ")}`,
+    );
+    assert.equal(result.coverage.status, "partial");
+    assert.equal(result.coverage.unresolvedPackages, 1);
+    assert.equal(result.matches.length, origin.matches);
+    for (const emitted of origin.emitted)
+      assert.ok(
+        result.components.some(
+          (component) =>
+            component.name === emitted.name &&
+            component.version === emitted.version &&
+            component.ecosystem === fixture.ecosystem &&
+            component.sourcePath === fixture.path,
+        ),
+        `${origin.format}: missing retained ${emitted.name} tuple`,
+      );
+    for (const omitted of origin.omitted ?? [])
+      assert.ok(
+        !result.components.some((component) => component.name === omitted),
+      );
+    if (origin.matches) assertEcosystemFacts(result, fixture, "1.2.0");
+  }
+  for (const origin of localOriginFixtures.filter((item) =>
+    ["uv", "poetry", "cargo", "bundler", "composer"].includes(item.format),
+  )) {
+    const fixture = ecosystemFixtures[origin.format];
+    const excluded = await scan(`ecosystem-${origin.format}-local-excluded`, {
+      [fixture.path]: origin.content,
+      "osv-scanner.toml": `[[PackageOverrides]]\nname=${JSON.stringify(fixture.name)}\necosystem=${JSON.stringify(fixture.ecosystem)}\nversion="1.2.0"\nignore=true\nreason="Synthetic exclusion contract"\n`,
+    });
+    assert.equal(
+      excluded.status,
+      "completed",
+      `${origin.format}: ${excluded.diagnostics.join("; ")}`,
+    );
+    assert.equal(excluded.coverage.unresolvedPackages, 0);
+    assert.equal(excluded.components.length, 0);
+    assert.equal(excluded.matches.length, 0);
+    assert.ok(
+      (await readFile(excluded.scanner.stderrPath, "utf8")).includes(
+        `Package ${fixture.ecosystem}/${fixture.name}/1.2.0 has been filtered out because:`,
+      ),
+    );
+  }
+  const resolvedProjectContent = ecosystemFixtures.nuget
+    .content("1.2.0")
+    .replace('"type":"Direct"', '"type":"Project"');
+  const resolvedProject = await scan("ecosystem-nuget-resolved-project", {
+    "packages.lock.json": resolvedProjectContent,
+  });
+  assert.equal(resolvedProject.status, "partial");
+  assert.equal(resolvedProject.coverage.unresolvedPackages, 1);
+  assertEcosystemFacts(resolvedProject, ecosystemFixtures.nuget, "1.2.0");
+  const excludedProject = await scan(
+    "ecosystem-nuget-resolved-project-excluded",
+    {
+      "packages.lock.json": resolvedProjectContent,
+      "osv-scanner.toml":
+        '[[PackageOverrides]]\nname="Synthetic.Library"\necosystem="NuGet"\nversion="1.2.0"\nignore=true\nreason="Synthetic exclusion contract"\n',
+    },
+  );
+  assert.equal(excludedProject.status, "completed");
+  assert.equal(excludedProject.coverage.unresolvedPackages, 0);
+  assert.equal(excludedProject.components.length, 0);
+  assert.equal(excludedProject.matches.length, 0);
+  assert.ok(
+    (await readFile(excludedProject.scanner.stderrPath, "utf8")).includes(
+      "Package NuGet/Synthetic.Library/1.2.0 has been filtered out because:",
+    ),
+  );
+  for (const input of unsupportedEcosystemInputs) {
+    const result = await scan(`ecosystem-unsupported-${input.name}`, {
+      [input.path]: input.content,
+    });
+    assert.equal(result.status, "failed");
+    assert.deepEqual(
+      result.coverage.inputs.map((file) => [file.path, file.status]),
+      [[input.path, "unsupported"]],
+    );
+    assert.equal(result.scanner.version, null);
+    assert.deepEqual(result.scanner.invocations, []);
+    assert.equal(result.matches.length, 0);
+  }
+  const resolvedFixtures = Object.entries(ecosystemFixtures).filter(
+    ([, fixture]) => !fixture.declaration,
+  );
+  const mixedFiles: Record<string, string> = {
+    "package-lock.json": npmLock(3),
+  };
+  for (const [format, fixture] of resolvedFixtures)
+    mixedFiles[`${format}/${fixture.path}`] = fixture.content("1.2.0");
+  const mixed = await scan("mixed-resolved-ecosystems", mixedFiles);
+  assert.equal(mixed.status, "completed");
+  assert.equal(mixed.coverage.status, "complete");
+  assert.equal(mixed.matches.length, resolvedFixtures.length + 1);
+  assert.equal(mixed.scanner.invocations!.length, resolvedFixtures.length + 1);
+  for (const [format, fixture] of resolvedFixtures)
+    assertEcosystemFacts(mixed, fixture, "1.2.0", `${format}/${fixture.path}`);
+  const mixedDeclarations = await scan(
+    "mixed-resolved-and-declaration-inventory",
+    {
+      "package-lock.json": npmLock(3),
+      "python/requirements.txt":
+        ecosystemFixtures.requirements.content("1.2.0"),
+      "java/pom.xml": ecosystemFixtures.maven.content("1.2.0"),
+    },
+  );
+  assert.equal(mixedDeclarations.status, "partial");
+  assert.equal(mixedDeclarations.coverage.status, "partial");
+  assert.equal(mixedDeclarations.matches.length, 3);
+  assertEcosystemFacts(
+    mixedDeclarations,
+    ecosystemFixtures.requirements,
+    "1.2.0",
+    "python/requirements.txt",
+  );
+  assertEcosystemFacts(
+    mixedDeclarations,
+    ecosystemFixtures.maven,
+    "1.2.0",
+    "java/pom.xml",
+  );
   console.log(
     JSON.stringify(
       { scanner: "OSV-Scanner v2.6.0", network: "disabled", cases: results },

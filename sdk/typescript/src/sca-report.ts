@@ -127,7 +127,7 @@ export function renderScaReport(result: ScaResult): string {
       assessment?.status === "completed" ? assessment.triage : null;
     sections.push(
       `## ${code(component.name)} ${code(component.version ?? "unresolved version")}`,
-      `Match: ${code(match.id)}. Source lockfile: ${code(component.sourcePath)}.`,
+      `Match: ${code(match.id)}. Source dependency file: ${code(component.sourcePath)}.`,
       `Advisories and aliases: ${identifiers(match).map(code).join(", ")}. Source severity: ${match.severity ?? "not supplied"}.`,
       `Candidate fixed versions from advisories: ${match.fixedVersions.length ? match.fixedVersions.map(code).join(", ") : "none supplied"}. Compatibility and resolution are not verified.`,
       "Introduction chain and direct/transitive classification: unknown from scanner evidence.",
@@ -232,6 +232,13 @@ function comparabilityReasons(base: ScaResult, head: ScaResult): string[] {
   return reasons;
 }
 
+function comparisonPackageName(component: ScaComponent): string {
+  if (component.ecosystem === "NuGet") return component.name.toLowerCase();
+  if (component.ecosystem === "PyPI")
+    return component.name.toLowerCase().replace(/[-_.]+/gu, "-");
+  return component.name;
+}
+
 /** Correlate package/advisory facts independently of model assessments. */
 export function compareScaResults(
   base: ScaResult,
@@ -264,7 +271,8 @@ export function compareScaResults(
       .filter((after) => {
         const afterComponent = headComponents.get(after.id)!;
         return (
-          beforeComponent.name === afterComponent.name &&
+          comparisonPackageName(beforeComponent) ===
+            comparisonPackageName(afterComponent) &&
           beforeComponent.ecosystem === afterComponent.ecosystem &&
           sourceIdentity(beforeComponent.sourcePath, base.repository.path) ===
             sourceIdentity(afterComponent.sourcePath, head.repository.path) &&
@@ -391,7 +399,7 @@ export function createScaUpdateHandoff(
     [
       "# Dependency update verification",
       "Verification is limited to dependency resolution and ordinary project compatibility checks. Do not create or run vulnerability reproductions or access external application targets.",
-      "1. Regenerate the selected lockfiles using the repository's normal package manager and record the actual resolved versions, including remaining affected versions.",
+      "1. Regenerate the selected dependency files using the repository's normal package manager and record the actual resolved versions, including remaining affected versions.",
       "2. Rerun dependency advisory matching for the same effective inputs and configuration. Record coverage, advisory provenance, remaining matches, and any advisory-data changes; incomplete matching cannot establish resolution.",
       "3. Run the ordinary project checks below and record each command, outcome, and any check that could not run. If no checks are specified, identify the normal checks with the developer before calling the update verified.",
       checks.length

@@ -2,29 +2,37 @@
 
 The additive SDK entry point is
 `security.scanDependencies({ repositoryPath, outputDir, auth, signal, maxCostUsd })`.
-The MVP covers npm package-lock/shrinkwrap v2/v3 and pnpm v9, retains OSV evidence,
+The MVP covers the [supported language/file matrix](../sdk/typescript/README.md#dependency-assessment-sca-mvp), retains OSV evidence,
 performs static application assessment, and produces a report, conservative
 base/head comparison, and developer-selected update handoff.
 See [the runnable examples](../examples/sca/README.md).
 
 ## Verification
 
-Implementation and isolated PR checks completed on Linux on September 30, 2026:
+Implementation and isolated PR checks completed on Linux on October 1, 2026:
 
-| Check                          | Observed result                                                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Focused SDK regressions        | 166 tests passed: adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs.         |
-| Actual OSV-Scanner v2.6.0      | 54 offline synthetic contract cases passed under Node 24; 53 under Bun 1.3.14.                                     |
-| Deterministic SCA evaluation   | 26 tests passed.                                                                                                   |
-| Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                       |
-| Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                         |
-| SDK compilation and formatting | `build`, `build:ci`, `types`, and `format` passed.                                                                 |
-| Built examples                 | Syntax checks passed; comparison and handoff runners worked against a synthetic SDK result.                        |
-| Live SDK/model integration     | One synthetic assessment completed, retained its advisory match, and saved all four artifacts with no diagnostics. |
-| Live evaluation smoke          | Six correct synthetic verdicts; five of six strict citation assertions passed.                                     |
+| Check                          | Observed result                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Focused SDK regressions        | 247 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
+| Actual OSV-Scanner v2.6.0      | 101 offline synthetic contract cases passed under Node 24; 100 under Bun 1.3.14.                                          |
+| Deterministic SCA evaluation   | 26 tests passed.                                                                                                          |
+| Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                              |
+| Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                                |
+| SDK compilation and formatting | `build`, `build:ci`, `types`, and `format` passed.                                                                        |
+| Built examples                 | Syntax checks passed; comparison and handoff runners worked against a synthetic SDK result.                               |
+| Live SDK/model integration     | One synthetic assessment completed, retained its advisory match, and saved all four artifacts with no diagnostics.        |
+| Live evaluation smoke          | Six correct synthetic verdicts; five of six strict citation assertions passed.                                            |
 
 Package-wide validation and the latest CI results are recorded with the pull
 request. The checks above describe the implementation and its focused contracts.
+
+The added ecosystem contracts cover Python, Go, Rust, Java/Kotlin, Ruby, PHP,
+and .NET alongside JavaScript/TypeScript. Tests verify vulnerable and fixed
+versions, local origins, explicit exclusions, mixed repositories, and coverage
+limits. SDK orchestration tests exercise each ecosystem through persisted
+artifacts and the model prompt. Requirements and Maven declarations remain
+partial; Maven parent projects, requirement includes, and older Go module
+formats are not treated as complete inventories.
 
 The live SDK smoke used a synthetic scanner executable and a real Codex session.
 The separate pinned OSV tests exercised the real scanner against a fictional
@@ -81,7 +89,9 @@ that Bun version; it passes under Node 24, and the normalization regression stay
 enabled on both runtimes.
 
 Portable tests exercise Windows paths; native Windows and macOS checks remain
-for CI. The twelve-case corpus has no independent human labels. The planned
+for CI. The twelve-case model corpus is JavaScript-focused and has no independent
+human labels. Multilingual scanner and orchestration tests do not establish
+per-language model assessment accuracy. The planned
 90-case adjudicated corpus and 5–8-developer update pilot require further study.
 No production accuracy, automatic-dismissal safety, or developer-productivity
 claim is established. The small live smoke retains its baseline citation failure,
