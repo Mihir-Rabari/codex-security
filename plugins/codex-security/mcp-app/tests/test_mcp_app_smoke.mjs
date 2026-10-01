@@ -610,7 +610,12 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const scopedTarget = await mkdtemp(
     path.join(tmpdir(), "codex-security-scoped-target-"),
   );
-  for (const directory of ["service", "library", "other"]) {
+  const selectedDirectories = [
+    "service",
+    "library",
+    ...Array.from({ length: 31 }, (_, index) => `directory-${index}`),
+  ].sort();
+  for (const directory of [...selectedDirectories, "other"]) {
     await mkdir(path.join(scopedTarget, directory), { recursive: true });
     await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
   }
@@ -685,17 +690,20 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: scopedTarget,
-        include_paths: ["service", "library"],
+        include_paths: selectedDirectories,
       },
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(scoped);
     const scopedResult = scoped.result.structuredContent;
-    assert.deepEqual(scopedResult.scan.contract.scope.requiredIncludePaths, [
-      "library",
-      "service",
-    ]);
-    assert.equal(scopedResult.scan.progress.coverage.filesTotal, 2);
+    assert.deepEqual(
+      scopedResult.scan.contract.scope.requiredIncludePaths,
+      selectedDirectories,
+    );
+    assert.equal(
+      scopedResult.scan.progress.coverage.filesTotal,
+      selectedDirectories.length,
+    );
     assert.deepEqual(scopedResult.scan.executionThreadIds, []);
     const conflict = await headlessServer.requestAndWait(41, "tools/call", {
       name: "start_codex_security_standard_scan",
@@ -729,7 +737,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
           coverage: {
             completeness: "complete",
             surfaces: [
-              { label: "Service and library", disposition: "rejected" },
+              { label: "Selected directories", disposition: "rejected" },
             ],
             explicitExclusions: [],
             deferred: [],
@@ -763,14 +771,14 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     );
     assertNoError(scopedCompleted);
     const scopedArtifacts = scopedCompleted.result.structuredContent;
-    assert.deepEqual(scopedArtifacts.manifest.scan.scope.includePaths, [
-      "library",
-      "service",
-    ]);
-    assert.deepEqual(scopedArtifacts.coverage.includePaths, [
-      "library",
-      "service",
-    ]);
+    assert.deepEqual(
+      scopedArtifacts.manifest.scan.scope.includePaths,
+      selectedDirectories,
+    );
+    assert.deepEqual(
+      scopedArtifacts.coverage.includePaths,
+      selectedDirectories,
+    );
     assert.equal(scopedArtifacts.coverage.mode, "scoped_path");
     assert.equal(scopedArtifacts.coverage.inventoryStrategy, "scoped_path");
     assert.ok(scopedArtifacts.manifest.scan.sealedAt);

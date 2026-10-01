@@ -263,10 +263,9 @@ const startHeadlessStandardScanSchema = {
   include_paths: z
     .array(z.string().min(1).max(1024))
     .min(1)
-    .max(32)
     .optional()
     .describe(
-      "Repository-relative directories to scan. Mutually exclusive with scope. Omit both for the whole repository.",
+      "Nonempty list of repository-relative directories to scan, with no directory-count limit. Mutually exclusive with scope. Omit both for the whole repository.",
     ),
   scope: z
     .string()

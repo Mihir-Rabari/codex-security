@@ -484,7 +484,7 @@ def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) 
     ("selection", "error"),
     [
         (("--include-paths-json", "{"), "must be a JSON array"),
-        (("--include-paths-json", "[]"), "must contain between"),
+        (("--include-paths-json", "[]"), "must be a nonempty JSON array"),
         (("--scope", ".", "--include-paths-json", '["."]'), "not allowed with argument"),
     ],
 )

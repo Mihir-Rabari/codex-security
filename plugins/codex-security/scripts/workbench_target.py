@@ -811,8 +811,8 @@ def require_include_paths(value: str, target: Path) -> list[str]:
         paths = json.loads(value)
     except ValueError as exc:
         raise SystemExit("include_paths must be a JSON array of directories.") from exc
-    if not isinstance(paths, list) or not 1 <= len(paths) <= 32:
-        raise SystemExit("include_paths must contain between 1 and 32 directories.")
+    if not isinstance(paths, list) or not paths:
+        raise SystemExit("include_paths must be a nonempty JSON array of directories.")
     normalized: set[str] = set()
     for path in paths:
         if (
