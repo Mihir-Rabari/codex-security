@@ -216,6 +216,26 @@ def test_selected_non_git_directory_count_walks_only_selected_paths(
     assert walked == [target / "service", target / "library"]
 
 
+def test_selected_non_git_parent_preserves_checkout_inventory(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    for directory in ("service", "library"):
+        checkout = target / directory
+        initialize_git_repository(checkout)
+        (checkout / ".gitignore").write_text("*.ignored\n")
+        (checkout / "cache.ignored").write_text("ignored\n")
+        (checkout / ".git" / "runtime-cache").write_text("runtime metadata\n")
+    for directory in ("plain", "other"):
+        (target / directory).mkdir()
+        (target / directory / "code.py").write_text("pass\n")
+
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    assert count_files(target / "service") == 2
+    assert count_files(target / "library") == 2
+    assert count_files(target, include_paths=["service", "library"]) == 4
+    assert count_files(target, include_paths=["service", "library", "plain"]) == 5
+
+
 @pytest.mark.parametrize(
     "paths",
     [

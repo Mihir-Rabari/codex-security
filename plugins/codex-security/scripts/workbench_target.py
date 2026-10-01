@@ -668,9 +668,12 @@ def directory_snapshot_regular_file_count(
     paths = git_directory_snapshot_paths(target)
     selected_identities: set[tuple[int, int]] = set()
     if paths is None:
-        paths = sorted(
-            path for selected in include_paths or ["."] for path in (target / selected).rglob("*")
-        )
+        if include_paths:
+            return sum(
+                directory_snapshot_regular_file_count(target / selected)
+                for selected in include_paths
+            )
+        paths = sorted(target.rglob("*"))
     elif include_paths:
         for selected in include_paths:
             metadata = (target / selected).stat()

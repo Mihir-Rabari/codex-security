@@ -371,6 +371,45 @@ def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -
     assert history[0]["includePaths"] == ["library", "service"]
 
 
+def test_headless_directory_set_preserves_nested_git_file_counts(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    scan_root = tmp_path / "scans"
+    standalone_counts = []
+    for directory in ("service", "library"):
+        repository = target / directory
+        initialize_git_repository(repository)
+        (repository / ".gitignore").write_text("ignored.py\n")
+        (repository / "untracked.py").write_text("pass\n")
+        (repository / "ignored.py").write_text("pass\n")
+        (repository / ".git" / "fixture-metadata").write_text("fixture\n")
+        standalone = start_headless_standard_scan(
+            state, repository, scan_root, thread_id=f"standalone-{directory}"
+        )
+        standalone_counts.append(standalone["scan"]["progress"]["coverage"]["filesTotal"])
+    (target / "other").mkdir()
+    (target / "other" / "code.py").write_text("pass\n")
+    (target / "root.py").write_text("pass\n")
+
+    combined = run_workbench(
+        state,
+        "start-headless-standard-scan",
+        "--thread-id",
+        "combined-directories",
+        "--target-path",
+        str(target),
+        "--include-paths-json",
+        '["service", "library"]',
+        "--scan-root",
+        str(scan_root),
+    )["scan"]
+
+    assert standalone_counts == [3, 3]
+    assert combined["contract"]["scope"]["requiredIncludePaths"] == ["library", "service"]
+    assert combined["progress"]["coverage"]["filesTotal"] == sum(standalone_counts)
+
+
 @pytest.mark.parametrize(
     ("command", "first_selection"),
     [
