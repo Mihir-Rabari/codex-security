@@ -386,6 +386,22 @@ async function preserveScanDraft(
       result = structuredClone(final);
       if (diffCandidates !== undefined) {
         sources.unshift(input);
+        const currentDecisionKeys = collectResolvedCandidateKeys(
+          { ...input, findings: [] },
+          owner,
+        );
+        for (const section of ["surfaces", "explicitExclusions"]) {
+          result.coverage[section] = [
+            ...(input.coverage[section] as JsonObject[]).filter(
+              isTerminalCandidateDecision,
+            ),
+            ...(result.coverage[section] as JsonObject[]).filter(
+              (item) =>
+                !isTerminalCandidateDecision(item) ||
+                !currentDecisionKeys.has(coverageKey(item)!),
+            ),
+          ];
+        }
         if (
           input.coverage.completeness === "partial" &&
           input.coverage.completenessBeforeCandidates === undefined
@@ -481,7 +497,7 @@ async function preserveScanDraft(
       ...(result.coverage.surfaces as JsonObject[]),
       ...(result.coverage.explicitExclusions as JsonObject[]),
     ].filter(isTerminalCandidateDecision);
-    const candidateRows = [...deferred, ...dispositions];
+    const candidateRows = [...dispositions, ...deferred];
     for (const pending of source.coverage.deferred as JsonObject[]) {
       const candidateId = coverageKey(pending);
       if (typeof candidateId !== "string") continue;
@@ -1283,6 +1299,13 @@ export function preserveScanCoverage(
     sources.some((source) => source.completeness === "unknown")
   ) {
     result.completeness = "unknown";
+  }
+  if (
+    coverage.completeness !== "partial" &&
+    result.completeness === "partial" &&
+    sources.some((source) => source.completenessBeforeCandidates !== undefined)
+  ) {
+    result.completenessBeforeCandidates = coverage.completeness;
   }
   return result;
 }

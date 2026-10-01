@@ -1019,43 +1019,190 @@ for (const [validation, attackPath, disposition] of [
   });
 }
 
-test("reportable diff ledger rows remain pending until a finding is saved", async (t) => {
-  const pending = candidate("reportable-review");
-  const context = await fixture(t, [pending]);
-  await recordCodexSecurityScanDraft(context, { ...draft(), complete: false });
-  const reportable = candidate(
-    pending.candidate_id,
-    "reportable",
-    "reportable",
-  );
-  await writeLedger(context, [reportable]);
-  await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-  const missingFinding = await readCoverage(context);
-  assert.equal(missingFinding.completeness, "partial");
-  assert.equal(missingFinding.deferred.length, 1);
-  assert.equal(missingFinding.deferred[0].candidateId, pending.candidate_id);
-  assert.deepEqual(missingFinding.deferred[0].candidate, reportable);
-  assert.match(missingFinding.deferred[0].reason, /no saved finding/u);
+for (const complete of [false, true]) {
+  test(`reportable diff ledger rows remain pending until a finding is saved in a ${complete ? "final draft" : "checkpoint"}`, async (t) => {
+    const pending = candidate("reportable-review");
+    const context = await fixture(t, [pending]);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: false,
+    });
+    const reportable = candidate(
+      pending.candidate_id,
+      "reportable",
+      "reportable",
+    );
+    await writeLedger(context, [reportable]);
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const missingFinding = await readCoverage(context);
+    assert.equal(missingFinding.completeness, "partial");
+    assert.equal(missingFinding.deferred.length, 1);
+    assert.equal(missingFinding.deferred[0].candidateId, pending.candidate_id);
+    assert.deepEqual(missingFinding.deferred[0].candidate, reportable);
+    assert.match(missingFinding.deferred[0].reason, /no saved finding/u);
 
-  const finalDraft = { ...draft(), complete: true };
-  finalDraft.findings.push(finding(pending.candidate_id));
-  await recordCodexSecurityScanDraft(context, finalDraft);
-  const saved = await readCoverage(context);
-  assert.equal(saved.completeness, "complete");
-  assert.deepEqual(saved.deferred, []);
-  await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-  const retained = await readCoverage(context);
-  assert.equal(retained.completeness, "complete");
-  assert.deepEqual(retained.deferred, []);
-  const findings = JSON.parse(
-    await readFile(path.join(context.root, "findings.json"), "utf8"),
-  );
-  assert.equal(findings.findings.length, 1);
-  assert.equal(
-    findings.findings[0].provenance.candidateId,
-    pending.candidate_id,
-  );
-});
+    const finalDraft = { ...draft(), complete };
+    finalDraft.findings.push(finding(pending.candidate_id));
+    await recordCodexSecurityScanDraft(context, finalDraft);
+    const saved = await readCoverage(context);
+    assert.equal(saved.completeness, "complete");
+    assert.deepEqual(saved.deferred, []);
+    assert.ok(
+      saved.surfaces.every(
+        (surface) => surface.disposition !== "needs_follow_up",
+      ),
+    );
+    for (const repeatComplete of [false, true, false]) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: repeatComplete,
+      });
+      const repeated = await readCoverage(context);
+      assert.equal(repeated.completeness, "complete");
+      assert.deepEqual(repeated.deferred, []);
+      assert.ok(
+        repeated.surfaces.every(
+          (surface) => surface.disposition !== "needs_follow_up",
+        ),
+      );
+    }
+    const retained = await readCoverage(context);
+    assert.equal(retained.completeness, "complete");
+    assert.deepEqual(retained.deferred, []);
+    const findings = JSON.parse(
+      await readFile(path.join(context.root, "findings.json"), "utf8"),
+    );
+    assert.equal(findings.findings.length, 1);
+    assert.equal(
+      findings.findings[0].provenance.candidateId,
+      pending.candidate_id,
+    );
+  });
+}
+
+for (const section of ["surfaces", "explicitExclusions"]) {
+  for (const disposition of ["rejected", "not_applicable"]) {
+    test(`a ${disposition} ${section} checkpoint resolves inherited generated coverage`, async (t) => {
+      const pending = candidate("checkpoint-decision");
+      const context = await fixture(t, [pending]);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      const generated = await readCoverage(context);
+      const initial = { ...draft(), complete: true };
+      Object.assign(initial.coverage, {
+        completeness: generated.completeness,
+        completenessBeforeCandidates: generated.completenessBeforeCandidates,
+        surfaces: generated.surfaces,
+        deferred: generated.deferred,
+      });
+      Object.assign(initial.coverage.surfaces[0], {
+        receiptRefs: ["artifacts/review/retained.json"],
+        analystAnnotation: "Keep this evidence annotation.",
+      });
+      await recordCodexSecurityScanDraft(context, initial);
+      const current = { ...draft(), complete: false };
+      const reason = "Current source evidence resolves this candidate.";
+      const decision = {
+        candidateId: pending.candidate_id,
+        disposition,
+        ...(section === "surfaces"
+          ? {
+              label: "Current review decision",
+              ...(disposition === "rejected" ? { notes: reason } : {}),
+              receiptRefs: ["artifacts/review/decision.json"],
+            }
+          : { pattern: "src/handler.ts", reason }),
+      };
+      current.coverage[section].push(decision);
+      await recordCodexSecurityScanDraft(context, current);
+      for (const complete of [false, true, false]) {
+        const saved = await readCoverage(context);
+        assert.equal(saved.completeness, "complete");
+        assert.deepEqual(saved.deferred, []);
+        assert.equal(saved.surfaces.length, 1);
+        const surface = saved.surfaces[0];
+        assert.equal(surface.disposition, disposition);
+        assert.equal(
+          surface.notes,
+          section === "surfaces" ? decision.notes : reason,
+        );
+        assert.equal(
+          surface.analystAnnotation,
+          "Keep this evidence annotation.",
+        );
+        assert.ok(
+          surface.receiptRefs.includes("artifacts/review/retained.json"),
+        );
+        if (section === "surfaces")
+          assert.ok(
+            surface.receiptRefs.includes("artifacts/review/decision.json"),
+          );
+        assert.deepEqual(saved[section][0].candidate, pending);
+        await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      }
+    });
+  }
+
+  for (const remaining of ["authored", "shared with another owner"]) {
+    test(`a terminal ${section} checkpoint retains ${remaining} follow-up evidence`, async (t) => {
+      const pending = candidate("owned-review");
+      const context = await fixture(t, [pending]);
+      const initial = { ...draft(), complete: true };
+      initial.coverage.completeness = "partial";
+      const shared = remaining === "shared with another owner";
+      const evidence = {
+        id: "shared-evidence",
+        candidateId: pending.candidate_id,
+        label: pending.summary,
+        disposition: "needs_follow_up",
+        notes: shared
+          ? `Candidate review is incomplete: ${pending.summary}`
+          : "Keep the authored follow-up request.",
+        receiptRefs: ["artifacts/review/retained.json"],
+      };
+      initial.coverage.surfaces.push(evidence);
+      if (shared)
+        initial.coverage.deferred.push({
+          candidateId: pending.candidate_id,
+          sourceWorkerId: "other-worker",
+          reason: "The independent candidate still needs this evidence.",
+          surfaceIds: [evidence.id],
+        });
+      await recordCodexSecurityScanDraft(context, initial);
+      const current = { ...draft(), complete: false };
+      current.coverage[section].push({
+        candidateId: pending.candidate_id,
+        disposition: "rejected",
+        ...(section === "surfaces"
+          ? { label: "Current source decision", notes: "Resolved locally." }
+          : { pattern: "src/handler.ts", reason: "Resolved locally." }),
+      });
+      await recordCodexSecurityScanDraft(context, current);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const saved = await readCoverage(context);
+        assert.equal(saved.completeness, "partial");
+        assert.deepEqual(
+          saved.surfaces.find((item) => item.id === evidence.id),
+          evidence,
+        );
+        assert.equal(saved.deferred.length, shared ? 1 : 0);
+        if (shared) {
+          assert.equal(saved.deferred[0].sourceWorkerId, "other-worker");
+          assert.deepEqual(saved.deferred[0].surfaceIds, [evidence.id]);
+        }
+        assert.ok(
+          saved[section].some((item) => item.disposition === "rejected"),
+        );
+        await recordCodexSecurityScanDraft(context, {
+          ...draft(),
+          complete: false,
+        });
+      }
+    });
+  }
+}
 
 for (const authored of [false, true]) {
   test(`diff checkpoints refresh ledger evidence and ${authored ? "retain authored" : "update generated"} coverage`, async (t) => {
@@ -1693,6 +1840,96 @@ for (const complete of [false, true]) {
           (surface) => surface.id === undefined,
         ),
       );
+    }
+  });
+}
+
+for (const remaining of [
+  "authored",
+  "shared pending",
+  "shared confirmed",
+  "explicit partial",
+  "unknown",
+]) {
+  test(`confirmation checkpoints preserve ${remaining} coverage`, async (t) => {
+    const pending = candidate("confirmed-coverage");
+    const shared = remaining.startsWith("shared");
+    const sibling = candidate("shared-review");
+    const context = await fixture(t, shared ? [pending, sibling] : [pending]);
+    const initial = { ...draft(), complete: true };
+    if (remaining === "unknown") initial.coverage.completeness = "unknown";
+    else initial.coverage.completeness = "partial";
+    if (remaining === "authored" || shared)
+      initial.coverage.surfaces.push({
+        id: "review-evidence",
+        candidateId: pending.candidate_id,
+        label: pending.summary,
+        disposition: "needs_follow_up",
+        notes:
+          remaining === "authored"
+            ? "Keep this authored follow-up request."
+            : `Candidate review is incomplete: ${pending.summary}`,
+        receiptRefs: ["artifacts/review/retained.json"],
+      });
+    if (shared)
+      initial.coverage.deferred.push({
+        candidateId: sibling.candidate_id,
+        reason: "The sibling review shares the source evidence.",
+        surfaceIds: ["review-evidence"],
+      });
+    await recordCodexSecurityScanDraft(context, initial);
+    const current = {
+      ...draft(),
+      complete: false,
+      findings: [finding(pending.candidate_id)],
+    };
+    if (remaining === "shared confirmed")
+      current.findings.push({
+        ...finding(sibling.candidate_id),
+        identity: { anchor: "shared-review" },
+      });
+    await recordCodexSecurityScanDraft(context, current);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const saved = await readCoverage(context);
+      assert.equal(
+        saved.completeness,
+        remaining === "unknown" ? "unknown" : "partial",
+      );
+      assert.equal(
+        saved.deferred.length,
+        remaining === "shared pending" ? 1 : 0,
+      );
+      const surface = saved.surfaces.find(
+        (item) => item.candidateId === pending.candidate_id,
+      );
+      assert.equal(
+        surface.disposition,
+        remaining === "authored" || remaining === "shared pending"
+          ? "needs_follow_up"
+          : "reported",
+      );
+      if (remaining === "authored" || shared) {
+        assert.deepEqual(
+          surface.receiptRefs,
+          initial.coverage.surfaces[0].receiptRefs,
+        );
+        assert.equal(
+          surface.notes,
+          remaining === "shared confirmed"
+            ? current.findings[0].summary
+            : initial.coverage.surfaces[0].notes,
+        );
+      }
+      assert.equal(
+        JSON.parse(
+          await readFile(path.join(context.root, "findings.json"), "utf8"),
+        ).findings.length,
+        remaining === "shared confirmed" ? 2 : 1,
+      );
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: false,
+      });
     }
   });
 }

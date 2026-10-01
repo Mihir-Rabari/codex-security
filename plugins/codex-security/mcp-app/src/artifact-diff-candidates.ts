@@ -169,19 +169,7 @@ export function refreshDiffCandidateHistory(
     result.coverage.deferred = deferred.filter(
       (item) => !closed.has(coverageCandidateKey(item) ?? ""),
     );
-    if (
-      closed.size > 0 &&
-      result.coverage.completenessBeforeCandidates !== undefined &&
-      result.coverage.completeness === "partial" &&
-      (result.coverage.deferred as JsonObject[]).length === 0 &&
-      !(result.coverage.surfaces as JsonObject[]).some(
-        (surface) => surface.disposition === "needs_follow_up",
-      )
-    ) {
-      result.coverage.completeness =
-        result.coverage.completenessBeforeCandidates;
-      delete result.coverage.completenessBeforeCandidates;
-    }
+    if (closed.size > 0) restoreCandidateCompleteness(result.coverage);
     return result;
   });
   for (const source of refreshed) {
@@ -367,6 +355,16 @@ export function preserveUnresolvedDiffCandidates(
 ): ScanDraftInput {
   if (candidates === undefined) return input;
   const resolvedKeys = resolvedCandidateKeys(input);
+  const confirmed = new Map(
+    input.findings.map((finding) => [findingCandidateKey(finding), finding]),
+  );
+  const inputSurfaces = input.coverage.surfaces as JsonObject[];
+  const decisions = new Map(
+    [...inputSurfaces, ...(input.coverage.explicitExclusions as JsonObject[])]
+      .filter(isTerminalCandidateDecision)
+      .map((item) => [coverageCandidateKey(item), item]),
+  );
+  const replacedDecisions = new Set<JsonObject>();
   const pending = new Map(
     candidates
       .filter(
@@ -415,42 +413,77 @@ export function preserveUnresolvedDiffCandidates(
       paths: [...new Set(candidate.locations.map((location) => location.path))],
     });
   }
-  const surfaces = (input.coverage.surfaces as JsonObject[]).map((surface) => {
-    const item = previous.get(coverageCandidateKey(surface));
-    const candidate = pending.get(coverageCandidateKey(surface) ?? "");
-    const oldCandidate = object(item?.candidate);
-    if (
-      !candidate ||
-      !oldCandidate ||
-      surface.disposition !== "needs_follow_up" ||
-      (input.coverage.deferred as JsonObject[]).some(
-        (other) =>
-          other !== item &&
-          Array.isArray(other.surfaceIds) &&
-          other.surfaceIds.some(
-            (id) =>
-              surfaceReferenceKey(
-                id,
-                other,
-                input.coverage.surfaces as JsonObject[],
-              ) === candidateKey(surface.id, surface.sourceWorkerId),
-          ),
+  const surfaces = inputSurfaces
+    .map((surface) => {
+      const key = coverageCandidateKey(surface);
+      const item = previous.get(key);
+      const finding = confirmed.get(key ?? "");
+      const decision = decisions.get(key);
+      if (
+        (finding || decision) &&
+        isGeneratedFollowUp(surface, item, deferred, inputSurfaces)
+      ) {
+        if (finding)
+          return {
+            ...surface,
+            disposition: "reported",
+            notes: finding.summary,
+          };
+        if (inputSurfaces.includes(decision!)) {
+          replacedDecisions.add(decision!);
+          const { notes: _generatedNotes, ...generatedSurface } = surface;
+          return {
+            ...generatedSurface,
+            ...decision,
+            receiptRefs: [
+              ...new Set([
+                ...((surface.receiptRefs as string[]) ?? []),
+                ...((decision!.receiptRefs as string[]) ?? []),
+              ]),
+            ],
+          };
+        }
+        return {
+          ...surface,
+          disposition: decision!.disposition,
+          notes: decision!.reason,
+        };
+      }
+      const candidate = pending.get(key ?? "");
+      const oldCandidate = object(item?.candidate);
+      if (
+        !candidate ||
+        !oldCandidate ||
+        surface.disposition !== "needs_follow_up" ||
+        (input.coverage.deferred as JsonObject[]).some(
+          (other) =>
+            other !== item &&
+            Array.isArray(other.surfaceIds) &&
+            other.surfaceIds.some(
+              (id) =>
+                surfaceReferenceKey(
+                  id,
+                  other,
+                  input.coverage.surfaces as JsonObject[],
+                ) === candidateKey(surface.id, surface.sourceWorkerId),
+            ),
+        )
       )
-    )
-      return surface;
-    return {
-      ...surface,
-      ...(object(surface.candidate)
-        ? { candidate: candidateSnapshot(surface.candidate, candidate) }
-        : {}),
-      ...(surface.label === oldCandidate.summary
-        ? { label: candidate.summary }
-        : {}),
-      ...(surface.notes === candidateReason(oldCandidate)
-        ? { notes: candidateReason(candidate) }
-        : {}),
-    };
-  });
+        return surface;
+      return {
+        ...surface,
+        ...(object(surface.candidate)
+          ? { candidate: candidateSnapshot(surface.candidate, candidate) }
+          : {}),
+        ...(surface.label === oldCandidate.summary
+          ? { label: candidate.summary }
+          : {}),
+        ...(surface.notes === candidateReason(oldCandidate)
+          ? { notes: candidateReason(candidate) }
+          : {}),
+      };
+    })
+    .filter((surface) => !replacedDecisions.has(surface));
   for (const item of deferred) {
     if (typeof item.candidateId !== "string") continue;
     const candidate = pending.get(coverageCandidateKey(item) ?? "");
@@ -475,16 +508,29 @@ export function preserveUnresolvedDiffCandidates(
       notes: item.reason,
     });
   }
-  return {
-    ...input,
-    coverage: {
-      ...(deferred.length > 0
-        ? candidatePartialCoverage(input.coverage)
-        : input.coverage),
-      deferred,
-      surfaces,
-    },
+  const coverage = {
+    ...(deferred.length > 0
+      ? candidatePartialCoverage(input.coverage)
+      : input.coverage),
+    deferred,
+    surfaces,
   };
+  restoreCandidateCompleteness(coverage);
+  return { ...input, coverage };
+}
+
+function restoreCandidateCompleteness(coverage: JsonObject): void {
+  if (
+    coverage.completenessBeforeCandidates !== undefined &&
+    coverage.completeness === "partial" &&
+    (coverage.deferred as JsonObject[]).length === 0 &&
+    !(coverage.surfaces as JsonObject[]).some(
+      (surface) => surface.disposition === "needs_follow_up",
+    )
+  ) {
+    coverage.completeness = coverage.completenessBeforeCandidates;
+    delete coverage.completenessBeforeCandidates;
+  }
 }
 
 // Retain the author's completeness only when candidate projection changes it.
