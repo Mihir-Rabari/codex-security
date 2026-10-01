@@ -610,6 +610,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const scopedTarget = await mkdtemp(
     path.join(tmpdir(), "codex-security-scoped-target-"),
   );
+  const distinctTarget = await mkdtemp(
+    path.join(tmpdir(), "codex-security-distinct-target-"),
+  );
   const selectedDirectories = [
     "service",
     "library",
@@ -624,6 +627,14 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   for (const directory of [...selectedDirectories, "other"]) {
     await mkdir(path.join(scopedTarget, directory), { recursive: true });
     await writeFile(path.join(scopedTarget, directory, "code.py"), "pass\n");
+  }
+  const distinctParent = "é".repeat(120);
+  const distinctDirectories = Array.from(
+    { length: 3000 },
+    (_, index) => distinctParent + "/" + String(index).padStart(4, "0"),
+  );
+  for (const directory of distinctDirectories) {
+    await mkdir(path.join(distinctTarget, directory), { recursive: true });
   }
 
   try {
@@ -814,6 +825,62 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(scopedArtifacts.coverage.inventoryStrategy, "scoped_path");
     assert.ok(scopedArtifacts.manifest.scan.sealedAt);
 
+    const distinct = await headlessServer.requestAndWait(47, "tools/call", {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: distinctTarget,
+        include_paths: distinctDirectories,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    assertNoError(distinct);
+    const distinctResult = distinct.result.structuredContent;
+    assert.equal(distinctResult.startDisposition, "created");
+    assert.deepEqual(
+      distinctResult.scan.contract.scope.requiredIncludePaths,
+      distinctDirectories,
+    );
+    // Python escapes these Unicode paths in stdout; the distinct selection exceeds 4 MiB.
+    assert.ok(
+      JSON.stringify(distinctResult).replaceAll("é", "\\u00e9").length >
+        4 * 1024 * 1024,
+    );
+    const distinctJoined = await headlessServer.requestAndWait(
+      48,
+      "tools/call",
+      {
+        name: "start_codex_security_standard_scan",
+        arguments: {
+          targetPath: distinctTarget,
+          include_paths: distinctDirectories.toReversed(),
+        },
+        _meta: { "openai/threadId": ownerThread },
+      },
+    );
+    assertNoError(distinctJoined);
+    assert.equal(
+      distinctJoined.result.structuredContent.startDisposition,
+      "joined",
+    );
+    assert.equal(
+      distinctJoined.result.structuredContent.scanId,
+      distinctResult.scanId,
+    );
+    const distinctLoaded = await headlessServer.requestAndWait(
+      49,
+      "tools/call",
+      {
+        name: "get_codex_security_scan",
+        arguments: { scanId: distinctResult.scanId },
+      },
+    );
+    assertNoError(distinctLoaded);
+    assert.deepEqual(
+      distinctLoaded.result.structuredContent.scan.contract.scope
+        .requiredIncludePaths,
+      distinctDirectories,
+    );
+
     const wrongThread = await headlessServer.requestAndWait(6, "tools/call", {
       name: "list_codex_security_review_items",
       arguments: { scanId: result.scanId },
@@ -909,6 +976,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await rm(headlessStateDir, { recursive: true, force: true });
     await rm(headlessScanRoot, { recursive: true, force: true });
     await rm(scopedTarget, { recursive: true, force: true });
+    await rm(distinctTarget, { recursive: true, force: true });
   }
 }
 
