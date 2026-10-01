@@ -852,6 +852,7 @@ test.each(["truncated", "malformed", "duplicate_id"] as const)(
       "failed",
       "completed",
     ]);
+    if (failure === "truncated") expect(result.model.costUsd).toBeNull();
     expect(turns).toHaveLength(3);
     expect(turns[1]!.evidence.assessments.map((item) => item.status)).toEqual([
       "completed",
@@ -1020,6 +1021,7 @@ test.each([
         await readFile(join(outputDir, "sca-result.json"), "utf8"),
       ) as ScaResult;
       expect(saved.status).toBe(requested ? "partial" : "completed");
+      if (!requested) expect(saved.model.costUsd).toBeNull();
       expect(saved.matches).toHaveLength(1);
       expect(saved.assessments[0]!.status).toBe("completed");
       if (failure === "throw")

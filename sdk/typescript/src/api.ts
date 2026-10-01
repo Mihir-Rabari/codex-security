@@ -837,12 +837,15 @@ export class CodexSecurity {
         };
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
           if (cost !== null) reportCost(cost);
-          else if (options.maxCostUsd !== undefined)
-            budgetController.abort(
-              new CodexSecurityError(
-                "Could not verify the dependency assessment cost limit.",
-              ),
-            );
+          else {
+            result!.model.costUsd = null;
+            if (options.maxCostUsd !== undefined)
+              budgetController.abort(
+                new CodexSecurityError(
+                  "Could not verify the dependency assessment cost limit.",
+                ),
+              );
+          }
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
