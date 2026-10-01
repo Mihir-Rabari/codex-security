@@ -13,7 +13,7 @@ Implementation and isolated PR checks completed on Linux on October 1, 2026:
 
 | Check                          | Observed result                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Focused SDK regressions        | 254 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
+| Focused SDK regressions        | 257 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
 | Actual OSV-Scanner v2.6.0      | 104 offline synthetic contract cases passed under Node 24; 103 under Bun 1.3.14.                                          |
 | Deterministic SCA evaluation   | 26 tests passed.                                                                                                          |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                              |
@@ -59,13 +59,15 @@ assessment.
 Actual OSV failure cases included exit 127 with retained inventory for a missing
 local database and exit 130 with retained matches for invalid configuration.
 Both remain incomplete. Git submodule inventory is explicitly incomplete;
-case-only directory aliases preserve tracked lockfiles. Local and direct URL
+case-only directory aliases preserve tracked lockfiles. A Git lookup failure in a
+checkout fails inventory rather than falling back to filesystem enumeration;
+ordinary non-Git directories remain supported. Local and direct URL
 origins remain unresolved while ordinary registry tarball URLs retain registry
 matching. Unchanged OSV configuration cannot turn conditional exclusions into
 resolution claims. Nested-source tests also verify that unused root
-configuration cannot abort matching or hide missing inventory. An exit-zero
-matching failure was not reproduced;
-a deterministic regression covers inconsistent diagnostics and exit status.
+configuration cannot abort matching or hide missing inventory. The Composer
+short-commit case returns exit zero despite skipped matching; retained diagnostics
+keep that result incomplete.
 
 ## Reproduce
 

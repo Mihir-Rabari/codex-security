@@ -16,6 +16,96 @@ afterEach(async () => {
   );
 });
 
+test.each(["missing-git", "broken-metadata", "standalone"] as const)(
+  "inventory distinguishes failed Git discovery from standalone directories: %s",
+  async (scenario) => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "sca-git-discovery-")),
+    );
+    directories.push(root);
+    const repository = join(root, "repository");
+    await mkdir(join(repository, "ignored"), { recursive: true });
+    await writeFile(join(repository, ".gitignore"), "ignored/\n");
+    await writeFile(
+      join(repository, "ignored", "package-lock.json"),
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: { "node_modules/synthetic-lib": { version: "1.0.0" } },
+      }),
+    );
+    if (scenario !== "standalone") {
+      await execFile("git", ["init", "--quiet", repository]);
+      if (scenario === "broken-metadata")
+        await rm(join(repository, ".git", "HEAD"));
+    }
+    const environment = { ...process.env };
+    if (scenario !== "broken-metadata") {
+      for (const name of Object.keys(environment))
+        if (name.toUpperCase() === "PATH") delete environment[name];
+      environment["PATH"] = "";
+    }
+    // Isolate PATH changes while exercising actual Git metadata and discovery.
+    const script = `
+      const [repository, output, module] = process.argv.slice(1);
+      const { discoverScaInputs, runOsvScan } = await import(module);
+      let discovery;
+      try {
+        discovery = await discoverScaInputs(repository);
+      } catch (error) {
+        discovery = { error: error.message };
+      }
+      let scannerCalls = 0;
+      const result = await runOsvScan({ repositoryPath: repository, outputDir: output }, {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) => {
+          scannerCalls++;
+          return argv[0] === "--version"
+            ? { stdout: "osv-scanner version: 2.6.0", stderr: "", exitCode: 0 }
+            : { stdout: JSON.stringify({ results: [{ source: { path: argv.at(-1) }, packages: [{ package: { name: "synthetic-lib", version: "1.0.0", ecosystem: "npm" } }] }] }), stderr: "", exitCode: 0 };
+        },
+      });
+      console.log(JSON.stringify({ discovery, result, scannerCalls }));
+    `;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        script,
+        repository,
+        join(root, "output"),
+        pathToFileURL(join(import.meta.dir, "../src/sca-osv.ts")).href,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    expect(child.stderr).toBe("");
+    expect(child.status).toBe(0);
+    const { discovery, result, scannerCalls } = JSON.parse(child.stdout);
+    if (scenario === "standalone") {
+      expect(discovery.inputs).toMatchObject([
+        { path: "ignored/package-lock.json", status: "scanned" },
+      ]);
+      expect(result).toMatchObject({
+        status: "completed",
+        coverage: { status: "complete" },
+      });
+      expect(scannerCalls).toBe(2);
+    } else {
+      expect(discovery.error).toContain(
+        "Could not determine the Git worktree root",
+      );
+      expect(result).toMatchObject({
+        status: "failed",
+        coverage: { status: "failed", inputs: [] },
+        scanner: { invocations: [] },
+      });
+      expect(result.diagnostics.join("\n")).toContain(
+        "Could not determine the Git worktree root",
+      );
+      expect(scannerCalls).toBe(0);
+    }
+  },
+);
+
 test.each([true, false])(
   "scoped Git inventory matches indexed prefixes by filesystem identity, same directory: %s",
   async (sameDirectory) => {

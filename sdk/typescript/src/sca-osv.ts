@@ -390,7 +390,9 @@ async function repositoryFiles(
   environment: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<{ files: string[]; submodules: string[] }> {
-  const worktree = await enclosingGitWorktreeRoot(repository, signal);
+  const worktree = await enclosingGitWorktreeRoot(repository, signal, {
+    requireIfPresent: true,
+  });
   if (worktree !== null) {
     validatedGitEnvironment(environment);
     const git = await resolveTrustedExecutable(
