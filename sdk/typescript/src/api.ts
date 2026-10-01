@@ -181,11 +181,13 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  environmentWithGit,
   pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
+  probeCodexSandbox,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
@@ -207,6 +209,7 @@ import {
   enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
+  gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
@@ -215,6 +218,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -448,6 +455,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
 }
@@ -1002,6 +1010,7 @@ export class CodexSecurity {
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
         options.auth,
+        undefined,
         policyCodexConfig(session.sessionConfig),
         inputs.gitMetadataPaths.length === 0
           ? []
@@ -1290,6 +1299,22 @@ export class CodexSecurity {
         python,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
+      let git: InspectedExecutable = {
+        executable: null,
+        environment: selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+        ),
+      };
+      for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
+        git = await inspectTrustedExecutable(
+          "git",
+          git.environment,
+          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        );
+      }
+      checkOpen();
       const deepScanConfigPath =
         mode === "deep"
           ? (runtime.deepScanConfigPath ??
@@ -1577,11 +1602,7 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
+          ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -1882,6 +1903,7 @@ export class CodexSecurity {
         session,
         runtimePaths,
         options.auth,
+        git,
       );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2623,6 +2645,7 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
+    git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
@@ -2636,17 +2659,20 @@ export class CodexSecurity {
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(
-        python,
-        withoutCodexHome(
-          selectedScanEnvironment(
-            commandAuth
-              ? withoutOpenAiApiKeys(runtime.environment)
-              : runtime.environment,
-            auth,
-            modelProvider,
+      ...environmentWithGit(
+        pluginExecutionEnvironment(
+          python,
+          withoutCodexHome(
+            selectedScanEnvironment(
+              commandAuth
+                ? withoutOpenAiApiKeys(runtime.environment)
+                : runtime.environment,
+              auth,
+              modelProvider,
+            ),
           ),
         ),
+        git,
       ),
       ...(externalProvider === null
         ? {}
@@ -3470,8 +3496,14 @@ export class CodexSecurity {
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
+      const codexCommand = this.#codexCommand();
+      await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
+        codexCommand,
+        { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
+        signal,
+      );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        codexCommand: this.#codexCommand(),
+        codexCommand,
         environment: withoutCodexHome(processEnvironment),
         signal,
       });

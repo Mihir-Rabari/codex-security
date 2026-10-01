@@ -2333,7 +2333,14 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
@@ -2421,7 +2428,12 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
@@ -7330,7 +7342,8 @@ async function runFindingPatches(
             "No complete patch result was returned for this finding.",
           );
         } else if (
-          parsed.data.status === "verified" &&
+          (parsed.data.status === "verified" ||
+            parsed.data.status === "no_change") &&
           !parsed.data.verification?.trim()
         ) {
           patch = failed(
@@ -7492,7 +7505,7 @@ async function runSkill(
           ...(options.findings === undefined
             ? []
             : [
-                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
+                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
               ]),
         ]),
     ...(options.findingInstructions === undefined
