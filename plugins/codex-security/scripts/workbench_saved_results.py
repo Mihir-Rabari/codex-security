@@ -500,6 +500,41 @@ def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
+    candidate = item.get("candidate")
+    if not isinstance(candidate, dict) or item.get("candidateId") != candidate.get("candidate_id"):
+        return False
+    try:
+        decision = _diff_candidate_decision(candidate)
+    except (KeyError, ValueError):
+        return False
+    return decision is not None and all(
+        item.get(field) == decision[field] for field in ("label", "disposition", "notes")
+    )
+
+
+def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
+    validation = candidate.get("validation")
+    validation = validation if isinstance(validation, dict) else {}
+    attack_path = candidate.get("attack_path")
+    attack_path = attack_path if isinstance(attack_path, dict) else {}
+    if (
+        validation.get("disposition") == "reportable"
+        and attack_path.get("decision") == "reportable"
+    ):
+        return f"A reportable candidate has no saved finding: {candidate.get('summary')}"
+    return next(
+        value
+        for value in (
+            attack_path.get("proof_gap"),
+            validation.get("counterevidence_or_proof_gap"),
+            validation.get("remaining_uncertainty"),
+            f"Candidate review is incomplete: {candidate.get('summary')}",
+        )
+        if isinstance(value, str) and value.strip()
+    )
+
+
 def _stopped_diff_candidate_decisions(
     scan_dir: Path,
     scan_id: str,
@@ -509,27 +544,67 @@ def _stopped_diff_candidate_decisions(
     current_coverage: dict[str, Any],
     current_findings: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    historical_deferred = [
-        item
-        for draft in drafts
-        for items in [draft["coverage"].get("deferred", [])]
-        if isinstance(items, list)
-        for item in items
-    ]
-    # Current saved decisions remain authoritative over obsolete pending checkpoints.
-    pending_ids = {
+    """Freeze current candidate state before historical evidence is recovered."""
+    pending = {}
+    current_pending_ids = {
         item["candidateId"]
-        for item in unresolved_candidates(
-            {**current_coverage, "deferred": historical_deferred}, current_findings
-        )
+        for item in unresolved_candidates(current_coverage, current_findings)
         if item.get("sourceWorkerId") is None
     }
-    if not pending_ids:
+    for draft in drafts:
+        items = draft["coverage"].get("deferred", [])
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and (key := coverage_candidate_key(item)) and key[0] is None:
+                pending.setdefault(key[1], copy.deepcopy(item))
+    findings = [
+        finding
+        for finding in current_findings
+        if (key := finding_candidate_key(finding)) is not None and key[0] is None
+    ]
+    finding_ids = {finding_candidate_id(finding) for finding in findings}
+    authored = []
+    generated = {}
+    for field in ("surfaces", "explicitExclusions"):
+        items = current_coverage.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if (
+                isinstance(item, dict)
+                and item.get("disposition") in {"rejected", "not_applicable"}
+                and (key := coverage_candidate_key(item)) is not None
+                and key[0] is None
+            ):
+                if field == "surfaces" and _generated_diff_candidate_decision(item):
+                    generated[key[1]] = copy.deepcopy(item)
+                else:
+                    authored.append((field, copy.deepcopy(item)))
+    authoritative = finding_ids | {item["candidateId"] for _, item in authored}
+    tracked = pending.keys() | generated.keys() | authoritative
+    if not tracked:
         return None
-    surfaces = []
+    coverage = {
+        "completeness": "partial",
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        # Keep the existing checkpoint marker so frozen older scans remain readable.
+        "stoppedDiffCandidateDecisions": True,
+    }
+    for field, item in authored:
+        if item["candidateId"] not in finding_ids:
+            coverage[field].append(item)
+    decisions = {
+        candidate_id: item
+        for candidate_id, item in generated.items()
+        if candidate_id not in authoritative
+    }
+    pending = {
+        candidate_id: item
+        for candidate_id, item in pending.items()
+        if candidate_id not in authoritative and candidate_id not in generated
+    }
     relative = "artifacts/02_discovery/candidate_ledger.jsonl"
     try:
-        if (scan_dir / relative).exists():
+        if tracked - authoritative and (scan_dir / relative).exists():
             descriptor = open_scan_local_file_descriptor(
                 scan_dir, relative, "Diff candidate ledger"
             )
@@ -539,26 +614,117 @@ def _stopped_diff_candidate_decisions(
                 if (
                     not isinstance(candidate, dict)
                     or not isinstance(candidate.get("candidate_id"), str)
-                    or candidate["candidate_id"] not in pending_ids
+                    or (candidate_id := candidate["candidate_id"]) not in tracked
+                    or candidate_id in authoritative
                 ):
                     continue
-                if (decision := _diff_candidate_decision(candidate)) is not None:
-                    surfaces.append(decision)
+                decision = _diff_candidate_decision(candidate)
+                if (
+                    not isinstance(candidate.get("summary"), str)
+                    or not candidate["summary"].strip()
+                ):
+                    raise ValueError("Diff candidate summary is missing.")
+                prior = pending.get(candidate_id, generated.get(candidate_id, {}))
+                previous = prior.get("candidate")
+                previous = previous if isinstance(previous, dict) else {}
+                candidate = {
+                    **{k: v for k, v in previous.items() if k not in {"attack_path", "validation"}},
+                    **candidate,
+                }
+                if decision is not None:
+                    decisions[candidate_id] = {
+                        **generated.get(candidate_id, {}),
+                        **decision,
+                        "candidate": candidate,
+                    }
+                    pending.pop(candidate_id, None)
+                    continue
+                item = pending.setdefault(candidate_id, {"candidateId": candidate_id})
+                current_pending_ids.add(candidate_id)
+                item["candidate"] = candidate
+                if "reason" not in item or item["reason"] == _diff_candidate_reason(previous):
+                    item["reason"] = _diff_candidate_reason(candidate)
+                old_decision = decisions.pop(candidate_id, None)
+                if old_decision is not None:
+                    coverage["surfaces"].append(
+                        {
+                            **old_decision,
+                            "candidate": item["candidate"],
+                            "label": candidate["summary"],
+                            "disposition": "needs_follow_up",
+                            "notes": item["reason"],
+                        }
+                    )
     except (ContractError, OSError, ValueError) as exc:
         warnings.append(f"Could not reconcile the saved Diff candidates: {exc}")
+    coverage["surfaces"].extend(decisions.values())
+    coverage["deferred"].extend(
+        item for candidate_id, item in pending.items() if candidate_id in current_pending_ids
+    )
     return {
         "scanId": scan_id,
         "complete": False,
-        "findings": [],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": surfaces,
-            "explicitExclusions": [],
-            "deferred": [],
-            # Coverage extensions are accepted by the existing semantic checkpoint readers.
-            "stoppedDiffCandidateDecisions": True,
-        },
+        "findings": copy.deepcopy(findings),
+        "coverage": coverage,
     }
+
+
+def _reconcile_stopped_diff_sources(
+    parent: dict[str, Any] | None,
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    decisions: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[tuple[str, dict[str, Any], str | None]]]:
+    """Apply frozen candidate state to copies, retaining all original source digests."""
+    states = {}
+    for draft in decisions:
+        for finding in draft["findings"]:
+            states[finding_candidate_key(finding)] = ("reported", finding)
+        for field in ("surfaces", "explicitExclusions"):
+            for item in draft["coverage"][field]:
+                if item.get("disposition") in {"rejected", "not_applicable"}:
+                    states[coverage_candidate_key(item)] = (item["disposition"], item)
+        for item in unresolved_candidates(draft["coverage"], draft["findings"]):
+            states[coverage_candidate_key(item)] = ("deferred", item)
+
+    def project(draft: dict[str, Any], owner: str | None) -> dict[str, Any]:
+        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True:
+            return draft
+        result = copy.deepcopy(draft)
+        retained = []
+        for finding in result["findings"]:
+            state = (
+                states.get(finding_candidate_key(finding, owner))
+                if isinstance(finding, dict)
+                else None
+            )
+            if state is None or state[0] == "reported":
+                retained.append(finding)
+            elif state[0] == "deferred":
+                state[1].setdefault("finding", finding)
+            else:
+                history = state[1].setdefault("previousFindings", [])
+                if finding not in history:
+                    history.append(finding)
+        result["findings"] = retained
+        for field in ("surfaces", "explicitExclusions", "deferred"):
+            items = result["coverage"].get(field)
+            if isinstance(items, list):
+                result["coverage"][field] = [
+                    item
+                    for item in items
+                    if not isinstance(item, dict)
+                    or coverage_candidate_key(item, owner) not in states
+                    or (
+                        field != "deferred"
+                        and item.get("disposition") not in {"rejected", "not_applicable"}
+                    )
+                ]
+        return result
+
+    return (
+        project(parent, None) if parent else None,
+        [(relative, project(draft, owner), owner) for relative, draft, owner in sources],
+    )
 
 
 def merge_saved_results(
@@ -752,7 +918,7 @@ def merge_saved_results(
         decision_draft = _stopped_diff_candidate_decisions(
             scan_dir,
             scan_id,
-            ([parent] if parent else []) + [draft for _, draft, _ in sources],
+            ([parent] if parent else []) + [draft for _, draft, owner in sources if owner is None],
             warnings,
             current_coverage=parent["coverage"] if parent else {},
             current_findings=[finding for finding in parent["findings"] if valid_finding(finding)]
@@ -769,8 +935,25 @@ def merge_saved_results(
     diff_resolved = {
         (None, item["candidateId"])
         for draft in decision_drafts
-        for item in draft["coverage"]["surfaces"]
+        for field in ("surfaces", "explicitExclusions")
+        for item in draft["coverage"][field]
+        if item.get("disposition") in {"rejected", "not_applicable"}
     }
+    resolved_surface_keys = {
+        (key[0], surface_id)
+        for _, draft, worker_id in ([("parent", parent, None)] if parent else []) + sources
+        for items in [draft["coverage"].get("deferred", [])]
+        if isinstance(items, list)
+        for item in items
+        if isinstance(item, dict)
+        and (key := coverage_candidate_key(item, worker_id)) in diff_resolved
+        for surface_ids in [item.get("surfaceIds", [])]
+        if isinstance(surface_ids, list)
+        for surface_id in surface_ids
+        if isinstance(surface_id, str)
+    }
+    if decision_drafts:
+        parent, sources = _reconcile_stopped_diff_sources(parent, sources, decision_drafts)
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     latest_reducer_key = (
@@ -898,7 +1081,7 @@ def merge_saved_results(
         else:
             current_drafts.insert(0, (None, parent))
     resolved: dict[tuple[str | None, str], str] = {}
-    for owner, draft in current_drafts:
+    for owner, draft in [(None, draft) for draft in decision_drafts] + current_drafts:
         for finding in draft["findings"]:
             if (
                 isinstance(finding, dict)
@@ -957,19 +1140,7 @@ def merge_saved_results(
                             )
                             resolved.setdefault(worker_candidate[:2], "reported")
     pending_resolved = resolved.keys() | diff_resolved
-    resolved_surface_keys = {
-        (key[0], surface_id)
-        for _, draft, worker_id in all_sources
-        for items in [draft["coverage"].get("deferred", [])]
-        if isinstance(items, list)
-        for item in items
-        if isinstance(item, dict)
-        and (key := coverage_candidate_key(item, worker_id)) in diff_resolved
-        for surface_ids in [item.get("surfaceIds", [])]
-        if isinstance(surface_ids, list)
-        for surface_id in surface_ids
-        if isinstance(surface_id, str)
-    }
+
     for relative, draft, worker_id in all_sources:
         superseded = (
             worker_id is None

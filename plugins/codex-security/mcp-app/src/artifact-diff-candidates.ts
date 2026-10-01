@@ -102,7 +102,7 @@ export function refreshDiffCandidateHistory(
         }
         return {
           ...surface,
-          candidate: { ...object(surface.candidate), ...candidate },
+          candidate: candidateSnapshot(surface.candidate, candidate),
           label: candidate.summary,
           disposition: disposition ?? "needs_follow_up",
           notes:
@@ -243,7 +243,7 @@ export function preserveUnresolvedDiffCandidates(
       return {
         ...item,
         candidateId: candidate.candidate_id,
-        candidate: { ...previous, ...candidate },
+        candidate: candidateSnapshot(previous, candidate),
         reason:
           item.reason === candidateReason(previous ?? candidate)
             ? candidateReason(candidate)
@@ -281,7 +281,7 @@ export function preserveUnresolvedDiffCandidates(
     return {
       ...surface,
       ...(object(surface.candidate)
-        ? { candidate: { ...object(surface.candidate), ...candidate } }
+        ? { candidate: candidateSnapshot(surface.candidate, candidate) }
         : {}),
       ...(surface.label === oldCandidate.summary
         ? { label: candidate.summary }
@@ -320,6 +320,19 @@ export function preserveUnresolvedDiffCandidates(
       surfaces,
     },
   };
+}
+
+function candidateSnapshot(
+  previous: unknown,
+  candidate: JsonObject,
+): JsonObject {
+  // Discovery replacement resets phase records while retaining candidate identities.
+  const {
+    validation: _validation,
+    attack_path: _attackPath,
+    ...saved
+  } = object(previous) ?? {};
+  return { ...saved, ...candidate };
 }
 
 function candidateDisposition(

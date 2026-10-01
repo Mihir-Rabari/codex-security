@@ -884,47 +884,40 @@ for (const complete of [false, true]) {
         notes: "The authored final decision remains authoritative.",
         receiptRefs: ["artifacts/review/decision.json"],
       };
-      for (const disposition of [
-        "suppressed",
-        "not_applicable",
-        "deferred",
-        "reportable",
+      for (const [stage, validation, attackPath, expectedDisposition] of [
+        ["ignored", "reportable", "ignore", "rejected"],
+        ["rediscovered", undefined, undefined, "needs_follow_up"],
+        ["suppressed", "suppressed", undefined, "rejected"],
+        ["not_applicable", "not_applicable", undefined, "not_applicable"],
+        ["deferred", "deferred", undefined, "needs_follow_up"],
+        ["reportable", "reportable", "reportable", "needs_follow_up"],
       ]) {
         const reviewed = {
-          ...candidate(
-            candidateId,
-            disposition,
-            disposition === "reportable" ? "reportable" : undefined,
-          ),
-          summary: `Current ${disposition} candidate summary.`,
-          evidence: `Current ${disposition} candidate evidence.`,
-          validation: {
-            disposition,
-            counterevidence_or_proof_gap: `Current ${disposition} rationale.`,
-          },
+          ...candidate(candidateId, validation, attackPath),
+          summary: `Current ${stage} candidate summary.`,
+          evidence: `Current ${stage} candidate evidence.`,
         };
+        if (reviewed.validation)
+          reviewed.validation.counterevidence_or_proof_gap = `Current ${stage} rationale.`;
+        if (attackPath === "ignore")
+          reviewed.attack_path.counterevidence =
+            "Current ignored counterevidence.";
         await writeLedger(context, [reviewed]);
         for (let attempt = 0; attempt < 2; attempt++) {
           const input = { ...draft(), complete };
-          if (authored && disposition === "suppressed" && attempt === 0)
+          if (authored && stage === "ignored" && attempt === 0)
             input.coverage.surfaces.push(authoredDecision);
           await recordCodexSecurityScanDraft(context, input);
           const saved = await readCoverage(context);
           const reopened =
-            !authored && ["deferred", "reportable"].includes(disposition);
+            !authored && expectedDisposition === "needs_follow_up";
           assert.equal(saved.completeness, reopened ? "partial" : "complete");
           assert.equal(saved.deferred.length, reopened ? 1 : 0);
           assert.equal(saved.surfaces.length, 1);
           const surface = saved.surfaces[0];
           assert.equal(
             surface.disposition,
-            authored
-              ? "rejected"
-              : reopened
-                ? "needs_follow_up"
-                : disposition === "suppressed"
-                  ? "rejected"
-                  : "not_applicable",
+            authored ? "rejected" : expectedDisposition,
           );
           assert.equal(
             surface.label,
@@ -939,7 +932,8 @@ for (const complete of [false, true]) {
               surface.notes,
               reopened
                 ? saved.deferred[0].reason
-                : reviewed.validation.counterevidence_or_proof_gap,
+                : (reviewed.attack_path?.counterevidence ??
+                    reviewed.validation.counterevidence_or_proof_gap),
             );
           }
           if (reopened) {
@@ -948,7 +942,7 @@ for (const complete of [false, true]) {
               saved.deferred[0].finding.provenance.candidateId,
               candidateId,
             );
-            if (disposition === "reportable")
+            if (stage === "reportable")
               assert.match(saved.deferred[0].reason, /no saved finding/u);
           }
           assert.deepEqual(
@@ -1106,7 +1100,12 @@ for (const authored of [false, true]) {
         proof_gap: "A synthetic deployment adapter is missing.",
       },
     };
-    for (const reviewed of [validation, attackPath]) {
+    const rediscovered = {
+      ...pending,
+      summary: "Rediscovered candidate without phase records.",
+      evidence: "New discovery evidence before phase review.",
+    };
+    for (const reviewed of [validation, attackPath, rediscovered]) {
       await writeLedger(context, [reviewed]);
       await recordCodexSecurityScanDraft(context, {
         ...draft(),
@@ -1125,7 +1124,8 @@ for (const authored of [false, true]) {
         authored
           ? authoredReason
           : (reviewed.attack_path?.proof_gap ??
-              reviewed.validation.counterevidence_or_proof_gap),
+              reviewed.validation?.counterevidence_or_proof_gap ??
+              `Candidate review is incomplete: ${reviewed.summary}`),
       );
       assert.equal(
         saved.surfaces[0].label,

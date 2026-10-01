@@ -112,6 +112,15 @@ def saved_diff_candidate(
     return state_dir, scan_dir, scan_id, ledger, checkpoint
 
 
+def saved_candidate_finding(tmp_path: Path, scan_id: str, candidate_id: str) -> dict:
+    template = tmp_path / "finding-template"
+    template.mkdir()
+    write_completed_contract(template, scan_id, tmp_path / "target", relative_path="README.md")
+    finding = json.loads((template / "findings.json").read_text())["findings"][0]
+    finding["provenance"]["candidateId"] = candidate_id
+    return finding
+
+
 @pytest.mark.parametrize(
     ("validation", "attack_path", "disposition"),
     [
@@ -234,11 +243,17 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
 
 
 @pytest.mark.parametrize(
-    ("resolution", "owner"),
-    [("finding", None), ("rejected", None), ("not_applicable", None), ("finding", "other-worker")],
+    ("resolution", "owner", "ledger_disposition"),
+    [
+        ("finding", None, "suppressed"),
+        ("rejected", None, "not_applicable"),
+        ("not_applicable", None, "suppressed"),
+        ("finding", "other-worker", "suppressed"),
+        ("rejected", None, "deferred"),
+    ],
 )
 def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions(
-    tmp_path: Path, resolution: str, owner: str | None
+    tmp_path: Path, resolution: str, owner: str | None, ledger_disposition: str
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -261,18 +276,14 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
     )
     coverage_path.write_text(json.dumps(coverage))
     if resolution == "finding":
-        template = tmp_path / "finding-template"
-        template.mkdir()
-        write_completed_contract(template, scan_id, tmp_path / "target", relative_path="README.md")
-        finding = json.loads((template / "findings.json").read_text())["findings"][0]
-        finding["provenance"].update(candidateId=candidate_id)
+        finding = saved_candidate_finding(tmp_path, scan_id, candidate_id)
         if owner:
             finding["provenance"]["sourceWorkerId"] = owner
         (scan_dir / "findings.json").write_text(
             json.dumps({"scanId": scan_id, "findings": [finding]})
         )
     candidate["validation"] = {
-        "disposition": "not_applicable" if resolution == "rejected" else "suppressed",
+        "disposition": ledger_disposition,
         "counterevidence_or_proof_gap": "An older ledger decision.",
     }
     ledger.write_text(json.dumps(candidate) + "\n")
@@ -307,6 +318,162 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
     write_checkpoint(scan_dir / "checkpoints", late)
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert_current_resolution()
+
+
+@pytest.mark.parametrize(
+    ("transition", "termination"),
+    [
+        ("historical-generated-decision", "fail-scan"),
+        ("historical-authored-decision", "fail-scan"),
+        ("current-generated-decision", "fail-scan"),
+        ("current-generated-decision", "cancel-scan"),
+        ("historical-finding", "fail-scan"),
+    ],
+)
+def test_stopped_diff_freezes_current_candidate_state_over_history(
+    tmp_path: Path, workbench_api, transition: str, termination: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate_id = candidate["candidate_id"]
+    old_candidate = {
+        **candidate,
+        "validation": {
+            "disposition": "suppressed",
+            "counterevidence_or_proof_gap": "Earlier generated decision.",
+        },
+    }
+    if transition == "current-generated-decision":
+        old_candidate.update(
+            attack_path={"decision": "ignore", "counterevidence": "Earlier path decision."},
+            reviewAnnotation="Retain this authored annotation.",
+        )
+    old_decision = workbench_api["saved_results"]._diff_candidate_decision(old_candidate)
+    if transition == "historical-authored-decision":
+        old_decision.pop("candidate")
+        old_decision["notes"] = "Earlier authored decision superseded by a reopened draft."
+    terminal_checkpoint = copy.deepcopy(checkpoint)
+    terminal_checkpoint["coverage"].update(surfaces=[old_decision], deferred=[])
+    write_checkpoint(scan_dir / "checkpoints", terminal_checkpoint)
+    coverage_path = scan_dir / "coverage.json"
+    current = json.loads(coverage_path.read_text())
+    if transition == "current-generated-decision":
+        current.update(
+            surfaces=[{**old_decision, "id": candidate_id, "receiptRefs": []}], deferred=[]
+        )
+    historical_finding = None
+    if transition == "historical-finding":
+        historical_finding = saved_candidate_finding(tmp_path, scan_id, candidate_id)
+        finding_checkpoint = copy.deepcopy(checkpoint)
+        finding_checkpoint["findings"] = [historical_finding]
+        finding_checkpoint["coverage"].update(surfaces=[], deferred=[])
+        write_checkpoint(scan_dir / "checkpoints", finding_checkpoint)
+        current["deferred"][0]["finding"] = historical_finding
+    # The same candidate ID from an independent owner must keep its authored decision.
+    other_owner = {
+        "id": "other-owner-decision",
+        "candidateId": candidate_id,
+        "sourceWorkerId": "independent-worker",
+        "label": "Independent worker decision",
+        "disposition": "not_applicable",
+        "notes": "Keep this separately owned review.",
+        "receiptRefs": [],
+    }
+    current["surfaces"].append(other_owner)
+    coverage_path.write_text(json.dumps(current))
+    candidate["validation"] = {
+        "disposition": "suppressed" if historical_finding else "deferred",
+        "counterevidence_or_proof_gap": "Current saved review evidence.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    original_sources = {
+        path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")
+    }
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_current_state() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 0
+        assert scan["progress"]["candidates"]["unresolved"] == int(historical_finding is None)
+        coverage = json.loads(coverage_path.read_text())
+        assert other_owner in coverage["surfaces"]
+        root_surfaces = [
+            item
+            for item in coverage["surfaces"]
+            if item.get("candidateId") == candidate_id and item.get("sourceWorkerId") is None
+        ]
+        assert {item["disposition"] for item in root_surfaces} == {
+            "rejected" if historical_finding else "needs_follow_up"
+        }
+        if historical_finding:
+            assert any(
+                historical_finding in item.get("previousFindings", []) for item in root_surfaces
+            )
+        else:
+            pending = next(
+                item for item in coverage["deferred"] if item.get("candidateId") == candidate_id
+            )
+            assert pending["candidate"] == {
+                **candidate,
+                **(
+                    {"reviewAnnotation": "Retain this authored annotation."}
+                    if transition == "current-generated-decision"
+                    else {}
+                ),
+            }
+            assert "## Unresolved candidates" in (scan_dir / "report.md").read_text()
+        assert all(path.read_bytes() == content for path, content in original_sources.items())
+
+    assert_current_state()
+    # Replay admits unrelated work but must use the frozen state even if the live
+    # ledger changes again and the earlier terminal/finding checkpoints remain.
+    ledger.write_text("{later incomplete ledger")
+    frozen_sources = {
+        scan_dir / relative: (scan_dir / relative).read_bytes()
+        for relative in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+            "preservedSources"
+        ]
+    }
+    if termination == "fail-scan":
+        late = copy.deepcopy(checkpoint)
+        late["coverage"].update(
+            surfaces=[], deferred=[{"id": "late-review", "reason": "Later work."}]
+        )
+        write_checkpoint(scan_dir / "checkpoints", late)
+        run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    else:
+        run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_current_state()
+    assert all(path.read_bytes() == content for path, content in frozen_sources.items())
+
+
+def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
+    tmp_path: Path, workbench_api
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    terminal = copy.deepcopy(checkpoint)
+    terminal["coverage"].update(
+        surfaces=[workbench_api["saved_results"]._diff_candidate_decision(candidate)], deferred=[]
+    )
+    write_checkpoint(scan_dir / "checkpoints", terminal)
+    # Neither the current empty draft nor a missing ledger establishes which of
+    # these historical candidate checkpoints was saved most recently.
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    ledger.unlink()
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["findingCount"] == 0
+    assert scan["progress"]["candidates"]["unresolved"] == 0
+    assert any(
+        item.get("disposition") == "rejected"
+        for item in json.loads(coverage_path.read_text())["surfaces"]
+    )
 
 
 @pytest.mark.parametrize("publication_failure", ["before_freeze", "after_freeze"])
