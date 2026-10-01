@@ -261,7 +261,7 @@ const startHeadlessStandardScanSchema = {
     .max(4096)
     .describe("Resolved local target path."),
   include_paths: z
-    .array(z.string().min(1).max(1024))
+    .array(z.string().min(1))
     .min(1)
     .optional()
     .describe(
@@ -1400,7 +1400,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "List Codex Security Scans",
       description:
-        "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
+        "App-only. Read persisted plugin-owned scan summaries for native Security navigation. Each summary includes the selected directories in includePaths.",
       inputSchema: scanListSchema,
       annotations: {
         readOnlyHint: true,

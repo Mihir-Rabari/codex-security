@@ -22,7 +22,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, user_text
+from workbench_validation import optional_text, reject_non_finite_json, user_text
 
 
 def safe_segment(value: str) -> str:
@@ -34,6 +34,17 @@ def safe_segment(value: str) -> str:
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
+    if "include_paths_json" in scan.keys() and scan["include_paths_json"] is not None:
+        return json.loads(scan["include_paths_json"], parse_constant=reject_non_finite_json)
+    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        target = recipe["target"]
+        if target["kind"] == "paths":
+            return target["paths"]
+    return [scan["scope"]]
 
 
 def scan_target_identity(

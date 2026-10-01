@@ -613,10 +613,15 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   const distinctTarget = await mkdtemp(
     path.join(tmpdir(), "codex-security-distinct-target-"),
   );
+  const longDirectory = Array.from({ length: 12 }, () => "é".repeat(90)).join(
+    "/",
+  );
+  assert.ok(longDirectory.length > 1024);
   const selectedDirectories = [
     "service",
-    "library",
-    ...Array.from({ length: 31 }, (_, index) => `directory-${index}`),
+    "café",
+    longDirectory,
+    ...Array.from({ length: 30 }, (_, index) => `directory-${index}`),
   ].sort();
   const largeSelection = Array.from(
     { length: 512 },
@@ -635,7 +640,22 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
   );
   for (const directory of distinctDirectories) {
     await mkdir(path.join(distinctTarget, directory), { recursive: true });
+    await writeFile(path.join(distinctTarget, directory, "code.py"), "pass\n");
   }
+  execFileSync("git", ["init", "--quiet", distinctTarget]);
+  execFileSync("git", ["-C", distinctTarget, "add", "."]);
+  execFileSync("git", [
+    "-C",
+    distinctTarget,
+    "-c",
+    "user.name=Test Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "Add selected directory fixtures",
+  ]);
 
   try {
     assertNoError(
@@ -725,6 +745,20 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.deepEqual(scopedResult.scan.executionThreadIds, []);
     assert.equal(scopedResult.scan.userContext, scopedContext);
     assert.equal(scopedResult.workspace.userContext, scopedContext);
+    const scopedHistory = await headlessServer.requestAndWait(
+      50,
+      "tools/call",
+      {
+        name: "list_codex_security_scans",
+        arguments: { query: "café" },
+      },
+    );
+    assertNoError(scopedHistory);
+    const [scopedSummary] = scopedHistory.result.structuredContent.scans;
+    assert.equal(scopedHistory.result.structuredContent.scans.length, 1);
+    assert.equal(scopedSummary.scanId, scopedResult.scanId);
+    assert.equal(scopedSummary.scope, ".");
+    assert.deepEqual(scopedSummary.includePaths, selectedDirectories);
     const scopedJoined = await headlessServer.requestAndWait(46, "tools/call", {
       name: "start_codex_security_standard_scan",
       arguments: {
@@ -840,6 +874,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       distinctResult.scan.contract.scope.requiredIncludePaths,
       distinctDirectories,
     );
+    assert.equal(
+      distinctResult.scan.progress.coverage.filesTotal,
+      distinctDirectories.length,
+    );
     // Python escapes these Unicode paths in stdout; the distinct selection exceeds 4 MiB.
     assert.ok(
       JSON.stringify(distinctResult).replaceAll("é", "\\u00e9").length >
@@ -865,6 +903,10 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(
       distinctJoined.result.structuredContent.scanId,
       distinctResult.scanId,
+    );
+    assert.equal(
+      distinctJoined.result.structuredContent.scan.progress.coverage.filesTotal,
+      distinctDirectories.length,
     );
     const distinctLoaded = await headlessServer.requestAndWait(
       49,

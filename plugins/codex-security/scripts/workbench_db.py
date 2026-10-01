@@ -97,6 +97,7 @@ from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
     insert_running_scan,
+    requested_scan_paths,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -438,17 +439,6 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     if scan["target_snapshot_digest"] == clean_worktree_content_digest():
         return ["git_revision"]
     return ["git_worktree"]
-
-
-def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
-    if "include_paths_json" in scan.keys() and scan["include_paths_json"] is not None:
-        return json.loads(scan["include_paths_json"], parse_constant=reject_non_finite_json)
-    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
-        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-        target = recipe["target"]
-        if target["kind"] == "paths":
-            return target["paths"]
-    return [scan["scope"]]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
@@ -944,9 +934,7 @@ def _start_prompt_driven_scan(
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
-    scope_file_count = sum(
-        directory_snapshot_regular_file_count(target / path) for path in include_paths
-    )
+    scope_file_count = directory_snapshot_regular_file_count(target, include_paths=include_paths)
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)

@@ -660,18 +660,47 @@ def directory_content_digest(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def directory_snapshot_regular_file_count(target: Path) -> int:
+def directory_snapshot_regular_file_count(
+    target: Path, *, include_paths: list[str] | None = None
+) -> int:
+    if include_paths is not None and len(include_paths) == 1:
+        return directory_snapshot_regular_file_count(target / include_paths[0])
     paths = git_directory_snapshot_paths(target)
+    selected_identities: set[tuple[int, int]] = set()
     if paths is None:
-        paths = sorted(target.rglob("*"))
+        paths = sorted(
+            path for selected in include_paths or ["."] for path in (target / selected).rglob("*")
+        )
+    elif include_paths:
+        for selected in include_paths:
+            metadata = (target / selected).stat()
+            selected_identities.add((metadata.st_dev, metadata.st_ino))
+    matching_directories: dict[str, bool] = {}
     count = 0
     for path in paths:
         try:
             metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            if selected_identities:
+                for parent in path.parents:
+                    if parent == target:
+                        break
+                    key = str(parent)
+                    if key not in matching_directories:
+                        metadata = parent.stat()
+                        # Match case aliases using the same identity as Path.samefile().
+                        matching_directories[key] = (
+                            metadata.st_dev,
+                            metadata.st_ino,
+                        ) in selected_identities
+                    if matching_directories[key]:
+                        count += 1
+                        break
+            else:
+                count += 1
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
-        if stat.S_ISREG(metadata.st_mode):
-            count += 1
     return count
 
 
@@ -818,9 +847,8 @@ def require_include_paths(value: str, target: Path) -> list[str]:
         if (
             not isinstance(path, str)
             or not path
-            or len(path.encode()) > 1024
             or path.startswith("/")
-            or (len(path) > 1 and path[1] == ":")
+            or (len(path) > 1 and path[0].isalpha() and path[1] == ":")
             or "\\" in path
             or any(ord(character) < 32 or ord(character) == 127 for character in path)
             or ".." in path.split("/")

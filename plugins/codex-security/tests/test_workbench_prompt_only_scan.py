@@ -364,6 +364,10 @@ def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -
     rejoined = start(["service", "library"])
     assert rejoined["startDisposition"] == "joined"
     assert rejoined["scan"]["scanId"] == first["scan"]["scanId"]
+    history = run_workbench(state, "list-scans", "--query", "service")["scans"]
+    assert [scan["scanId"] for scan in history] == [first["scan"]["scanId"]]
+    assert history[0]["scope"] == "."
+    assert history[0]["includePaths"] == ["library", "service"]
 
 
 @pytest.mark.parametrize(
@@ -374,12 +378,21 @@ def test_headless_directory_set_controls_identity_and_coverage(tmp_path: Path) -
         ("start-prompt-only-scan", "--scope"),
     ],
 )
-def test_prompt_driven_scans_join_unicode_directory_selection(
-    tmp_path: Path, command: str, first_selection: str
+@pytest.mark.parametrize(
+    "directory",
+    [
+        "café",
+        pytest.param(
+            "1:module", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory name")
+        ),
+    ],
+)
+def test_prompt_driven_scans_join_literal_directory_selection(
+    tmp_path: Path, command: str, first_selection: str, directory: str
 ) -> None:
     target = tmp_path / "target"
-    (target / "café").mkdir(parents=True)
-    (target / "café" / "code.py").write_text("pass\n")
+    (target / directory).mkdir(parents=True)
+    (target / directory / "code.py").write_text("pass\n")
 
     def start(selection: str) -> dict[str, object]:
         return run_workbench(
@@ -390,7 +403,7 @@ def test_prompt_driven_scans_join_unicode_directory_selection(
             "--target-path",
             str(target),
             selection,
-            "café" if selection == "--scope" else json.dumps(["café"]),
+            directory if selection == "--scope" else json.dumps([directory]),
             "--scan-root",
             str(tmp_path / "scans"),
             *(("--mode", "standard") if command == "start-prompt-only-scan" else ()),
@@ -404,11 +417,24 @@ def test_prompt_driven_scans_join_unicode_directory_selection(
         joined = start(selection)
         assert joined["startDisposition"] == "joined"
         assert joined["scan"]["scanId"] == first["scan"]["scanId"]
+    history = run_workbench(tmp_path / "state", "list-scans", "--query", directory)["scans"]
+    assert [scan["scanId"] for scan in history] == [first["scan"]["scanId"]]
+    assert history[0]["scope"] == directory
+    assert history[0]["includePaths"] == [directory]
 
 
-def test_headless_directory_set_survives_completion(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "selected",
+    [
+        ["app/[id]", "library"],
+        pytest.param(
+            ["1:module", "library"],
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory name"),
+        ),
+    ],
+)
+def test_headless_directory_set_survives_completion(tmp_path: Path, selected: list[str]) -> None:
     target = tmp_path / "target"
-    selected = ["app/[id]", "library"]
     for directory in (*selected, "dependency"):
         (target / directory).mkdir(parents=True)
         (target / directory / "code.py").write_text("pass\n")
@@ -486,6 +512,7 @@ def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) 
     [
         (("--include-paths-json", "{"), "must be a JSON array"),
         (("--include-paths-json", "[]"), "must be a nonempty JSON array"),
+        (("--include-paths-json", '["a:module"]'), "literal repository-relative"),
         (("--scope", ".", "--include-paths-json", '["."]'), "not allowed with argument"),
     ],
 )

@@ -276,6 +276,11 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     }
     assert any(scan["progress"]["status"] == "failed" for scan in history["scans"])
     assert all(scan["recipeAvailable"] for scan in history["scans"])
+    assert {scan["scanId"]: scan["includePaths"] for scan in history["scans"]} == {
+        first["scanId"]: ["."],
+        rerun["scanId"]: ["src", "tests"],
+        failed["scanId"]: ["."],
+    }
     assert len(run_workbench(state_dir, "list-scans", "--repository", str(other))["scans"]) == 1
 
 

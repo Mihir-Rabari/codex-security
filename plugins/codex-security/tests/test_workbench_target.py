@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 import runpy
+import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any, Callable, cast
 
@@ -141,6 +142,97 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
     cached_source.unlink()
 
     assert directory_content_digest(target) == original_digest
+
+
+@pytest.mark.parametrize("case_alias", [False, True])
+def test_selected_git_directory_count_reuses_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_alias: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    for directory in ("service", "library", "other"):
+        (target / directory).mkdir()
+        (target / directory / "tracked.py").write_text("pass\n")
+    (target / ".gitignore").write_text("*.ignored\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    (target / "service" / "untracked.py").write_text("pass\n")
+    (target / "service" / "cache.ignored").write_text("ignored\n")
+    nested = target / "service" / "nested"
+    initialize_git_repository(nested)
+    (nested / ".gitignore").write_text("*.ignored\n")
+    (nested / "code.py").write_text("pass\n")
+    (nested / "cache.ignored").write_text("ignored\n")
+    if os.name != "nt":
+        (target / "library" / "linked.py").symlink_to(target / "service" / "tracked.py")
+
+    selected = ["service", "library"]
+    if case_alias:
+        native_stat = Path.stat
+
+        def alias_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            if path == target / "SERVICE":
+                path = target / "service"
+            return native_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", alias_stat)
+        selected[0] = "SERVICE"
+
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    git_command = count_files.__globals__["git_command"]
+    listings = []
+
+    def record_git(repository: Path, *args: str, **kwargs: Any) -> Any:
+        if "ls-files" in args:
+            listings.append(repository)
+        return git_command(repository, *args, **kwargs)
+
+    monkeypatch.setitem(count_files.__globals__, "git_command", record_git)
+    assert count_files(target, include_paths=selected) == 6
+    assert listings == [target, nested]
+
+
+def test_selected_non_git_directory_count_walks_only_selected_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", "library", "other"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    native_rglob = Path.rglob
+    walked = []
+
+    def record_walk(path: Path, *args: Any, **kwargs: Any) -> Any:
+        walked.append(path)
+        return native_rglob(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rglob", record_walk)
+    assert (
+        WORKBENCH_TARGET["directory_snapshot_regular_file_count"](
+            target, include_paths=["service", "library"]
+        )
+        == 2
+    )
+    assert walked == [target / "service", target / "library"]
+
+
+def test_selected_directory_count_distinguishes_case_sensitive_windows_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WindowsPath(PureWindowsPath):
+        def stat(self) -> SimpleNamespace:
+            return SimpleNamespace(st_dev=1, st_ino={"SRC": 1, "src": 2, "library": 3}[self.name])
+
+        def lstat(self) -> SimpleNamespace:
+            return SimpleNamespace(st_mode=stat.S_IFREG)
+
+    target = WindowsPath("C:/repository")
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    monkeypatch.setitem(
+        count_files.__globals__,
+        "git_directory_snapshot_paths",
+        lambda _: [target / "SRC" / "one.py", target / "src" / "two.py"],
+    )
+    assert count_files(target, include_paths=["SRC", "library"]) == 1
 
 
 def test_worktree_content_digest_streams_tracked_binary_patch(
