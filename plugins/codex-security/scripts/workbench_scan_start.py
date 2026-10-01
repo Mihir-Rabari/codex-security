@@ -176,6 +176,7 @@ def insert_running_scan(
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    include_paths: list[str] | None = None,
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
@@ -191,11 +192,11 @@ def insert_running_scan(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, scope, mode, user_context,
+            target_device, target_inode, scope, include_paths_json, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -205,6 +206,7 @@ def insert_running_scan(
             str(target),
             *target_identity,
             scope,
+            json.dumps(include_paths, separators=(",", ":")) if include_paths is not None else None,
             workspace["default_mode"],
             user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,

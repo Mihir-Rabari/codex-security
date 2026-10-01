@@ -804,7 +804,20 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         target = require_target(workspace["target_path"])
         require_scannable_target(target)
         target_metadata = target.stat()
-        scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        previous = (
+            require_scan(connection, workspace["active_scan_id"])
+            if workspace["active_scan_id"] is not None
+            else None
+        )
+        include_paths = (
+            require_include_paths(previous["include_paths_json"], target)
+            if previous is not None and previous["include_paths_json"] is not None
+            else None
+        )
+        if include_paths is None:
+            scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        else:
+            scope = include_paths[0] if len(include_paths) == 1 else "."
         diff_target = None
         if workspace["default_mode"] == "diff":
             diff_target = require_diff_target(
@@ -819,8 +832,10 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         if diff_target is not None and not target_summary:
             target_summary = diff_target_summary(diff_target)
-        scope_file_count = directory_snapshot_regular_file_count(
-            target if scope == "." else target / scope
+        scope_file_count = (
+            directory_snapshot_regular_file_count(target, include_paths=include_paths)
+            if include_paths is not None
+            else directory_snapshot_regular_file_count(target if scope == "." else target / scope)
         )
         target_identity = scan_target_identity(
             target,
@@ -881,6 +896,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             timestamp=timestamp,
             model=args.model,
             reasoning_effort=args.reasoning_effort,
+            include_paths=include_paths,
         )
         if manages_transaction:
             connection.commit()
@@ -1049,12 +1065,8 @@ def _start_prompt_driven_scan(
             handoff_status="delivered",
             model=args.model,
             reasoning_effort=args.reasoning_effort,
+            include_paths=include_paths if include_paths_json is not None else None,
         )
-        if include_paths_json is not None:
-            connection.execute(
-                "UPDATE scans SET include_paths_json = ? WHERE id = ?",
-                (json.dumps(include_paths, separators=(",", ":")), scan_id),
-            )
         if headless_standard:
             claimed = connection.execute(
                 """

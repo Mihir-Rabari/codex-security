@@ -512,6 +512,92 @@ def test_headless_whole_repository_selection_joins_legacy_scope(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
+    ("selection", "selected"),
+    [
+        (("--scope", "service"), ["service"]),
+        (("--include-paths-json", '[" leading"]'), [" leading"]),
+    ],
+)
+def test_workspace_restart_preserves_single_directory_selection(
+    tmp_path: Path, selection: tuple[str, ...], selected: list[str]
+) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", " leading", "other"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    state = tmp_path / "state"
+    started = run_workbench(
+        state,
+        "start-headless-standard-scan",
+        "--thread-id",
+        "restart-scan",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        *selection,
+    )
+    run_workbench(
+        state,
+        "cancel-scan",
+        "--scan-id",
+        str(started["scan"]["scanId"]),
+        "--thread-id",
+        "restart-scan",
+    )
+    restarted = run_workbench(
+        state,
+        "start-scan",
+        "--workspace-id",
+        str(started["workspace"]["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["results"]
+    assert restarted["scanId"] != started["scan"]["scanId"]
+    assert restarted["contract"]["scope"]["requiredIncludePaths"] == selected
+    assert restarted["progress"]["coverage"]["filesTotal"] == 1
+
+
+def test_workspace_restart_revalidates_saved_directory_selection(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    for directory in ("service", "library", "other"):
+        (target / directory).mkdir(parents=True)
+        (target / directory / "code.py").write_text("pass\n")
+    state = tmp_path / "state"
+    started = run_workbench(
+        state,
+        "start-headless-standard-scan",
+        "--thread-id",
+        "restart-scan",
+        "--target-path",
+        str(target),
+        "--include-paths-json",
+        '["service", "library"]',
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )
+    scan_id = str(started["scan"]["scanId"])
+    run_workbench(state, "cancel-scan", "--scan-id", scan_id, "--thread-id", "restart-scan")
+    (target / "service").rename(target / "moved")
+    rejected = run_workbench(
+        state,
+        "start-scan",
+        "--workspace-id",
+        str(started["workspace"]["id"]),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "existing directory" in rejected["stderr"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT id FROM scans").fetchall() == [(scan_id,)]
+        assert connection.execute("SELECT active_scan_id FROM workspaces").fetchall() == [
+            (scan_id,)
+        ]
+
+
+@pytest.mark.parametrize(
     ("selection", "error"),
     [
         (("--include-paths-json", "{"), "must be a JSON array"),

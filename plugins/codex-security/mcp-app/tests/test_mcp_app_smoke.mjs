@@ -863,6 +863,43 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(scopedArtifacts.coverage.inventoryStrategy, "scoped_path");
     assert.ok(scopedArtifacts.manifest.scan.sealedAt);
 
+    let previousScopedScanId = scopedResult.scanId;
+    for (const requestId of [51, 53]) {
+      const restarted = await headlessServer.requestAndWait(
+        requestId,
+        "tools/call",
+        {
+          name: "start_codex_security_scan",
+          arguments: { sessionId: scopedResult.workspace.id },
+        },
+      );
+      assertNoError(restarted);
+      const restartedScan =
+        restarted.result.structuredContent.workspace.results;
+      assert.notEqual(restartedScan.scanId, previousScopedScanId);
+      assert.deepEqual(
+        restartedScan.contract.scope.requiredIncludePaths,
+        selectedDirectories,
+      );
+      assert.equal(
+        restartedScan.progress.coverage.filesTotal,
+        selectedDirectories.length,
+      );
+      previousScopedScanId = restartedScan.scanId;
+      if (requestId === 51) {
+        const canceled = await headlessServer.requestAndWait(52, "tools/call", {
+          name: "cancel_codex_security_scan",
+          arguments: { scanId: restartedScan.scanId },
+          _meta: { "openai/threadId": ownerThread },
+        });
+        assertNoError(canceled);
+        assert.equal(
+          canceled.result.structuredContent.workspace.results.progress.status,
+          "canceled",
+        );
+      }
+    }
+
     const distinct = await headlessServer.requestAndWait(47, "tools/call", {
       name: "start_codex_security_standard_scan",
       arguments: {
