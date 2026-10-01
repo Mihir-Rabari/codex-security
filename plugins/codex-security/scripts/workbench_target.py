@@ -858,12 +858,19 @@ def require_include_paths(value: str, target: Path) -> list[str]:
             or "\\" in path
             or any(ord(character) < 32 for character in path)
             or ".." in path.split("/")
-            or any(part.casefold() == ".git" for part in path.split("/"))
+            or ".git" in path.split("/")
         ):
             raise SystemExit("include_paths must contain literal repository-relative directories.")
         resolved = require_scope(canonical, "standard", target, strip_whitespace=False)
         if Path(resolved) != Path(canonical):
             raise SystemExit("include_paths must not resolve through a directory symlink.")
+        directory = target
+        for part in Path(resolved).parts:
+            directory = directory / part
+            if part.casefold() == ".git":
+                git_directory = directory.with_name(".git")
+                if git_directory.exists() and directory.samefile(git_directory):
+                    raise SystemExit("include_paths must not select Git metadata.")
         normalized.add(resolved)
     if "." in normalized:
         return ["."]

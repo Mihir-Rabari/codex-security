@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import runpy
 import stat
@@ -213,6 +214,29 @@ def test_selected_non_git_directory_count_walks_only_selected_paths(
         == 2
     )
     assert walked == [target / "service", target / "library"]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [".git", "src/.git", "src/.git/objects", ".GIT", "src/.GIT", "src/.GIT/objects"],
+)
+def test_selected_directory_rejects_git_metadata_case_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    target = tmp_path / "target"
+    for directory in (".git/objects", "src/.git/objects"):
+        (target / directory).mkdir(parents=True)
+    if not (target / selection).exists():
+        native_stat = Path.stat
+
+        def alias_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            path = Path(*(".git" if part == ".GIT" else part for part in path.parts))
+            return native_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", alias_stat)
+
+    with pytest.raises(SystemExit):
+        WORKBENCH_TARGET["require_include_paths"](json.dumps([selection]), target)
 
 
 def test_selected_directory_count_distinguishes_case_sensitive_windows_directories(

@@ -324,6 +324,36 @@ def test_scan_history_search_casefolds_selected_paths(tmp_path: Path, storage: s
     assert run_workbench(state_dir, "list-scans", "--query", "absent-directory")["scans"] == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux non-UTF-8 directory name")
+def test_scan_history_search_handles_surrogate_escaped_recipe_paths(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    paths = ["bad-\udcff", "library"]
+    for path in [*paths, "other"]:
+        (repository / path).mkdir(parents=True)
+        (repository / path / "code.py").write_text("pass\n")
+    selected = create_cli_scan(
+        state_dir, tmp_path / "results", repository, complete=False, paths=paths
+    )
+    other = create_cli_scan(
+        state_dir, tmp_path / "results", repository, complete=False, paths=["other"]
+    )
+
+    history = run_workbench(state_dir, "list-scans")["scans"]
+    assert (
+        next(scan for scan in history if scan["scanId"] == selected["scanId"])["includePaths"]
+        == paths
+    )
+    for query, expected in (
+        ("other", [other["scanId"]]),
+        ("absent-directory", []),
+        ("bad-", [selected["scanId"]]),
+        ("LIBRARY", [selected["scanId"]]),
+    ):
+        scans = run_workbench(state_dir, "list-scans", "--query", query)["scans"]
+        assert [scan["scanId"] for scan in scans] == expected
+
+
 def test_scan_history_filters_recipe_paths_before_pagination(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

@@ -260,12 +260,12 @@ def list_scans(
     if args is not None and args.query:
         query = args.query.strip().casefold()
         if query:
-            connection.create_function("casefold", 1, str.casefold, deterministic=True)
             connection.create_function(
-                "requested_scan_paths",
-                3,
-                lambda include_paths_json, recipe_json, scope: json.dumps(
-                    requested_scan_paths(
+                "requested_scan_paths_match",
+                4,
+                lambda include_paths_json, recipe_json, scope, query: any(
+                    query in path.casefold()
+                    for path in requested_scan_paths(
                         {
                             "include_paths_json": include_paths_json,
                             "recipe_json": recipe_json,
@@ -279,9 +279,8 @@ def list_scans(
                 "(instr(lower(scans.target_path), ?) > 0 "
                 "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
                 "OR instr(lower(scans.scope), ?) > 0 "
-                "OR EXISTS (SELECT 1 FROM json_each(requested_scan_paths("
-                "scans.include_paths_json, scans.recipe_json, scans.scope)) "
-                "WHERE instr(casefold(value), ?) > 0) "
+                "OR requested_scan_paths_match("
+                "scans.include_paths_json, scans.recipe_json, scans.scope, ?) "
                 "OR instr(lower(scans.mode), ?) > 0)"
             )
             values.extend((query, query, query, query, query))

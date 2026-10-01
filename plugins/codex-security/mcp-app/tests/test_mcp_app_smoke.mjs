@@ -626,7 +626,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     " leading",
     process.platform === "win32" ? "trailing" : "trailing ",
     "name-\u007f",
-    ...Array.from({ length: 27 }, (_, index) => `directory-${index}`),
+    process.platform === "linux" ? ".GIT" : "git-case",
+    process.platform === "linux" ? "src/.GIT" : "git-nested",
+    ...Array.from({ length: 25 }, (_, index) => `directory-${index}`),
   ].sort();
   const largeSelection = Array.from(
     { length: 512 },
@@ -647,20 +649,31 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await mkdir(path.join(distinctTarget, directory), { recursive: true });
     await writeFile(path.join(distinctTarget, directory, "code.py"), "pass\n");
   }
-  execFileSync("git", ["init", "--quiet", distinctTarget]);
-  execFileSync("git", ["-C", distinctTarget, "add", "."]);
-  execFileSync("git", [
-    "-C",
-    distinctTarget,
-    "-c",
-    "user.name=Test Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "--quiet",
-    "-m",
-    "Add selected directory fixtures",
-  ]);
+  for (const gitTarget of [scopedTarget, distinctTarget]) {
+    execFileSync("git", ["init", "--quiet", gitTarget]);
+    // Git inventories these ordinary directories but refuses them in its index.
+    execFileSync("git", [
+      "-C",
+      gitTarget,
+      "add",
+      "--",
+      ".",
+      ":(exclude).GIT",
+      ":(exclude)src/.GIT",
+    ]);
+    execFileSync("git", [
+      "-C",
+      gitTarget,
+      "-c",
+      "user.name=Test Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "Add selected directory fixtures",
+    ]);
+  }
 
   try {
     assertNoError(
