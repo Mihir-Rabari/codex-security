@@ -620,8 +620,9 @@ def preserve_budget_candidates(
         (None, candidate["candidate_id"]): (
             "reported"
             if (None, candidate["candidate_id"]) in findings_by_candidate
-            else diff_candidate_disposition(candidate)
-            or terminal_decisions.get((None, candidate["candidate_id"]), "needs_follow_up")
+            else terminal_decisions.get((None, candidate["candidate_id"]))
+            or diff_candidate_disposition(candidate)
+            or "needs_follow_up"
         )
         for candidate in candidates
     }
@@ -714,7 +715,11 @@ def preserve_budget_candidates(
             item["finding"] for item in deferred if isinstance(item.get("finding"), dict)
         ]
         for surface in surfaces:
-            surface["disposition"] = disposition
+            if disposition == "reported" or surface.get("disposition") not in (
+                "rejected",
+                "not_applicable",
+            ):
+                surface["disposition"] = disposition
             surface["candidate"] = {**retained_candidate, **candidate}
             if previous_findings:
                 if not isinstance(surface.get("previousFindings"), list):

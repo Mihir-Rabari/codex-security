@@ -430,3 +430,106 @@ def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
             == "synthetic-candidate-review"
         )
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+
+
+@pytest.mark.parametrize(
+    ("saved_kind", "saved_disposition", "ledger_disposition"),
+    [
+        ("surface", "not_applicable", "suppressed"),
+        ("surface", "rejected", "not_applicable"),
+        ("exclusion", "not_applicable", "suppressed"),
+        ("mixed", "not_applicable", "suppressed"),
+        ("other-owner", "not_applicable", "suppressed"),
+        ("finding", "not_applicable", "suppressed"),
+    ],
+)
+def test_budget_exhaustion_preserves_authored_terminal_decisions(
+    tmp_path: Path, saved_kind: str, saved_disposition: str, ledger_disposition: str
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": ledger_disposition}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    if saved_kind == "finding":
+        findings_path = scan_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        findings["findings"][0]["provenance"]["candidateId"] = candidate["candidate_id"]
+        findings_path.write_text(json.dumps(findings))
+    pending_surface = {
+        "id": "pending-review",
+        "candidateId": candidate["candidate_id"],
+        "label": "Candidate review",
+        "disposition": "needs_follow_up",
+        "notes": "Review details awaiting reconciliation.",
+        "receiptRefs": [],
+    }
+    authored = {
+        **pending_surface,
+        "id": "authored-review",
+        "disposition": saved_disposition,
+        "notes": f"Authored rationale for {saved_disposition}.",
+        "reviewContext": "Preserve this annotation.",
+    }
+    if saved_kind == "other-owner":
+        authored["sourceWorkerId"] = "worker-other"
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"] = [pending_surface]
+    if saved_kind == "exclusion":
+        authored = {
+            "pattern": "app.py",
+            "candidateId": candidate["candidate_id"],
+            "disposition": saved_disposition,
+            "reason": authored["notes"],
+        }
+        coverage["explicitExclusions"] = [authored]
+    else:
+        coverage["surfaces"].append(authored)
+    if saved_kind == "mixed":
+        coverage["surfaces"].append(
+            {
+                **authored,
+                "id": "second-review",
+                "disposition": "rejected",
+                "notes": "Other rationale.",
+            }
+        )
+    original_surfaces = list(coverage["surfaces"])
+    coverage["deferred"] = [
+        {
+            "id": "pending-candidate",
+            "candidateId": candidate["candidate_id"],
+            "reason": "Unfinished validation.",
+            "surfaceIds": [pending_surface["id"]],
+        }
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["candidates"]["unresolved"] == 0
+    assert completed["findingCount"] == 1
+    preserved = json.loads(coverage_path.read_text())
+    assert not any(
+        row.get("candidateId") == candidate["candidate_id"] for row in preserved["deferred"]
+    )
+    if saved_kind == "exclusion":
+        assert preserved["explicitExclusions"] == [authored]
+    for original in original_surfaces:
+        retained = next(row for row in preserved["surfaces"] if row["id"] == original["id"])
+        for field in ("label", "notes", "reviewContext", "sourceWorkerId"):
+            assert retained.get(field) == original.get(field)
+        if saved_kind == "finding":
+            assert retained["disposition"] == "reported"
+        elif original["disposition"] != "needs_follow_up":
+            assert retained["disposition"] == original["disposition"]
+        elif saved_kind == "other-owner":
+            assert retained["disposition"] == "rejected"
+        elif saved_kind == "mixed":
+            assert retained["disposition"] in {"rejected", "not_applicable"}
+        else:
+            assert retained["disposition"] == saved_disposition
