@@ -874,11 +874,22 @@ def require_include_paths(value: str, target: Path) -> list[str]:
         normalized.add(resolved)
     if "." in normalized:
         return ["."]
+    directory_identities: dict[str, tuple[int, int]] = {}
+    selected_identities: set[tuple[int, int]] = set()
     result: list[str] = []
-    for path in sorted(normalized):
-        if not any(path.startswith(parent + "/") for parent in result):
+    for path in sorted(normalized, key=lambda value: (value.count("/"), value)):
+        relative = Path(path)
+        for ancestor in (relative, *relative.parents):
+            key = ancestor.as_posix()
+            if key not in directory_identities:
+                metadata = (target / ancestor).stat()
+                directory_identities[key] = (metadata.st_dev, metadata.st_ino)
+            if directory_identities[key] in selected_identities:
+                break
+        else:
             result.append(path)
-    return result
+            selected_identities.add(directory_identities[path])
+    return sorted(result)
 
 
 def require_remediation_target(value: str) -> Path:

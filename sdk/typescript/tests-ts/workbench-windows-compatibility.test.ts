@@ -36,6 +36,7 @@ test("normalizes Windows scopes and case aliases without accepting escapes", () 
       "class WindowsPath(PureWindowsPath):",
       "    def resolve(self): return WindowsPath(*('src' if part in {'SRC', 'linked'} else part for part in self.parts))",
       "    def is_dir(self): return True",
+      "    def stat(self): return SimpleNamespace(st_dev=1, st_ino={'repository': 1, 'src': 2, 'nested': 3}[self.name])",
       "workbench.require_scope.__globals__['Path'] = WindowsPath",
       "workbench.require_scope.__globals__['os'] = SimpleNamespace(name='nt')",
       "target = WindowsPath('C:/repository')",

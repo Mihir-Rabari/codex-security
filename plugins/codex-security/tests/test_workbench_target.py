@@ -217,6 +217,54 @@ def test_selected_non_git_directory_count_walks_only_selected_paths(
 
 
 @pytest.mark.parametrize(
+    "paths",
+    [
+        ["src", "SRC"],
+        ["SRC", "src"],
+        ["src", "SRC/nested"],
+        ["SRC/nested", "src"],
+        ["SRC", "src/nested"],
+        ["src/nested", "SRC"],
+    ],
+)
+def test_selected_non_git_case_aliases_count_each_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paths: list[str]
+) -> None:
+    target = tmp_path / "target"
+    (target / "src" / "nested").mkdir(parents=True)
+    (target / "src" / "code.py").write_text("pass\n")
+    (target / "src" / "nested" / "code.py").write_text("pass\n")
+    native_stat = Path.stat
+    native_rglob = Path.rglob
+
+    def physical_path(path: Path) -> Path:
+        try:
+            relative = path.relative_to(target)
+        except ValueError:
+            return path
+        return target.joinpath(*(part.casefold() for part in relative.parts))
+
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: native_stat(physical_path(path), *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda path, *args, **kwargs: native_rglob(physical_path(path), *args, **kwargs),
+    )
+    count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    monkeypatch.setitem(count_files.__globals__, "git_directory_snapshot_paths", lambda _: None)
+
+    selected = WORKBENCH_TARGET["require_include_paths"](json.dumps(paths), target)
+
+    assert count_files(target, include_paths=selected) == 2
+    assert len(selected) == 1
+    assert selected[0] in {"src", "SRC"}
+
+
+@pytest.mark.parametrize(
     "selection",
     [".git", "src/.git", "src/.git/objects", ".GIT", "src/.GIT", "src/.GIT/objects"],
 )
@@ -243,20 +291,34 @@ def test_selected_directory_count_distinguishes_case_sensitive_windows_directori
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class WindowsPath(PureWindowsPath):
+        def resolve(self) -> WindowsPath:
+            return self
+
+        def is_dir(self) -> bool:
+            return True
+
         def stat(self) -> SimpleNamespace:
-            return SimpleNamespace(st_dev=1, st_ino={"SRC": 1, "src": 2, "library": 3}[self.name])
+            return SimpleNamespace(
+                st_dev=1, st_ino={"repository": 0, "SRC": 1, "src": 2, "library": 3}[self.name]
+            )
 
         def lstat(self) -> SimpleNamespace:
             return SimpleNamespace(st_mode=stat.S_IFREG)
 
     target = WindowsPath("C:/repository")
     count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
+    monkeypatch.setitem(count_files.__globals__, "Path", WindowsPath)
     monkeypatch.setitem(
         count_files.__globals__,
         "git_directory_snapshot_paths",
         lambda _: [target / "SRC" / "one.py", target / "src" / "two.py"],
     )
-    assert count_files(target, include_paths=["SRC", "library"]) == 1
+    selected = WORKBENCH_TARGET["require_include_paths"]('["SRC", "library"]', target)
+    assert selected == ["SRC", "library"]
+    assert count_files(target, include_paths=selected) == 1
+    selected = WORKBENCH_TARGET["require_include_paths"]('["SRC", "src", "library"]', target)
+    assert selected == ["SRC", "library", "src"]
+    assert count_files(target, include_paths=selected) == 2
 
 
 def test_worktree_content_digest_streams_tracked_binary_patch(
