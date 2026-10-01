@@ -600,13 +600,12 @@ def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
     )
 
 
-def _generated_budget_candidate_decision(item: dict[str, Any]) -> bool:
+def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
     candidate = item.get("candidate")
     return (
         isinstance(candidate, dict)
         and item.get("candidateId") == candidate.get("candidate_id")
-        and item.get("disposition") in ("rejected", "not_applicable")
-        and item["disposition"] == diff_candidate_disposition(candidate)
+        and item.get("disposition") == (diff_candidate_disposition(candidate) or "needs_follow_up")
         and item.get("label") == candidate.get("summary")
         and item.get("notes") == candidate.get("evidence")
     )
@@ -628,7 +627,7 @@ def preserve_budget_candidates(
         for item in coverage[field]
         if isinstance(item, dict)
         and item.get("disposition") in ("rejected", "not_applicable")
-        and (field != "surfaces" or not _generated_budget_candidate_decision(item))
+        and (field != "surfaces" or not _generated_budget_candidate_surface(item))
     }
     dispositions = {
         (None, candidate["candidate_id"]): (
@@ -693,10 +692,10 @@ def preserve_budget_candidates(
         key = (None, candidate_id)
         deferred = deferred_by_candidate.get(key, [])
         disposition = dispositions[key]
-        # An interrupted budget completion can leave generated terminal rows.
+        # An interrupted budget completion can leave generated candidate rows.
         # Refresh them before retaining pending work, including shared surfaces.
         for surface in surfaces_by_candidate.get(key, []):
-            if _generated_budget_candidate_decision(surface):
+            if _generated_budget_candidate_surface(surface):
                 surface.update(
                     label=candidate["summary"],
                     disposition=disposition,

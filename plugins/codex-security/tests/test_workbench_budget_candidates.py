@@ -538,12 +538,17 @@ def test_budget_exhaustion_preserves_authored_terminal_decisions(
 
 @pytest.mark.parametrize("decision", ["deferred", "reportable", "not_applicable"])
 @pytest.mark.parametrize("saved_pending", [False, True])
+@pytest.mark.parametrize("started_pending", [False, True])
 def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
-    tmp_path: Path, workbench_api: dict[str, Any], decision: str, saved_pending: bool
+    tmp_path: Path,
+    workbench_api: dict[str, Any],
+    decision: str,
+    saved_pending: bool,
+    started_pending: bool,
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     original = json.loads(ledger.read_text())
-    original["validation"] = {"disposition": "suppressed"}
+    original["validation"] = {"disposition": "deferred" if started_pending else "suppressed"}
     original["context"] = "Retained discovery context."
     run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
     # Leave the real budget writer's output unsealed, as when completion is interrupted.
@@ -551,6 +556,32 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
         workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+        if started_pending:
+            assert (
+                run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"][
+                    "candidates"
+                ]["unresolved"]
+                == 1
+            )
+            assert (
+                run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", scan_id)["scanId"]
+                == scan_id
+            )
+            original = {
+                **original,
+                "summary": "Updated terminal review",
+                "evidence": "Updated terminal evidence.",
+                "validation": {"disposition": "suppressed"},
+            }
+            workbench_api["budget_exhausted_draft"](
+                scan, scan_dir, [original], "Cost limit reached."
+            )
+            assert (
+                run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"][
+                    "candidates"
+                ]["unresolved"]
+                == 0
+            )
     resumed = run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", scan_id)
     assert resumed["scanId"] == scan_id
     assert "sealedProducerVersion" not in resumed
@@ -612,8 +643,9 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
 
 
 @pytest.mark.parametrize("field", ["label", "notes"])
+@pytest.mark.parametrize("started_pending", [False, True])
 def test_budget_exhaustion_preserves_authored_changes_to_generated_decisions(
-    workbench_api: dict[str, Any], field: str
+    workbench_api: dict[str, Any], field: str, started_pending: bool
 ) -> None:
     preserve = workbench_api["saved_results"].preserve_budget_candidates
     candidate = {
@@ -621,12 +653,15 @@ def test_budget_exhaustion_preserves_authored_changes_to_generated_decisions(
         "summary": "Synthetic candidate",
         "evidence": "Saved review evidence.",
         "locations": [{"path": "app.py"}],
-        "validation": {"disposition": "not_applicable"},
+        "validation": {"disposition": "deferred" if started_pending else "not_applicable"},
     }
     coverage = {"surfaces": [], "explicitExclusions": [], "deferred": []}
     preserve(coverage, [], [candidate])
     surface = coverage["surfaces"][0]
     surface[field] = "Authored decision detail."
+    if started_pending:
+        candidate = {**candidate, "validation": {"disposition": "not_applicable"}}
+        preserve(coverage, [], [candidate])
 
     preserve(coverage, [], [{**candidate, "validation": {"disposition": "deferred"}}])
 
