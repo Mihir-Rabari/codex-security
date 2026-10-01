@@ -224,10 +224,7 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
         "model": row["model"],
         "parentScanId": row["parent_scan_id"],
         "progress": {
-            "candidates": {
-                "reportable": row["reportable_findings_count"],
-                "unresolved": saved_unresolved_candidate_count(row),
-            },
+            "candidates": {"reportable": row["reportable_findings_count"]},
             "coverage": {
                 "closedRows": row["review_items_completed"],
                 "filesTotal": row["scope_file_count"],

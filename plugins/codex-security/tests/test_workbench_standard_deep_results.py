@@ -88,7 +88,7 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     )
     assert stopped["progress"]["candidates"]["unresolved"] == 1
     history = run_workbench(state_dir, "list-scans")["scans"]
-    assert history[0]["progress"]["candidates"]["unresolved"] == 1
+    assert "unresolved" not in history[0]["progress"]["candidates"]
     assert result_path.read_text() == "{incomplete"
     assert (
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == termination
@@ -2082,12 +2082,8 @@ def test_recovery_preserves_bound_worker_owner_over_imported_metadata(
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["findingCount"] == 1
         assert scan["progress"]["candidates"]["unresolved"] == 1
-        assert (
-            run_workbench(state_dir, "list-scans")["scans"][0]["progress"]["candidates"][
-                "unresolved"
-            ]
-            == 1
-        )
+        history = run_workbench(state_dir, "list-scans")["scans"][0]
+        assert "unresolved" not in history["progress"]["candidates"]
         retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
         assert retained["summary"] == finding["summary"]
         assert retained["provenance"]["sourceWorkerId"] == owner_a

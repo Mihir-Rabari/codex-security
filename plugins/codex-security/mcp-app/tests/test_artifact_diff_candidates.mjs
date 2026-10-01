@@ -30,8 +30,10 @@ const {
   preserveUnresolvedDiffCandidates,
   readDiffCandidates,
 } = await loadModule("artifact-diff-candidates.ts");
-const { recordCodexSecurityScanDraft } = await loadModule(
-  "artifact-scan-draft.ts",
+const { recordCodexSecurityScanDraft, recordCodexSecurityWorkerScanDraft } =
+  await loadModule("artifact-scan-draft.ts");
+const { discoveryReductionInput } = await loadModule(
+  "deep-scan/artifact-validation.ts",
 );
 const { recordCodexSecurityCandidateValidations } = await loadModule(
   "artifact-validation-phase.ts",
@@ -204,14 +206,18 @@ test("diff reconciliation enriches pending records and retains general coverage 
   const result = await reconcileDiffCandidates(
     context,
     draft([
-      { id: "pending", reason: "Keep the original follow-up question." },
+      {
+        id: "pending-row",
+        candidateId: "pending",
+        reason: "Keep the original follow-up question.",
+      },
       { candidateId: "rejected", reason: "An earlier incomplete checkpoint." },
       general,
     ]),
   );
   assert.deepEqual(result.coverage.deferred, [
     {
-      id: "pending",
+      id: "pending-row",
       candidateId: "pending",
       candidate: pending,
       reason: "Keep the original follow-up question.",
@@ -223,6 +229,194 @@ test("diff reconciliation enriches pending records and retains general coverage 
     added.coverage.deferred[0].reason,
     pending.attack_path.proof_gap,
   );
+});
+
+for (const resolution of ["finding", "ledger rejection"]) {
+  test(`general coverage row IDs remain separate from candidates through ${resolution}`, async (t) => {
+    const pending = candidate("pending", "deferred");
+    const context = await fixture(t, [pending]);
+    const general = {
+      id: pending.candidate_id,
+      reason: "A separate source directory still needs review.",
+      surfaceIds: ["general-review"],
+    };
+    const surface = {
+      id: "general-review",
+      label: "Separate source directory",
+      disposition: "needs_follow_up",
+      notes: general.reason,
+      receiptRefs: [],
+    };
+    const initial = { ...draft([general]), complete: false };
+    initial.coverage.completeness = "partial";
+    initial.coverage.surfaces = [surface];
+    await recordCodexSecurityScanDraft(context, initial);
+    const projected = await readCoverage(context);
+    assert.deepEqual(
+      projected.deferred.find((item) => item.id === general.id),
+      general,
+    );
+    assert.equal(projected.deferred.length, 2);
+    assert.equal(
+      projected.surfaces.filter(
+        (item) =>
+          item.candidateId === pending.candidate_id &&
+          item.disposition === "needs_follow_up",
+      ).length,
+      1,
+    );
+    assert.deepEqual(
+      projected.surfaces.find((item) => item.id === surface.id),
+      surface,
+    );
+
+    const resolved = { ...draft(), complete: true };
+    if (resolution === "finding")
+      resolved.findings = [finding(pending.candidate_id)];
+    else
+      await writeLedger(context, [
+        candidate(pending.candidate_id, "suppressed"),
+      ]);
+    await recordCodexSecurityScanDraft(context, resolved);
+    for (const complete of [true, false]) {
+      const saved = await readCoverage(context);
+      assert.deepEqual(saved.deferred, [general]);
+      assert.deepEqual(
+        saved.surfaces.find((item) => item.id === surface.id),
+        surface,
+      );
+      assert.equal(saved.completeness, "partial");
+      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+    }
+  });
+}
+
+for (const metadata of [
+  { label: "legacy-owner" },
+  ["legacy-owner"],
+  "",
+  "  ",
+]) {
+  test(`non-string and blank owner metadata do not leave confirmed Diff candidates unresolved: ${JSON.stringify(metadata)}`, async (t) => {
+    const pending = candidate("pending", "deferred");
+    const context = await fixture(t, [pending]);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: false,
+    });
+    const confirmed = finding(pending.candidate_id);
+    Object.assign(confirmed.provenance, {
+      sourceWorkerId: metadata,
+      workerId: metadata,
+    });
+    for (const complete of [true, false]) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete,
+        findings: [confirmed],
+      });
+      const saved = await readCoverage(context);
+      assert.deepEqual(saved.deferred, []);
+      assert.equal(saved.completeness, "complete");
+      const findings = JSON.parse(
+        await readFile(path.join(context.root, "findings.json"), "utf8"),
+      ).findings;
+      assert.equal(findings.length, 1);
+      assert.deepEqual(findings[0].provenance.sourceWorkerId, metadata);
+      assert.deepEqual(findings[0].provenance.workerId, metadata);
+    }
+  });
+}
+
+for (const fallback of ["workerId", "extensions"]) {
+  test(`structured owner metadata allows a valid ${fallback} owner to resolve its candidate`, async (t) => {
+    const context = { ...(await fixture(t)), mode: "standard" };
+    const confirmed = finding("pending");
+    confirmed.provenance.sourceWorkerId = { label: "legacy-owner" };
+    if (fallback === "workerId")
+      confirmed.provenance.workerId = "actual-worker";
+    else {
+      confirmed.provenance.workerId = " ";
+      confirmed.extensions = { sourceWorkerId: "actual-worker" };
+    }
+    const unrelated = {
+      candidateId: "pending",
+      sourceWorkerId: "other-worker",
+      reason: "Independent worker review.",
+    };
+    const initial = {
+      ...draft([
+        {
+          candidateId: "pending",
+          sourceWorkerId: "actual-worker",
+          reason: "Candidate review.",
+        },
+        unrelated,
+      ]),
+      complete: false,
+    };
+    initial.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, initial);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      findings: [confirmed],
+      complete: true,
+    });
+    assert.deepEqual(
+      (await readCoverage(context)).deferred.map(
+        ({ candidateId, sourceWorkerId }) => ({ candidateId, sourceWorkerId }),
+      ),
+      [{ candidateId: "pending", sourceWorkerId: "other-worker" }],
+    );
+  });
+}
+
+test("bound worker ownership overrides imported metadata and preserves its evidence", async (t) => {
+  const context = { ...(await fixture(t)), layout: "worker", mode: "standard" };
+  const confirmed = finding("pending");
+  confirmed.provenance.sourceWorkerId = {
+    label: "legacy-owner",
+    details: ["retained"],
+  };
+  confirmed.provenance.workerId = "imported-worker";
+  const initial = {
+    ...draft([
+      {
+        candidateId: "pending",
+        sourceWorkerId: "different-import",
+        reason: "Review in the bound worker.",
+      },
+    ]),
+    complete: false,
+  };
+  initial.coverage.completeness = "partial";
+  await recordCodexSecurityWorkerScanDraft(context, initial);
+  await recordCodexSecurityWorkerScanDraft(context, {
+    ...draft(),
+    complete: true,
+    findings: [confirmed],
+  });
+  const saved = JSON.parse(
+    await readFile(path.join(context.root, "result.json"), "utf8"),
+  );
+  assert.deepEqual(saved.coverage.deferred, []);
+  for (const workerId of ["actual-worker", "imported-worker"]) {
+    const reduced = discoveryReductionInput(saved, workerId);
+    assert.equal(reduced.findings[0].provenance.sourceWorkerId, workerId);
+    assert.deepEqual(
+      reduced.findings[0].provenance.previousFindings[0].provenance
+        .sourceWorkerId,
+      confirmed.provenance.sourceWorkerId,
+    );
+    assert.equal(
+      reduced.findings[0].provenance.previousFindings[0].provenance.workerId,
+      "imported-worker",
+    );
+    assert.deepEqual(
+      saved.findings[0].provenance.sourceWorkerId,
+      confirmed.provenance.sourceWorkerId,
+    );
+  }
 });
 
 test("final findings and explicit candidate resolutions are not reopened", async (t) => {

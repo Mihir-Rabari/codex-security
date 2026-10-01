@@ -271,7 +271,7 @@ def test_scan_list_probes_requested_repository_once(
     ],
     ids=["no-candidates", "general-review-work", "resolved-in-coverage"],
 )
-def test_scan_list_skips_findings_artifacts_without_unresolved_candidates(
+def test_scan_detail_skips_findings_artifacts_without_unresolved_candidates(
     workbench_api, indexed_collections, monkeypatch, coverage
 ):
     connection, _ = indexed_collections
@@ -283,16 +283,14 @@ def test_scan_list_skips_findings_artifacts_without_unresolved_candidates(
         return coverage if name == "coverage.json" else {"findings": []}
 
     monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
-    scans = history.list_scans(connection)["scans"]
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
 
-    assert len(scans) == len(SCAN_IDS)
-    assert all(scan["progress"]["candidates"]["unresolved"] == 0 for scan in scans)
-    assert sorted(reads) == [(scan_id, "coverage.json") for scan_id in SCAN_IDS]
+    assert history.saved_unresolved_candidate_count(scan) == 0
+    assert reads == [(SCAN_IDS[0], "coverage.json")]
 
 
-@pytest.mark.parametrize(("limit", "offset"), [(None, 0), (1, 0), (1, 1)])
-def test_scan_list_reads_findings_to_resolve_saved_candidates(
-    workbench_api, indexed_collections, monkeypatch, limit, offset
+def test_scan_detail_reads_findings_to_resolve_saved_candidates(
+    workbench_api, indexed_collections, monkeypatch
 ):
     connection, _ = indexed_collections
     history = workbench_api["scan_history"]
@@ -310,14 +308,36 @@ def test_scan_list_reads_findings_to_resolve_saved_candidates(
         return coverage if name == "coverage.json" else findings
 
     monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
-    scans = history.list_scans(connection, query_args(limit=limit, offset=offset))["scans"]
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
 
-    expected_ids = SCAN_IDS if limit is None else SCAN_IDS[offset : offset + limit]
-    assert [scan["scanId"] for scan in scans] == expected_ids
-    assert all(scan["progress"]["candidates"]["unresolved"] == 1 for scan in scans)
-    assert sorted(reads) == [
-        (scan_id, name) for scan_id in expected_ids for name in ("coverage.json", "findings.json")
-    ]
+    assert history.saved_unresolved_candidate_count(scan) == 1
+    assert reads == [(SCAN_IDS[0], "coverage.json"), (SCAN_IDS[0], "findings.json")]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_ids"),
+    [
+        (None, SCAN_IDS),
+        ({"limit": None}, SCAN_IDS),
+        ({"limit": 1}, SCAN_IDS[:1]),
+        ({"limit": 1, "offset": 1}, SCAN_IDS[1:2]),
+        ({"query": "missing"}, []),
+    ],
+)
+def test_scan_list_does_not_read_candidate_artifacts(
+    workbench_api, indexed_collections, monkeypatch, arguments, expected_ids
+):
+    connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+
+    def reject_artifact_read(*arguments):
+        raise AssertionError("Listing scans must not load candidate artifacts.")
+
+    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
+    result = history.list_scans(connection, query_args(**arguments) if arguments else None)
+
+    assert [scan["scanId"] for scan in result["scans"]] == expected_ids
+    assert all("unresolved" not in scan["progress"]["candidates"] for scan in result["scans"])
 
 
 @pytest.mark.parametrize(
@@ -331,7 +351,7 @@ def test_scan_list_reads_findings_to_resolve_saved_candidates(
         ({"status": "not_scanned"}, [], None),
     ],
 )
-def test_repository_list_reads_artifacts_only_for_returned_latest_scans(
+def test_repository_list_does_not_read_candidate_artifacts(
     workbench_api, indexed_collections, monkeypatch, tmp_path, arguments, expected_ids, next_offset
 ):
     connection, _ = indexed_collections
@@ -352,17 +372,11 @@ def test_repository_list_reads_artifacts_only_for_returned_latest_scans(
             (history_id, "2026-08-02T00:00:00Z"),
         )
     history = workbench_api["scan_history"]
-    reads = []
 
-    def read_artifact(scan_dir, name, label):
-        reads.append((scan_dir.name, name))
-        return (
-            {"deferred": [{"candidateId": "candidate-pending", "reason": "Review remains."}]}
-            if name == "coverage.json"
-            else {"findings": []}
-        )
+    def reject_artifact_read(*arguments):
+        raise AssertionError("Listing repositories must not load candidate artifacts.")
 
-    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
     result = workbench_api["native_indexes"].list_repositories(
         connection, query_args(**arguments) if arguments is not None else None
     )
@@ -372,10 +386,7 @@ def test_repository_list_reads_artifacts_only_for_returned_latest_scans(
     )
     assert all(repository["scanCount"] == 2 for repository in result["repositories"])
     assert all(
-        repository["latestScan"]["progress"]["candidates"]["unresolved"] == 1
+        "unresolved" not in repository["latestScan"]["progress"]["candidates"]
         for repository in result["repositories"]
     )
-    assert reads == [
-        (scan_id, name) for scan_id in expected_ids for name in ("coverage.json", "findings.json")
-    ]
     assert result.get("nextOffset") == next_offset

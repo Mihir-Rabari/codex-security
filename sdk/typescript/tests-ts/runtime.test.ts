@@ -334,6 +334,7 @@ describe("plugin runtime preparation", () => {
   test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
     const runtime = await loadBundledRuntime();
     const source = [
+      "candidateOwner",
       "candidateKey",
       "surfaceReferenceKey",
       "normalizeCoverageEntries",

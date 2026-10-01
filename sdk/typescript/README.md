@@ -958,7 +958,8 @@ potential security issues that the scan has not confirmed or ruled out. They do
 not contribute to the findings count, severity totals, or finding-based exit
 thresholds. JSON results and the SDK expose `unresolvedCandidateCount` and
 `unresolvedCandidates`; the report lists their saved details and reasons for
-follow-up.
+follow-up. Detailed saved-scan context includes the unresolved count; scan and
+repository listings stay lightweight and do not load candidate artifacts.
 
 Candidates are counted once by `candidateId` within each logical Deep worker,
 including resumed workers. Rejected and not-applicable candidates, generic

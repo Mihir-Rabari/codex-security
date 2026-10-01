@@ -96,7 +96,13 @@ export function discoveryReductionInput(
         sourceWorkerId: workerId,
       };
       const previousOwner = findingCandidateOwner(finding);
-      if (previousOwner !== undefined && previousOwner !== workerId)
+      const previousSource = (
+        finding.provenance as Record<string, unknown> | undefined
+      )?.sourceWorkerId;
+      if (
+        (previousOwner !== undefined && previousOwner !== workerId) ||
+        (previousSource !== undefined && previousSource !== workerId)
+      )
         preserveFindingDetails(normalized, finding);
       return normalized;
     }),

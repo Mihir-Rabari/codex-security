@@ -1,5 +1,11 @@
 type JsonObject = Record<string, unknown>;
 
+function candidateOwner(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && !!value.trim(),
+  );
+}
+
 export function findingCandidateId(finding: JsonObject): string | undefined {
   const provenance = finding.provenance as JsonObject | undefined;
   const extensions = finding.extensions as JsonObject | undefined;
@@ -15,17 +21,17 @@ export function findingCandidateId(finding: JsonObject): string | undefined {
 
 export function candidateKey(id: unknown, owner?: unknown): string | undefined {
   return typeof id === "string" && id.trim()
-    ? JSON.stringify([owner ?? null, id])
+    ? JSON.stringify([candidateOwner(owner) ?? null, id])
     : undefined;
 }
 
-export function findingCandidateOwner(finding: JsonObject): unknown {
+export function findingCandidateOwner(finding: JsonObject): string | undefined {
   const provenance = finding.provenance as JsonObject | undefined;
   const extensions = finding.extensions as JsonObject | undefined;
-  return (
-    provenance?.sourceWorkerId ??
-    provenance?.workerId ??
-    extensions?.sourceWorkerId
+  return candidateOwner(
+    provenance?.sourceWorkerId,
+    provenance?.workerId,
+    extensions?.sourceWorkerId,
   );
 }
 
@@ -35,7 +41,7 @@ export function findingCandidateKey(
 ): string | undefined {
   return candidateKey(
     findingCandidateId(finding),
-    owner ?? findingCandidateOwner(finding),
+    candidateOwner(owner, findingCandidateOwner(finding)),
   );
 }
 
@@ -44,8 +50,8 @@ export function coverageCandidateKey(
   owner?: string,
 ): string | undefined {
   return candidateKey(
-    item.candidateId ?? item.id,
-    owner ?? item.sourceWorkerId,
+    item.candidateId,
+    candidateOwner(owner, item.sourceWorkerId),
   );
 }
 
@@ -59,11 +65,11 @@ export function surfaceReferenceKey(
   const matches = surfaces.filter((surface) => surface.id === id);
   const sameOwner = matches.find(
     (surface) =>
-      (owner ?? surface.sourceWorkerId ?? null) ===
-      (owner ?? source.sourceWorkerId ?? null),
+      candidateOwner(owner, surface.sourceWorkerId) ===
+      candidateOwner(owner, source.sourceWorkerId),
   );
   const target = sameOwner ?? (matches.length === 1 ? matches[0]! : source);
-  return candidateKey(id, owner ?? target.sourceWorkerId);
+  return candidateKey(id, candidateOwner(owner, target.sourceWorkerId));
 }
 
 export function isTerminalCandidateDecision(

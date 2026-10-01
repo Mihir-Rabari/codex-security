@@ -285,10 +285,12 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert coverage["completeness"] == "partial"
     assert coverage["deferred"][0] == {
         "id": "candidate-1",
-        "candidateId": "candidate-1",
-        "candidate": json.loads(ledger.read_text()),
         "reason": "Authored review gap.",
     }
+    pending = next(item for item in coverage["deferred"] if item.get("candidateId"))
+    assert pending["id"] != "candidate-1"
+    assert pending["candidateId"] == "candidate-1"
+    assert pending["candidate"] == json.loads(ledger.read_text())
 
 
 @pytest.mark.parametrize(
@@ -334,7 +336,9 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
         assert coverage["deferred"][0]["id"] == "scan-cost-limit"
 
 
-def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -> None:
+def test_budget_exhaustion_preserves_generic_terminal_surface_id_collision(
+    tmp_path: Path,
+) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     candidate = json.loads(ledger.read_text())
     candidate["validation"] = {"disposition": "suppressed"}
@@ -363,8 +367,128 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     assert completed["findingCount"] == 1
     preserved = json.loads(coverage_path.read_text())
     assert sum(row["id"] == "candidate-candidate-1" for row in preserved["surfaces"]) == 1
-    assert preserved["surfaces"][1]["disposition"] == "rejected"
-    assert not any(row["id"] == "candidate-1" for row in preserved["deferred"])
+    assert preserved["surfaces"][1] == coverage["surfaces"][1]
+    decision = next(row for row in preserved["surfaces"] if row.get("candidateId"))
+    assert decision["id"] != "candidate-candidate-1"
+    assert decision["candidateId"] == "candidate-1"
+    assert decision["disposition"] == "rejected"
+    assert not any(row.get("candidateId") == "candidate-1" for row in preserved["deferred"])
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "reported",
+        "suppressed",
+        "not_applicable",
+        "ignore",
+        "deferred",
+        "other-owner",
+        "existing-terminal",
+    ],
+)
+def test_budget_exhaustion_reconciles_saved_candidate_rows_without_losing_other_work(
+    tmp_path: Path, decision: str
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    previous = {**candidate, "context": "Saved source context."}
+    if decision == "ignore":
+        candidate["attack_path"] = {"decision": "ignore"}
+    else:
+        candidate["validation"] = {
+            "disposition": "reportable"
+            if decision in {"reported", "other-owner", "existing-terminal"}
+            else decision
+        }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    if decision in {"reported", "other-owner"}:
+        findings_path = scan_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        findings["findings"][0]["provenance"]["candidateId"] = candidate["candidate_id"]
+        if decision == "other-owner":
+            findings["findings"][0]["provenance"]["sourceWorkerId"] = "worker-other"
+        findings_path.write_text(json.dumps(findings))
+    surface = {
+        "id": "candidate-candidate-1",
+        "candidateId": candidate["candidate_id"],
+        "label": "Authored candidate review",
+        "disposition": "needs_follow_up",
+        "notes": "Saved authored evidence.",
+        "receiptRefs": [],
+        "reviewContext": "Keep this annotation.",
+    }
+    if decision == "existing-terminal":
+        surface["disposition"] = "rejected"
+    shared = {**surface, "id": "shared-review", "sourceWorkerId": " "}
+    other_owner = {
+        **surface,
+        "id": "other-owner-review",
+        "sourceWorkerId": "worker-other",
+        "disposition": "needs_follow_up",
+    }
+    generic = {
+        "id": "general-review",
+        "reason": "Independent unfinished review.",
+        "surfaceIds": [shared["id"]],
+    }
+    independent = {
+        "id": "other-owner-candidate",
+        "candidateId": candidate["candidate_id"],
+        "sourceWorkerId": "worker-other",
+        "reason": "A different worker's unfinished review.",
+        "surfaceIds": [other_owner["id"]],
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"] = [surface, shared, other_owner]
+    coverage["deferred"] = [
+        {
+            "id": "candidate-1",
+            "candidateId": candidate["candidate_id"],
+            "candidate": previous,
+            "reason": "Authored unresolved evidence.",
+            "surfaceIds": [surface["id"]],
+        },
+        generic,
+        independent,
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    preserved = json.loads(coverage_path.read_text())
+    assert generic in preserved["deferred"]
+    assert independent in preserved["deferred"]
+    assert shared in preserved["surfaces"]
+    assert other_owner in preserved["surfaces"]
+    expected_disposition = {
+        "reported": "reported",
+        "suppressed": "rejected",
+        "not_applicable": "not_applicable",
+        "ignore": "rejected",
+        "deferred": "needs_follow_up",
+        "other-owner": "needs_follow_up",
+        "existing-terminal": "rejected",
+    }[decision]
+    retained = next(row for row in preserved["surfaces"] if row["id"] == surface["id"])
+    assert retained["disposition"] == expected_disposition
+    assert retained["notes"] == surface["notes"]
+    assert retained["reviewContext"] == surface["reviewContext"]
+    pending = [
+        row
+        for row in preserved["deferred"]
+        if row.get("candidateId") == candidate["candidate_id"] and not row.get("sourceWorkerId")
+    ]
+    assert bool(pending) is (decision in {"deferred", "other-owner"})
+    assert completed["progress"]["candidates"]["unresolved"] == (2 if decision == "deferred" else 1)
+    if decision in {"deferred", "other-owner"}:
+        assert pending[0] == coverage["deferred"][0]
+    else:
+        assert retained["candidate"] == {**previous, **candidate}
 
 
 @pytest.mark.parametrize(

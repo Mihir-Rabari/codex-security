@@ -285,6 +285,48 @@ def test_candidate_selection_uses_existing_finding_identity_order(
     } - {resolved_id}
 
 
+@pytest.mark.parametrize(
+    ("provenance", "extensions", "owner"),
+    [
+        ({"sourceWorkerId": {"imported": "worker"}}, {}, None),
+        ({"sourceWorkerId": ["worker"]}, {}, None),
+        ({"sourceWorkerId": " "}, {}, None),
+        ({"sourceWorkerId": {}, "workerId": "worker-a"}, {}, "worker-a"),
+        ({"sourceWorkerId": " ", "workerId": []}, {"sourceWorkerId": "worker-a"}, "worker-a"),
+    ],
+)
+def test_projection_resolves_candidates_using_string_owner_metadata(
+    provenance: dict, extensions: dict, owner: str | None
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding.update(provenance={**provenance, "candidateId": "confirmed"}, extensions=extensions)
+    saved_finding = copy.deepcopy(finding)
+    coverage["deferred"] = [
+        {
+            "id": "resolved",
+            "candidateId": "confirmed",
+            "sourceWorkerId": owner,
+            "reason": "Earlier checkpoint.",
+        },
+        {
+            "id": "other-worker",
+            "candidateId": "confirmed",
+            "sourceWorkerId": "worker-b",
+            "reason": "Independent review.",
+        },
+    ]
+
+    assert CANDIDATES.unresolved_candidates(coverage, findings["findings"]) == [
+        coverage["deferred"][1]
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "| Unresolved candidates | 1 |" in markdown
+    assert "Earlier checkpoint." not in markdown
+    assert "Independent review." in markdown
+    assert finding == saved_finding
+
+
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]

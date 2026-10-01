@@ -145,6 +145,71 @@ describe("ScanResult", () => {
     expect(fakeResult([]).unresolvedCandidateCount).toBe(0);
   });
 
+  test.each([
+    [{ sourceWorkerId: { imported: "worker" } }, {}, undefined],
+    [{ sourceWorkerId: ["worker"] }, {}, undefined],
+    [{ sourceWorkerId: " " }, {}, undefined],
+    [{ sourceWorkerId: {}, workerId: "worker-a" }, {}, "worker-a"],
+    [
+      { sourceWorkerId: " ", workerId: [] },
+      { sourceWorkerId: "worker-a" },
+      "worker-a",
+    ],
+  ])(
+    "resolves candidates using string owner metadata: %j",
+    (provenance, extensions, owner) => {
+      const result = fakeResult(["high"]);
+      const finding = result.findings.findings[0]!;
+      finding.provenance = {
+        ...finding.provenance,
+        ...provenance,
+        candidateId: "confirmed",
+      };
+      finding.extensions = extensions;
+      const savedFinding = structuredClone(finding);
+      result.coverage.deferred = [
+        {
+          id: "resolved",
+          candidateId: "confirmed",
+          sourceWorkerId: owner,
+          reason: "Earlier checkpoint.",
+        },
+        {
+          id: "other-worker",
+          candidateId: "confirmed",
+          sourceWorkerId: "worker-b",
+          reason: "Independent review.",
+        },
+      ];
+
+      expect(
+        result.unresolvedCandidates.map((candidate) => candidate.id),
+      ).toEqual(["other-worker"]);
+      expect(result.toJSON()).toMatchObject({
+        unresolvedCandidateCount: 1,
+        unresolvedCandidates: [result.coverage.deferred[1]],
+      });
+      expect(finding).toEqual(savedFinding);
+    },
+  );
+
+  test("excludes blank candidate identities without changing saved deferred work", () => {
+    const result = fakeResult([]);
+    result.coverage.deferred = [
+      { id: "generic", reason: "Unfinished review." },
+      { id: "blank", candidateId: " \t", reason: "Unfinished review." },
+      {
+        id: "pending",
+        candidateId: "pending",
+        reason: "Candidate needs validation.",
+      },
+    ];
+
+    expect(result.unresolvedCandidates).toEqual([result.coverage.deferred[2]!]);
+    expect(result.unresolvedCandidateCount).toBe(1);
+    expect(result.coverage.deferred).toHaveLength(3);
+  });
+
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
       const result = fakeResult(levels);

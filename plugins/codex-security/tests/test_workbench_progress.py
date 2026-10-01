@@ -44,9 +44,11 @@ def test_unresolved_count_preserves_progress_with_incomplete_canonical_drafts(
     )["scan"]
     history = run_workbench(state_dir, "list-scans")["scans"][0]
 
-    for scan in (current, updated, history):
+    for scan in (current, updated):
         assert scan["progress"]["status"] == "running"
         assert scan["progress"]["candidates"]["unresolved"] == 1
+    assert history["progress"]["status"] == "running"
+    assert "unresolved" not in history["progress"]["candidates"]
     assert updated["progress"]["phase"] == "discovery"
     assert json.loads(coverage_path.read_text()) == coverage
     assert json.loads(findings_path.read_text()) == findings

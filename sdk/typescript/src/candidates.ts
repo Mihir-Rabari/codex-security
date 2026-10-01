@@ -1,5 +1,11 @@
 import type { CoverageDocument, DeferredCoverage, Finding } from "./models.js";
 
+function candidateOwner(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && !!value.trim(),
+  );
+}
+
 /** Candidate aliases in canonical precedence order. */
 export function findingCandidateIds(
   finding: Pick<Finding, "provenance" | "extensions">,
@@ -17,11 +23,11 @@ export function findingCandidateIds(
 
 export function findingCandidateOwner(
   finding: Pick<Finding, "provenance" | "extensions">,
-): unknown {
-  return (
-    finding.provenance["sourceWorkerId"] ??
-    finding.provenance["workerId"] ??
-    finding.extensions?.["sourceWorkerId"]
+): string | undefined {
+  return candidateOwner(
+    finding.provenance["sourceWorkerId"],
+    finding.provenance["workerId"],
+    finding.extensions?.["sourceWorkerId"],
   );
 }
 
@@ -29,7 +35,7 @@ export function candidateIdentity(
   candidateId: string,
   sourceWorkerId: unknown,
 ): string {
-  return JSON.stringify([sourceWorkerId ?? null, candidateId]);
+  return JSON.stringify([candidateOwner(sourceWorkerId) ?? null, candidateId]);
 }
 
 /** Saved candidate identities without a finding or terminal disposition. */
@@ -63,7 +69,11 @@ export function unresolvedCandidates(
   }
   const pending = new Map<string, DeferredCoverage>();
   for (const candidate of coverage.deferred) {
-    if (candidate.candidateId === undefined) continue;
+    if (
+      typeof candidate.candidateId !== "string" ||
+      !candidate.candidateId.trim()
+    )
+      continue;
     const key = candidateIdentity(
       candidate.candidateId,
       candidate.sourceWorkerId,

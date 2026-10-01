@@ -7,14 +7,14 @@ from typing import Any
 CandidateKey = tuple[str | None, str]
 
 
+def candidate_owner(*values: Any) -> str | None:
+    return next((value for value in values if isinstance(value, str) and value.strip()), None)
+
+
 def candidate_key(candidate_id: Any, owner: Any = None) -> CandidateKey | None:
-    if (
-        not isinstance(candidate_id, str)
-        or not candidate_id.strip()
-        or (owner is not None and not isinstance(owner, str))
-    ):
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
         return None
-    return owner, candidate_id
+    return candidate_owner(owner), candidate_id
 
 
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
@@ -44,17 +44,19 @@ def finding_candidate_key(finding: dict[str, Any], owner: str | None = None) -> 
     extensions = finding.get("extensions")
     extensions = extensions if isinstance(extensions, dict) else {}
     # A worker result's actual owner overrides imported finding metadata.
-    owner = (
-        owner
-        or provenance.get("sourceWorkerId")
-        or provenance.get("workerId")
-        or extensions.get("sourceWorkerId")
+    owner = candidate_owner(
+        owner,
+        provenance.get("sourceWorkerId"),
+        provenance.get("workerId"),
+        extensions.get("sourceWorkerId"),
     )
     return candidate_key(finding_candidate_id(finding), owner)
 
 
 def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> CandidateKey | None:
-    return candidate_key(item.get("candidateId"), owner or item.get("sourceWorkerId"))
+    return candidate_key(
+        item.get("candidateId"), candidate_owner(owner, item.get("sourceWorkerId"))
+    )
 
 
 def surface_reference_key(
@@ -66,7 +68,8 @@ def surface_reference_key(
         (
             surface
             for surface in matches
-            if surface.get("sourceWorkerId") == source.get("sourceWorkerId")
+            if candidate_owner(surface.get("sourceWorkerId"))
+            == candidate_owner(source.get("sourceWorkerId"))
         ),
         matches[0] if len(matches) == 1 else source,
     )

@@ -476,11 +476,12 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
     )
 
 
+@pytest.mark.parametrize("finding_source", ["canonical", "checkpoint"])
 @pytest.mark.parametrize(
     "ledger_state", ["unchanged", "terminal", "deferred", "missing", "malformed"]
 )
 def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
-    tmp_path: Path, ledger_state: str
+    tmp_path: Path, ledger_state: str, finding_source: str
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -493,11 +494,21 @@ def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
     }
     finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
     finding["provenance"]["diffCandidateDecision"] = copy.deepcopy(phases)
-    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": [finding]}))
     coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
-    coverage.update(surfaces=[], deferred=[])
-    coverage_path.write_text(json.dumps(coverage))
+    if finding_source == "canonical":
+        (scan_dir / "findings.json").write_text(
+            json.dumps({"scanId": scan_id, "findings": [finding]})
+        )
+        coverage = json.loads(coverage_path.read_text())
+        coverage.update(surfaces=[], deferred=[])
+        coverage_path.write_text(json.dumps(coverage))
+    else:
+        # The finding checkpoint was saved, but publication left the older
+        # unresolved canonical draft in place.
+        override = copy.deepcopy(checkpoint)
+        override["findings"] = [finding]
+        override["coverage"].update(surfaces=[], deferred=[])
+        write_checkpoint(scan_dir / "checkpoints", override)
     # Object key order does not change a phase snapshot's meaning.
     candidate.update({key: dict(reversed(list(value.items()))) for key, value in phases.items()})
     if ledger_state in {"terminal", "deferred"}:
@@ -546,6 +557,127 @@ def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
     run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert_override_state()
     assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
+@pytest.mark.parametrize("resolution", ["authored-terminal", "other-owner-finding"])
+def test_stopped_diff_scopes_checkpoint_override_and_preserves_current_authored_decision(
+    tmp_path: Path, resolution: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = {"validation": candidate["validation"]}
+    if resolution == "other-owner-finding":
+        finding["provenance"]["sourceWorkerId"] = "other-worker"
+    override = copy.deepcopy(checkpoint)
+    override["findings"] = [finding]
+    override["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", override)
+    original = saved.read_bytes()
+    coverage_path = scan_dir / "coverage.json"
+    if resolution == "authored-terminal":
+        coverage = json.loads(coverage_path.read_text())
+        authored = {
+            "id": "authored-decision",
+            "candidateId": candidate["candidate_id"],
+            "label": "Current authored review",
+            "disposition": "not_applicable",
+            "notes": "Current authored decision supersedes the historical finding.",
+            "receiptRefs": [],
+        }
+        coverage.update(surfaces=[authored], deferred=[])
+        coverage_path.write_text(json.dumps(coverage))
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["findingCount"] == int(resolution == "other-owner-finding")
+    assert scan["progress"]["candidates"]["unresolved"] == 0
+    recovered = json.loads(coverage_path.read_text())
+    if resolution == "authored-terminal":
+        retained = next(row for row in recovered["surfaces"] if row["id"] == authored["id"])
+        assert {key: retained[key] for key in authored} == authored
+        assert finding in retained["previousFindings"]
+    else:
+        assert any(
+            row.get("candidateId") == candidate["candidate_id"]
+            and row.get("sourceWorkerId") is None
+            and row["disposition"] == "rejected"
+            for row in recovered["surfaces"]
+        )
+    assert saved.read_bytes() == original
+
+
+def test_stopped_diff_uses_current_checkpoint_override_over_older_marked_parent(
+    tmp_path: Path,
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": "suppressed",
+        "counterevidence_or_proof_gap": "Current ledger review.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    finding["provenance"]["diffCandidateDecision"] = {"validation": candidate["validation"]}
+    older = copy.deepcopy(finding)
+    older["summary"] = "Earlier saved finding evidence."
+    older["provenance"]["diffCandidateDecision"]["validation"]["counterevidence_or_proof_gap"] = (
+        "Earlier ledger review."
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": [older]}))
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original = saved.read_bytes()
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    def assert_current_override() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 1
+        assert scan["progress"]["candidates"]["unresolved"] == 0
+        recovered = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+        assert recovered["summary"] == finding["summary"]
+        assert (
+            recovered["provenance"]["diffCandidateDecision"]
+            == finding["provenance"]["diffCandidateDecision"]
+        )
+        assert older in recovered["provenance"]["previousFindings"]
+
+    assert_current_override()
+    ledger.write_text("{later incomplete ledger")
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_current_override()
+    assert saved.read_bytes() == original
+
+
+def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
+    tmp_path: Path, workbench_api
+) -> None:
+    coverage = {
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [
+            {
+                "candidateId": "synthetic-candidate",
+                "sourceWorkerId": " ",
+                "reason": "Saved review gap.",
+            }
+        ],
+    }
+    draft = workbench_api["saved_results"]._stopped_diff_candidate_decisions(
+        tmp_path,
+        "synthetic-scan",
+        [{"coverage": coverage}],
+        [],
+        current_coverage=coverage,
+        current_findings=[],
+        checkpoint_findings=[],
+    )
+    assert draft["coverage"]["deferred"] == coverage["deferred"]
 
 
 @pytest.mark.parametrize("publication_failure", ["before_freeze", "after_freeze"])
