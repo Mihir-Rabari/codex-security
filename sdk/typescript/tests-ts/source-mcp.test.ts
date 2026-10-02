@@ -78,6 +78,8 @@ async function sourceCheckout() {
 for (const transport of [
   "http",
   "http-static",
+  "http-no-local",
+  "http-no-local-credentials",
   "stdio",
   "stdio-relative",
   "stdio-absolute",
@@ -87,10 +89,18 @@ for (const transport of [
   test(`native dedupe keeps ${transport} source configuration at its process boundary`, async () => {
     const name =
       transport === "stdio-prototype-name" ? "constructor" : "source";
-    const storedLogin = ["stdio-credentials", "stdio-prototype-name"].includes(
-      transport,
-    );
+    const storedLogin = [
+      "stdio-credentials",
+      "stdio-prototype-name",
+      "http-no-local-credentials",
+    ].includes(transport);
+    const noLocal = transport.startsWith("http-no-local");
     const home = await temporaryDirectory();
+    if (noLocal)
+      await writeFile(
+        join(home, "environments.toml"),
+        "include_local = false\n",
+      );
     const repository = await sourceCheckout();
     const captured = join(home, "mcp-environment.json");
     let modelRequests = 0;
@@ -204,7 +214,7 @@ for (const transport of [
         await writeFile(
           join(credentialHome, "config.toml"),
           stringify(
-            transport === "stdio-prototype-name"
+            transport === "stdio-prototype-name" || noLocal
               ? {
                   ...provider,
                   mcp_servers: {
@@ -215,6 +225,11 @@ for (const transport of [
           ),
           { mode: 0o600 },
         );
+        if (noLocal)
+          await writeFile(
+            join(credentialHome, "environments.toml"),
+            "include_local = false\n",
+          );
       }
       const source = await sourceForTest(
         configuration,
@@ -391,6 +406,7 @@ test.each([
   "credential-environment",
   "executor-environment",
   "executor-inheritance",
+  "noise-environment",
   "origin",
 ])("rechecks resumed reviews after source MCP %s changes", async (changed) => {
   const home = await temporaryDirectory();
@@ -403,6 +419,13 @@ test.each([
     CODEX_HOME: home,
     CODEX_SECURITY_STATE_DIR: join(home, "state"),
     SOURCE_ROOT: "synthetic-source-root",
+    ...(changed === "noise-environment"
+      ? {
+          CODEX_EXEC_SERVER_NOISE_REGISTRY_URL: "http://127.0.0.1:9",
+          CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID: "synthetic-first-target",
+          CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN: "synthetic-noise-token",
+        }
+      : {}),
   };
   if (changed === "project-environment") {
     await mkdir(join(repository, ".codex"));
@@ -448,20 +471,29 @@ test.each([
     });
   if (changed.startsWith("executor-"))
     await writeFile(join(home, "environments.toml"), executorConfig());
+  if (changed === "noise-environment")
+    await writeFile(
+      join(home, "environments.toml"),
+      stringify({
+        environments: [{ id: "remote", program: "synthetic-ignored-executor" }],
+      }),
+    );
   await sourceForTest(
     {
       projects: { [repository]: { trust_level: "trusted" } },
       mcp_servers: {
         source: {
           command: "synthetic-source-command",
-          ...(changed === "project-environment"
-            ? {}
-            : changed.startsWith("executor-")
-              ? {
-                  environment_id: "source-executor",
-                  env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
-                }
-              : { env_vars: ["SOURCE_ROOT"] }),
+          ...(changed === "noise-environment"
+            ? { environment_id: "remote" }
+            : changed === "project-environment"
+              ? {}
+              : changed.startsWith("executor-")
+                ? {
+                    environment_id: "source-executor",
+                    env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
+                  }
+                : { env_vars: ["SOURCE_ROOT"] }),
         },
       },
     },
@@ -508,7 +540,11 @@ test.each([
   await (await checkpoint()).run(review);
   await (await checkpoint()).run(review);
   expect(calls).toBe(1);
-  if (changed !== "origin") environment.SOURCE_ROOT = "changed-source-root";
+  if (changed === "noise-environment")
+    environment.CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID =
+      "synthetic-second-target";
+  else if (changed !== "origin")
+    environment.SOURCE_ROOT = "changed-source-root";
   else
     execFileSync("git", [
       "-C",
@@ -994,4 +1030,35 @@ test("source MCP preserves native executor URL configuration", async () => {
     { CODEX_HOME: home, CODEX_EXEC_SERVER_URL: "ws://127.0.0.1:9" },
   );
   expect(source.executor).toEqual({ url: "ws://127.0.0.1:9" });
+});
+
+test("source MCP captures native Noise connection identity before URL fallback", async () => {
+  const home = await temporaryDirectory();
+  const source = await sourceForTest(
+    {
+      mcp_servers: {
+        source: {
+          command: "synthetic-source-command",
+          environment_id: "remote",
+        },
+      },
+    },
+    {
+      CODEX_HOME: home,
+      CODEX_EXEC_SERVER_URL: "ws://127.0.0.1:9/ignored",
+      CODEX_EXEC_SERVER_NOISE_REGISTRY_URL: " http://127.0.0.1:9/// ",
+      CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID: " synthetic-target ",
+      CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN: " synthetic-noise-token ",
+      CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID: " synthetic-account ",
+    },
+  );
+  expect(source.executor).toEqual({
+    noise: {
+      registry_url: "http://127.0.0.1:9",
+      environment_id: "synthetic-target",
+      auth_token: "synthetic-noise-token",
+      chatgpt_account_id: "synthetic-account",
+    },
+  });
+  expect(source.executorLaunchDirectory).toBeUndefined();
 });

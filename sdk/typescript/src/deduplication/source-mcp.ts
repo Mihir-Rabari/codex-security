@@ -52,7 +52,7 @@ async function readSourceConfig(
   signal: AbortSignal | undefined,
   startCodex: StartCodex,
   name: string,
-  environmentId?: string,
+  sourceServer?: JsonObject,
 ): Promise<JsonObject> {
   signal?.throwIfAborted();
   const command = resolveCodexCommand(environment);
@@ -87,6 +87,7 @@ async function readSourceConfig(
     });
     const loaded = Promise.withResolvers<JsonObject>();
     let resolvedConfig: JsonObject | undefined;
+    let environmentId: string | undefined;
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -133,12 +134,18 @@ async function readSourceConfig(
           resolvedConfig = message.result.config;
           const servers = resolvedConfig["mcp_servers"] as
             JsonObject | undefined;
-          const selected = servers?.[name] as JsonObject | undefined;
-          environmentId ??=
+          const selected =
+            sourceServer ?? (servers?.[name] as JsonObject | undefined);
+          environmentId =
             selected?.["enabled"] === false
               ? undefined
               : (selected?.["environment_id"] as string | undefined);
-          if (environmentId === undefined) loaded.resolve(resolvedConfig);
+          // Native local HTTP clients do not require a local execution environment.
+          if (
+            environmentId === undefined ||
+            (environmentId === "local" && typeof selected?.["url"] === "string")
+          )
+            loaded.resolve(resolvedConfig);
           else
             send({
               id: 3,
@@ -192,6 +199,32 @@ async function sourceExecutor(
   signal?: AbortSignal,
 ): Promise<JsonObject | undefined> {
   if (environmentId === "local") return undefined;
+  const noiseRegistry = environmentEntry(
+    environment,
+    "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+  )?.trim();
+  const noiseEnvironment = environmentEntry(
+    environment,
+    "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID",
+  )?.trim();
+  const noiseAuth = environmentEntry(
+    environment,
+    "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+  )?.trim();
+  // Native Noise configuration takes precedence over both file and URL mappings.
+  if (noiseRegistry && noiseEnvironment && noiseAuth)
+    return {
+      noise: {
+        registry_url: noiseRegistry.replace(/\/+$/u, ""),
+        environment_id: noiseEnvironment,
+        auth_token: noiseAuth,
+        chatgpt_account_id:
+          environmentEntry(
+            environment,
+            "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID",
+          )?.trim() || null,
+      },
+    };
   const home = configuredCodexHome(environment);
   let config: JsonObject;
   try {
@@ -271,7 +304,7 @@ export async function resolveSourceMcp(
       signal,
       startCodex,
       name,
-      environmentId,
+      selected,
     );
     const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
     const other = reviewServers?.[name];

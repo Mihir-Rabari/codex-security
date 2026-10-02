@@ -2270,10 +2270,11 @@ to the MCP child. An explicit relative stdio `cwd` is resolved from the caller's
 directory for local servers; executor-owned paths retain native handling. If a
 stored-login home defines the same server name, its effective definition must
 match the caller's configuration; use matching definitions or distinct server
-names. Executor-backed servers also require the selected native executor to be
-available with a matching definition in the review's credential home. The
-selected executor's connection, configured environment, and referenced inherited
-values are included in resume checkpoints. A stdio executor without `cwd`
+names. Local HTTP servers do not require a local executor. Executor-backed
+servers require the selected native executor to be available with a matching
+definition in the review's credential home. The selected executor's connection
+(including native Noise settings), configured environment, and referenced
+inherited values are included in resume checkpoints. A stdio executor without `cwd`
 inherits the caller's directory, including its trusted Codex startup configuration;
 the review target, permissions, and tool approvals remain explicit. That caller
 directory also participates in resume checkpoints. OAuth credentials
