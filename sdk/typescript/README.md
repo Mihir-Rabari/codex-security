@@ -2266,7 +2266,8 @@ This uses native Codex MCP transport and approval review. HTTP environment crede
 headers and stdio server environment values are passed through native MCP
 configuration over JSON-RPC, preserving native header and environment precedence.
 Stdio `env_vars` inherits only defined values, and `env` overrides remain local
-to the MCP child. OAuth credentials from another Codex home are not imported.
+to the MCP child. An explicit relative stdio `cwd` is resolved from the caller's
+directory. OAuth credentials from another Codex home are not imported.
 Native resource reads retain Codex's existing behavior and the MCP server's
 repository permissions. Omitting the flag preserves existing dedupe source access.
 

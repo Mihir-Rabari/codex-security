@@ -111,6 +111,11 @@ const transportCases: {
   },
   { scenario: "correction", name: "HTTP source MCP", sourceMcp: "http" },
   { scenario: "correction", name: "stdio source MCP", sourceMcp: "stdio" },
+  {
+    scenario: "request-error",
+    name: "source MCP config read failure",
+    sourceMcp: "http",
+  },
   { scenario: "retry-correction" },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
@@ -503,7 +508,7 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
-      if (sourceMcp) {
+      if (sourceMcp && scenario !== "request-error") {
         const transcriptText = await readFile(transcript, "utf8");
         expect(transcriptText).not.toContain("token synthetic-source-auth");
         const request = transcriptText
@@ -515,6 +520,7 @@ for (const {
           required: true,
           enabled: true,
           default_tools_approval_mode: "prompt",
+          tools: { inherited_read: { approval_mode: "prompt" } },
           ...(sourceMcp === "http"
             ? {
                 http_headers: { Authorization: "token synthetic-static-auth" },
@@ -572,7 +578,9 @@ for (const {
         );
         expect(
           messages.filter((message) => message.method === "thread/start"),
-        ).toHaveLength(sessions);
+        ).toHaveLength(
+          sourceMcp && scenario === "request-error" ? 0 : sessions,
+        );
         expect(
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(

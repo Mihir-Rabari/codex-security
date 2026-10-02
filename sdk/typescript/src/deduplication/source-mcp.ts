@@ -1,3 +1,4 @@
+import { isAbsolute, resolve } from "node:path";
 import { environmentEntry, readCodexHomeConfig } from "../auth.js";
 import type { JsonObject, JsonValue } from "../config.js";
 import { ConfigurationError } from "../errors.js";
@@ -46,6 +47,9 @@ export async function resolveSourceMcp(
     // Read-only source tools still need authorization for their repository and revision.
     default_tools_approval_mode: "prompt",
   };
+  // Native relative MCP cwd is anchored to the host process, which dedupe isolates.
+  if (typeof server["cwd"] === "string" && !isAbsolute(server["cwd"]))
+    server["cwd"] = resolve(server["cwd"]);
   if (server["tools"] !== undefined) {
     server["tools"] = Object.fromEntries(
       Object.entries(server["tools"] as JsonObject).map(([tool, settings]) => [

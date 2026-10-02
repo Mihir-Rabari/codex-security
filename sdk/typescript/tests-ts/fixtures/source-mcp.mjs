@@ -12,9 +12,12 @@ const names = [
 ];
 writeFileSync(
   process.argv[2],
-  JSON.stringify(
-    Object.fromEntries(names.map((name) => [name, process.env[name]])),
-  ),
+  JSON.stringify({
+    cwd: process.cwd(),
+    environment: Object.fromEntries(
+      names.map((name) => [name, process.env[name]]),
+    ),
+  }),
 );
 // Deliberately fail initialization after recording the native MCP child's environment.
 process.exit(1);

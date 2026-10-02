@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "smol-toml";
@@ -59,7 +59,13 @@ async function sourceCheckout() {
   return repository;
 }
 
-for (const transport of ["http", "http-static", "stdio"] as const) {
+for (const transport of [
+  "http",
+  "http-static",
+  "stdio",
+  "stdio-relative",
+  "stdio-absolute",
+] as const) {
   test(`native dedupe keeps ${transport} source configuration at its process boundary`, async () => {
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
@@ -103,7 +109,7 @@ for (const transport of ["http", "http-static", "stdio"] as const) {
           mcp_servers: {
             source: {
               startup_timeout_sec: 2,
-              ...(transport !== "stdio"
+              ...(!transport.startsWith("stdio")
                 ? {
                     url: `${url}/mcp`,
                     http_headers: {
@@ -114,11 +120,19 @@ for (const transport of ["http", "http-static", "stdio"] as const) {
                 : {
                     command: process.execPath,
                     args: [
-                      fileURLToPath(
-                        new URL("fixtures/source-mcp.mjs", import.meta.url),
+                      relative(
+                        repository,
+                        fileURLToPath(
+                          new URL("fixtures/source-mcp.mjs", import.meta.url),
+                        ),
                       ),
                       captured,
                     ],
+                    ...(transport === "stdio-relative"
+                      ? { cwd: relative(process.cwd(), repository) }
+                      : transport === "stdio-absolute"
+                        ? { cwd: repository }
+                        : {}),
                     env: {
                       OPENAI_API_KEY: "synthetic-source-key",
                       CODEX_HOME: "synthetic-source-home",
@@ -169,7 +183,7 @@ for (const transport of ["http", "http-static", "stdio"] as const) {
         }),
       ).rejects.toThrow(/required.*source|source.*required/i);
       expect(modelRequests).toBe(0);
-      if (transport !== "stdio") {
+      if (!transport.startsWith("stdio")) {
         expect(authorizations.length).toBeGreaterThan(0);
         expect(new Set(authorizations)).toEqual(
           new Set([
@@ -179,7 +193,9 @@ for (const transport of ["http", "http-static", "stdio"] as const) {
           ]),
         );
       } else {
-        expect(JSON.parse(await readFile(captured, "utf8"))).toEqual({
+        const child = JSON.parse(await readFile(captured, "utf8"));
+        expect(await realpath(child.cwd)).toBe(await realpath(repository));
+        expect(child.environment).toEqual({
           OPENAI_API_KEY: "synthetic-source-key",
           CODEX_HOME: "synthetic-source-home",
           OPTIONAL_SOURCE: "synthetic-fallback",
