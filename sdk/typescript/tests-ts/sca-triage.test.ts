@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   dependencyTriageContract,
@@ -11,6 +20,42 @@ const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
 const contract = await dependencyTriageContract(pluginRoot);
+
+test("skill digest tracks the required assessment references across installation roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sca-triage-contract-"));
+  const files = [
+    "skills/triage-finding/SKILL.md",
+    "schemas/triage-result.schema.json",
+    "skills/triage-finding/references/triage-result-contract.md",
+    "references/static-finding-assessment.md",
+    "references/security-guidance.md",
+    "references/artifact-storage.md",
+  ];
+  try {
+    for (const relative of files) {
+      const path = join(root, relative);
+      await mkdir(dirname(path), { recursive: true });
+      await copyFile(join(pluginRoot, relative), path);
+    }
+    expect((await dependencyTriageContract(root)).skillDigest).toBe(
+      contract.skillDigest,
+    );
+    for (const relative of files) {
+      const path = join(root, relative);
+      const original = await readFile(path, "utf8");
+      await writeFile(path, `${original}\n`);
+      expect((await dependencyTriageContract(root)).skillDigest).not.toBe(
+        contract.skillDigest,
+      );
+      await writeFile(path, original);
+    }
+    expect((await dependencyTriageContract(root)).skillDigest).toBe(
+      contract.skillDigest,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function fixture(): ScaResult {
   return {

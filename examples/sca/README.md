@@ -47,9 +47,12 @@ node examples/sca/compare.mjs /path/base/sca-result.json /path/head/sca-result.j
 ```
 
 Comparison correlates aliases and repository-relative lockfile paths, preserving
-multiple versions and ambiguous cases. Live OSV runs do not share a frozen
-advisory snapshot, so disappeared matches are **no longer observed**, not proven
-resolved. Incomplete coverage or changed configuration cannot resolve old debt.
+multiple versions and ambiguous cases. `newlyObserved` retains all head-only
+matches; `introduced` contains them only when the scans are comparable. Live OSV
+runs do not share a frozen advisory snapshot, so they cannot establish
+introduction or resolution. Incomplete coverage or changed configuration also
+prevents those claims. Disappeared matches remain in `noLongerObserved` with
+`resolved: false` until comparability is established.
 
 Select match IDs from `sca-result.json` for a deliberate update request:
 

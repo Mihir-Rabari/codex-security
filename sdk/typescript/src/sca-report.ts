@@ -9,6 +9,9 @@ export interface ScaMatchCorrelation {
 export interface ScaComparison {
   comparable: boolean;
   reasons: string[];
+  /** Head-only matches, including differences from incomparable scans. */
+  newlyObserved: string[];
+  /** Head-only matches from comparable scans. */
   introduced: string[];
   persisting: ScaMatchCorrelation[];
   changedVersion: ScaMatchCorrelation[];
@@ -248,6 +251,7 @@ export function compareScaResults(
   const result: ScaComparison = {
     comparable: reasons.length === 0,
     reasons,
+    newlyObserved: [],
     introduced: [],
     persisting: [],
     changedVersion: [],
@@ -336,7 +340,8 @@ export function compareScaResults(
     for (const id of baseGroup) remainingBase.delete(id);
     for (const id of headGroup) remainingHead.delete(id);
   }
-  result.introduced = [...remainingHead];
+  result.newlyObserved = [...remainingHead];
+  if (result.comparable) result.introduced = [...result.newlyObserved];
   return result;
 }
 

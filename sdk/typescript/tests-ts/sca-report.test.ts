@@ -311,7 +311,8 @@ describe("SCA comparison", () => {
     head.matches[0]!.id = "head-match";
     const comparison = compareScaResults(base, head);
     expect(comparison.persisting).toEqual([]);
-    expect(comparison.introduced).toEqual(["head-match"]);
+    expect(comparison.newlyObserved).toEqual(["head-match"]);
+    expect(comparison.introduced).toEqual([]);
     expect(comparison.noLongerObserved).toEqual([
       { matchId: "match-1", resolved: false },
     ]);
@@ -369,6 +370,9 @@ describe("SCA comparison", () => {
     expect(compareScaResults(base, head).noLongerObserved).toEqual([
       { matchId: "match-1", resolved: true },
     ]);
+    const reverse = compareScaResults(head, base);
+    expect(reverse.newlyObserved).toEqual(["match-1"]);
+    expect(reverse.introduced).toEqual(["match-1"]);
   });
 
   test("does not call a conditionally excluded match resolved under unchanged configuration", () => {
@@ -459,19 +463,25 @@ describe("SCA comparison", () => {
         result.scanner.advisoryMode = "online";
       },
     ],
-  ] as const)("does not resolve absent matches after %s", (_label, change) => {
-    const base = fixture();
-    const head = fixture();
-    head.matches = [];
-    head.scanner.exitCode = 0;
-    change(head);
-    const comparison = compareScaResults(base, head);
-    expect(comparison.comparable).toBe(false);
-    expect(comparison.reasons.length).toBeGreaterThan(0);
-    expect(comparison.noLongerObserved).toEqual([
-      { matchId: "match-1", resolved: false },
-    ]);
-  });
+  ] as const)(
+    "does not infer introduction or resolution after %s",
+    (_label, change) => {
+      const base = fixture();
+      const head = fixture();
+      head.matches = [];
+      head.scanner.exitCode = 0;
+      change(head);
+      const comparison = compareScaResults(base, head);
+      expect(comparison.comparable).toBe(false);
+      expect(comparison.reasons.length).toBeGreaterThan(0);
+      expect(comparison.noLongerObserved).toEqual([
+        { matchId: "match-1", resolved: false },
+      ]);
+      const reverse = compareScaResults(head, base);
+      expect(reverse.newlyObserved).toEqual(["match-1"]);
+      expect(reverse.introduced).toEqual([]);
+    },
+  );
 
   test("does not reuse earlier assessments or let them alter raw-match comparison", () => {
     const base = fixture();

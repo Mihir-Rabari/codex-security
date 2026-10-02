@@ -9,19 +9,25 @@ See [the runnable examples](../examples/sca/README.md).
 
 ## Verification
 
-Implementation and isolated PR checks completed on Linux on October 1, 2026:
+Focused checks rerun on Linux on October 2, 2026:
 
 | Check                          | Observed result                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Focused SDK regressions        | 257 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
-| Actual OSV-Scanner v2.6.0      | 104 offline synthetic contract cases passed under Node 24; 103 under Bun 1.3.14.                                          |
-| Deterministic SCA evaluation   | 26 tests passed.                                                                                                          |
+| Focused SDK regressions        | 306 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
+| Deterministic SCA evaluation   | 28 tests passed.                                                                                                          |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                              |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                                |
 | SDK compilation and formatting | `build`, `build:ci`, `types`, and `format` passed.                                                                        |
-| Built examples                 | Syntax checks passed; comparison and handoff runners worked against a synthetic SDK result.                               |
-| Live SDK/model integration     | One synthetic assessment completed, retained its advisory match, and saved all four artifacts with no diagnostics.        |
-| Live evaluation smoke          | Six correct synthetic verdicts; five of six strict citation assertions passed.                                            |
+
+Earlier implementation checks remain recorded below; they were not rerun in
+this follow-up:
+
+| Check                      | Observed result                                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Actual OSV-Scanner v2.6.0  | 104 offline synthetic contract cases passed under Node 24; 103 under Bun 1.3.14.                                   |
+| Built examples             | Syntax checks passed; comparison and handoff runners worked against a synthetic SDK result.                        |
+| Live SDK/model integration | One synthetic assessment completed, retained its advisory match, and saved all four artifacts with no diagnostics. |
+| Live evaluation smoke      | Six correct synthetic verdicts; five of six strict citation assertions passed.                                     |
 
 Package-wide validation and the latest CI results are recorded with the pull
 request. The checks above describe the implementation and its focused contracts.

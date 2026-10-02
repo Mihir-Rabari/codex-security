@@ -2741,6 +2741,12 @@ remotes also leave package origins unresolved. npm v2/v3 and pnpm v9 lockfiles
 with explicit tarball URLs outside the public npm registry leave those origins
 unresolved.
 
+Advisory matching uses observed package names and versions; it does not establish
+registry origin. Gradle and NuGet locks do not record the selected repository or
+feed, and npm locks can omit resolved URLs. Complete matching coverage means the
+supported inputs were inventoried and matched, not that every package's public
+registry origin was verified.
+
 ```ts
 import { createSecurity } from "@openai/codex-security";
 
@@ -2758,6 +2764,9 @@ before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
 Each matched advisory gets a separate assessment turn. The SDK saves completed
 assessments before continuing, and an invalid response affects only its match.
+Retained triage ranks apply within each single-match result; they do not form a
+priority queue across the scan. The recorded skill digest includes the triage
+skill, output schema, and required local assessment references.
 The cost limit applies to the total across assessment turns. If source files
 change, assessment stops; earlier results describe the original source and the
 run is partial.
@@ -2793,10 +2802,13 @@ projects remain part of the selected repository's inventory. Tracked lockfiles
 omitted by sparse checkout are reported as unavailable and leave coverage
 incomplete; ordinary working-tree deletions remain outside inventory.
 
-`compareScaResults(base, head)` returns alias-aware changes with conservative
-resolution semantics. Live OSV runs have no atomic database snapshot, so a
-disappeared match remains “no longer observed.” Recorded OSV configuration also
-prevents resolution claims, even with identical hashes and a frozen database:
+`compareScaResults(base, head)` correlates advisory aliases and retains all
+head-only matches in `newlyObserved`. It populates `introduced` only when the
+scans are comparable. Live OSV runs have no atomic database snapshot, so they
+cannot establish introduction or resolution; disappeared matches remain
+`noLongerObserved` with `resolved: false`. Recorded OSV configuration also
+prevents introduction and resolution claims, even with identical hashes and a
+frozen database:
 a group-based exclusion can start applying when a dependency changes groups.
 Results store configuration digests rather than effective exclusions, so this
 conservative rule also applies to configurations without exclusion rules.
