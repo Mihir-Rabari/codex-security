@@ -1,11 +1,16 @@
-import { execFileSync } from "node:child_process";
+import {
+  execFileSync,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import type { JsonObject, JsonValue } from "../src/config.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import {
   CheckpointedReviewRunner,
@@ -25,12 +30,21 @@ afterEach(cleanup);
 async function sourceForTest(
   config: JsonObject,
   environment: NodeJS.ProcessEnv,
+  repository = process.cwd(),
 ) {
   await writeFile(
     join(environment["CODEX_HOME"]!, "config.toml"),
     stringify(config),
   );
-  return resolveSourceMcp("source", environment);
+  return resolveSourceMcp(
+    "source",
+    {
+      CODEX_SECURITY_STATE_DIR: join(environment["CODEX_HOME"]!, "state"),
+      ...environment,
+    },
+    undefined,
+    repository,
+  );
 }
 
 async function sourceCheckout() {
@@ -65,6 +79,7 @@ for (const transport of [
   "stdio",
   "stdio-relative",
   "stdio-absolute",
+  "stdio-credentials",
 ] as const) {
   test(`native dedupe keeps ${transport} source configuration at its process boundary`, async () => {
     const home = await temporaryDirectory();
@@ -95,7 +110,10 @@ for (const transport of [
         TEMP: process.env["TEMP"],
         TMP: process.env["TMP"],
         CODEX_HOME: home,
-        OPENAI_API_KEY: "synthetic-review-key",
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        ...(transport === "stdio-credentials"
+          ? {}
+          : { OPENAI_API_KEY: "synthetic-review-key" }),
         ...(transport === "http-static"
           ? {}
           : { SOURCE_AUTH: "token synthetic-env-auth" }),
@@ -104,11 +122,66 @@ for (const transport of [
         IMPLICIT_SOURCE: "synthetic-implicit",
         OVERRIDDEN_SOURCE: "synthetic-ambient",
       };
+      const inheritedSource: JsonValue[] = [
+        "OPTIONAL_SOURCE",
+        "MISSING_SOURCE",
+        "INHERITED_SOURCE",
+        "OVERRIDDEN_SOURCE",
+        { name: "OBJECT_SOURCE", source: "local" },
+        { name: "IMPLICIT_SOURCE" },
+      ];
+      const provider = {
+        model_provider: "fixture",
+        model_providers: {
+          fixture: {
+            name: "Fixture",
+            wire_api: "responses",
+            base_url: `${url}/v1`,
+            request_max_retries: 0,
+          },
+        },
+      };
+      if (transport === "stdio-credentials") {
+        const credentialHome = join(home, "state", "codex-home");
+        await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        await writeFile(
+          join(credentialHome, "auth.json"),
+          JSON.stringify({ OPENAI_API_KEY: "synthetic-stored-key" }),
+          { mode: 0o600 },
+        );
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          stringify({
+            ...provider,
+            mcp_servers: {
+              source: {
+                command: "synthetic-overridden-command",
+                env_vars: inheritedSource,
+                env: {
+                  OPTIONAL_SOURCE: "synthetic-overridden-fallback",
+                  MISSING_SOURCE: "synthetic-credential-home",
+                },
+                tools: {
+                  host_only: {
+                    approval_mode: "approve",
+                    output_token_limit: 432,
+                  },
+                },
+                tool_timeout_sec: 12.5,
+              },
+            },
+          }),
+          { mode: 0o600 },
+        );
+      }
       const source = await sourceForTest(
         {
           mcp_servers: {
             source: {
               startup_timeout_sec: 2,
+              ...(transport === "stdio-absolute"
+                ? { tool_timeout_sec: 12.5 }
+                : {}),
               ...(!transport.startsWith("stdio")
                 ? {
                     url: `${url}/mcp`,
@@ -141,29 +214,26 @@ for (const transport of [
                         ? "overridden_source"
                         : "OVERRIDDEN_SOURCE"]: "synthetic-explicit",
                     },
-                    env_vars: [
-                      "OPTIONAL_SOURCE",
-                      "MISSING_SOURCE",
-                      "INHERITED_SOURCE",
-                      "OVERRIDDEN_SOURCE",
-                      { name: "OBJECT_SOURCE", source: "local" },
-                      { name: "IMPLICIT_SOURCE" },
-                    ],
+                    ...(transport === "stdio-credentials"
+                      ? {}
+                      : { env_vars: inheritedSource }),
                   }),
             },
           },
-          model_provider: "fixture",
-          model_providers: {
-            fixture: {
-              name: "Fixture",
-              wire_api: "responses",
-              base_url: `${url}/v1`,
-              request_max_retries: 0,
-            },
-          },
+          ...provider,
         },
         environment,
+        repository,
       );
+      expect(source.server["tool_timeout_sec"]).toBe(
+        ["stdio-absolute", "stdio-credentials"].includes(transport)
+          ? 12.5
+          : undefined,
+      );
+      if (transport === "stdio-credentials")
+        expect(source.server["tools"]).toEqual({
+          host_only: { approval_mode: "prompt", output_token_limit: 432 },
+        });
       const runner = new CodexReviewRunner(
         environment,
         undefined,
@@ -195,10 +265,14 @@ for (const transport of [
       } else {
         const child = JSON.parse(await readFile(captured, "utf8"));
         expect(await realpath(child.cwd)).toBe(await realpath(repository));
+        expect(source.server["env"]).toEqual(child.environment);
         expect(child.environment).toEqual({
           OPENAI_API_KEY: "synthetic-source-key",
           CODEX_HOME: "synthetic-source-home",
           OPTIONAL_SOURCE: "synthetic-fallback",
+          ...(transport === "stdio-credentials"
+            ? { MISSING_SOURCE: "synthetic-credential-home" }
+            : {}),
           INHERITED_SOURCE: "synthetic-inherited",
           OBJECT_SOURCE: "synthetic-object",
           IMPLICIT_SOURCE: "synthetic-implicit",
@@ -234,7 +308,7 @@ test("source MCP preserves native settings and requires an enabled configured se
     },
     { CODEX_HOME: home, SOURCE_AUTH: "token synthetic-env-auth" },
   );
-  expect(source.server).toEqual({
+  expect(source.server).toMatchObject({
     url: "https://source.example.com/.api/mcp",
     http_headers: { Authorization: "token synthetic-static-auth" },
     env_http_headers: { Authorization: "SOURCE_AUTH" },
@@ -253,7 +327,11 @@ test("source MCP preserves native settings and requires an enabled configured se
   ).rejects.toThrow("not configured");
   await expect(
     sourceForTest(
-      { mcp_servers: { source: { enabled: false } } },
+      {
+        mcp_servers: {
+          source: { command: "synthetic-command", enabled: false },
+        },
+      },
       { CODEX_HOME: home },
     ),
   ).rejects.toThrow("disabled");
@@ -296,12 +374,9 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
-test("source MCP leaves remote environment resolution and validation to Codex", async () => {
+test("source MCP leaves remote environment resolution to Codex", async () => {
   const home = await temporaryDirectory();
-  const env_vars = [
-    { name: "REMOTE_SOURCE", source: "remote" },
-    { name: "INVALID_SOURCE", source: "unknown" },
-  ];
+  const env_vars = [{ name: "REMOTE_SOURCE", source: "remote" }];
   const source = await sourceForTest(
     { mcp_servers: { source: { command: "synthetic-command", env_vars } } },
     { CODEX_HOME: home, REMOTE_SOURCE: "synthetic-local-value" },
@@ -311,77 +386,220 @@ test("source MCP leaves remote environment resolution and validation to Codex", 
   expect(source.environment).toEqual({});
 });
 
-test.each(["environment", "origin"])(
-  "rechecks resumed reviews after source MCP %s changes",
-  async (changed) => {
-    const home = await temporaryDirectory();
-    const repository = await sourceCheckout();
-    const environment = {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      TEMP: process.env["TEMP"],
-      TMP: process.env["TMP"],
-      CODEX_HOME: home,
-      SOURCE_ROOT: "synthetic-source-root",
-    };
-    await sourceForTest(
-      {
+test.each([
+  "environment",
+  "project-environment",
+  "credential-environment",
+  "origin",
+])("rechecks resumed reviews after source MCP %s changes", async (changed) => {
+  const home = await temporaryDirectory();
+  const repository = await sourceCheckout();
+  const environment = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    TEMP: process.env["TEMP"],
+    TMP: process.env["TMP"],
+    CODEX_HOME: home,
+    CODEX_SECURITY_STATE_DIR: join(home, "state"),
+    SOURCE_ROOT: "synthetic-source-root",
+  };
+  if (changed === "project-environment") {
+    await mkdir(join(repository, ".codex"));
+    await writeFile(
+      join(repository, ".codex", "config.toml"),
+      stringify({
+        mcp_servers: { source: { env_vars: ["SOURCE_ROOT"] } },
+      }),
+    );
+  }
+  if (changed === "credential-environment") {
+    const credentialHome = join(home, "state", "codex-home");
+    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(credentialHome, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "synthetic-stored-key" }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(credentialHome, "config.toml"),
+      stringify({
         mcp_servers: {
           source: {
             command: "synthetic-source-command",
             env_vars: ["SOURCE_ROOT"],
           },
         },
-      },
-      environment,
+      }),
+      { mode: 0o600 },
     );
-    const store = checkpointWorkbench("source-context", { repository });
-    const workflow = new FindingWorkflow(
-      "source-context",
-      environment,
-      store.run,
-    );
-    let calls = 0;
-    const runner = {
-      async run<T>(review: CodexReview<T>): Promise<T> {
-        calls++;
-        return review.validate({ decision: "SAME" });
+  }
+  await sourceForTest(
+    {
+      projects: { [repository]: { trust_level: "trusted" } },
+      mcp_servers: {
+        source: {
+          command: "synthetic-source-command",
+          ...(["project-environment", "credential-environment"].includes(
+            changed,
+          )
+            ? {}
+            : { env_vars: ["SOURCE_ROOT"] }),
+        },
       },
-    };
-    const review: CodexReview<{ decision: string }> = {
-      stage: "pair-review",
-      model: "gpt-5.6-sol",
-      effort: "low",
-      prompt: "Review the synthetic findings.",
-      schema: { type: "object" },
-      validate: () => ({ decision: "SAME" }),
-    };
-    const checkpoint = async () =>
-      new CheckpointedReviewRunner(
-        workflow,
-        runner,
-        await workflow.sourceSnapshot(repository),
-        { allRepositories: true },
-        await reviewSettingsDigest(environment, {
-          mcp: await resolveSourceMcp("source", environment),
+    },
+    environment,
+    repository,
+  );
+  const store = checkpointWorkbench("source-context", { repository });
+  const workflow = new FindingWorkflow(
+    "source-context",
+    environment,
+    store.run,
+  );
+  let calls = 0;
+  const runner = {
+    async run<T>(review: CodexReview<T>): Promise<T> {
+      calls++;
+      return review.validate({ decision: "SAME" });
+    },
+  };
+  const review: CodexReview<{ decision: string }> = {
+    stage: "pair-review",
+    model: "gpt-5.6-sol",
+    effort: "low",
+    prompt: "Review the synthetic findings.",
+    schema: { type: "object" },
+    validate: () => ({ decision: "SAME" }),
+  };
+  const checkpoint = async () =>
+    new CheckpointedReviewRunner(
+      workflow,
+      runner,
+      await workflow.sourceSnapshot(repository),
+      { allRepositories: true },
+      await reviewSettingsDigest(environment, {
+        mcp: await resolveSourceMcp(
+          "source",
+          environment,
+          undefined,
           repository,
+        ),
+        repository,
+      }),
+    );
+  await (await checkpoint()).run(review);
+  await (await checkpoint()).run(review);
+  expect(calls).toBe(1);
+  if (changed !== "origin") environment.SOURCE_ROOT = "changed-source-root";
+  else
+    execFileSync("git", [
+      "-C",
+      repository,
+      "remote",
+      "set-url",
+      "origin",
+      "https://git.example.com/team/other.git",
+    ]);
+  await (await checkpoint()).run(review);
+  expect(calls).toBe(2);
+});
+
+test.each(["cancel", "configuration-error"])(
+  "source configuration %s preserves diagnostics and closes the native child",
+  async (scenario) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    await writeFile(
+      join(home, "config.toml"),
+      stringify({
+        projects: { [repository]: { trust_level: "trusted" } },
+        mcp_servers: { source: { command: "synthetic-source-command" } },
+      }),
+    );
+    if (scenario === "configuration-error") {
+      await mkdir(join(repository, ".codex"));
+      await writeFile(
+        join(repository, ".codex", "config.toml"),
+        stringify({
+          mcp_servers: {
+            source: { default_tools_approval_mode: "synthetic-invalid-mode" },
+          },
         }),
       );
-    await (await checkpoint()).run(review);
-    await (await checkpoint()).run(review);
-    expect(calls).toBe(1);
-    if (changed === "environment")
-      environment.SOURCE_ROOT = "changed-source-root";
-    else
-      execFileSync("git", [
-        "-C",
-        repository,
-        "remote",
-        "set-url",
-        "origin",
-        "https://git.example.com/team/other.git",
-      ]);
-    await (await checkpoint()).run(review);
-    expect(calls).toBe(2);
+    }
+    const controller = new AbortController();
+    const cancellation = new Error(
+      "synthetic source configuration cancellation",
+    );
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let directory: string | undefined;
+    const result = resolveSourceMcp(
+      "source",
+      {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+      },
+      controller.signal,
+      repository,
+      (command, args, options) => {
+        directory = String(options.cwd);
+        expect(options.env!["CODEX_HOME"]).toBe(home);
+        child = spawn(command, args, options);
+        if (scenario === "cancel")
+          child.once("spawn", () => controller.abort(cancellation));
+        return child;
+      },
+    );
+    if (scenario === "cancel") await expect(result).rejects.toBe(cancellation);
+    else await expect(result).rejects.toThrow("synthetic-invalid-mode");
+    expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
+    expect(existsSync(directory!)).toBe(false);
   },
 );
+
+test("source configuration preserves caller-relative auth helper context", async () => {
+  const home = await temporaryDirectory();
+  const tools = join(home, "auth-tools");
+  await mkdir(tools);
+  const captured = join(home, "auth.json.capture");
+  await writeFile(
+    join(tools, "auth.mjs"),
+    `
+    import {writeFileSync} from "node:fs";
+    writeFileSync(process.argv[2], JSON.stringify({cwd: process.cwd(), home: process.env.CODEX_HOME, value: process.env.SYNTHETIC_AUTH_VALUE}));
+    console.log("synthetic-provider-token");
+  `,
+  );
+  const config = {
+    model_provider: "fixture",
+    model_providers: {
+      fixture: {
+        name: "Fixture",
+        wire_api: "responses",
+        base_url: "http://127.0.0.1:9/v1",
+        request_max_retries: 0,
+        auth: {
+          command: process.execPath,
+          args: ["auth.mjs", captured],
+          cwd: "auth-tools",
+        },
+      },
+    },
+    mcp_servers: { source: { command: "synthetic-source-command" } },
+  };
+  await writeFile(join(home, "config.toml"), stringify(config));
+  const environment = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    CODEX_HOME: relative(process.cwd(), home),
+    SYNTHETIC_AUTH_VALUE: "synthetic-caller-value",
+  };
+  await resolveSourceMcp("source", environment);
+  const actual = JSON.parse(await readFile(captured, "utf8"));
+  expect(await realpath(actual.cwd)).toBe(await realpath(tools));
+  expect(await realpath(actual.home)).toBe(await realpath(home));
+  expect(actual.value).toBe("synthetic-caller-value");
+  expect(environment.CODEX_HOME).toBe(relative(process.cwd(), home));
+});

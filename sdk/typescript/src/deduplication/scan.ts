@@ -162,7 +162,12 @@ async function deduplicateResolvedScan(
   const source =
     options.sourceMcp === undefined
       ? undefined
-      : await resolveSourceMcp(options.sourceMcp, environment, options.signal);
+      : await resolveSourceMcp(
+          options.sourceMcp,
+          environment,
+          options.signal,
+          repositoryPath,
+        );
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     selectedDirectory,
     {

@@ -32,7 +32,6 @@ import {
   hasCommandAuth,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
-  type JsonObject,
 } from "../config.js";
 import {
   reviewErrorInstructions,
@@ -83,7 +82,6 @@ interface Message {
     data?: { codexErrorInfo?: unknown };
   };
   result?: {
-    config?: { mcp_servers?: Record<string, { tools?: JsonObject }> };
     thread?: { id: string; ephemeral: boolean; path: string | null };
     turn?: { id: string };
   };
@@ -292,7 +290,7 @@ export class CodexReviewRunner {
       child.stderr.resume();
       const send = (message: object) =>
         child.stdin.write(`${JSON.stringify(message)}\n`);
-      const startThread = (inheritedTools: JsonObject = {}) =>
+      const startThread = () =>
         send({
           id: 3,
           method: "thread/start",
@@ -313,20 +311,7 @@ export class CodexReviewRunner {
                 ...servers,
                 ...(source === undefined
                   ? {}
-                  : {
-                      [source.name]: {
-                        ...source.server,
-                        tools: {
-                          ...Object.fromEntries(
-                            Object.keys(inheritedTools).map((tool) => [
-                              tool,
-                              { approval_mode: "prompt" },
-                            ]),
-                          ),
-                          ...(source.server["tools"] as JsonObject),
-                        },
-                      },
-                    }),
+                  : { [source.name]: source.server }),
               },
               web_search: "disabled",
               project_doc_max_bytes: 0,
@@ -389,15 +374,6 @@ export class CodexReviewRunner {
             ],
           },
         });
-      const prepareThread = () => {
-        if (source)
-          send({
-            id: "source-config",
-            method: "config/read",
-            params: { cwd: workingDirectory },
-          });
-        else startThread();
-      };
       let threadId: string | undefined;
       let turnId: string | undefined;
       let accepted: T | undefined;
@@ -525,13 +501,9 @@ export class CodexReviewRunner {
                 method: "account/login/start",
                 params: { type: "apiKey", apiKey },
               });
-            else prepareThread();
+            else startThread();
           } else if (message.id === 2) {
-            prepareThread();
-          } else if (message.id === "source-config" && source) {
-            startThread(
-              message.result?.config?.mcp_servers?.[source.name]?.tools,
-            );
+            startThread();
           } else if (message.id === 3) {
             const thread = message.result?.thread;
             if (!thread?.id || !thread.ephemeral || thread.path !== null) {

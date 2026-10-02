@@ -72,32 +72,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.type, "apiKey");
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
-  } else if (message.method === "config/read") {
-    assert.equal(message.params.cwd, checkout);
-    if (scenario === "request-error") {
-      send({
-        id: message.id,
-        error: { code: -32000, message: "Authentication required" },
-      });
-      continue;
-    }
-    send({
-      id: message.id,
-      result: {
-        config: {
-          mcp_servers: {
-            sourcegraph: {
-              tools: {
-                inherited_read: {
-                  approval_mode: "approve",
-                  output_token_limit: 432,
-                },
-              },
-            },
-          },
-        },
-      },
-    });
   } else if (message.method === "thread/start") {
     if (
       [

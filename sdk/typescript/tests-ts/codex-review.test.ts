@@ -111,11 +111,6 @@ const transportCases: {
   },
   { scenario: "correction", name: "HTTP source MCP", sourceMcp: "http" },
   { scenario: "correction", name: "stdio source MCP", sourceMcp: "stdio" },
-  {
-    scenario: "request-error",
-    name: "source MCP config read failure",
-    sourceMcp: "http",
-  },
   { scenario: "retry-correction" },
   { scenario: "text-only-correction" },
   { scenario: "cancel-continuation" },
@@ -212,6 +207,9 @@ for (const {
         ]);
       }
       const configuration = stringify({
+        ...(sourceMcp
+          ? { projects: { [checkout]: { trust_level: "trusted" } } }
+          : {}),
         mcp_servers: {
           synthetic: { command: "synthetic-unused-command" },
           ...(sourceMcp
@@ -257,6 +255,24 @@ for (const {
           : {}),
       });
       await writeFile(join(modelHome, "config.toml"), configuration);
+      if (sourceMcp) {
+        await mkdir(join(checkout, ".codex"));
+        await writeFile(
+          join(checkout, ".codex", "config.toml"),
+          stringify({
+            mcp_servers: {
+              sourcegraph: {
+                tools: {
+                  inherited_read: {
+                    approval_mode: "approve",
+                    output_token_limit: 432,
+                  },
+                },
+              },
+            },
+          }),
+        );
+      }
       await mkdir(join(modelHome, "state", "codex-home"), { recursive: true });
       const [homeName, keyName, ghName] = environmentNames;
       const runner = new CodexReviewRunner(
@@ -332,11 +348,18 @@ for (const {
           },
         },
         sourceMcp
-          ? await resolveSourceMcp("sourcegraph", {
-              CODEX_HOME: modelHome,
-              SOURCE_AUTH: "token synthetic-source-auth",
-              INHERITED_SOURCE: "synthetic-inherited",
-            })
+          ? await resolveSourceMcp(
+              "sourcegraph",
+              {
+                CODEX_HOME: modelHome,
+                OPENAI_API_KEY: "synthetic-review-key",
+                CODEX_SECURITY_STATE_DIR: join(modelHome, "state"),
+                SOURCE_AUTH: "token synthetic-source-auth",
+                INHERITED_SOURCE: "synthetic-inherited",
+              },
+              undefined,
+              checkout,
+            )
           : undefined,
       );
       let validations = 0;
@@ -508,7 +531,7 @@ for (const {
         expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       }
       expect(args.join(" ")).not.toContain("synthetic-review-key");
-      if (sourceMcp && scenario !== "request-error") {
+      if (sourceMcp) {
         const transcriptText = await readFile(transcript, "utf8");
         expect(transcriptText).not.toContain("token synthetic-source-auth");
         const request = transcriptText
@@ -520,7 +543,12 @@ for (const {
           required: true,
           enabled: true,
           default_tools_approval_mode: "prompt",
-          tools: { inherited_read: { approval_mode: "prompt" } },
+          tools: {
+            inherited_read: {
+              approval_mode: "prompt",
+              output_token_limit: 432,
+            },
+          },
           ...(sourceMcp === "http"
             ? {
                 http_headers: { Authorization: "token synthetic-static-auth" },
@@ -578,9 +606,7 @@ for (const {
         );
         expect(
           messages.filter((message) => message.method === "thread/start"),
-        ).toHaveLength(
-          sourceMcp && scenario === "request-error" ? 0 : sessions,
-        );
+        ).toHaveLength(sessions);
         expect(
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(

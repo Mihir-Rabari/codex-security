@@ -1,9 +1,34 @@
-import { isAbsolute, resolve } from "node:path";
-import { environmentEntry, readCodexHomeConfig } from "../auth.js";
-import type { JsonObject, JsonValue } from "../config.js";
+import {
+  spawn,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import {
+  configuredCodexHome,
+  environmentEntry,
+  readCodexHomeConfig,
+} from "../auth.js";
+import {
+  deepMerge,
+  hasCommandAuth,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
+  type JsonObject,
+  type JsonValue,
+} from "../config.js";
 import { ConfigurationError } from "../errors.js";
-import type { ProcessEnvironment } from "../runtime.js";
+import {
+  executablePathForSpawn,
+  resolveCodexCommand,
+  type ProcessEnvironment,
+} from "../runtime.js";
+import { comparisonEnvironment } from "../scan-comparison.js";
 import { gitOutput } from "../targets.js";
+import { VERSION } from "../version.js";
 
 export interface SourceMcp {
   name: string;
@@ -11,18 +36,144 @@ export interface SourceMcp {
   environment: Record<string, string>;
 }
 
+type StartCodex = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
+
+async function readSourceConfig(
+  environment: ProcessEnvironment,
+  repository: string,
+  signal: AbortSignal | undefined,
+  startCodex: StartCodex,
+): Promise<JsonObject> {
+  signal?.throwIfAborted();
+  const command = resolveCodexCommand(environment);
+  const home = configuredCodexHome(environment);
+  const config = await readCodexHomeConfig(environment, signal);
+  const args = ["app-server", "--stdio", "--disable", "plugins"];
+  if (hasCommandAuth(config))
+    args.push(
+      ...modelProviderConfigOverride(
+        resolveCommandAuthConfig(config, home),
+      ).flatMap((value) => ["--config", value]),
+    );
+  const hostEnvironment: ProcessEnvironment = {
+    ...environment,
+    CODEX_HOME: home,
+  };
+  if (process.platform === "win32") {
+    for (const name of Object.keys(hostEnvironment)) {
+      if (name.toUpperCase() === "CODEX_HOME") hostEnvironment[name] = home;
+    }
+  }
+  const directory = await mkdtemp(
+    join(tmpdir(), "codex-security-source-config-"),
+  );
+  try {
+    const child = startCodex(executablePathForSpawn(command.command), args, {
+      cwd: directory,
+      env: hostEnvironment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal,
+    });
+    const loaded = Promise.withResolvers<JsonObject>();
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const closed = new Promise<void>((resolve) => {
+      child.once("close", () => {
+        loaded.reject(
+          new ConfigurationError(
+            stderr.trim() ||
+              "Codex exited before returning source MCP configuration.",
+          ),
+        );
+        resolve();
+      });
+    });
+    child.once("error", loaded.reject);
+    child.stdin.on("error", loaded.reject);
+    const send = (message: object) =>
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    lines.on("line", (line) => {
+      try {
+        const message = JSON.parse(line) as {
+          id?: number;
+          method?: string;
+          error?: { message: string };
+          result?: { config?: JsonObject };
+        };
+        if (message.method !== undefined || message.id === undefined) return;
+        if (message.error) throw new ConfigurationError(message.error.message);
+        if (message.id === 1) {
+          send({ method: "initialized" });
+          send({
+            id: 2,
+            method: "config/read",
+            params: { cwd: resolve(repository) },
+          });
+        } else if (message.id === 2) {
+          if (!message.result?.config)
+            throw new ConfigurationError(
+              "Codex did not return source MCP configuration.",
+            );
+          loaded.resolve(message.result.config);
+        }
+      } catch (error) {
+        loaded.reject(error);
+      }
+    });
+    try {
+      send({
+        id: 1,
+        method: "initialize",
+        params: { clientInfo: { name: "codex-security", version: VERSION } },
+      });
+      return await loaded.promise;
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    } finally {
+      lines.close();
+      child.stdin.end();
+      child.kill();
+      const timer = setTimeout(() => child.kill("SIGKILL"), 1_000);
+      try {
+        await closed;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function resolveSourceMcp(
   name: string,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
+  repository = process.cwd(),
+  startCodex: StartCodex = spawn,
 ): Promise<SourceMcp> {
   if (typeof name !== "string" || !name.trim()) {
     throw new ConfigurationError(
       "sourceMcp must name a configured Codex MCP server.",
     );
   }
-  const home = await readCodexHomeConfig(environment, signal);
-  const servers = home["mcp_servers"] as JsonObject | undefined;
+  const config = await readSourceConfig(
+    environment,
+    repository,
+    signal,
+    startCodex,
+  );
+  const servers = config["mcp_servers"] as JsonObject | undefined;
   const selected = servers?.[name];
   if (
     !servers ||
@@ -40,13 +191,34 @@ export async function resolveSourceMcp(
       `Source MCP server ${JSON.stringify(name)} is disabled.`,
     );
   }
+  const overrides = structuredClone(selected);
+  // Native config/read emits null for an unset timeout; thread/start TOML rejects it.
+  if (overrides["tool_timeout_sec"] === null)
+    delete overrides["tool_timeout_sec"];
+  const reviewEnvironment = await comparisonEnvironment(
+    environment,
+    undefined,
+    signal,
+  );
+  const reviewConfig =
+    configuredCodexHome(reviewEnvironment) === configuredCodexHome(environment)
+      ? config
+      : await readSourceConfig(
+          reviewEnvironment,
+          repository,
+          signal,
+          startCodex,
+        );
+  const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
   const server: JsonObject = {
-    ...structuredClone(selected),
+    // Match native thread/start's table merge, including the selected credential home.
+    ...deepMerge((reviewServers?.[name] ?? {}) as JsonObject, overrides),
     enabled: true,
     required: true,
     // Read-only source tools still need authorization for their repository and revision.
     default_tools_approval_mode: "prompt",
   };
+  if (server["tool_timeout_sec"] === null) delete server["tool_timeout_sec"];
   // Native relative MCP cwd is anchored to the host process, which dedupe isolates.
   if (typeof server["cwd"] === "string" && !isAbsolute(server["cwd"]))
     server["cwd"] = resolve(server["cwd"]);
@@ -70,13 +242,13 @@ export async function resolveSourceMcp(
   }
   if (typeof server["bearer_token_env_var"] === "string")
     capture(server["bearer_token_env_var"]);
-  // Resolve stdio inheritance before the review host selects its own home/auth.
+  // Resolve stdio inheritance from the caller before the isolated review launches.
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = {};
   const explicit = (server["env"] ?? {}) as JsonObject;
   const environmentName = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
-  const overrides = new Set(Object.keys(explicit).map(environmentName));
+  const explicitNames = new Set(Object.keys(explicit).map(environmentName));
   const remaining: JsonValue[] = [];
   for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
     []) {
@@ -91,7 +263,7 @@ export async function resolveSourceMcp(
     }
     const name = entry["name"] as string;
     const value = environmentEntry(environment, name);
-    if (value !== undefined && !overrides.has(environmentName(name)))
+    if (value !== undefined && !explicitNames.has(environmentName(name)))
       inherited[name] = value;
   }
   if (Object.keys(inherited).length) {
