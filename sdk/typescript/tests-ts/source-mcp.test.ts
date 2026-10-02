@@ -381,6 +381,7 @@ test.each([
   "project-environment",
   "credential-environment",
   "executor-environment",
+  "executor-inheritance",
   "origin",
 ])("rechecks resumed reviews after source MCP %s changes", async (changed) => {
   const home = await temporaryDirectory();
@@ -430,11 +431,13 @@ test.each([
         {
           id: "source-executor",
           program: "synthetic-executor-command",
-          env: { SOURCE_ROOT: environment.SOURCE_ROOT },
+          ...(changed === "executor-inheritance"
+            ? {}
+            : { env: { SOURCE_ROOT: environment.SOURCE_ROOT } }),
         },
       ],
     });
-  if (changed === "executor-environment")
+  if (changed.startsWith("executor-"))
     await writeFile(join(home, "environments.toml"), executorConfig());
   await sourceForTest(
     {
@@ -444,7 +447,7 @@ test.each([
           command: "synthetic-source-command",
           ...(changed === "project-environment"
             ? {}
-            : changed === "executor-environment"
+            : changed.startsWith("executor-")
               ? {
                   environment_id: "source-executor",
                   env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
@@ -736,11 +739,19 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
-test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
+test.each([
+  "caller-home",
+  "caller-inheritance",
+  "caller-context",
+  "matching-home",
+  "missing-home",
+  "changed-home",
+])(
   "native source executor preserves configuration with %s",
   async (scenario) => {
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
+    const storedLogin = !scenario.startsWith("caller-");
     const credentialHome = join(home, "state", "codex-home");
     const captured = join(home, "source-root.txt");
     const fixture = join(home, "source.mjs");
@@ -767,17 +778,32 @@ test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
         TMP: process.env["TMP"],
         CODEX_HOME: home,
         CODEX_SECURITY_STATE_DIR: join(home, "state"),
-        ...(scenario === "caller-home"
-          ? { OPENAI_API_KEY: "synthetic-review-key" }
-          : {}),
+        ...(!storedLogin ? { OPENAI_API_KEY: "synthetic-review-key" } : {}),
         SOURCE_ROOT: "synthetic-host-value",
       };
+      const nativeCommand = resolveCodexCommand(environment).command;
+      const executorFixture = join(home, "executor.mjs");
+      const executorCwd = join(home, "executor-cwd.txt");
+      if (scenario === "caller-context")
+        await writeFile(
+          executorFixture,
+          `import {writeFileSync} from "node:fs"; import {spawnSync} from "node:child_process"; writeFileSync(${JSON.stringify(executorCwd)}, process.cwd()); process.exit(spawnSync(process.argv[2], ["exec-server", "--listen", "stdio"], {stdio:"inherit"}).status ?? 1);`,
+        );
       const executor = {
         id: "source-executor",
-        program: resolveCodexCommand(environment).command,
-        args: ["exec-server", "--listen", "stdio"],
-        cwd: repository,
-        env: { SOURCE_ROOT: "synthetic-remote-value" },
+        ...(scenario === "caller-context"
+          ? {
+              program: process.execPath,
+              args: [relative(process.cwd(), executorFixture), nativeCommand],
+            }
+          : {
+              program: nativeCommand,
+              args: ["exec-server", "--listen", "stdio"],
+              cwd: repository,
+            }),
+        ...(scenario === "caller-inheritance"
+          ? {}
+          : { env: { SOURCE_ROOT: "synthetic-remote-value" } }),
       };
       const executorConfig = stringify({ environments: [executor] });
       await writeFile(join(home, "environments.toml"), executorConfig);
@@ -792,7 +818,7 @@ test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
           },
         },
       };
-      if (scenario !== "caller-home") {
+      if (storedLogin) {
         await mkdir(credentialHome, { recursive: true, mode: 0o700 });
         await writeFile(
           join(credentialHome, "auth.json"),
@@ -846,6 +872,14 @@ test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
       } else {
         const source = await configured;
         expect(source.executor).toEqual(executor);
+        expect(source.executorLaunchDirectory).toBe(
+          scenario === "caller-context" ? process.cwd() : undefined,
+        );
+        expect(source.executorEnvironment).toEqual(
+          scenario === "caller-inheritance"
+            ? { SOURCE_ROOT: environment.SOURCE_ROOT }
+            : undefined,
+        );
         const runner = new CodexReviewRunner(
           environment,
           undefined,
@@ -864,7 +898,15 @@ test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
             validate: (value) => value,
           }),
         ).rejects.toThrow(/required.*source|source.*required/i);
-        expect(await readFile(captured, "utf8")).toBe("synthetic-remote-value");
+        expect(await readFile(captured, "utf8")).toBe(
+          scenario === "caller-inheritance"
+            ? environment.SOURCE_ROOT
+            : "synthetic-remote-value",
+        );
+        if (scenario === "caller-context")
+          expect(await realpath(await readFile(executorCwd, "utf8"))).toBe(
+            await realpath(process.cwd()),
+          );
       }
       expect(modelRequests).toBe(0);
       expect(await readFile(join(home, "environments.toml"), "utf8")).toBe(

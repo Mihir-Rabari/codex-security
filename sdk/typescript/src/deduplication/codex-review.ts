@@ -258,8 +258,8 @@ export class CodexReviewRunner {
         executablePathForSpawn(command.command),
         args,
         {
-          // Keep host-side auth helpers outside the source checkout.
-          cwd: directory,
+          // An executor without cwd inherits the caller; the review target stays explicit.
+          cwd: source?.executorLaunchDirectory ?? directory,
           env: {
             ...environment,
             ...source?.environment,

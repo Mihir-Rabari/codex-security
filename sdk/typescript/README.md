@@ -2272,8 +2272,11 @@ stored-login home defines the same server name, its effective definition must
 match the caller's configuration; use matching definitions or distinct server
 names. Executor-backed servers also require the selected native executor to be
 available with a matching definition in the review's credential home. The
-selected executor's connection and environment configuration is included in
-resume checkpoints, so changing it triggers fresh reviews. OAuth credentials
+selected executor's connection, configured environment, and referenced inherited
+values are included in resume checkpoints. A stdio executor without `cwd`
+inherits the caller's directory, including its trusted Codex startup configuration;
+the review target, permissions, and tool approvals remain explicit. That caller
+directory also participates in resume checkpoints. OAuth credentials
 from another Codex home are not imported.
 Native resource reads retain Codex's existing behavior and the MCP server's
 repository permissions. Omitting the flag preserves existing dedupe source access.

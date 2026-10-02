@@ -36,6 +36,8 @@ export interface SourceMcp {
   server: JsonObject;
   environment: Record<string, string>;
   executor?: JsonObject;
+  executorLaunchDirectory?: string;
+  executorEnvironment?: Record<string, string>;
 }
 
 type StartCodex = (
@@ -292,6 +294,12 @@ export async function resolveSourceMcp(
         `Source MCP environment ${JSON.stringify(environmentId)} has conflicting definitions in the configured and review credential homes. Configure matching executor definitions before deduplicating.`,
       );
   }
+  const executorLaunchDirectory =
+    typeof selected["command"] === "string" &&
+    typeof executor?.["program"] === "string" &&
+    executor["cwd"] === undefined
+      ? process.cwd()
+      : undefined;
   const server: JsonObject = {
     ...structuredClone(selected),
     enabled: true,
@@ -336,6 +344,10 @@ export async function resolveSourceMcp(
   const environmentName = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
   const explicitNames = new Set(Object.keys(explicit).map(environmentName));
+  const executorEnvironment: Record<string, string> = {};
+  const executorEnvironmentNames = new Set(
+    Object.keys((executor?.["env"] ?? {}) as JsonObject).map(environmentName),
+  );
   const remaining: JsonValue[] = [];
   for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
     []) {
@@ -344,7 +356,17 @@ export async function resolveSourceMcp(
         ? { name: variable }
         : (variable as JsonObject);
     if (entry["source"] !== undefined && entry["source"] !== "local") {
-      // Remote variables belong to the executor. Let Codex resolve/validate them.
+      // Keep native remote resolution; fingerprint referenced host inputs to stdio executors.
+      const name = entry["name"] as string;
+      if (
+        entry["source"] === "remote" &&
+        typeof executor?.["program"] === "string" &&
+        !explicitNames.has(environmentName(name)) &&
+        !executorEnvironmentNames.has(environmentName(name))
+      ) {
+        const value = environmentEntry(reviewEnvironment, name);
+        if (value !== undefined) executorEnvironment[name] = value;
+      }
       remaining.push(variable);
       continue;
     }
@@ -376,6 +398,10 @@ export async function resolveSourceMcp(
     server,
     environment: credentials,
     ...(executor === undefined ? {} : { executor }),
+    ...(executorLaunchDirectory === undefined
+      ? {}
+      : { executorLaunchDirectory }),
+    ...(Object.keys(executorEnvironment).length ? { executorEnvironment } : {}),
   };
 }
 
