@@ -142,6 +142,51 @@ for (const transport of [
           },
         },
       };
+      const configuration: JsonObject = {
+        mcp_servers: {
+          source: {
+            startup_timeout_sec: 2,
+            ...(["stdio-absolute", "stdio-credentials"].includes(transport)
+              ? { tool_timeout_sec: 12.5 }
+              : {}),
+            ...(!transport.startsWith("stdio")
+              ? {
+                  url: `${url}/mcp`,
+                  http_headers: {
+                    Authorization: "token synthetic-static-auth",
+                  },
+                  env_http_headers: { Authorization: "SOURCE_AUTH" },
+                }
+              : {
+                  command: process.execPath,
+                  args: [
+                    relative(
+                      repository,
+                      fileURLToPath(
+                        new URL("fixtures/source-mcp.mjs", import.meta.url),
+                      ),
+                    ),
+                    captured,
+                  ],
+                  ...(transport === "stdio-relative"
+                    ? { cwd: relative(process.cwd(), repository) }
+                    : transport === "stdio-absolute"
+                      ? { cwd: repository }
+                      : {}),
+                  env: {
+                    OPENAI_API_KEY: "synthetic-source-key",
+                    CODEX_HOME: "synthetic-source-home",
+                    OPTIONAL_SOURCE: "synthetic-fallback",
+                    [process.platform === "win32"
+                      ? "overridden_source"
+                      : "OVERRIDDEN_SOURCE"]: "synthetic-explicit",
+                  },
+                  env_vars: inheritedSource,
+                }),
+          },
+        },
+        ...provider,
+      };
       if (transport === "stdio-credentials") {
         const credentialHome = join(home, "state", "codex-home");
         await mkdir(credentialHome, { recursive: true, mode: 0o700 });
@@ -152,77 +197,12 @@ for (const transport of [
         );
         await writeFile(
           join(credentialHome, "config.toml"),
-          stringify({
-            ...provider,
-            mcp_servers: {
-              source: {
-                command: "synthetic-overridden-command",
-                env_vars: inheritedSource,
-                env: {
-                  OPTIONAL_SOURCE: "synthetic-overridden-fallback",
-                  MISSING_SOURCE: "synthetic-credential-home",
-                },
-                tools: {
-                  host_only: {
-                    approval_mode: "approve",
-                    output_token_limit: 432,
-                  },
-                },
-                tool_timeout_sec: 12.5,
-              },
-            },
-          }),
+          stringify(configuration),
           { mode: 0o600 },
         );
       }
       const source = await sourceForTest(
-        {
-          mcp_servers: {
-            source: {
-              startup_timeout_sec: 2,
-              ...(transport === "stdio-absolute"
-                ? { tool_timeout_sec: 12.5 }
-                : {}),
-              ...(!transport.startsWith("stdio")
-                ? {
-                    url: `${url}/mcp`,
-                    http_headers: {
-                      Authorization: "token synthetic-static-auth",
-                    },
-                    env_http_headers: { Authorization: "SOURCE_AUTH" },
-                  }
-                : {
-                    command: process.execPath,
-                    args: [
-                      relative(
-                        repository,
-                        fileURLToPath(
-                          new URL("fixtures/source-mcp.mjs", import.meta.url),
-                        ),
-                      ),
-                      captured,
-                    ],
-                    ...(transport === "stdio-relative"
-                      ? { cwd: relative(process.cwd(), repository) }
-                      : transport === "stdio-absolute"
-                        ? { cwd: repository }
-                        : {}),
-                    env: {
-                      OPENAI_API_KEY: "synthetic-source-key",
-                      CODEX_HOME: "synthetic-source-home",
-                      OPTIONAL_SOURCE: "synthetic-fallback",
-                      [process.platform === "win32"
-                        ? "overridden_source"
-                        : "OVERRIDDEN_SOURCE"]: "synthetic-explicit",
-                    },
-                    ...(transport === "stdio-credentials"
-                      ? {}
-                      : { env_vars: inheritedSource }),
-                  }),
-            },
-          },
-          ...provider,
-        },
+        configuration,
         environment,
         repository,
       );
@@ -231,10 +211,6 @@ for (const transport of [
           ? 12.5
           : undefined,
       );
-      if (transport === "stdio-credentials")
-        expect(source.server["tools"]).toEqual({
-          host_only: { approval_mode: "prompt", output_token_limit: 432 },
-        });
       const runner = new CodexReviewRunner(
         environment,
         undefined,
@@ -271,9 +247,6 @@ for (const transport of [
           OPENAI_API_KEY: "synthetic-source-key",
           CODEX_HOME: "synthetic-source-home",
           OPTIONAL_SOURCE: "synthetic-fallback",
-          ...(transport === "stdio-credentials"
-            ? { MISSING_SOURCE: "synthetic-credential-home" }
-            : {}),
           INHERITED_SOURCE: "synthetic-inherited",
           OBJECT_SOURCE: "synthetic-object",
           IMPLICIT_SOURCE: "synthetic-implicit",
@@ -440,9 +413,7 @@ test.each([
       mcp_servers: {
         source: {
           command: "synthetic-source-command",
-          ...(["project-environment", "credential-environment"].includes(
-            changed,
-          )
+          ...(changed === "project-environment"
             ? {}
             : { env_vars: ["SOURCE_ROOT"] }),
         },
@@ -604,3 +575,103 @@ test("source configuration preserves caller-relative auth helper context", async
   expect(actual.value).toBe("synthetic-caller-value");
   expect(environment.CODEX_HOME).toBe(relative(process.cwd(), home));
 });
+
+test.each(["http", "stdio"])(
+  "source MCP rejects conflicting %s connections across credential homes before startup",
+  async (transport) => {
+    const home = await temporaryDirectory();
+    const credentialHome = join(home, "state", "codex-home");
+    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(credentialHome, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "synthetic-stored-key" }),
+      { mode: 0o600 },
+    );
+    let sourceRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url?.startsWith("/mcp")) sourceRequests++;
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end('{"data":[]}');
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+    try {
+      const provider = {
+        model_provider: "fixture",
+        model_providers: {
+          fixture: {
+            name: "Fixture",
+            wire_api: "responses",
+            base_url: `${url}/v1`,
+            request_max_retries: 0,
+          },
+        },
+      };
+      const storedConfig = stringify({
+        ...provider,
+        mcp_servers: {
+          source: {
+            url: `${url}/mcp/stored`,
+            http_headers: { Authorization: "synthetic-stored-source-auth" },
+          },
+        },
+      });
+      await writeFile(join(credentialHome, "config.toml"), storedConfig, {
+        mode: 0o600,
+      });
+      await expect(
+        sourceForTest(
+          {
+            ...provider,
+            mcp_servers: {
+              source:
+                transport === "http"
+                  ? { url: `${url}/mcp/selected` }
+                  : { command: "synthetic-source-command" },
+            },
+          },
+          {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          },
+        ),
+      ).rejects.toThrow("conflicting definitions");
+      expect(sourceRequests).toBe(0);
+      expect(await readFile(join(credentialHome, "config.toml"), "utf8")).toBe(
+        storedConfig,
+      );
+    } finally {
+      const closed = new Promise<void>((resolve) =>
+        endpoint.close(() => resolve()),
+      );
+      endpoint.closeAllConnections();
+      await closed;
+    }
+  },
+);
+
+test.each(["C:\\source", "/srv/source"])(
+  "source MCP preserves executor-owned cwd %s",
+  async (cwd) => {
+    const home = await temporaryDirectory();
+    const source = await sourceForTest(
+      {
+        mcp_servers: {
+          source: {
+            command: "synthetic-source-command",
+            environment_id: "synthetic-executor",
+            cwd,
+          },
+        },
+      },
+      { CODEX_HOME: home },
+    );
+    expect(source.server["cwd"]).toBe(cwd);
+    expect(source.server["environment_id"]).toBe("synthetic-executor");
+  },
+);

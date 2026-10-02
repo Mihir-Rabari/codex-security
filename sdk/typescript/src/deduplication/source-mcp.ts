@@ -7,13 +7,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
 import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
 } from "../auth.js";
 import {
-  deepMerge,
   hasCommandAuth,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
@@ -191,36 +191,43 @@ export async function resolveSourceMcp(
       `Source MCP server ${JSON.stringify(name)} is disabled.`,
     );
   }
-  const overrides = structuredClone(selected);
-  // Native config/read emits null for an unset timeout; thread/start TOML rejects it.
-  if (overrides["tool_timeout_sec"] === null)
-    delete overrides["tool_timeout_sec"];
   const reviewEnvironment = await comparisonEnvironment(
     environment,
     undefined,
     signal,
   );
-  const reviewConfig =
-    configuredCodexHome(reviewEnvironment) === configuredCodexHome(environment)
-      ? config
-      : await readSourceConfig(
-          reviewEnvironment,
-          repository,
-          signal,
-          startCodex,
-        );
-  const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
+  if (
+    configuredCodexHome(reviewEnvironment) !== configuredCodexHome(environment)
+  ) {
+    const reviewConfig = await readSourceConfig(
+      reviewEnvironment,
+      repository,
+      signal,
+      startCodex,
+    );
+    const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
+    const other = reviewServers?.[name];
+    // Native thread/start merges tables, so different connections must not share this name.
+    if (other !== undefined && !isDeepStrictEqual(selected, other))
+      throw new ConfigurationError(
+        `Source MCP server ${JSON.stringify(name)} has conflicting definitions in the configured and review credential homes. Use matching server definitions or a different server name.`,
+      );
+  }
   const server: JsonObject = {
-    // Match native thread/start's table merge, including the selected credential home.
-    ...deepMerge((reviewServers?.[name] ?? {}) as JsonObject, overrides),
+    ...structuredClone(selected),
     enabled: true,
     required: true,
     // Read-only source tools still need authorization for their repository and revision.
     default_tools_approval_mode: "prompt",
   };
+  // Native config/read emits null for an unset timeout; thread/start TOML rejects it.
   if (server["tool_timeout_sec"] === null) delete server["tool_timeout_sec"];
   // Native relative MCP cwd is anchored to the host process, which dedupe isolates.
-  if (typeof server["cwd"] === "string" && !isAbsolute(server["cwd"]))
+  if (
+    server["environment_id"] === "local" &&
+    typeof server["cwd"] === "string" &&
+    !isAbsolute(server["cwd"])
+  )
     server["cwd"] = resolve(server["cwd"]);
   if (server["tools"] !== undefined) {
     server["tools"] = Object.fromEntries(
