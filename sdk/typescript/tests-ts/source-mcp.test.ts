@@ -6,7 +6,7 @@ import {
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "smol-toml";
@@ -31,13 +31,14 @@ async function sourceForTest(
   config: JsonObject,
   environment: NodeJS.ProcessEnv,
   repository = process.cwd(),
+  name = "source",
 ) {
   await writeFile(
     join(environment["CODEX_HOME"]!, "config.toml"),
     stringify(config),
   );
   return resolveSourceMcp(
-    "source",
+    name,
     {
       CODEX_SECURITY_STATE_DIR: join(environment["CODEX_HOME"]!, "state"),
       ...environment,
@@ -80,8 +81,14 @@ for (const transport of [
   "stdio-relative",
   "stdio-absolute",
   "stdio-credentials",
+  "stdio-prototype-name",
 ] as const) {
   test(`native dedupe keeps ${transport} source configuration at its process boundary`, async () => {
+    const name =
+      transport === "stdio-prototype-name" ? "constructor" : "source";
+    const storedLogin = ["stdio-credentials", "stdio-prototype-name"].includes(
+      transport,
+    );
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
     const captured = join(home, "mcp-environment.json");
@@ -111,9 +118,7 @@ for (const transport of [
         TMP: process.env["TMP"],
         CODEX_HOME: home,
         CODEX_SECURITY_STATE_DIR: join(home, "state"),
-        ...(transport === "stdio-credentials"
-          ? {}
-          : { OPENAI_API_KEY: "synthetic-review-key" }),
+        ...(storedLogin ? {} : { OPENAI_API_KEY: "synthetic-review-key" }),
         ...(transport === "http-static"
           ? {}
           : { SOURCE_AUTH: "token synthetic-env-auth" }),
@@ -144,7 +149,7 @@ for (const transport of [
       };
       const configuration: JsonObject = {
         mcp_servers: {
-          source: {
+          [name]: {
             startup_timeout_sec: 2,
             ...(["stdio-absolute", "stdio-credentials"].includes(transport)
               ? { tool_timeout_sec: 12.5 }
@@ -187,7 +192,7 @@ for (const transport of [
         },
         ...provider,
       };
-      if (transport === "stdio-credentials") {
+      if (storedLogin) {
         const credentialHome = join(home, "state", "codex-home");
         await mkdir(credentialHome, { recursive: true, mode: 0o700 });
         await writeFile(
@@ -197,7 +202,16 @@ for (const transport of [
         );
         await writeFile(
           join(credentialHome, "config.toml"),
-          stringify(configuration),
+          stringify(
+            transport === "stdio-prototype-name"
+              ? {
+                  ...provider,
+                  mcp_servers: {
+                    other: { command: "synthetic-other-command" },
+                  },
+                }
+              : configuration,
+          ),
           { mode: 0o600 },
         );
       }
@@ -205,6 +219,7 @@ for (const transport of [
         configuration,
         environment,
         repository,
+        name,
       );
       expect(source.server["tool_timeout_sec"]).toBe(
         ["stdio-absolute", "stdio-credentials"].includes(transport)
@@ -228,7 +243,7 @@ for (const transport of [
           schema: { type: "object" },
           validate: (value) => value,
         }),
-      ).rejects.toThrow(/required.*source|source.*required/i);
+      ).rejects.toThrow(new RegExp(`required.*${name}|${name}.*required`, "i"));
       expect(modelRequests).toBe(0);
       if (!transport.startsWith("stdio")) {
         expect(authorizations.length).toBeGreaterThan(0);
@@ -673,5 +688,21 @@ test.each(["C:\\source", "/srv/source"])(
     );
     expect(source.server["cwd"]).toBe(cwd);
     expect(source.server["environment_id"]).toBe("synthetic-executor");
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "source MCP anchors Windows root-relative cwd to the caller drive",
+  async () => {
+    const home = await temporaryDirectory();
+    const source = await sourceForTest(
+      {
+        mcp_servers: {
+          source: { command: "synthetic-source-command", cwd: "\\source-mcp" },
+        },
+      },
+      { CODEX_HOME: home },
+    );
+    expect(source.server["cwd"]).toBe(resolve("\\source-mcp"));
   },
 );

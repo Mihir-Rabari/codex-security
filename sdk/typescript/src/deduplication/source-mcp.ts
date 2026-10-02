@@ -5,7 +5,7 @@ import {
 } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, parse, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -208,7 +208,11 @@ export async function resolveSourceMcp(
     const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
     const other = reviewServers?.[name];
     // Native thread/start merges tables, so different connections must not share this name.
-    if (other !== undefined && !isDeepStrictEqual(selected, other))
+    if (
+      reviewServers &&
+      Object.hasOwn(reviewServers, name) &&
+      !isDeepStrictEqual(selected, other)
+    )
       throw new ConfigurationError(
         `Source MCP server ${JSON.stringify(name)} has conflicting definitions in the configured and review credential homes. Use matching server definitions or a different server name.`,
       );
@@ -226,7 +230,8 @@ export async function resolveSourceMcp(
   if (
     server["environment_id"] === "local" &&
     typeof server["cwd"] === "string" &&
-    !isAbsolute(server["cwd"])
+    (!isAbsolute(server["cwd"]) ||
+      (process.platform === "win32" && parse(server["cwd"]).root.length === 1))
   )
     server["cwd"] = resolve(server["cwd"]);
   if (server["tools"] !== undefined) {
