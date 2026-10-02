@@ -743,6 +743,7 @@ test.each([
   "caller-home",
   "caller-inheritance",
   "caller-context",
+  "caller-http-context",
   "matching-home",
   "missing-home",
   "changed-home",
@@ -752,6 +753,8 @@ test.each([
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
     const storedLogin = !scenario.startsWith("caller-");
+    const inheritedCwd = scenario.endsWith("context");
+    const http = scenario === "caller-http-context";
     const credentialHome = join(home, "state", "codex-home");
     const captured = join(home, "source-root.txt");
     const fixture = join(home, "source.mjs");
@@ -760,7 +763,29 @@ test.each([
       'import {writeFileSync} from "node:fs"; writeFileSync(process.argv[2], process.env.SOURCE_ROOT ?? ""); process.exit(1);',
     );
     let modelRequests = 0;
-    const endpoint = createServer((request, response) => {
+    let mcpInitializations = 0;
+    const endpoint = createServer(async (request, response) => {
+      if (request.url === "/mcp") {
+        if (request.method !== "POST") {
+          response.writeHead(405).end();
+          return;
+        }
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        const message = JSON.parse(body);
+        if (message.method === "initialize") mcpInitializations++;
+        response.writeHead(200, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32603,
+              message: "synthetic initialization failure",
+            },
+          }),
+        );
+        return;
+      }
       if (request.url?.includes("responses")) modelRequests++;
       response
         .writeHead(200, { "Content-Type": "application/json" })
@@ -784,14 +809,14 @@ test.each([
       const nativeCommand = resolveCodexCommand(environment).command;
       const executorFixture = join(home, "executor.mjs");
       const executorCwd = join(home, "executor-cwd.txt");
-      if (scenario === "caller-context")
+      if (inheritedCwd)
         await writeFile(
           executorFixture,
           `import {writeFileSync} from "node:fs"; import {spawnSync} from "node:child_process"; writeFileSync(${JSON.stringify(executorCwd)}, process.cwd()); process.exit(spawnSync(process.argv[2], ["exec-server", "--listen", "stdio"], {stdio:"inherit"}).status ?? 1);`,
         );
       const executor = {
         id: "source-executor",
-        ...(scenario === "caller-context"
+        ...(inheritedCwd
           ? {
               program: process.execPath,
               args: [relative(process.cwd(), executorFixture), nativeCommand],
@@ -850,12 +875,16 @@ test.each([
           ...provider,
           mcp_servers: {
             source: {
-              command: process.execPath,
-              args: [fixture, captured],
-              cwd: repository,
+              ...(http
+                ? { url: `${url}/mcp` }
+                : {
+                    command: process.execPath,
+                    args: [fixture, captured],
+                    cwd: repository,
+                    env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
+                  }),
               environment_id: "source-executor",
               startup_timeout_sec: 2,
-              env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
             },
           },
         },
@@ -873,7 +902,7 @@ test.each([
         const source = await configured;
         expect(source.executor).toEqual(executor);
         expect(source.executorLaunchDirectory).toBe(
-          scenario === "caller-context" ? process.cwd() : undefined,
+          inheritedCwd ? process.cwd() : undefined,
         );
         expect(source.executorEnvironment).toEqual(
           scenario === "caller-inheritance"
@@ -898,12 +927,14 @@ test.each([
             validate: (value) => value,
           }),
         ).rejects.toThrow(/required.*source|source.*required/i);
-        expect(await readFile(captured, "utf8")).toBe(
-          scenario === "caller-inheritance"
-            ? environment.SOURCE_ROOT
-            : "synthetic-remote-value",
-        );
-        if (scenario === "caller-context")
+        if (http) expect(mcpInitializations).toBeGreaterThan(0);
+        else
+          expect(await readFile(captured, "utf8")).toBe(
+            scenario === "caller-inheritance"
+              ? environment.SOURCE_ROOT
+              : "synthetic-remote-value",
+          );
+        if (inheritedCwd)
           expect(await realpath(await readFile(executorCwd, "utf8"))).toBe(
             await realpath(process.cwd()),
           );

@@ -295,9 +295,7 @@ export async function resolveSourceMcp(
       );
   }
   const executorLaunchDirectory =
-    typeof selected["command"] === "string" &&
-    typeof executor?.["program"] === "string" &&
-    executor["cwd"] === undefined
+    typeof executor?.["program"] === "string" && executor["cwd"] === undefined
       ? process.cwd()
       : undefined;
   const server: JsonObject = {
