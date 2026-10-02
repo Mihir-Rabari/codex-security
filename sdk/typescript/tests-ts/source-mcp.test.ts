@@ -6,7 +6,16 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
-import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
+import {
+  CheckpointedReviewRunner,
+  reviewSettingsDigest,
+} from "../src/deduplication/checkpointed-review.js";
+import { checkpointWorkbench } from "./support/workbench-fakes.js";
+import {
+  CodexReviewRunner,
+  type CodexReview,
+} from "../src/deduplication/codex-review.js";
 import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 
@@ -50,7 +59,7 @@ async function sourceCheckout() {
   return repository;
 }
 
-for (const transport of ["http", "stdio"] as const) {
+for (const transport of ["http", "http-static", "stdio"] as const) {
   test(`native dedupe keeps ${transport} source configuration at its process boundary`, async () => {
     const home = await temporaryDirectory();
     const repository = await sourceCheckout();
@@ -81,7 +90,9 @@ for (const transport of ["http", "stdio"] as const) {
         TMP: process.env["TMP"],
         CODEX_HOME: home,
         OPENAI_API_KEY: "synthetic-review-key",
-        SOURCE_AUTH: "token synthetic-env-auth",
+        ...(transport === "http-static"
+          ? {}
+          : { SOURCE_AUTH: "token synthetic-env-auth" }),
         INHERITED_SOURCE: "synthetic-inherited",
         OBJECT_SOURCE: "synthetic-object",
         IMPLICIT_SOURCE: "synthetic-implicit",
@@ -92,7 +103,7 @@ for (const transport of ["http", "stdio"] as const) {
           mcp_servers: {
             source: {
               startup_timeout_sec: 2,
-              ...(transport === "http"
+              ...(transport !== "stdio"
                 ? {
                     url: `${url}/mcp`,
                     http_headers: {
@@ -112,7 +123,9 @@ for (const transport of ["http", "stdio"] as const) {
                       OPENAI_API_KEY: "synthetic-source-key",
                       CODEX_HOME: "synthetic-source-home",
                       OPTIONAL_SOURCE: "synthetic-fallback",
-                      OVERRIDDEN_SOURCE: "synthetic-explicit",
+                      [process.platform === "win32"
+                        ? "overridden_source"
+                        : "OVERRIDDEN_SOURCE"]: "synthetic-explicit",
                     },
                     env_vars: [
                       "OPTIONAL_SOURCE",
@@ -156,10 +169,14 @@ for (const transport of ["http", "stdio"] as const) {
         }),
       ).rejects.toThrow(/required.*source|source.*required/i);
       expect(modelRequests).toBe(0);
-      if (transport === "http") {
+      if (transport !== "stdio") {
         expect(authorizations.length).toBeGreaterThan(0);
         expect(new Set(authorizations)).toEqual(
-          new Set(["token synthetic-env-auth"]),
+          new Set([
+            transport === "http-static"
+              ? "token synthetic-static-auth"
+              : "token synthetic-env-auth",
+          ]),
         );
       } else {
         expect(JSON.parse(await readFile(captured, "utf8"))).toEqual({
@@ -224,19 +241,21 @@ test("source MCP preserves native settings and requires an enabled configured se
       { CODEX_HOME: home },
     ),
   ).rejects.toThrow("disabled");
-  await expect(
-    sourceForTest(
-      {
-        mcp_servers: {
-          source: {
-            url: "https://source.example.com/mcp",
-            env_http_headers: { Authorization: "MISSING_SOURCE_AUTH" },
-          },
+  const optional = await sourceForTest(
+    {
+      mcp_servers: {
+        source: {
+          url: "https://source.example.com/mcp",
+          env_http_headers: { Authorization: "MISSING_SOURCE_AUTH" },
         },
       },
-      { CODEX_HOME: home },
-    ),
-  ).rejects.toThrow("MISSING_SOURCE_AUTH");
+    },
+    { CODEX_HOME: home },
+  );
+  expect(optional.environment).toEqual({});
+  expect(optional.server["env_http_headers"]).toEqual({
+    Authorization: "MISSING_SOURCE_AUTH",
+  });
 });
 
 test.skipIf(process.platform !== "win32")(
@@ -275,3 +294,78 @@ test("source MCP leaves remote environment resolution and validation to Codex", 
   expect(source.server["env"]).toBeUndefined();
   expect(source.environment).toEqual({});
 });
+
+test.each(["environment", "origin"])(
+  "rechecks resumed reviews after source MCP %s changes",
+  async (changed) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      SOURCE_ROOT: "synthetic-source-root",
+    };
+    await sourceForTest(
+      {
+        mcp_servers: {
+          source: {
+            command: "synthetic-source-command",
+            env_vars: ["SOURCE_ROOT"],
+          },
+        },
+      },
+      environment,
+    );
+    const store = checkpointWorkbench("source-context", { repository });
+    const workflow = new FindingWorkflow(
+      "source-context",
+      environment,
+      store.run,
+    );
+    let calls = 0;
+    const runner = {
+      async run<T>(review: CodexReview<T>): Promise<T> {
+        calls++;
+        return review.validate({ decision: "SAME" });
+      },
+    };
+    const review: CodexReview<{ decision: string }> = {
+      stage: "pair-review",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      prompt: "Review the synthetic findings.",
+      schema: { type: "object" },
+      validate: () => ({ decision: "SAME" }),
+    };
+    const checkpoint = async () =>
+      new CheckpointedReviewRunner(
+        workflow,
+        runner,
+        await workflow.sourceSnapshot(repository),
+        { allRepositories: true },
+        await reviewSettingsDigest(environment, {
+          mcp: await resolveSourceMcp("source", environment),
+          repository,
+        }),
+      );
+    await (await checkpoint()).run(review);
+    await (await checkpoint()).run(review);
+    expect(calls).toBe(1);
+    if (changed === "environment")
+      environment.SOURCE_ROOT = "changed-source-root";
+    else
+      execFileSync("git", [
+        "-C",
+        repository,
+        "remote",
+        "set-url",
+        "origin",
+        "https://git.example.com/team/other.git",
+      ]);
+    await (await checkpoint()).run(review);
+    expect(calls).toBe(2);
+  },
+);

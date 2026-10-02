@@ -244,7 +244,16 @@ async function deduplicateResolvedScan(
           runner,
           await workflow.sourceSnapshot(repositoryPath),
           scope,
-          await reviewSettingsDigest(environment, options.sourceMcp),
+          await reviewSettingsDigest(
+            environment,
+            source === undefined
+              ? undefined
+              : {
+                  mcp: source,
+                  repository: repositoryPath,
+                  signal: options.signal,
+                },
+          ),
         )
       : undefined;
     const deduplicator = new FindingDeduplicator(

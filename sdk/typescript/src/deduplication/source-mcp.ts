@@ -57,11 +57,7 @@ export async function resolveSourceMcp(
   const credentials: Record<string, string> = {};
   const capture = (key: string): void => {
     const value = environmentEntry(environment, key);
-    if (value === undefined)
-      throw new ConfigurationError(
-        `Source MCP environment variable ${JSON.stringify(key)} is not set.`,
-      );
-    credentials[key] = value;
+    if (value !== undefined) credentials[key] = value;
   };
   for (const variable of Object.values(
     (server["env_http_headers"] as JsonObject | undefined) ?? {},
@@ -73,6 +69,10 @@ export async function resolveSourceMcp(
   // Resolve stdio inheritance before the review host selects its own home/auth.
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = {};
+  const explicit = (server["env"] ?? {}) as JsonObject;
+  const environmentName = (name: string) =>
+    process.platform === "win32" ? name.toUpperCase() : name;
+  const overrides = new Set(Object.keys(explicit).map(environmentName));
   const remaining: JsonValue[] = [];
   for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
     []) {
@@ -87,12 +87,13 @@ export async function resolveSourceMcp(
     }
     const name = entry["name"] as string;
     const value = environmentEntry(environment, name);
-    if (value !== undefined) inherited[name] = value;
+    if (value !== undefined && !overrides.has(environmentName(name)))
+      inherited[name] = value;
   }
   if (Object.keys(inherited).length) {
     server["env"] = {
       ...inherited,
-      ...((server["env"] as JsonObject | undefined) ?? {}),
+      ...explicit,
     };
   }
   if (remaining.length) server["env_vars"] = remaining;
