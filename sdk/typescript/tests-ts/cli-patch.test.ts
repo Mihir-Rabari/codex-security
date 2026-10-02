@@ -1543,6 +1543,8 @@ describe("scan and patch workflow", () => {
   test.each([
     ["github", "push"],
     ["github", "create"],
+    ["gitlab", "push"],
+    ["gitlab", "create"],
     ["gitlab", "missing client"],
   ])(
     "resumes %s publication after %s fails without patching again",
@@ -1620,20 +1622,7 @@ describe("scan and patch workflow", () => {
               failOnce = false;
               throw new Error("spawn glab ENOENT");
             }
-            if (args[1] === "list")
-              return gitlab
-                ? JSON.stringify(
-                    publishedUrl
-                      ? [
-                          {
-                            source_project_id: 1,
-                            target_project_id: 1,
-                            web_url: publishedUrl,
-                          },
-                        ]
-                      : [],
-                  )
-                : publishedUrl;
+            if (args[1] === "list") return publishedUrl;
             expect(args[1]).toBe("create");
             if (failure === "create" && failOnce) {
               failOnce = false;
@@ -2246,7 +2235,7 @@ describe("scan and patch workflow", () => {
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
-            return args[1] === "create" ? url : client === "glab" ? "[]" : "";
+            return args[1] === "create" ? url : "";
           },
         },
       );
@@ -2267,7 +2256,7 @@ describe("scan and patch workflow", () => {
             "--output",
             "json",
             "--jq",
-            "map({source_project_id, target_project_id, web_url})",
+            "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
             "--repo",
             selector,
           ],
@@ -2322,9 +2311,11 @@ describe("scan and patch workflow", () => {
             if (command === "git")
               return args[0] === "remote"
                 ? `https://${provider}.com/example/repository.git`
-                : "";
+                : args.includes("--name-only")
+                  ? "src/finding-1.ts\0"
+                  : "";
             expect(command).toBe(gitlab ? "glab" : "gh");
-            if (args[1] === "list") return gitlab ? "[]" : "";
+            if (args[1] === "list") return "";
             publishedBody =
               args[args.indexOf(gitlab ? "--description" : "--body") + 1]!;
             return "https://example.test/review/1";
@@ -2350,13 +2341,13 @@ describe("scan and patch workflow", () => {
   );
 
   test.each([false, true])(
-    "filters fork merge requests before reuse (same-project MR: %j)",
+    "uses the GitLab project filter result before publishing (existing MR: %j)",
     async (hasExisting) => {
       const result = resultWithFindings(["high"]);
+      const origin = "ssh://git@gitlab.com/example/subgroup/repository.git";
+      const branch = "codex-security/patch-scan-1";
       const url =
-        "https://gitlab.example.test/example/repository/-/merge_requests/14";
-      const forkUrl =
-        "https://gitlab.example.test/example/repository/-/merge_requests/15";
+        "https://gitlab.com/example/subgroup/repository/-/merge_requests/14";
       const commands: string[] = [];
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
@@ -2364,30 +2355,31 @@ describe("scan and patch workflow", () => {
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
-              if (args[0] === "remote")
-                return "https://gitlab.com/example/repository.git";
-              if (args[0] === "push") commands.push("push");
-              return "";
+              if (args[0] === "remote") return origin;
+              if (args[0] === "push") {
+                expect(args).toEqual([
+                  "push",
+                  "--set-upstream",
+                  "origin",
+                  branch,
+                ]);
+                commands.push("push");
+              }
+              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
             }
             expect(command).toBe("glab");
             commands.push(args[1]!);
-            if (args[1] === "list")
-              return JSON.stringify([
-                {
-                  source_project_id: 2,
-                  target_project_id: 1,
-                  web_url: forkUrl,
-                },
-                ...(hasExisting
-                  ? [
-                      {
-                        source_project_id: 1,
-                        target_project_id: 1,
-                        web_url: url,
-                      },
-                    ]
-                  : []),
-              ]);
+            expect(args[args.indexOf("--repo") + 1]).toBe(origin);
+            expect(args[args.indexOf("--source-branch") + 1]).toBe(branch);
+            if (args[1] === "list") {
+              // glab applies this filter to the branch-matched API response:
+              // fork merge requests must not count as this project's patch.
+              expect(args[args.indexOf("--jq") + 1]).toBe(
+                "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
+              );
+              return hasExisting ? url : "";
+            }
+            expect(args[args.indexOf("--head") + 1]).toBe(origin);
             return url;
           },
         },
@@ -2396,8 +2388,7 @@ describe("scan and patch workflow", () => {
       expect(commands).toEqual(
         hasExisting ? ["list"] : ["list", "push", "create"],
       );
-      expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
-      expect(outcome.stderr).not.toContain(forkUrl);
+      expect(JSON.parse(outcome.stdout).pullRequest).toEqual({ branch, url });
     },
   );
 

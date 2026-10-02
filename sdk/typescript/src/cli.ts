@@ -6805,7 +6805,7 @@ async function publishPatchBranch(
     const gitlabRepository = remote.includes("://")
       ? remote
       : `ssh://${remote.replace(":", "/")}`;
-    const existing = await run(
+    let url = await run(
       command,
       gitlab
         ? [
@@ -6817,7 +6817,7 @@ async function publishPatchBranch(
             "--output",
             "json",
             "--jq",
-            "map({source_project_id, target_project_id, web_url})",
+            "map(select(.source_project_id == .target_project_id))[0].web_url // empty",
             "--repo",
             gitlabRepository,
           ]
@@ -6834,16 +6834,6 @@ async function publishPatchBranch(
             ".[0].url // empty",
           ],
     );
-    let url = gitlab
-      ? (
-          JSON.parse(existing) as {
-            source_project_id: number;
-            target_project_id: number;
-            web_url: string;
-          }[]
-        ).find((mr) => mr.source_project_id === mr.target_project_id)
-          ?.web_url ?? ""
-      : existing;
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
       url = await run(
