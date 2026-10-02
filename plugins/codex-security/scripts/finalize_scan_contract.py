@@ -1164,6 +1164,10 @@ def _populate_unsealed_manifest_envelope(
 
     target = scan.setdefault("target", {})
     if isinstance(target, dict):
+        if completion_binding.get("repositoryProvenanceRecorded"):
+            for field in ("remote", "repositoryPath"):
+                if field not in completion_binding["target"]:
+                    target.pop(field, None)
         allowed_kinds = completion_binding["allowedTargetKinds"]
         if len(allowed_kinds) == 1:
             target.setdefault("kind", allowed_kinds[0])

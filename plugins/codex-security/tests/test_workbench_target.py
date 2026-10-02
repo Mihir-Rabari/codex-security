@@ -27,6 +27,30 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("https://github.com/example/project.git", "https://github.com/example/project.git"),
+        ("git@github.com:example/project.git", "ssh://github.com/example/project.git"),
+        (
+            "https://fixture-user:fixture-password@github.com/example/project.git",
+            "https://github.com/example/project.git",
+        ),
+        ("../another-local-checkout", None),
+    ],
+)
+def test_repository_provenance_records_identity_without_clone_credentials(
+    tmp_path: Path, remote: str, expected: str | None
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=target, check=True)
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (expected, ".")
+    subdirectory = target / "nested"
+    subdirectory.mkdir()
+    assert WORKBENCH_TARGET["git_repository_provenance"](subdirectory) == (expected, "nested")
+
+
 def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(tmp_path / "missing-git"))
 
