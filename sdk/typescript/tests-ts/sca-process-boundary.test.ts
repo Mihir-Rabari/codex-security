@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
+import { dependencyRepositoryDirty } from "../src/sca.js";
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -139,6 +140,52 @@ async function observe(operation: "status" | "inventory" | "scan") {
   expect(observed.environment).toEqual(environment);
   return { ...paths, ...observed };
 }
+
+test("SCA dirty reporting follows the selected Git subtree", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "sca-dirty-subtree-")),
+  );
+  temporaryDirectories.push(root);
+  const project = join(root, "project");
+  const sibling = join(root, "sibling");
+  await Promise.all([mkdir(project), mkdir(sibling)]);
+  for (const directory of [project, sibling])
+    await writeFile(join(directory, "tracked.txt"), "original\n");
+  const git = (...args: string[]) => {
+    const child = spawnSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+    });
+    expect(child.status, child.stderr).toBe(0);
+  };
+  git("init", "--quiet");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Synthetic Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--quiet",
+    "-m",
+    "Synthetic fixture",
+  );
+  const signal = new AbortController().signal;
+  const dirty = (path: string) =>
+    dependencyRepositoryDirty(path, process.env, signal);
+  expect(await dirty(project)).toBe(false);
+  await writeFile(join(sibling, "tracked.txt"), "changed sibling\n");
+  expect(await dirty(project)).toBe(false);
+  await writeFile(join(sibling, "untracked.txt"), "untracked sibling\n");
+  expect(await dirty(project)).toBe(false);
+  expect(await dirty(root)).toBe(true);
+  await writeFile(join(project, "tracked.txt"), "changed selected file\n");
+  expect(await dirty(project)).toBe(true);
+  await writeFile(join(project, "tracked.txt"), "original\n");
+  await writeFile(join(project, "untracked.txt"), "untracked selected file\n");
+  expect(await dirty(project)).toBe(true);
+});
 
 test.each(["status", "inventory"] as const)(
   "SCA %s Git requests protect the enclosing checkout and isolate selected configuration",

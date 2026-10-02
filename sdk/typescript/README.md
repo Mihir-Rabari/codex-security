@@ -2783,7 +2783,8 @@ workspace, Git, direct URL, and alternate Cargo registry origins retain
 uncertainty when registry identity cannot be established. Non-PyPI indexes in
 Pipenv, uv, and Poetry lockfiles leave the affected package origins unresolved
 and coverage incomplete. Bundler GEM sections with custom or mixed registry
-remotes also leave package origins unresolved.
+remotes also leave package origins unresolved. npm v2/v3 lockfiles with explicit
+tarball URLs outside the public npm registry leave those origins unresolved.
 
 ```ts
 import { createSecurity } from "@openai/codex-security";

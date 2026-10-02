@@ -266,8 +266,8 @@ function npmLocalReferences(
 ): DependencyLocalReference[] {
   const packages = parsed["packages"];
   if (!record(packages)) return [];
-  // A resolved URL alone also describes normal registry distribution. A matching
-  // dependency specifier records the explicit direct URL origin in npm v2/v3.
+  // A matching dependency specifier records an explicit direct URL origin even
+  // when its tarball is hosted by the public registry.
   const directUrls = new Set<string>();
   for (const dependency of Object.values(packages)) {
     if (!record(dependency)) continue;
@@ -287,10 +287,16 @@ function npmLocalReferences(
   for (const [path, dependency] of Object.entries(packages)) {
     if (!path || !record(dependency)) continue;
     const resolved = dependency["resolved"];
+    const alternateRegistry =
+      typeof resolved === "string" &&
+      /^https?:\/\//u.test(resolved) &&
+      !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/u.test(resolved);
     if (
       dependency["link"] !== true &&
       (typeof resolved !== "string" ||
-        (!/^(?:file|link):/u.test(resolved) && !directUrls.has(resolved)))
+        (!/^(?:file|link):/u.test(resolved) &&
+          !directUrls.has(resolved) &&
+          !alternateRegistry))
     )
       continue;
     const name =

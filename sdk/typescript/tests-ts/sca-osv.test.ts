@@ -1012,6 +1012,19 @@ describe("SCA scanner execution", () => {
   );
   test.each(
     [
+      ...[2, 3].map((lockfileVersion) => ({
+        path: "package-lock.json",
+        content: JSON.stringify({
+          lockfileVersion,
+          packages: {
+            "": { dependencies: { "synthetic-lib": "^1.2.0" } },
+            "node_modules/synthetic-lib": {
+              version: "1.2.0",
+              resolved: "https://registry.example.test/synthetic-lib.tgz",
+            },
+          },
+        }),
+      })),
       {
         path: "Pipfile.lock",
         content: JSON.stringify({
@@ -1046,7 +1059,12 @@ describe("SCA scanner execution", () => {
       [false, true].map((matched) => ({
         ...input,
         matched,
-        ecosystem: input.path === "Gemfile.lock" ? "RubyGems" : "PyPI",
+        ecosystem:
+          input.path === "package-lock.json"
+            ? "npm"
+            : input.path === "Gemfile.lock"
+              ? "RubyGems"
+              : "PyPI",
       })),
     ),
   )(
@@ -1072,9 +1090,11 @@ describe("SCA scanner execution", () => {
       expect(result.status).toBe("partial");
       expect(result.coverage.unresolvedPackages).toBe(1);
       expect(result.coverage.limitations.join("\n")).toContain(
-        ecosystem === "RubyGems"
-          ? "https://gems.example.test"
-          : "https://index.example.test/simple",
+        ecosystem === "npm"
+          ? "https://registry.example.test"
+          : ecosystem === "RubyGems"
+            ? "https://gems.example.test"
+            : "https://index.example.test/simple",
       );
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },
@@ -1082,7 +1102,8 @@ describe("SCA scanner execution", () => {
   test.each(["dependencies", "devDependencies", "optionalDependencies"])(
     "preserves npm direct URL provenance recorded in %s without changing registry tarballs",
     async (group) => {
-      const resolved = "https://example.invalid/synthetic-lib.tgz";
+      const resolved =
+        "https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz";
       for (const direct of [false, true]) {
         const result = await scanFixture(
           {

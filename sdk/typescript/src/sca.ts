@@ -72,6 +72,8 @@ export async function dependencyRepositoryDirty(
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
+        "--",
+        ".",
       ],
       { env: git.environment, signal, maxBuffer: Infinity },
     );
