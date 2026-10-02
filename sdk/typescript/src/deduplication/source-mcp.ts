@@ -63,39 +63,28 @@ export async function resolveSourceMcp(
       );
     credentials[key] = value;
   };
-  const headers = { ...(server["env_http_headers"] as JsonObject | undefined) };
-  for (const value of Object.values(headers))
-    if (typeof value === "string") capture(value);
-  // Native HTTP headers are sent by the host, never as secrets in SDK argv.
-  for (const [header, value] of Object.entries(
-    (server["http_headers"] as JsonObject | undefined) ?? {},
+  for (const variable of Object.values(
+    (server["env_http_headers"] as JsonObject | undefined) ?? {},
   )) {
-    if (typeof value !== "string") continue;
-    const variable = `CODEX_SECURITY_SOURCE_HEADER_${Object.keys(credentials).length}`;
-    credentials[variable] = value;
-    headers[header] = variable;
-  }
-  delete server["http_headers"];
-  if (Object.keys(headers).length) server["env_http_headers"] = headers;
-  if (typeof server["bearer_token_env_var"] === "string")
-    capture(server["bearer_token_env_var"]);
-  for (const variable of (server["env_vars"] as unknown[] | undefined) ?? []) {
     if (typeof variable === "string") capture(variable);
   }
-  for (const [key, value] of Object.entries(
-    (server["env"] as JsonObject | undefined) ?? {},
-  )) {
-    if (typeof value === "string") credentials[key] = value;
+  if (typeof server["bearer_token_env_var"] === "string")
+    capture(server["bearer_token_env_var"]);
+  // Resolve stdio inheritance before the review host selects its own home/auth.
+  // Explicit server values retain native precedence and never become host values.
+  const inherited: JsonObject = {};
+  for (const variable of (server["env_vars"] as unknown[] | undefined) ?? []) {
+    if (typeof variable !== "string") continue;
+    const value = environmentEntry(environment, variable);
+    if (value !== undefined) inherited[variable] = value;
   }
-  if (server["env"] !== undefined) {
-    server["env_vars"] = [
-      ...new Set([
-        ...((server["env_vars"] as string[] | undefined) ?? []),
-        ...Object.keys(server["env"] as JsonObject),
-      ]),
-    ];
-    delete server["env"];
+  if (Object.keys(inherited).length) {
+    server["env"] = {
+      ...inherited,
+      ...((server["env"] as JsonObject | undefined) ?? {}),
+    };
   }
+  delete server["env_vars"];
   // Node passes one spelling per Windows environment variable. Exclude every
   // inherited spelling as well so an alias cannot expose an MCP credential.
   if (process.platform === "win32") {
@@ -107,27 +96,6 @@ export async function resolveSourceMcp(
     }
   }
   return { name, server, environment: credentials };
-}
-
-export function sourceMcpConfig(
-  source: SourceMcp,
-  config: JsonObject,
-): JsonObject {
-  const shell = (config["shell_environment_policy"] ?? {}) as JsonObject;
-  const excluded = new Set([
-    ...((shell["exclude"] as string[] | undefined) ?? []),
-    ...Object.keys(source.environment),
-  ]);
-  return {
-    mcp_servers: {
-      ...((config["mcp_servers"] ?? {}) as JsonObject),
-      [source.name]: source.server,
-    },
-    shell_environment_policy: {
-      ...shell,
-      exclude: [...excluded],
-    },
-  };
 }
 
 export async function sourceMcpInstructions(

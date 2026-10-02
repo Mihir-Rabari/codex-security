@@ -23,6 +23,7 @@ import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt } from "./codex-prompt.js";
+import type { ScanModelConfiguration } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { CodexSecurityError, InvalidTargetError } from "./errors.js";
 import { resolvePluginPython, type ProcessEnvironment } from "./runtime.js";
@@ -40,20 +41,19 @@ import {
 
 export type SecurityPolicyStage = "architecture" | "threat_model" | "policy";
 
-export interface SecurityPolicyOptions
-  extends Pick<
-    ScanOptions,
-    | "auth"
-    | "knowledgeBasePaths"
-    | "outputDir"
-    | "maxCostUsd"
-    | "signal"
-    | "onAuthentication"
-    | "onOutputDirReady"
-    | "onCost"
-    | "onWarning"
-    | "onObserverError"
-  > {
+export interface SecurityPolicyOptions extends Pick<
+  ScanOptions,
+  | "auth"
+  | "knowledgeBasePaths"
+  | "outputDir"
+  | "maxCostUsd"
+  | "signal"
+  | "onAuthentication"
+  | "onOutputDirReady"
+  | "onCost"
+  | "onWarning"
+  | "onObserverError"
+> {
   path?: string;
   onStage?: (stage: SecurityPolicyStage) => void;
   answerQuestions?: (
@@ -116,11 +116,10 @@ export async function securityPolicyProtectedRoots(
   return [...new Set([roots.at(-1) ?? target.repository, ...metadata.flat()])];
 }
 
-export interface SecurityPolicyPreflight extends SecurityPolicyTarget {
+export interface SecurityPolicyPreflight
+  extends SecurityPolicyTarget, ScanModelConfiguration {
   outputDir: string | null;
   authentication: ScanAuthentication;
-  model: string;
-  reasoningEffort: string;
   maxCostUsd?: number;
 }
 
@@ -158,8 +157,7 @@ export interface SecurityPolicySnapshot {
 }
 
 export interface SecurityPolicyDraft
-  extends SecurityPolicyTarget,
-    SecurityPolicySnapshot {
+  extends SecurityPolicyTarget, SecurityPolicySnapshot {
   outputDir: string;
   draftPath: string;
   specificationPath: string;
