@@ -1,6 +1,6 @@
 import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
@@ -212,8 +212,13 @@ export async function publishScanToCloud(
     "findings.json",
     "coverage.json",
   ];
-  if (scan.artifacts.some((item) => item.path === "report.md"))
-    names.push("report.md");
+  const report = await lstat(join(scanDirectory, "report.md")).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    },
+  );
+  if (report !== undefined) names.push("report.md");
   const bytes = new Map<string, Buffer>();
   const artifacts: ImportArtifactDeclaration[] = [];
   for (const name of names) {
@@ -231,8 +236,9 @@ export async function publishScanToCloud(
       );
     if (
       name === "scan-manifest.json" &&
-      JSON.stringify(JSON.parse(contents.toString("utf8"))) !==
-        JSON.stringify(contract.manifest)
+      JSON.stringify(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contents)),
+      ) !== JSON.stringify(contract.manifest)
     )
       throw new CodexSecurityError("Scan manifest changed after validation.");
     bytes.set(name, contents);

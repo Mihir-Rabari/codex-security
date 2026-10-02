@@ -37,6 +37,9 @@ def initialize_unborn_git_repository(target: Path) -> None:
             "https://github.com/example/project.git",
         ),
         ("../another-local-checkout", None),
+        (r"C:\repos\project", None),
+        ("C:/repos/project", None),
+        (r"C:relative\project", None),
     ],
 )
 def test_repository_provenance_records_identity_without_clone_credentials(

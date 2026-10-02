@@ -76,3 +76,29 @@ def test_sealed_manifest_must_match_saved_repository_provenance(
         )
         with pytest.raises(SystemExit, match="must match saved scan provenance"):
             namespace["verify_manifest_binding"](scan, manifest)
+
+
+def test_initial_completion_rejects_presealed_unrecorded_remote(tmp_path: Path) -> None:
+    target, state = tmp_path / "target", tmp_path / "state"
+    revision = initialize_git_repository(target)
+    workspace = create_saved_git_workspace(state, target)
+    started = start_delivered_scan(
+        state, "--workspace-id", str(workspace["id"]), "--scan-root", str(tmp_path / "scans")
+    )
+    scan_id = str(started["results"]["scanId"])
+    scan_dir = Path(str(started["results"]["scanDir"]))
+    write_completed_contract(
+        scan_dir, scan_id, target, target_kind="git_revision", target_revision=revision
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["target"].update(
+        remote="https://github.com/example/invented.git", repositoryPath="."
+    )
+    manifest_path.write_text(json.dumps(manifest))
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace["finalize_scan"](scan_dir)
+    assert json.loads(manifest_path.read_text())["scan"]["sealedAt"]
+    completed = run_workbench(state, "complete-scan", "--scan-id", scan_id, check=False)
+    assert completed["returncode"] != 0
+    assert "must match saved scan provenance" in completed["stderr"]

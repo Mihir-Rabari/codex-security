@@ -2742,7 +2742,9 @@ export async function main(
               cloudPrompt.select(
                 "Which Cloud environment would you like to publish to?",
                 destinations.map((item) => ({
-                  label: `${item.environment_name} · ${item.environment_id}`,
+                  label: safePatchText(
+                    `${item.environment_name} · ${item.environment_id}`,
+                  ),
                   value: item.environment_id,
                 })),
                 undefined,

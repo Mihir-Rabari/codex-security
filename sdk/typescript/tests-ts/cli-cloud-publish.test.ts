@@ -289,13 +289,19 @@ describe("publish scan to Cloud", () => {
     await writeFile(unrelated, JSON.stringify(manifest));
     let environmentSelected = false;
     deps.listCloudDestinations = async () => [
-      cloudDestination,
+      {
+        ...cloudDestination,
+        environment_name: "Example\u001b[2J\u001b[H\u009b2J",
+      },
       { ...cloudDestination, environment_id: "env-2" },
     ];
     deps.publishPrompt = {
       isInteractive: () => true,
       select: async (_question, choices) => {
         expect(workbenchCalls).toHaveLength(0);
+        expect(choices[0]!.label).not.toMatch(/[\u001b\u009b]/u);
+        expect(choices[0]!.label).toContain("Example");
+        expect(String(choices[0]!.value)).toBe("env-1");
         environmentSelected = true;
         return choices[1]!.value;
       },

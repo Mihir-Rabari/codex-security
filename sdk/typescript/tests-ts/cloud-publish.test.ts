@@ -10,6 +10,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -203,11 +204,63 @@ describe("native Cloud publication", () => {
       dedupe_status: "pending",
     });
     expect(result.findingIds).toEqual([]);
-    expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(3);
+    expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(4);
+    const reportBytes = await readFile(join(scan, "report.md"));
+    expect(cloud.create?.artifacts).toContainEqual({
+      name: "report.md",
+      size_bytes: reportBytes.byteLength,
+      sha256: createHash("sha256").update(reportBytes).digest("hex"),
+    });
+    expect(
+      Buffer.from(
+        cloud.calls.find(
+          (item) => item.method === "PUT" && item.url.endsWith("report.md"),
+        )!.body as Uint8Array,
+      ),
+    ).toEqual(reportBytes);
     expect(
       cloud.calls.every((item) => !item.url.includes("cli/findings")),
     ).toBe(true);
   });
+  test("publishes a BOM-prefixed validated manifest without changing its bytes", async () => {
+    const { scan, environment } = await fixture();
+    const path = join(scan, "scan-manifest.json");
+    const bytes = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      await readFile(path),
+    ]);
+    await writeFile(path, bytes);
+    const cloud = server();
+    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    expect(
+      Buffer.from(
+        cloud.calls.find(
+          (item) =>
+            item.method === "PUT" && item.url.endsWith("scan-manifest.json"),
+        )!.body as Uint8Array,
+      ),
+    ).toEqual(bytes);
+  });
+  test("publishes supported external scans without an optional report", async () => {
+    const { scan, environment } = await fixture();
+    await rm(join(scan, "report.md"));
+    const cloud = server();
+    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(3);
+  });
+  test.skipIf(process.platform === "win32")(
+    "rejects a report symlink before creating an upload",
+    async () => {
+      const { scan, environment } = await fixture();
+      await rm(join(scan, "report.md"));
+      await symlink(join(scan, "findings.json"), join(scan, "report.md"));
+      const cloud = server();
+      await expect(
+        publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
+      ).rejects.toThrow();
+      expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
+    },
+  );
   test("resumes interrupted upload, skips verified objects and returns the same publication", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ rejectPutOnce: true });
@@ -264,7 +317,7 @@ describe("native Cloud publication", () => {
     });
     expect(result.publication?.imported_scan_id).toBe("import-1");
     expect(result.publication?.upload_status).toBe("finalizing");
-    expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(3);
+    expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(4);
     expect(cloud.calls.at(-1)?.url).toEndWith("/finalize");
   });
   test("failed parsing retries from retained artifacts", async () => {

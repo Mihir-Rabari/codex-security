@@ -1287,6 +1287,10 @@ def _validate_completion_binding(
     if scan.get("producer") != completion_binding["producer"]:
         raise ContractError("manifest.scan.producer: must match the workbench producer")
     target = _require_dict(scan, "target", "manifest.scan")
+    if completion_binding.get("repositoryProvenanceRecorded"):
+        for field in ("remote", "repositoryPath"):
+            if target.get(field) != completion_binding["target"].get(field):
+                raise ContractError(f"scan.target.{field}: must match saved scan provenance")
     allowed_target_kinds = completion_binding["allowedTargetKinds"]
     if target.get("kind") not in allowed_target_kinds:
         raise ContractError("scan.target.kind: must match the workbench target")

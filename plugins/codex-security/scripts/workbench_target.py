@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, BinaryIO
 from urllib.parse import urlsplit, urlunsplit
 
@@ -802,6 +802,8 @@ def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
     repository_path = target.resolve().relative_to(Path(root).resolve()).as_posix()
     remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
+        return None, repository_path
+    if PureWindowsPath(remote).drive:
         return None, repository_path
     if "://" not in remote:
         authority, separator, path = remote.partition(":")
