@@ -9,7 +9,7 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
-import { stringify } from "smol-toml";
+import { parse as parseToml, stringify } from "smol-toml";
 import type { JsonObject, JsonValue } from "../src/config.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import {
@@ -574,14 +574,9 @@ test("source configuration preserves caller-relative auth helper context", async
   const home = await temporaryDirectory();
   const tools = join(home, "auth-tools");
   await mkdir(tools);
-  const captured = join(home, "auth.json.capture");
   await writeFile(
     join(tools, "auth.mjs"),
-    `
-    import {writeFileSync} from "node:fs";
-    writeFileSync(process.argv[2], JSON.stringify({cwd: process.cwd(), home: process.env.CODEX_HOME, value: process.env.SYNTHETIC_AUTH_VALUE}));
-    console.log("synthetic-provider-token");
-  `,
+    'console.log("synthetic-provider-token");',
   );
   const config = {
     model_provider: "fixture",
@@ -593,7 +588,7 @@ test("source configuration preserves caller-relative auth helper context", async
         request_max_retries: 0,
         auth: {
           command: process.execPath,
-          args: ["auth.mjs", captured],
+          args: ["auth.mjs"],
           cwd: "auth-tools",
         },
       },
@@ -607,11 +602,34 @@ test("source configuration preserves caller-relative auth helper context", async
     CODEX_HOME: relative(process.cwd(), home),
     SYNTHETIC_AUTH_VALUE: "synthetic-caller-value",
   };
-  await resolveSourceMcp("source", environment);
-  const actual = JSON.parse(await readFile(captured, "utf8"));
-  expect(await realpath(actual.cwd)).toBe(await realpath(tools));
-  expect(await realpath(actual.home)).toBe(await realpath(home));
-  expect(actual.value).toBe("synthetic-caller-value");
+  let starts = 0;
+  await resolveSourceMcp(
+    "source",
+    environment,
+    undefined,
+    process.cwd(),
+    (command, args, options) => {
+      starts++;
+      const override = args.find((value) =>
+        value.startsWith("model_providers="),
+      );
+      expect(override).toBeDefined();
+      expect(parseToml(override!)).toEqual({
+        model_providers: {
+          fixture: {
+            ...config.model_providers.fixture,
+            auth: { ...config.model_providers.fixture.auth, cwd: tools },
+          },
+        },
+      });
+      expect(options.env!["CODEX_HOME"]).toBe(home);
+      expect(options.env!["SYNTHETIC_AUTH_VALUE"]).toBe(
+        "synthetic-caller-value",
+      );
+      return spawn(command, args, options);
+    },
+  );
+  expect(starts).toBe(1);
   expect(environment.CODEX_HOME).toBe(relative(process.cwd(), home));
 });
 
