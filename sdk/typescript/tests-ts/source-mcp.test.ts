@@ -258,7 +258,16 @@ for (const transport of [
       } else {
         const child = JSON.parse(await readFile(captured, "utf8"));
         expect(await realpath(child.cwd)).toBe(await realpath(repository));
-        expect(source.server["env"]).toEqual(child.environment);
+        expect(
+          Object.fromEntries(
+            Object.entries(source.server["env"] as JsonObject).map(
+              ([key, value]) => [
+                process.platform === "win32" ? key.toUpperCase() : key,
+                value,
+              ],
+            ),
+          ),
+        ).toEqual(child.environment);
         expect(child.environment).toEqual({
           OPENAI_API_KEY: "synthetic-source-key",
           CODEX_HOME: "synthetic-source-home",
