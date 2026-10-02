@@ -22,6 +22,7 @@ import {
   type CodexReview,
 } from "../src/deduplication/codex-review.js";
 import { resolveSourceMcp } from "../src/deduplication/source-mcp.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -379,6 +380,7 @@ test.each([
   "environment",
   "project-environment",
   "credential-environment",
+  "executor-environment",
   "origin",
 ])("rechecks resumed reviews after source MCP %s changes", async (changed) => {
   const home = await temporaryDirectory();
@@ -422,6 +424,18 @@ test.each([
       { mode: 0o600 },
     );
   }
+  const executorConfig = () =>
+    stringify({
+      environments: [
+        {
+          id: "source-executor",
+          program: "synthetic-executor-command",
+          env: { SOURCE_ROOT: environment.SOURCE_ROOT },
+        },
+      ],
+    });
+  if (changed === "executor-environment")
+    await writeFile(join(home, "environments.toml"), executorConfig());
   await sourceForTest(
     {
       projects: { [repository]: { trust_level: "trusted" } },
@@ -430,7 +444,12 @@ test.each([
           command: "synthetic-source-command",
           ...(changed === "project-environment"
             ? {}
-            : { env_vars: ["SOURCE_ROOT"] }),
+            : changed === "executor-environment"
+              ? {
+                  environment_id: "source-executor",
+                  env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
+                }
+              : { env_vars: ["SOURCE_ROOT"] }),
         },
       },
     },
@@ -487,6 +506,8 @@ test.each([
       "origin",
       "https://git.example.com/team/other.git",
     ]);
+  if (changed === "executor-environment")
+    await writeFile(join(home, "environments.toml"), executorConfig());
   await (await checkpoint()).run(review);
   expect(calls).toBe(2);
 });
@@ -674,6 +695,14 @@ test.each(["C:\\source", "/srv/source"])(
   "source MCP preserves executor-owned cwd %s",
   async (cwd) => {
     const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "environments.toml"),
+      stringify({
+        environments: [
+          { id: "synthetic-executor", program: "synthetic-executor-command" },
+        ],
+      }),
+    );
     const source = await sourceForTest(
       {
         mcp_servers: {
@@ -706,3 +735,163 @@ test.skipIf(process.platform !== "win32")(
     expect(source.server["cwd"]).toBe(resolve("\\source-mcp"));
   },
 );
+
+test.each(["caller-home", "matching-home", "missing-home", "changed-home"])(
+  "native source executor preserves configuration with %s",
+  async (scenario) => {
+    const home = await temporaryDirectory();
+    const repository = await sourceCheckout();
+    const credentialHome = join(home, "state", "codex-home");
+    const captured = join(home, "source-root.txt");
+    const fixture = join(home, "source.mjs");
+    await writeFile(
+      fixture,
+      'import {writeFileSync} from "node:fs"; writeFileSync(process.argv[2], process.env.SOURCE_ROOT ?? ""); process.exit(1);',
+    );
+    let modelRequests = 0;
+    const endpoint = createServer((request, response) => {
+      if (request.url?.includes("responses")) modelRequests++;
+      response
+        .writeHead(200, { "Content-Type": "application/json" })
+        .end('{"data":[]}');
+    });
+    await new Promise<void>((resolve) =>
+      endpoint.listen(0, "127.0.0.1", resolve),
+    );
+    const url = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
+    try {
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        TEMP: process.env["TEMP"],
+        TMP: process.env["TMP"],
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(home, "state"),
+        ...(scenario === "caller-home"
+          ? { OPENAI_API_KEY: "synthetic-review-key" }
+          : {}),
+        SOURCE_ROOT: "synthetic-host-value",
+      };
+      const executor = {
+        id: "source-executor",
+        program: resolveCodexCommand(environment).command,
+        args: ["exec-server", "--listen", "stdio"],
+        cwd: repository,
+        env: { SOURCE_ROOT: "synthetic-remote-value" },
+      };
+      const executorConfig = stringify({ environments: [executor] });
+      await writeFile(join(home, "environments.toml"), executorConfig);
+      const provider = {
+        model_provider: "fixture",
+        model_providers: {
+          fixture: {
+            name: "Fixture",
+            wire_api: "responses",
+            base_url: `${url}/v1`,
+            request_max_retries: 0,
+          },
+        },
+      };
+      if (scenario !== "caller-home") {
+        await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+        await writeFile(
+          join(credentialHome, "auth.json"),
+          JSON.stringify({ OPENAI_API_KEY: "synthetic-stored-key" }),
+          { mode: 0o600 },
+        );
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          stringify(provider),
+          { mode: 0o600 },
+        );
+        if (scenario !== "missing-home")
+          await writeFile(
+            join(credentialHome, "environments.toml"),
+            scenario === "matching-home"
+              ? executorConfig
+              : stringify({
+                  environments: [
+                    {
+                      ...executor,
+                      env: { SOURCE_ROOT: "synthetic-other-value" },
+                    },
+                  ],
+                }),
+          );
+      }
+      const configured = sourceForTest(
+        {
+          ...provider,
+          mcp_servers: {
+            source: {
+              command: process.execPath,
+              args: [fixture, captured],
+              cwd: repository,
+              environment_id: "source-executor",
+              startup_timeout_sec: 2,
+              env_vars: [{ name: "SOURCE_ROOT", source: "remote" }],
+            },
+          },
+        },
+        environment,
+        repository,
+      );
+      if (scenario === "missing-home" || scenario === "changed-home") {
+        await expect(configured).rejects.toThrow(
+          scenario === "missing-home"
+            ? "unknown environment"
+            : "conflicting definitions",
+        );
+        expect(existsSync(captured)).toBe(false);
+      } else {
+        const source = await configured;
+        expect(source.executor).toEqual(executor);
+        const runner = new CodexReviewRunner(
+          environment,
+          undefined,
+          AbortSignal.timeout(15_000),
+          repository,
+          undefined,
+          source,
+        );
+        await expect(
+          runner.run({
+            stage: "pair-review",
+            model: "gpt-5.6-sol",
+            effort: "low",
+            prompt: "Read source using the required MCP server.",
+            schema: { type: "object" },
+            validate: (value) => value,
+          }),
+        ).rejects.toThrow(/required.*source|source.*required/i);
+        expect(await readFile(captured, "utf8")).toBe("synthetic-remote-value");
+      }
+      expect(modelRequests).toBe(0);
+      expect(await readFile(join(home, "environments.toml"), "utf8")).toBe(
+        executorConfig,
+      );
+    } finally {
+      const closed = new Promise<void>((resolve) =>
+        endpoint.close(() => resolve()),
+      );
+      endpoint.closeAllConnections();
+      await closed;
+    }
+  },
+);
+
+test("source MCP preserves native executor URL configuration", async () => {
+  const home = await temporaryDirectory();
+  const source = await sourceForTest(
+    {
+      mcp_servers: {
+        source: {
+          command: "synthetic-source-command",
+          environment_id: "remote",
+        },
+      },
+    },
+    { CODEX_HOME: home, CODEX_EXEC_SERVER_URL: "ws://127.0.0.1:9" },
+  );
+  expect(source.executor).toEqual({ url: "ws://127.0.0.1:9" });
+});

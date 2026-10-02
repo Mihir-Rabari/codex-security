@@ -3,11 +3,12 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
+import { parse as parseToml } from "smol-toml";
 import {
   configuredCodexHome,
   environmentEntry,
@@ -34,6 +35,7 @@ export interface SourceMcp {
   name: string;
   server: JsonObject;
   environment: Record<string, string>;
+  executor?: JsonObject;
 }
 
 type StartCodex = (
@@ -47,6 +49,8 @@ async function readSourceConfig(
   repository: string,
   signal: AbortSignal | undefined,
   startCodex: StartCodex,
+  name: string,
+  environmentId?: string,
 ): Promise<JsonObject> {
   signal?.throwIfAborted();
   const command = resolveCodexCommand(environment);
@@ -80,6 +84,7 @@ async function readSourceConfig(
       signal,
     });
     const loaded = Promise.withResolvers<JsonObject>();
+    let resolvedConfig: JsonObject | undefined;
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -107,7 +112,7 @@ async function readSourceConfig(
           id?: number;
           method?: string;
           error?: { message: string };
-          result?: { config?: JsonObject };
+          result?: { config?: JsonObject; status?: string; error?: string };
         };
         if (message.method !== undefined || message.id === undefined) return;
         if (message.error) throw new ConfigurationError(message.error.message);
@@ -123,7 +128,28 @@ async function readSourceConfig(
             throw new ConfigurationError(
               "Codex did not return source MCP configuration.",
             );
-          loaded.resolve(message.result.config);
+          resolvedConfig = message.result.config;
+          const servers = resolvedConfig["mcp_servers"] as
+            JsonObject | undefined;
+          const selected = servers?.[name] as JsonObject | undefined;
+          environmentId ??=
+            selected?.["enabled"] === false
+              ? undefined
+              : (selected?.["environment_id"] as string | undefined);
+          if (environmentId === undefined) loaded.resolve(resolvedConfig);
+          else
+            send({
+              id: 3,
+              method: "environment/status",
+              params: { environmentId },
+            });
+        } else if (message.id === 3) {
+          if (message.result?.status === "unknown")
+            throw new ConfigurationError(
+              message.result.error ??
+                `Unknown source MCP environment ${JSON.stringify(environmentId)}.`,
+            );
+          loaded.resolve(resolvedConfig!);
         }
       } catch (error) {
         loaded.reject(error);
@@ -133,7 +159,10 @@ async function readSourceConfig(
       send({
         id: 1,
         method: "initialize",
-        params: { clientInfo: { name: "codex-security", version: VERSION } },
+        params: {
+          clientInfo: { name: "codex-security", version: VERSION },
+          capabilities: { experimentalApi: true },
+        },
       });
       return await loaded.promise;
     } catch (error) {
@@ -155,6 +184,38 @@ async function readSourceConfig(
   }
 }
 
+async function sourceExecutor(
+  environment: ProcessEnvironment,
+  environmentId: string,
+  signal?: AbortSignal,
+): Promise<JsonObject | undefined> {
+  if (environmentId === "local") return undefined;
+  const home = configuredCodexHome(environment);
+  let config: JsonObject;
+  try {
+    config = parseToml(
+      await readFile(join(home, "environments.toml"), {
+        encoding: "utf8",
+        signal,
+      }),
+    ) as JsonObject;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // Native uses this endpoint only when environments.toml is absent.
+    return {
+      url:
+        environmentEntry(environment, "CODEX_EXEC_SERVER_URL")?.trim() ?? null,
+    };
+  }
+  const selected = (config["environments"] as JsonObject[] | undefined)?.find(
+    (entry) => entry["id"] === environmentId,
+  );
+  // Native anchors an executor's relative host cwd to its configuration home.
+  if (typeof selected?.["cwd"] === "string")
+    selected["cwd"] = resolve(home, selected["cwd"]);
+  return selected;
+}
+
 export async function resolveSourceMcp(
   name: string,
   environment: ProcessEnvironment,
@@ -172,6 +233,7 @@ export async function resolveSourceMcp(
     repository,
     signal,
     startCodex,
+    name,
   );
   const servers = config["mcp_servers"] as JsonObject | undefined;
   const selected = servers?.[name];
@@ -191,6 +253,8 @@ export async function resolveSourceMcp(
       `Source MCP server ${JSON.stringify(name)} is disabled.`,
     );
   }
+  const environmentId = selected["environment_id"] as string;
+  const executor = await sourceExecutor(environment, environmentId, signal);
   const reviewEnvironment = await comparisonEnvironment(
     environment,
     undefined,
@@ -204,6 +268,8 @@ export async function resolveSourceMcp(
       repository,
       signal,
       startCodex,
+      name,
+      environmentId,
     );
     const reviewServers = reviewConfig["mcp_servers"] as JsonObject | undefined;
     const other = reviewServers?.[name];
@@ -215,6 +281,15 @@ export async function resolveSourceMcp(
     )
       throw new ConfigurationError(
         `Source MCP server ${JSON.stringify(name)} has conflicting definitions in the configured and review credential homes. Use matching server definitions or a different server name.`,
+      );
+    const reviewExecutor = await sourceExecutor(
+      reviewEnvironment,
+      environmentId,
+      signal,
+    );
+    if (!isDeepStrictEqual(executor, reviewExecutor))
+      throw new ConfigurationError(
+        `Source MCP environment ${JSON.stringify(environmentId)} has conflicting definitions in the configured and review credential homes. Configure matching executor definitions before deduplicating.`,
       );
   }
   const server: JsonObject = {
@@ -296,7 +371,12 @@ export async function resolveSourceMcp(
       }
     }
   }
-  return { name, server, environment: credentials };
+  return {
+    name,
+    server,
+    environment: credentials,
+    ...(executor === undefined ? {} : { executor }),
+  };
 }
 
 export async function sourceMcpInstructions(

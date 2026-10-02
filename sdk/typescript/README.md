@@ -2270,7 +2270,11 @@ to the MCP child. An explicit relative stdio `cwd` is resolved from the caller's
 directory for local servers; executor-owned paths retain native handling. If a
 stored-login home defines the same server name, its effective definition must
 match the caller's configuration; use matching definitions or distinct server
-names. OAuth credentials from another Codex home are not imported.
+names. Executor-backed servers also require the selected native executor to be
+available with a matching definition in the review's credential home. The
+selected executor's connection and environment configuration is included in
+resume checkpoints, so changing it triggers fresh reviews. OAuth credentials
+from another Codex home are not imported.
 Native resource reads retain Codex's existing behavior and the MCP server's
 repository permissions. Omitting the flag preserves existing dedupe source access.
 
