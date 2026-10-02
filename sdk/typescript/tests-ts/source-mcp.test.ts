@@ -125,6 +125,7 @@ for (const transport of [
       const inheritedSource: JsonValue[] = [
         "OPTIONAL_SOURCE",
         "MISSING_SOURCE",
+        "CODEX_SQLITE_HOME",
         "INHERITED_SOURCE",
         "OVERRIDDEN_SOURCE",
         { name: "OBJECT_SOURCE", source: "local" },

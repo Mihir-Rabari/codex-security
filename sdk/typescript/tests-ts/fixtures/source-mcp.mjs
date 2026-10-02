@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 const names = [
   "OPENAI_API_KEY",
   "CODEX_HOME",
+  "CODEX_SQLITE_HOME",
   "OPTIONAL_SOURCE",
   "MISSING_SOURCE",
   "INHERITED_SOURCE",

@@ -563,9 +563,9 @@ for (const {
                 },
               }),
         });
-        expect(
-          request.params.config.mcp_servers.sourcegraph.env_vars,
-        ).toBeUndefined();
+        expect(request.params.config.mcp_servers.sourcegraph.env_vars).toEqual(
+          sourceMcp === "http" ? undefined : [],
+        );
         expect(args.join(" ")).not.toContain("synthetic-source-only-key");
         expect(args.join(" ")).not.toContain("synthetic-static-auth");
         expect(request.params.approvalPolicy).toBe("on-request");

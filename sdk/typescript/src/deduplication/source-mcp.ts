@@ -272,8 +272,8 @@ export async function resolveSourceMcp(
       ...explicit,
     };
   }
-  if (remaining.length) server["env_vars"] = remaining;
-  else delete server["env_vars"];
+  // An empty array clears the native list; omitting it would restore inheritance.
+  if (server["env_vars"] !== undefined) server["env_vars"] = remaining;
   // Node passes one spelling per Windows environment variable. Exclude every
   // inherited spelling as well so an alias cannot expose an MCP credential.
   if (process.platform === "win32") {
