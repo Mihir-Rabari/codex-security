@@ -62,7 +62,7 @@ Both remain incomplete. Git submodule inventory is explicitly incomplete;
 case-only directory aliases preserve tracked lockfiles. A Git lookup failure in a
 checkout fails inventory rather than falling back to filesystem enumeration;
 ordinary non-Git directories remain supported. Local and direct URL
-origins remain unresolved while ordinary registry tarball URLs retain registry
+origins remain unresolved while public npm registry tarball URLs retain registry
 matching. Unchanged OSV configuration cannot turn conditional exclusions into
 resolution claims. Nested-source tests also verify that unused root
 configuration cannot abort matching or hide missing inventory. The Composer

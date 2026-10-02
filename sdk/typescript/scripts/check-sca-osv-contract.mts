@@ -391,7 +391,9 @@ try {
       const resolved =
         origin === "local"
           ? "file:../local-lib.tgz"
-          : "https://example.invalid/synthetic-lib.tgz";
+          : origin === "registry"
+            ? "https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz"
+            : "https://example.invalid/synthetic-lib.tgz";
       const tarball = await scan(`npm-v${version}-${origin}-tarball`, {
         "package-lock.json": JSON.stringify({
           lockfileVersion: version,
@@ -446,7 +448,7 @@ importers:
         version: '1.2.0(peer-lib@2.0.0)'
 packages:
   synthetic-lib@1.2.0:
-    resolution: {integrity: synthetic, tarball: https://example.invalid/synthetic-lib.tgz}
+    resolution: {integrity: synthetic, tarball: https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz}
   peer-lib@2.0.0:
     resolution: {integrity: synthetic}
 snapshots:

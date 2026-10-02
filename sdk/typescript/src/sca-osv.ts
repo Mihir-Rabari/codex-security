@@ -159,7 +159,14 @@ function referenceVersionMatches(
   );
 }
 
-/** OSV omits pnpm links and loses direct URL provenance from declared versions. */
+function alternateNpmTarball(value: string): boolean {
+  return (
+    /^https?:\/\//u.test(value) &&
+    !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/u.test(value)
+  );
+}
+
+/** OSV omits pnpm links and loses non-Git tarball provenance. */
 function pnpmLocalReferences(
   parsed: Record<string, unknown>,
   sourcePath: string,
@@ -189,11 +196,12 @@ function pnpmLocalReferences(
       const tarball = record(entry["resolution"])
         ? entry["resolution"]["tarball"]
         : null;
-      // Registry packages may also have tarball URLs; the package key records
-      // whether the dependency identity itself is a direct URL.
+      // Public registry tarballs retain registry identity; explicit direct URL
+      // keys and alternate tarball origins remain unresolved.
       const resolution = /^(?:file:|link:|https?:\/\/)/u.test(keyVersion)
         ? keyVersion
-        : typeof tarball === "string" && /^(?:file|link):/u.test(tarball)
+        : typeof tarball === "string" &&
+            (/^(?:file|link):/u.test(tarball) || alternateNpmTarball(tarball))
           ? tarball
           : null;
       if (resolution === null) continue;
@@ -287,16 +295,12 @@ function npmLocalReferences(
   for (const [path, dependency] of Object.entries(packages)) {
     if (!path || !record(dependency)) continue;
     const resolved = dependency["resolved"];
-    const alternateRegistry =
-      typeof resolved === "string" &&
-      /^https?:\/\//u.test(resolved) &&
-      !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/u.test(resolved);
     if (
       dependency["link"] !== true &&
       (typeof resolved !== "string" ||
         (!/^(?:file|link):/u.test(resolved) &&
           !directUrls.has(resolved) &&
-          !alternateRegistry))
+          !alternateNpmTarball(resolved)))
     )
       continue;
     const name =

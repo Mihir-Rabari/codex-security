@@ -1026,6 +1026,14 @@ describe("SCA scanner execution", () => {
         }),
       })),
       {
+        path: "pnpm-lock.yaml",
+        content: `lockfileVersion: '9.0'
+packages:
+  synthetic-lib@1.2.0:
+    resolution: {tarball: https://registry.example.test/synthetic-lib.tgz}
+`,
+      },
+      {
         path: "Pipfile.lock",
         content: JSON.stringify({
           _meta: {
@@ -1059,12 +1067,11 @@ describe("SCA scanner execution", () => {
       [false, true].map((matched) => ({
         ...input,
         matched,
-        ecosystem:
-          input.path === "package-lock.json"
-            ? "npm"
-            : input.path === "Gemfile.lock"
-              ? "RubyGems"
-              : "PyPI",
+        ecosystem: ["package-lock.json", "pnpm-lock.yaml"].includes(input.path)
+          ? "npm"
+          : input.path === "Gemfile.lock"
+            ? "RubyGems"
+            : "PyPI",
       })),
     ),
   )(
@@ -1195,7 +1202,7 @@ importers:
     devDependencies:
       linked-lib: {specifier: 'link:../linked-lib', version: 'link:../linked-lib'}
 packages:
-  synthetic-lib@1.2.0: {resolution: {integrity: synthetic}}
+  synthetic-lib@1.2.0: {resolution: {integrity: synthetic, tarball: https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz}}
   local-lib@file:../local-lib: {resolution: {directory: ../local-lib, type: directory}}
 snapshots:
   synthetic-lib@1.2.0:
