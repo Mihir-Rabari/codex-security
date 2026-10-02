@@ -1,5 +1,5 @@
 import { environmentEntry, readCodexHomeConfig } from "../auth.js";
-import type { JsonObject } from "../config.js";
+import type { JsonObject, JsonValue } from "../config.js";
 import { ConfigurationError } from "../errors.js";
 import type { ProcessEnvironment } from "../runtime.js";
 import { gitOutput } from "../targets.js";
@@ -48,9 +48,9 @@ export async function resolveSourceMcp(
   };
   if (server["tools"] !== undefined) {
     server["tools"] = Object.fromEntries(
-      Object.keys(server["tools"] as JsonObject).map((tool) => [
+      Object.entries(server["tools"] as JsonObject).map(([tool, settings]) => [
         tool,
-        { approval_mode: "prompt" },
+        { ...(settings as JsonObject), approval_mode: "prompt" },
       ]),
     );
   }
@@ -73,10 +73,21 @@ export async function resolveSourceMcp(
   // Resolve stdio inheritance before the review host selects its own home/auth.
   // Explicit server values retain native precedence and never become host values.
   const inherited: JsonObject = {};
-  for (const variable of (server["env_vars"] as unknown[] | undefined) ?? []) {
-    if (typeof variable !== "string") continue;
-    const value = environmentEntry(environment, variable);
-    if (value !== undefined) inherited[variable] = value;
+  const remaining: JsonValue[] = [];
+  for (const variable of (server["env_vars"] as JsonValue[] | undefined) ??
+    []) {
+    const entry =
+      typeof variable === "string"
+        ? { name: variable }
+        : (variable as JsonObject);
+    if (entry["source"] !== undefined && entry["source"] !== "local") {
+      // Remote variables belong to the executor. Let Codex resolve/validate them.
+      remaining.push(variable);
+      continue;
+    }
+    const name = entry["name"] as string;
+    const value = environmentEntry(environment, name);
+    if (value !== undefined) inherited[name] = value;
   }
   if (Object.keys(inherited).length) {
     server["env"] = {
@@ -84,7 +95,8 @@ export async function resolveSourceMcp(
       ...((server["env"] as JsonObject | undefined) ?? {}),
     };
   }
-  delete server["env_vars"];
+  if (remaining.length) server["env_vars"] = remaining;
+  else delete server["env_vars"];
   // Node passes one spelling per Windows environment variable. Exclude every
   // inherited spelling as well so an alias cannot expose an MCP credential.
   if (process.platform === "win32") {

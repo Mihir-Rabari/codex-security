@@ -6,6 +6,8 @@ const names = [
   "OPTIONAL_SOURCE",
   "MISSING_SOURCE",
   "INHERITED_SOURCE",
+  "OBJECT_SOURCE",
+  "IMPLICIT_SOURCE",
   "OVERRIDDEN_SOURCE",
 ];
 writeFileSync(

@@ -83,6 +83,8 @@ for (const transport of ["http", "stdio"] as const) {
         OPENAI_API_KEY: "synthetic-review-key",
         SOURCE_AUTH: "token synthetic-env-auth",
         INHERITED_SOURCE: "synthetic-inherited",
+        OBJECT_SOURCE: "synthetic-object",
+        IMPLICIT_SOURCE: "synthetic-implicit",
         OVERRIDDEN_SOURCE: "synthetic-ambient",
       };
       const source = await sourceForTest(
@@ -117,6 +119,8 @@ for (const transport of ["http", "stdio"] as const) {
                       "MISSING_SOURCE",
                       "INHERITED_SOURCE",
                       "OVERRIDDEN_SOURCE",
+                      { name: "OBJECT_SOURCE", source: "local" },
+                      { name: "IMPLICIT_SOURCE" },
                     ],
                   }),
             },
@@ -163,6 +167,8 @@ for (const transport of ["http", "stdio"] as const) {
           CODEX_HOME: "synthetic-source-home",
           OPTIONAL_SOURCE: "synthetic-fallback",
           INHERITED_SOURCE: "synthetic-inherited",
+          OBJECT_SOURCE: "synthetic-object",
+          IMPLICIT_SOURCE: "synthetic-implicit",
           OVERRIDDEN_SOURCE: "synthetic-explicit",
         });
       }
@@ -186,7 +192,9 @@ test("source MCP preserves native settings and requires an enabled configured se
           http_headers: { Authorization: "token synthetic-static-auth" },
           env_http_headers: { Authorization: "SOURCE_AUTH" },
           default_tools_approval_mode: "approve",
-          tools: { read_source: { approval_mode: "approve" } },
+          tools: {
+            read_source: { approval_mode: "approve", output_token_limit: 321 },
+          },
         },
         unrelated: { command: "unrelated-command" },
       },
@@ -200,7 +208,9 @@ test("source MCP preserves native settings and requires an enabled configured se
     enabled: true,
     required: true,
     default_tools_approval_mode: "prompt",
-    tools: { read_source: { approval_mode: "prompt" } },
+    tools: {
+      read_source: { approval_mode: "prompt", output_token_limit: 321 },
+    },
   });
   expect(source.environment).toEqual({
     SOURCE_AUTH: "token synthetic-env-auth",
@@ -250,3 +260,18 @@ test.skipIf(process.platform !== "win32")(
     });
   },
 );
+
+test("source MCP leaves remote environment resolution and validation to Codex", async () => {
+  const home = await temporaryDirectory();
+  const env_vars = [
+    { name: "REMOTE_SOURCE", source: "remote" },
+    { name: "INVALID_SOURCE", source: "unknown" },
+  ];
+  const source = await sourceForTest(
+    { mcp_servers: { source: { command: "synthetic-command", env_vars } } },
+    { CODEX_HOME: home, REMOTE_SOURCE: "synthetic-local-value" },
+  );
+  expect(source.server["env_vars"]).toEqual(env_vars);
+  expect(source.server["env"]).toBeUndefined();
+  expect(source.environment).toEqual({});
+});
