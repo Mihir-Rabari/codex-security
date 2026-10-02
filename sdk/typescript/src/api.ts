@@ -830,9 +830,7 @@ export class CodexSecurity {
         const reportTrackingError = (error: unknown): void => {
           if (options.maxCostUsd !== undefined) budgetController.abort(error);
           else
-            result!.diagnostics.push(
-              `Cost tracking: ${safeErrorMessage(error)}`,
-            );
+            result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
           if (cost !== null) reportCost(cost);
@@ -893,7 +891,7 @@ export class CodexSecurity {
               })[0]!;
             } catch (error) {
               throwIfAborted(signal, outputDir);
-              const message = safeErrorMessage(error);
+              const message = errorMessage(error);
               const failure = classifyConnectionFailure(message);
               if (failure === "unauthorized" || failure === "forbidden")
                 throw error;
@@ -939,7 +937,7 @@ export class CodexSecurity {
         throwIfAborted(signal, outputDir);
       } catch (error) {
         result.status = "partial";
-        const message = safeErrorMessage(error);
+        const message = errorMessage(error);
         result.diagnostics.push(`Static assessment: ${message}`);
         for (const assessment of result.assessments) {
           if (assessment.status === "completed") continue;
@@ -958,7 +956,7 @@ export class CodexSecurity {
         for (const assessment of result.assessments) {
           if (assessment.status === "completed") continue;
           assessment.status = "cancelled";
-          assessment.error = safeErrorMessage(signal.reason);
+          assessment.error = errorMessage(signal.reason);
         }
         result.diagnostics.push(
           "Dependency scan interrupted; completed scanner facts are retained.",

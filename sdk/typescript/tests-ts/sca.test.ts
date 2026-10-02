@@ -763,9 +763,10 @@ test("failed matching without assessable matches retains its failure status", as
 test.each(["runtime", "model", "malformed", "missing"])(
   "%s failure retains matches and records unavailable assessment",
   async (failure) => {
+    const modelError = "synthetic transport failure: token=synthetic-value";
     const { client, repository, outputDir } = await fixture({
       runtimeError: failure === "runtime",
-      error: failure === "model" ? "synthetic transport failure" : undefined,
+      error: failure === "model" ? modelError : undefined,
       malformed: failure === "malformed",
       missing: failure === "missing",
     });
@@ -781,10 +782,13 @@ test.each(["runtime", "model", "malformed", "missing"])(
       status: "failed",
       verdict: null,
     });
+    if (failure === "model") {
+      expect(result.assessments[0]!.error).toBe(modelError);
+      expect(result.diagnostics.join("\n")).toContain(modelError);
+    }
     expect(
-      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8"))
-        .matches,
-    ).toHaveLength(1);
+      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    ).toEqual(result);
   },
 );
 
@@ -985,14 +989,15 @@ test.each([
 ])(
   "final cost verification $failure enforces requested limit: $requested",
   async ({ failure, requested }) => {
+    const trackingError =
+      "synthetic final cost tracking failure: token=synthetic-value";
     const { client, repository, outputDir } = await fixture();
     await using security = client;
     const originalStop = ScanCostTracker.prototype.stop;
     const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
       async function (this: ScanCostTracker, usage?: unknown) {
         const snapshot = await originalStop.call(this, usage);
-        if (failure === "throw")
-          throw new Error("synthetic final cost tracking failure");
+        if (failure === "throw") throw new Error(trackingError);
         return { ...snapshot, cost: null };
       },
     );
@@ -1011,7 +1016,7 @@ test.each([
         expect((error as ScanInterruptedError).cause).toMatchObject({
           message:
             failure === "throw"
-              ? "synthetic final cost tracking failure"
+              ? trackingError
               : "Could not verify the dependency assessment cost limit.",
         });
       } else {
@@ -1025,9 +1030,7 @@ test.each([
       expect(saved.matches).toHaveLength(1);
       expect(saved.assessments[0]!.status).toBe("completed");
       if (failure === "throw")
-        expect(saved.diagnostics.join("\n")).toContain(
-          "synthetic final cost tracking failure",
-        );
+        expect(saved.diagnostics.join("\n")).toContain(trackingError);
     } finally {
       stop.mockRestore();
     }
