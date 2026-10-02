@@ -13,7 +13,7 @@ Focused checks rerun on Linux on October 2, 2026:
 
 | Check                          | Observed result                                                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Focused SDK regressions        | 306 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
+| Focused SDK regressions        | 307 tests passed: input formats, adapter, orchestration, schemas, partial assessment, reports, comparisons, and handoffs. |
 | Deterministic SCA evaluation   | 28 tests passed.                                                                                                          |
 | Portable plugin compatibility  | Source check and all 9 checker tests passed.                                                                              |
 | Python source checks           | Ruff 0.16.8 lint and format checks passed.                                                                                |

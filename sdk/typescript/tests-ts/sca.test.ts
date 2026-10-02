@@ -178,6 +178,7 @@ async function fixture(
     dirtyRepository?: boolean;
     changeSourceAt?: "scanner" | "model";
     changeRevision?: boolean;
+    changeRefs?: boolean;
     snapshotErrorAt?: 1 | 2;
     workbenchSnapshot?: boolean;
     mcpConfig?: string;
@@ -250,7 +251,9 @@ async function fixture(
     return {
       repository,
       revision,
-      refsDigest: "synthetic-refs",
+      refsDigest: options.changeRefs
+        ? `synthetic-refs-${snapshotCalls}`
+        : "synthetic-refs",
       content: await readFile(sourcePath, "utf8"),
     };
   };
@@ -1079,6 +1082,28 @@ test("stable initially dirty source can complete dependency assessment", async (
   expect(result.repository.dirty).toBe(true);
   expect(result.status).toBe("completed");
   expect(result.assessments[0]!.status).toBe("completed");
+});
+
+test("unrelated Git reference changes retain all dependency assessments", async () => {
+  const { client, repository, outputDir, sourceCalls } = await fixture({
+    changeRefs: true,
+    workbenchSnapshot: true,
+    turns: ["completed", "completed"],
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+  });
+  expect(sourceCalls).toHaveLength(3);
+  expect(result.status).toBe("completed");
+  expect(result.assessments.map(({ status }) => status)).toEqual([
+    "completed",
+    "completed",
+  ]);
+  expect(
+    JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+  ).toEqual(result);
 });
 
 test.each([

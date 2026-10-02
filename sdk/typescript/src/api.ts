@@ -716,10 +716,14 @@ export class CodexSecurity {
         }
         return await sourceWorkflow.sourceSnapshot(inputs.repository);
       };
+      const sourceDigest = async () => {
+        const { repository, revision, content } = await snapshotSource();
+        return workflowDigest({ repository, revision, content });
+      };
       // Bind triage to the source before inventory, including dirty and ignored files.
       // A snapshot failure must not discard deterministic scanner evidence.
-      const source = await snapshotSource().then(
-        (snapshot) => ({ digest: workflowDigest(snapshot) }),
+      const source = await sourceDigest().then(
+        (digest) => ({ digest }),
         (error: unknown) => ({ error }),
       );
       const repository = {
@@ -906,7 +910,7 @@ export class CodexSecurity {
                 error: message,
               };
             }
-            if (workflowDigest(await snapshotSource()) !== source.digest)
+            if ((await sourceDigest()) !== source.digest)
               throw new CodexSecurityError(
                 "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
               );
