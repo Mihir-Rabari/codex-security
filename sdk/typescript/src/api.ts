@@ -47,6 +47,7 @@ import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
+  codexSecurityPrivatePaths,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -188,7 +189,6 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
-  codexRuntimeReadDirectories,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -490,6 +490,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
+const SCA_PERMISSION_PROFILE = "codex_security_dependencies";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
@@ -779,8 +780,6 @@ export class CodexSecurity {
         );
         result.model.skillDigest = contract.skillDigest;
         const command = this.#codexCommand();
-        const runtimeReadDirectories =
-          await codexRuntimeReadDirectories(command);
         const mcpServers = await disabledMcpServers(
           command,
           session.sessionConfig,
@@ -799,21 +798,19 @@ export class CodexSecurity {
           },
           options.auth,
           undefined,
-          policyCodexConfig(session.sessionConfig),
-          [`mcp_servers=${inlineToml(mcpServers)}`],
+          {
+            ...policyCodexConfig(session.sessionConfig),
+            default_permissions: SCA_PERMISSION_PROFILE,
+          },
+          [
+            `mcp_servers=${inlineToml(mcpServers)}`,
+            `permissions.${SCA_PERMISSION_PROFILE}=${inlineToml(dependencyPermissions(this.#dependencies.environment, runtime.codexHome))}`,
+          ],
         );
         const threadOptions: ThreadOptions = {
           threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
           workingDirectory: outputDir,
-          additionalDirectories: [
-            ...new Set([
-              inputs.repository,
-              runtime.plugin.pluginRoot,
-              // Linked launchers also need the native shell-tool runtime.
-              dirname(command.command),
-              ...runtimeReadDirectories,
-            ]),
-          ],
+          additionalDirectories: [inputs.repository, runtime.plugin.pluginRoot],
           skipGitRepoCheck: true,
           approvalPolicy: "never",
           networkAccessEnabled: false,
@@ -4965,6 +4962,27 @@ export function scanRuntimeCodexConfig(
         network: { enabled: false },
       },
     },
+  };
+}
+
+function dependencyPermissions(
+  environment: ProcessEnvironment,
+  runtimeHome: string,
+): JsonObject {
+  const ambientHome = configuredCodexHome(environment);
+  const privatePaths = [
+    ...codexSecurityPrivatePaths(environment),
+    runtimeHome,
+    // The ambient home also contains the default dependency evidence directory.
+    join(ambientHome, "auth.json"),
+    join(ambientHome, "config.toml"),
+  ];
+  return {
+    extends: ":read-only",
+    filesystem: Object.fromEntries(
+      privatePaths.map((path) => [path, { ".": "deny" }]),
+    ),
+    network: { enabled: false },
   };
 }
 

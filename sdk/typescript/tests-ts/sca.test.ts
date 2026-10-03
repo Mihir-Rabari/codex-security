@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   readFile,
   realpath,
@@ -19,6 +20,7 @@ import Ajv from "ajv";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
+import { codexSecurityPrivatePaths } from "../src/auth.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import {
   ScanInterruptedError,
@@ -185,13 +187,26 @@ async function fixture(
     mcpOverrides?: JsonObject;
     linkedCodex?: boolean;
     codexLauncher?: string;
+    wrappedCodex?: boolean;
+    ambientOutput?: boolean;
     advisoryDetails?: string;
   } = {},
 ) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
-  const outputDir = join(root, "sca");
+  const ambientHome = join(root, "ambient-codex-home");
+  const outputDir = options.ambientOutput
+    ? join(
+        ambientHome,
+        "state",
+        "plugins",
+        "codex-security",
+        "dependencies",
+        "repository",
+        "scan",
+      )
+    : join(root, "sca");
   await Promise.all([
     mkdir(repository, { mode: 0o700 }),
     mkdir(codexHome, { mode: 0o700 }),
@@ -199,6 +214,19 @@ async function fixture(
   if (options.mcpConfig !== undefined)
     await writeFile(join(codexHome, "config.toml"), options.mcpConfig);
   let codexPath = options.codexLauncher;
+  if (options.wrappedCodex) {
+    codexPath = join(root, "launcher", "launch-security");
+    await mkdir(dirname(codexPath));
+    await writeFile(
+      codexPath,
+      `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const child = spawnSync(${JSON.stringify(resolveCodexCommand({}).command)}, process.argv.slice(2), { stdio: "inherit" });
+process.exit(child.status ?? 1);
+`,
+    );
+    await chmod(codexPath, 0o700);
+  }
   if (options.linkedCodex) {
     const nativePath = resolveCodexCommand({}).command;
     const launcherDirectory = join(root, "linked-runtime");
@@ -240,7 +268,9 @@ async function fixture(
         process.env[name] === undefined ? [] : [[name, process.env[name]!]],
       ),
     ),
-    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(options.ambientOutput
+      ? { CODEX_HOME: ambientHome }
+      : { CODEX_SECURITY_STATE_DIR: join(root, "state") }),
     OPENAI_API_KEY: "synthetic-sca-key",
     ...(codexPath === undefined ? {} : { CODEX_CLI_PATH: codexPath }),
   };
@@ -454,6 +484,7 @@ async function fixture(
     pythonResolutions,
     environment,
     codexHome,
+    ambientHome,
   };
 }
 
@@ -461,7 +492,7 @@ async function fixture(
   "JavaScript",
   "pnpm shim",
 ])(
-  "dependency triage keeps the installed npm %s launcher and grants its native runtime",
+  "dependency triage keeps the installed npm %s launcher with read-only permissions",
   async (kind) => {
     const launcher =
       kind === "JavaScript"
@@ -475,11 +506,8 @@ async function fixture(
     });
     expect(result.status).toBe("completed");
     expect(f.captured.codex!.codexPathOverride).toBe(launcher);
-    expect(f.captured.thread!.additionalDirectories).toContain(
-      dirname(launcher),
-    );
-    expect(f.captured.thread!.additionalDirectories).toContain(
-      dirname(resolveCodexCommand({}).command),
+    expect(f.captured.codex!.config!["default_permissions"]).toBe(
+      "codex_security_dependencies",
     );
     expect(f.captured.codex!.env!["CODEX_CLI_PATH"]).toBe(launcher);
 
@@ -517,7 +545,84 @@ process.exit(0);
   },
 );
 
-test("dependency triage disables inherited MCP servers and grants the linked native runtime", async () => {
+(process.platform === "win32" ? test.skip : test)(
+  "dependency triage runs a delegated native tool with read-only evidence and private credentials",
+  async () => {
+    const f = await fixture({ wrappedCodex: true, ambientOutput: true });
+    await using security = f.client;
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    });
+    expect(result.status).toBe("completed");
+    const options = f.captured.codex!;
+    const launcher = f.environment.CODEX_CLI_PATH!;
+    const native = resolveCodexCommand({}).command;
+    expect(options.codexPathOverride).toBe(launcher);
+    expect(options.env!["CODEX_CLI_PATH"]).toBe(launcher);
+    expect(dirname(native)).not.toBe(dirname(launcher));
+    const privateFiles = [
+      join(f.ambientHome, "auth.json"),
+      join(f.ambientHome, "config.toml"),
+      join(f.codexHome, "auth.json"),
+      ...codexSecurityPrivatePaths(f.environment).filter((path) =>
+        path.includes("workbench.sqlite3"),
+      ),
+      join(
+        f.ambientHome,
+        "state",
+        "plugins",
+        "codex-security",
+        "codex-home",
+        "auth.json",
+      ),
+    ];
+    for (const path of privateFiles) {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(
+        path,
+        path.endsWith("config.toml")
+          ? "# synthetic private configuration\n"
+          : "synthetic credential",
+      );
+    }
+    const permissions = parseToml(options.configOverrides![1]!)[
+      "permissions"
+    ] as Record<string, JsonObject>;
+    expect(permissions["codex_security_dependencies"]!["network"]).toEqual({
+      enabled: false,
+    });
+    const source = join(f.repository, "usage.txt");
+    const probe = await runCodexCommand(
+      { command: launcher },
+      [
+        ...options.configOverrides!.flatMap((value) => ["--config", value]),
+        "sandbox",
+        "-P",
+        "codex_security_dependencies",
+        "-C",
+        f.outputDir,
+        "/bin/sh",
+        "-c",
+        'set -eu; cat "$1" >/dev/null; "$2" --version; if printf changed >"$3" 2>/dev/null; then exit 1; fi; shift 3; for private in "$@"; do if cat "$private" >/dev/null 2>&1; then exit 1; fi; done',
+        "sca-permissions",
+        join(f.outputDir, "sca-result.json"),
+        native,
+        source,
+        ...privateFiles,
+      ],
+      options.env!,
+    );
+    expect(probe.stderr).not.toContain("Permission profile");
+    expect(probe.success).toBe(true);
+    expect(probe.stdout).toContain("codex-cli");
+    expect(await readFile(source, "utf8")).toBe(
+      "synthetic initial source context",
+    );
+  },
+);
+
+test("dependency triage disables inherited MCP servers and keeps the linked native launcher", async () => {
   const mcpConfig =
     '[mcp_servers."synthetic.inherited"]\ncommand = "synthetic-inherited"\n';
   const f = await fixture({
@@ -538,17 +643,15 @@ test("dependency triage disables inherited MCP servers and grants the linked nat
   expect(result.status).toBe("completed");
   const options = f.captured.codex!;
   expect(options.env!["CODEX_HOME"]).toBe(f.codexHome);
-  expect(options.configOverrides!.map((value) => parseToml(value))).toEqual([
-    {
-      mcp_servers: {
-        "synthetic.inherited": { enabled: false },
-        "synthetic.configured": {
-          command: "synthetic-configured",
-          enabled: false,
-        },
+  expect(parseToml(options.configOverrides![0]!)).toEqual({
+    mcp_servers: {
+      "synthetic.inherited": { enabled: false },
+      "synthetic.configured": {
+        command: "synthetic-configured",
+        enabled: false,
       },
     },
-  ]);
+  });
   const effective = await runCodexCommand(
     resolveCodexCommand(f.environment),
     [
@@ -582,8 +685,6 @@ test("dependency triage disables inherited MCP servers and grants the linked nat
   expect(f.captured.thread!.additionalDirectories).toEqual([
     f.repository,
     PLUGIN_ROOT,
-    dirname(launcherPath),
-    runtimeDirectory,
   ]);
 
   // Exercise the pinned SDK's argument/environment boundary without a model call.
@@ -617,7 +718,11 @@ process.exit(0);
   expect(turn.finalResponse).toBe("synthetic response");
   const child = JSON.parse(await readFile(receipt, "utf8"));
   expect(child.home).toBe(f.codexHome);
-  expect(child.argv).toContain(options.configOverrides![0]);
+  for (const override of options.configOverrides!)
+    expect(child.argv).toContain(override);
+  expect(child.argv).toContain(
+    'default_permissions="codex_security_dependencies"',
+  );
   expect(
     child.argv.flatMap((value: string, index: number, argv: string[]) =>
       value === "--add-dir" ? [argv[index + 1]] : [],
@@ -696,7 +801,7 @@ test.each([
     expect(captured.codex!.config).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
-      default_permissions: "codex_security_policy",
+      default_permissions: "codex_security_dependencies",
       features: { plugins: false, apps: false },
       mcp_servers: {},
     });
@@ -705,11 +810,7 @@ test.each([
       approvalPolicy: "never",
       networkAccessEnabled: false,
       webSearchMode: "disabled",
-      additionalDirectories: [
-        repository,
-        PLUGIN_ROOT,
-        dirname(resolveCodexCommand().command),
-      ],
+      additionalDirectories: [repository, PLUGIN_ROOT],
     });
     expect(captured.prompt).toContain("triage-finding");
     expect(captured.prompt).toContain(

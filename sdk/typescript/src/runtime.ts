@@ -2435,50 +2435,29 @@ export function resolveCodexCommand(
   ) {
     return { command: resolve(expanded) };
   }
-  return packagedCodexCommand(import.meta.url);
-}
 
-function packagedCodexCommand(
-  from: string,
-  launcherPackageRoot?: string,
-): CodexCommand {
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
-  let vendor: string;
+  let packageJson: string;
   try {
-    const require = createRequire(from);
+    const require = createRequire(import.meta.url);
     const codexPackageJson = require.resolve("@openai/codex/package.json");
-    const packageJson = createRequire(codexPackageJson).resolve(
+    packageJson = createRequire(codexPackageJson).resolve(
       `${packageName}/package.json`,
     );
-    vendor = join(dirname(packageJson), "vendor");
   } catch (error) {
-    if (launcherPackageRoot === undefined) {
-      throw new PluginBootstrapError(
-        `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
-        { cause: error },
-      );
-    }
-    // The npm JavaScript entrypoint also supports a vendor directory in its package.
-    vendor = join(launcherPackageRoot, "vendor");
+    throw new PluginBootstrapError(
+      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
+      { cause: error },
+    );
   }
-  const launcherTargets: Record<string, string> = {
-    "linux-x64": "x86_64-unknown-linux-musl",
-    "linux-arm64": "aarch64-unknown-linux-musl",
-    "darwin-x64": "x86_64-apple-darwin",
-    "darwin-arm64": "aarch64-apple-darwin",
-    "win32-x64": "x86_64-pc-windows-msvc",
-    "win32-arm64": "aarch64-pc-windows-msvc",
-  };
-  const target =
-    launcherPackageRoot === undefined
-      ? readdirSync(vendor, { withFileTypes: true }).find((entry) =>
-          entry.isDirectory(),
-        )?.name
-      : launcherTargets[`${platform}-${process.arch}`];
+  const vendor = join(dirname(packageJson), "vendor");
+  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
+    entry.isDirectory(),
+  );
   const command = join(
     vendor,
-    target ?? "",
+    target?.name ?? "",
     "bin",
     process.platform === "win32" ? "codex.exe" : "codex",
   );
@@ -2488,42 +2467,6 @@ function packagedCodexCommand(
     );
   }
   return { command };
-}
-
-/** Resolve read access for the selected runtime without replacing its launcher. */
-export async function codexRuntimeReadDirectories(
-  command: CodexCommand,
-): Promise<string[]> {
-  const executable = await realpath(command.command);
-  const directories = [dirname(executable)];
-  // pnpm uses a regular .bin shim rather than a symlink to codex.js.
-  const packageShim =
-    basename(executable) === "codex" &&
-    basename(dirname(executable)) === ".bin";
-  if (basename(executable) !== "codex.js" && !packageShim) return directories;
-  let packageJson: string;
-  try {
-    packageJson = createRequire(executable).resolve(
-      "@openai/codex/package.json",
-    );
-  } catch (error) {
-    // A custom launcher need not be the npm package's entrypoint.
-    if (nodeErrorCode(error) === "MODULE_NOT_FOUND") return directories;
-    throw error;
-  }
-  if (
-    !packageShim &&
-    executable !== join(dirname(packageJson), "bin", "codex.js")
-  )
-    return directories;
-  directories.push(
-    dirname(
-      await realpath(
-        packagedCodexCommand(packageJson, dirname(packageJson)).command,
-      ),
-    ),
-  );
-  return directories;
 }
 
 export function executablePathForSpawn(command: string): string {

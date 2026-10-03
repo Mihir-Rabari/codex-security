@@ -67,7 +67,6 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
-  codexRuntimeReadDirectories,
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
@@ -2248,90 +2247,14 @@ describe("plugin runtime preparation", () => {
     },
   );
 
-  test("resolves the exact npm Codex executable", async () => {
+  test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
     expect(isAbsolute(command.command)).toBe(true);
     expect(command.command).toContain(`${sep}vendor${sep}`);
     expect(command.command).toEndWith(
       join("bin", process.platform === "win32" ? "codex.exe" : "codex"),
     );
-    expect(await codexRuntimeReadDirectories(command)).toEqual([
-      dirname(await realpath(command.command)),
-    ]);
   });
-
-  test.each(["platform package", "bundled vendor"])(
-    "resolves native read access from the selected npm JavaScript %s",
-    async (layout) => {
-      const root = await temporaryDirectory();
-      const packageRoot = join(root, "node_modules", "@openai", "codex");
-      const platform =
-        process.platform === "android" ? "linux" : process.platform;
-      const platformName = `@openai/codex-${platform}-${process.arch}`;
-      const platformRoot = join(root, "node_modules", platformName);
-      const targets: Record<string, string> = {
-        "linux-x64": "x86_64-unknown-linux-musl",
-        "linux-arm64": "aarch64-unknown-linux-musl",
-        "darwin-x64": "x86_64-apple-darwin",
-        "darwin-arm64": "aarch64-apple-darwin",
-        "win32-x64": "x86_64-pc-windows-msvc",
-        "win32-arm64": "aarch64-pc-windows-msvc",
-      };
-      const vendor = join(
-        layout === "platform package" ? platformRoot : packageRoot,
-        "vendor",
-      );
-      const runtimeDirectory = join(
-        vendor,
-        targets[`${platform}-${process.arch}`]!,
-        "bin",
-      );
-      const launcher = join(packageRoot, "bin", "codex.js");
-      await mkdir(dirname(launcher), { recursive: true });
-      await mkdir(runtimeDirectory, { recursive: true });
-      await mkdir(join(vendor, "another-target", "bin"), { recursive: true });
-      await writeFile(
-        join(packageRoot, "package.json"),
-        JSON.stringify({ name: "@openai/codex", type: "module" }),
-      );
-      if (layout === "platform package")
-        await writeFile(
-          join(platformRoot, "package.json"),
-          JSON.stringify({ name: platformName }),
-        );
-      await writeFile(
-        launcher,
-        "// synthetic package entrypoint, never executed\n",
-      );
-      await writeFile(
-        join(
-          runtimeDirectory,
-          process.platform === "win32" ? "codex.exe" : "codex",
-        ),
-        "synthetic native file, never executed\n",
-      );
-      expect(await codexRuntimeReadDirectories({ command: launcher })).toEqual([
-        dirname(launcher),
-        runtimeDirectory,
-      ]);
-      if (process.platform !== "win32")
-        expect(resolveCodexCommand({ CODEX_CLI_PATH: launcher })).toEqual({
-          command: launcher,
-        });
-    },
-  );
-
-  test.each(["codex", "codex.js"])(
-    "preserves an independent custom launcher named %s",
-    async (name) => {
-      const root = await temporaryDirectory();
-      const launcher = join(root, name);
-      await writeFile(launcher, "synthetic custom launcher, never executed\n");
-      expect(await codexRuntimeReadDirectories({ command: launcher })).toEqual([
-        root,
-      ]);
-    },
-  );
 
   test("uses an explicit Codex executable override", () => {
     const executable = process.platform === "win32" ? "codex.exe" : "codex";

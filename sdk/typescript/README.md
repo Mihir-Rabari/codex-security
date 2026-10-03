@@ -2874,7 +2874,8 @@ its overall status also accounts for assessment execution.
 
 OSV sends package identities to its advisory service, not repository source.
 The assessment uses the existing Codex provider/model/authentication settings
-and the existing read-only, offline tool permission profile. It executes no
+and a read-only, offline tool permission profile. Codex authentication files
+and protected credential homes stay inaccessible to model tools. It executes no
 application code or vulnerability reproductions. OSV configuration exclusions
 remain effective and are reported; a missing source inventory requires a scanner
 receipt showing empty input or package filtering. Exact suppressed counts and
