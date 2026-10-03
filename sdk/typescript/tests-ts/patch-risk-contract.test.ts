@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
 import {
-  copyFile,
-  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +12,7 @@ import { dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 interface Assessment {
   [key: string]: unknown;
@@ -780,27 +779,13 @@ describe("patch risk assessment contract", () => {
     async () => {
       const outside = await mkdtemp(join(tmpdir(), "patch-risk-powershell-"));
       try {
-        const plugin = join(outside, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
-        const expandedPlugin = plugin.replace("%PLUGIN%", "expanded-plugin");
+        const launcher = windowsHelperFixture(outside);
         const file = join(
           outside,
           "review-%USERNAME% !EXPAND! \u96ea's",
           "assessment.json",
         );
         const expandedFile = file.replace("%USERNAME%", "expanded-user");
-        await mkdir(join(plugin, "scripts"), { recursive: true });
-        await cp(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), {
-          recursive: true,
-        });
-        await copyFile(
-          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
-          join(plugin, "scripts", "launch_codex_security_mcp.cmd"),
-        );
-        await mkdir(join(expandedPlugin, "scripts"), { recursive: true });
-        await writeFile(
-          join(expandedPlugin, "scripts", "launch_codex_security_mcp.cmd"),
-          "@echo expanded-plugin-used\r\n@exit /b 0\r\n",
-        );
         for (const path of [file, expandedFile])
           await mkdir(dirname(path), { recursive: true });
         const original = JSON.stringify(assessment()).replace(
@@ -808,62 +793,17 @@ describe("patch risk assessment contract", () => {
           "example/caf\u00e9-\u96ea",
         );
         await writeFile(expandedFile, original);
-        const skill = await readFile(
-          join(PLUGIN_ROOT, "skills", "assess-patch-risk", "SKILL.md"),
-          "utf8",
-        );
-        const command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(
-          skill,
-        )?.[1];
-        expect(command).toBeDefined();
-        const quote = (value: string) => value.replaceAll("'", "''");
-        const powershells = [
-          join(
-            process.env["SystemRoot"]!,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe",
-          ),
-          Bun.which("pwsh"),
-        ].filter((value): value is string => value !== null);
-        for (const powershell of powershells) {
+        for (const powershell of launcher.powershells) {
           for (const input of ["invalid", "valid", "stdin"]) {
             await writeFile(file, input === "invalid" ? "{}" : original);
-            const script =
-              command!
-                .replace("<plugin-root>", quote(plugin))
-                .replace(
-                  "<assessment.json>",
-                  quote(input === "stdin" ? "-" : file),
-                ) + "\nexit $LASTEXITCODE\n";
-            const result = spawnSync(
+            const result = launcher.run(
               powershell,
-              [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                Buffer.from(script, "utf16le").toString("base64"),
-              ],
+              "skills/assess-patch-risk/SKILL.md",
               {
-                cwd: outside,
-                env: {
-                  SystemRoot: process.env["SystemRoot"],
-                  PATH: join(process.env["SystemRoot"]!, "System32"),
-                  HOME: outside,
-                  USERPROFILE: outside,
-                  LOCALAPPDATA: outside,
-                  XDG_CACHE_HOME: outside,
-                  CODEX_MCP_NODE_PATH: node,
-                  PLUGIN: "expanded-plugin",
-                  USERNAME: "expanded-user",
-                  EXPAND: "expanded-bang",
-                },
-                encoding: "utf8",
-                input: original,
-                windowsHide: true,
+                "<plugin-root>": launcher.plugin,
+                "<assessment.json>": input === "stdin" ? "-" : file,
               },
+              original,
             );
             expect(
               result.status,
