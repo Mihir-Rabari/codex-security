@@ -358,6 +358,7 @@ function excludedLocalReference(
 ): boolean {
   const referenceVersion = reference.version;
   if (
+    reference.omittedCategory !== undefined ||
     referenceVersion === null ||
     components.some(
       (component) =>

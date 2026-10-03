@@ -144,6 +144,84 @@ test("a retained local tuple remains unresolved when another occurrence was excl
   expect(result.status).toBe("partial");
 });
 
+test.each([
+  ["registry", {}, false],
+  ["local", { path: "../synthetic-local" }, false],
+  ["local, custom category first", { path: "../synthetic-local" }, true],
+  ["alternate index", { index: "synthetic-private" }, false],
+] as const)(
+  "Pipenv dev exclusions leave omitted categories unresolved: %s",
+  async (_label, origin, customFirst) => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "sca-pipenv-exclusion-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const dependency = { "synthetic-lib": { version: "==1.2.0", ...origin } };
+    const develop = { develop: dependency };
+    const production = { production: dependency };
+    const scanPipenv = async (includeProduction: boolean) => {
+      await writeFile(
+        join(repository, "Pipfile.lock"),
+        JSON.stringify({
+          _meta: {
+            sources: [
+              { name: "pypi", url: "https://pypi.org/simple" },
+              {
+                name: "synthetic-private",
+                url: "https://index.example.test/simple",
+              },
+            ],
+          },
+          ...(includeProduction && customFirst ? production : {}),
+          ...develop,
+          ...(includeProduction && !customFirst ? production : {}),
+        }),
+      );
+      return runOsvScan(
+        { repositoryPath: repository, outputDir: join(root, "output") },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? {
+                  stdout: "osv-scanner version: 2.6.0",
+                  stderr: "",
+                  exitCode: 0,
+                }
+              : {
+                  stdout: JSON.stringify({ results: [] }),
+                  stderr:
+                    "Package PyPI/synthetic-lib/1.2.0 has been filtered out because: dev-only exclusion\n",
+                  exitCode: 0,
+                },
+        },
+      );
+    };
+
+    const omitted = await scanPipenv(true);
+    expect(omitted.status).toBe("failed");
+    expect(omitted.coverage.status).toBe("failed");
+    expect(omitted.coverage.unresolvedPackages).toBe(1);
+    expect(omitted.coverage.limitations.join("\n")).toContain(
+      "group:production",
+    );
+    expect(omitted.coverage.limitations.join("\n")).toContain(
+      "synthetic-lib@1.2.0",
+    );
+    if ("path" in origin)
+      expect(omitted.coverage.limitations.join("\n")).toContain(origin.path);
+    if ("index" in origin)
+      expect(omitted.coverage.limitations.join("\n")).toContain(origin.index);
+
+    const excluded = await scanPipenv(false);
+    expect(excluded.status).toBe("completed");
+    expect(excluded.coverage.status).toBe("complete");
+    expect(excluded.coverage.unresolvedPackages).toBe(0);
+  },
+);
+
 for (const [origin, resolution] of [
   ["local", "file:../synthetic-lib.tgz"],
   ["direct-url", "https://example.invalid/synthetic-lib.tgz"],

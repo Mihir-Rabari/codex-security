@@ -12,6 +12,7 @@ export interface ScaUnresolvedReference {
   name: string;
   version: string | null;
   resolution: string;
+  omittedCategory?: string;
 }
 
 export interface InputInspection {
@@ -76,6 +77,7 @@ function addReference(
   name: string,
   version: string | null,
   resolution: string,
+  omittedCategory?: string,
 ): void {
   const normalizedName =
     ecosystem === "PyPI" ? name.toLowerCase().replace(/[-_.]+/gu, "-") : name;
@@ -84,7 +86,8 @@ function addReference(
       reference.sourcePath === sourcePath &&
       reference.ecosystem === ecosystem &&
       reference.name === normalizedName &&
-      reference.version === version,
+      reference.version === version &&
+      reference.omittedCategory === omittedCategory,
   );
   if (previous) return;
   result.references.push({
@@ -93,6 +96,7 @@ function addReference(
     name: normalizedName,
     version,
     resolution,
+    ...(omittedCategory === undefined ? {} : { omittedCategory }),
   });
 }
 
@@ -205,11 +209,14 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
         if ((index !== null || source !== undefined) && !isPublicPypiIndex(url))
           origin = `index:${index ?? text(source?.["name"]) ?? "default"};url:${url ?? "unresolved"}`;
       }
+      const omittedCategory =
+        group !== "default" && group !== "develop" ? group : undefined;
+      const groupResolution = `group:${group};version:${declaredVersion ?? "unresolved"}`;
       if (
         origin !== undefined ||
         version === null ||
         /[*,<>=~]/u.test(version) ||
-        (group !== "default" && group !== "develop")
+        omittedCategory !== undefined
       )
         addReference(
           result,
@@ -217,7 +224,10 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
           "PyPI",
           name,
           version,
-          origin ?? `group:${group};version:${declaredVersion ?? "unresolved"}`,
+          omittedCategory === undefined
+            ? (origin ?? groupResolution)
+            : `${groupResolution}${origin === undefined ? "" : `;${origin}`}`,
+          omittedCategory,
         );
     }
   }
