@@ -1177,6 +1177,42 @@ packages:
       }
     },
   );
+  test.each([2, 3])(
+    "keeps npm v%s local Git provenance when OSV emits a registry tuple",
+    async (lockfileVersion) => {
+      const resolved = `git+file:///synthetic/local-repository#${"a".repeat(40)}`;
+      for (const matched of [false, true]) {
+        // OSV-Scanner 2.6.0 emits an npm tuple for this local Git locator.
+        const result = await scanFixture(
+          {
+            stdout: JSON.stringify(
+              rawOutput("package-lock.json", matched ? [advisory("A")] : []),
+            ),
+            stderr: "",
+            exitCode: matched ? 1 : 0,
+          },
+          {
+            "package-lock.json": JSON.stringify({
+              lockfileVersion,
+              packages: {
+                "node_modules/synthetic-lib": { version: "1.2.0", resolved },
+              },
+            }),
+          },
+        );
+        expect(result.status).toBe("partial");
+        expect(result.coverage.status).toBe("partial");
+        expect(result.coverage.unresolvedPackages).toBe(1);
+        expect(result.coverage.limitations.join("\n")).toContain(resolved);
+        expect(result.components[0]).toMatchObject({
+          ecosystem: "npm",
+          name: "synthetic-lib",
+          version: "1.2.0",
+        });
+        expect(result.matches).toHaveLength(matched ? 1 : 0);
+      }
+    },
+  );
   test.each([true, false])(
     "counts npm workspace links once when an unresolved tuple is emitted: %s",
     async (emitted) => {

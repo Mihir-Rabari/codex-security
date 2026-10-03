@@ -298,7 +298,7 @@ function npmLocalReferences(
     if (
       dependency["link"] !== true &&
       (typeof resolved !== "string" ||
-        (!/^(?:file|link):/u.test(resolved) &&
+        (!/^(?:file|link|git\+file):/u.test(resolved) &&
           !directUrls.has(resolved) &&
           !alternateNpmTarball(resolved)))
     )
