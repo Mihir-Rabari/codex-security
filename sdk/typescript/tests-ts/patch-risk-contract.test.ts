@@ -666,6 +666,31 @@ describe("patch risk assessment contract", () => {
     }
   });
 
+  test("rejects long truncated strings without repeatedly scanning their suffix", () => {
+    const complete = assessment();
+    complete.impact.rationale = '"'.repeat(64000);
+    const truncated = '{"impact":{"rationale":"' + '\\"'.repeat(64000) + "\\";
+    for (const [input, status] of [
+      [truncated, 1],
+      [JSON.stringify(complete), 0],
+    ] as const) {
+      const result = spawnSync(
+        node,
+        [helper, "validate-patch-risk-assessment", "-"],
+        {
+          input,
+          encoding: "utf8",
+          timeout: 5000,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(status);
+      if (status === 1)
+        expect(result.stderr).toContain("cannot read assessment:");
+      else expect(result.stderr).toBe("");
+    }
+  });
+
   test("rejects malformed JSON and preserves duplicate and property order", () => {
     for (const [text, message] of [
       ["\ufeff{}", "cannot read assessment: Unexpected UTF-8 BOM"],
