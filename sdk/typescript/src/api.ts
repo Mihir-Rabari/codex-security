@@ -4975,6 +4975,7 @@ function dependencyPermissions(
     runtimeHome,
     // The ambient home also contains the default dependency evidence directory.
     join(ambientHome, "auth.json"),
+    join(ambientHome, ".credentials.json"),
     join(ambientHome, "config.toml"),
   ];
   return {

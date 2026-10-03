@@ -676,6 +676,7 @@ process.exit(0);
     expect(dirname(native)).not.toBe(dirname(launcher));
     const privateFiles = [
       join(f.ambientHome, "auth.json"),
+      join(f.ambientHome, ".credentials.json"),
       join(f.ambientHome, "config.toml"),
       join(f.codexHome, "auth.json"),
       ...codexSecurityPrivatePaths(f.environment).filter((path) =>
