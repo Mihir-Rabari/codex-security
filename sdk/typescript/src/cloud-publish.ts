@@ -79,6 +79,7 @@ async function cloudRequest(
   method = "GET",
   body?: BodyInit,
   contentType = "application/json",
+  timeoutMs = 30_000,
 ): Promise<unknown> {
   dependencies.signal?.throwIfAborted();
   const credentials = await readCloudCredentials(
@@ -87,7 +88,7 @@ async function cloudRequest(
   const base =
     dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
     CLOUD_PUBLISH_URL;
-  const timeout = AbortSignal.timeout(30_000);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
@@ -326,6 +327,8 @@ export async function publishScanToCloud(
           "PUT",
           new Uint8Array(bytes.get(artifact.name)!),
           "application/octet-stream",
+          // Allow the server's 120-second ingress window plus response processing.
+          150_000,
         ),
       );
     }

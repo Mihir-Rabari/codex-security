@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -518,6 +518,42 @@ describe("native Cloud publication", () => {
     await expect(
       publishScanToCloud(scan, { environment, fetch }),
     ).rejects.toThrow("ChatGPT login");
+  });
+  test("allows artifact transfers beyond the metadata request deadline", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    let elapsed = 0;
+    const deadlines: { at: number; controller: AbortController }[] = [];
+    const timeout = spyOn(AbortSignal, "timeout").mockImplementation(
+      (delay) => {
+        const controller = new AbortController();
+        deadlines.push({ at: elapsed + delay, controller });
+        return controller.signal;
+      },
+    );
+    try {
+      const result = await publishScanToCloud(scan, {
+        environment,
+        fetch: async (url, options) => {
+          // A supported 64 MiB artifact takes about 54 seconds at 10 Mbps.
+          if (options.method === "PUT") elapsed += 54_000;
+          for (const deadline of deadlines) {
+            if (deadline.at <= elapsed)
+              deadline.controller.abort(
+                new DOMException("Timed out", "TimeoutError"),
+              );
+          }
+          options.signal?.throwIfAborted();
+          return cloud.fetch(url, options);
+        },
+      });
+      expect(result.publication?.upload_status).toBe("accepted");
+      expect(cloud.calls.filter((call) => call.method === "PUT")).toHaveLength(
+        4,
+      );
+    } finally {
+      timeout.mockRestore();
+    }
   });
   test("caller cancellation prevents subsequent artifact upload", async () => {
     const { scan, environment } = await fixture();
