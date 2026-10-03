@@ -679,7 +679,7 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  test("rejects long truncated strings without repeatedly scanning their suffix", () => {
+  test("rejects long truncated strings without repeatedly scanning their suffix", async () => {
     const complete = assessment();
     complete.impact.rationale = '"'.repeat(64000);
     const truncated = '{"impact":{"rationale":"' + '\\"'.repeat(64000) + "\\";
@@ -687,16 +687,15 @@ describe("patch risk assessment contract", () => {
       [truncated, 1],
       [JSON.stringify(complete), 0],
     ] as const) {
-      const result = spawnSync(
+      const result = await runCommand(
         node,
         [helper, "validate-patch-risk-assessment", "-"],
         {
           input,
-          encoding: "utf8",
           timeout: 5000,
         },
       );
-      expect(result.error).toBeUndefined();
+      expect(result.signal, result.error?.message).toBeNull();
       expect(result.status, result.stderr).toBe(status);
       if (status === 1)
         expect(result.stderr).toContain("cannot read assessment:");
@@ -827,287 +826,6 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  // Temporary CI probe: remove once the silent Windows invocation is isolated.
-  test.skipIf(process.platform !== "win32")(
-    "diagnoses PowerShell startup and documented helper execution",
-    async () => {
-      const outside = await mkdtemp(join(tmpdir(), "patch-risk-probe-"));
-      powershellDirectories.push(outside);
-      const plugin = join(outside, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
-      const file = join(
-        outside,
-        "review-%USERNAME% !EXPAND! \u96ea's",
-        "assessment.json",
-      );
-      const caller = join(outside, "caller");
-      await mkdir(join(plugin, "scripts"), { recursive: true });
-      await cp(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), {
-        recursive: true,
-      });
-      await copyFile(
-        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
-        join(plugin, "scripts", "launch_codex_security_mcp.cmd"),
-      );
-      const expandedPlugin = plugin.replace("%PLUGIN%", "expanded-plugin");
-      await mkdir(join(expandedPlugin, "scripts"), { recursive: true });
-      await writeFile(
-        join(expandedPlugin, "scripts", "launch_codex_security_mcp.cmd"),
-        "@echo expanded-plugin-used\r\n@exit /b 0\r\n",
-      );
-      const original = JSON.stringify(assessment()).replace(
-        "example/project",
-        "example/caf\u00e9-\u96ea",
-      );
-      const expandedFile = file.replace("%USERNAME%", "expanded-user");
-      await mkdir(dirname(expandedFile), { recursive: true });
-      await writeFile(expandedFile, original);
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, "{}");
-      await mkdir(caller);
-      const source = await readFile(
-        join(PLUGIN_ROOT, "skills", "assess-patch-risk", "SKILL.md"),
-        "utf8",
-      );
-      const command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
-      if (command === undefined)
-        throw new Error("Missing documented PowerShell command");
-      const quote = (value: string) => value.replaceAll("'", "''");
-      const systemRoot = process.env["SystemRoot"]!;
-      const fixtureEnvironment = {
-        SystemRoot: systemRoot,
-        PATH: join(systemRoot, "System32"),
-        HOME: outside,
-        USERPROFILE: outside,
-        LOCALAPPDATA: outside,
-        XDG_CACHE_HOME: outside,
-        CODEX_MCP_NODE_PATH: node,
-        PLUGIN: "expanded-plugin",
-        USERNAME: "expanded-user",
-        EXPAND: "expanded-bang",
-      };
-      const driver = join(outside, "powershell-driver.cjs");
-      await writeFile(
-        driver,
-        String.raw`
-const { execFile } = require("node:child_process");
-const { readFileSync, writeFileSync } = require("node:fs");
-const configuration = JSON.parse(readFileSync(process.argv[2], "utf8"));
-const overrides = new Set(Object.keys(configuration.env).map((key) => key.toUpperCase()));
-const inherited = configuration.environment === "inherited"
-  ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !overrides.has(key.toUpperCase())))
-  : {};
-const started = Date.now();
-let stdinError = null;
-const child = execFile(configuration.powershell, configuration.args, {
-  cwd: configuration.cwd,
-  env: { ...inherited, ...configuration.env },
-  encoding: "utf8",
-  timeout: 30_000,
-  windowsHide: true,
-}, (error, stdout, stderr) => {
-  const result = {
-    runtime: { executable: process.execPath, node: process.version, bun: process.versions.bun ?? null },
-    durationMs: Date.now() - started,
-    status: child.exitCode,
-    signal: child.signalCode,
-    error: error?.message ?? null,
-    stdinError,
-    stdout,
-    stderr,
-  };
-  writeFileSync(configuration.result, JSON.stringify(result));
-});
-child.stdin.on("error", (error) => { stdinError = error.message; });
-child.stdin.end(configuration.input);
-`,
-      );
-      interface ProbeResult {
-        runtime: { executable: string; node: string; bun: string | null };
-        durationMs: number;
-        status: number | null;
-        signal: string | null;
-        error: string | null;
-        stdinError: string | null;
-        stdout: string;
-        stderr: string;
-      }
-      const results: Array<{
-        runtime: string;
-        environment: string;
-        shell: string;
-        payload: string;
-        driver:
-          | (Omit<Awaited<ReturnType<typeof runCommand>>, "error"> & {
-              error: string | null;
-            })
-          | null;
-        driverError: string | null;
-        result: ProbeResult | null;
-        resultError: string | null;
-        started: string | null;
-        finished: string | null;
-      }> = [];
-      const readMarker = async (path: string) => {
-        try {
-          return await readFile(path, "utf8");
-        } catch (error) {
-          return (error as NodeJS.ErrnoException).code === "ENOENT"
-            ? null
-            : String(error);
-        }
-      };
-      const shellAvailability: Array<readonly [string, string | null]> = [
-        [
-          "powershell5",
-          join(
-            systemRoot,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe",
-          ),
-        ],
-        ["powershell7", Bun.which("pwsh")],
-      ];
-      const shells = shellAvailability.filter(
-        (shell): shell is readonly [string, string] => shell[1] !== null,
-      );
-      for (const [runtime, executable] of [
-        ["node", node],
-        ["bun", process.execPath],
-      ] as const) {
-        for (const environment of ["fixture", "inherited"] as const) {
-          for (const [shell, powershell] of shells) {
-            for (const payload of ["marker", "documented"] as const) {
-              const id = `${runtime}-${environment}-${shell}-${payload}`;
-              const started = join(outside, `${id}.started`);
-              const finished = join(outside, `${id}.finished`);
-              const resultPath = join(outside, `${id}.result.json`);
-              const configurationPath = join(
-                outside,
-                `${id}.configuration.json`,
-              );
-              const script = [
-                `[IO.File]::WriteAllText('${quote(started)}', 'started')`,
-                ...(payload === "marker"
-                  ? [
-                      "[Console]::Out.WriteLine('probe-stdout')",
-                      "[Console]::Error.WriteLine('probe-stderr')",
-                      "$probeExit = 37",
-                    ]
-                  : [
-                      "$ProgressPreference = 'SilentlyContinue'",
-                      `Set-Location -LiteralPath '${quote(caller)}' -ErrorAction Stop`,
-                      command
-                        .replace("<plugin-root>", quote(plugin))
-                        .replace("<assessment.json>", quote(file)),
-                      "$probeExit = $LASTEXITCODE",
-                    ]),
-                `[IO.File]::WriteAllText('${quote(finished)}', [string]$probeExit)`,
-                "exit $probeExit",
-                "",
-              ].join("\n");
-              await writeFile(
-                configurationPath,
-                JSON.stringify({
-                  powershell,
-                  args: [
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-EncodedCommand",
-                    Buffer.from(script, "utf16le").toString("base64"),
-                  ],
-                  cwd: outside,
-                  env: fixtureEnvironment,
-                  environment,
-                  input: original,
-                  result: resultPath,
-                }),
-              );
-              let driverResult: Awaited<ReturnType<typeof runCommand>> | null =
-                null;
-              let driverError: string | null = null;
-              try {
-                driverResult = await runCommand(
-                  executable,
-                  [driver, configurationPath],
-                  {
-                    cwd: outside,
-                    timeout: 40_000,
-                    windowsHide: true,
-                  },
-                );
-              } catch (error) {
-                driverError = String(error);
-              }
-              let result: ProbeResult | null = null;
-              let resultError: string | null = null;
-              try {
-                result = JSON.parse(
-                  await readFile(resultPath, "utf8"),
-                ) as ProbeResult;
-              } catch (error) {
-                resultError = String(error);
-              }
-              results.push({
-                runtime,
-                environment,
-                shell,
-                payload,
-                driver:
-                  driverResult === null
-                    ? null
-                    : {
-                        ...driverResult,
-                        error: driverResult.error?.message ?? null,
-                      },
-                driverError,
-                result,
-                resultError,
-                started: await readMarker(started),
-                finished: await readMarker(finished),
-              });
-            }
-          }
-        }
-      }
-      const diagnostics = JSON.stringify(
-        {
-          shells: shellAvailability.map(([shell, executable]) => ({
-            shell,
-            available: executable !== null,
-          })),
-          results,
-        },
-        null,
-        2,
-      );
-      console.log(`PowerShell diagnostic matrix\n${diagnostics}`);
-      expect(results).toHaveLength(shells.length * 8);
-      for (const result of results) {
-        expect(result.driverError, diagnostics).toBeNull();
-        expect(result.driver?.status, diagnostics).toBe(0);
-        expect(result.resultError, diagnostics).toBeNull();
-        expect(result.started, diagnostics).toBe("started");
-        const status = result.payload === "marker" ? 37 : 1;
-        expect(result.finished, diagnostics).toBe(String(status));
-        expect(result.result?.status, diagnostics).toBe(status);
-        expect(result.result?.stderr, diagnostics).toContain(
-          result.payload === "marker"
-            ? "probe-stderr"
-            : "missing required schema property",
-        );
-        if (result.payload === "marker")
-          expect(result.result?.stdout, diagnostics).toContain("probe-stdout");
-        expect(result.result?.runtime.bun === null, diagnostics).toBe(
-          result.runtime === "node",
-        );
-      }
-    },
-    16 * 40_000 + 30_000,
-  );
-
   for (const location of ["absolute", "relative", "unc"] as const)
     test.skipIf(
       process.platform !== "win32" ||
@@ -1170,6 +888,26 @@ child.stdin.end(configuration.input);
           ),
           Bun.which("pwsh"),
         ].filter((value): value is string => value !== null);
+        const fixtureEnvironment = {
+          SystemRoot: process.env["SystemRoot"],
+          PATH: join(process.env["SystemRoot"]!, "System32"),
+          HOME: outside,
+          USERPROFILE: outside,
+          LOCALAPPDATA: outside,
+          XDG_CACHE_HOME: outside,
+          CODEX_MCP_NODE_PATH: node,
+          PLUGIN: "expanded-plugin",
+          USERNAME: "expanded-user",
+          EXPAND: "expanded-bang",
+        };
+        const overrides = new Set(
+          Object.keys(fixtureEnvironment).map((key) => key.toUpperCase()),
+        );
+        const inherited = Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([key]) => !overrides.has(key.toUpperCase()),
+          ),
+        );
         for (const powershell of powershells) {
           for (const input of [
             "invalid",
@@ -1214,18 +952,7 @@ child.stdin.end(configuration.input);
               ],
               {
                 cwd: outside,
-                env: {
-                  SystemRoot: process.env["SystemRoot"],
-                  PATH: join(process.env["SystemRoot"]!, "System32"),
-                  HOME: outside,
-                  USERPROFILE: outside,
-                  LOCALAPPDATA: outside,
-                  XDG_CACHE_HOME: outside,
-                  CODEX_MCP_NODE_PATH: node,
-                  PLUGIN: "expanded-plugin",
-                  USERNAME: "expanded-user",
-                  EXPAND: "expanded-bang",
-                },
+                env: { ...inherited, ...fixtureEnvironment },
                 timeout: 30_000,
                 input: input === "pipeline" ? "" : original,
                 windowsHide: true,
