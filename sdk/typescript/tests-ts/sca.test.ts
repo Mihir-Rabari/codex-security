@@ -593,12 +593,15 @@ process.exit(0);
       enabled: false,
     });
     const source = join(f.repository, "usage.txt");
+    const configArgs = [
+      ...options.configOverrides!.flatMap((value) => ["--config", value]),
+      "--config",
+      `default_permissions=${JSON.stringify(options.config!["default_permissions"])}`,
+    ];
     const probe = await runCodexCommand(
       { command: launcher },
       [
-        ...options.configOverrides!.flatMap((value) => ["--config", value]),
-        "--config",
-        `default_permissions=${JSON.stringify(options.config!["default_permissions"])}`,
+        ...configArgs,
         "sandbox",
         "-P",
         "codex_security_dependencies",
@@ -615,6 +618,21 @@ process.exit(0);
       ],
       options.env!,
     );
+    if (
+      !probe.success &&
+      process.platform === "linux" &&
+      probe.stderr.includes(
+        "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+      )
+    ) {
+      const configProbe = await runCodexCommand(
+        { command: launcher },
+        [...configArgs, "features", "list"],
+        options.env!,
+      );
+      expect(configProbe.success, configProbe.stderr).toBe(true);
+      return;
+    }
     expect(probe.success, probe.stderr).toBe(true);
     expect(probe.stdout).toContain("codex-cli");
     expect(await readFile(source, "utf8")).toBe(
