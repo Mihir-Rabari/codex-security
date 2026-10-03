@@ -1,6 +1,12 @@
 import { decodeUtf8 } from "./utf8";
 import { dirname } from "node:path";
-import { mkdir, pythonPath, readFile, writeFile } from "./helper-files";
+import {
+  filesystemErrorMessage,
+  mkdir,
+  pythonPath,
+  readFile,
+  writeFile,
+} from "./helper-files";
 import { encodePosixPath } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
 import { expandHome } from "./resolve-security-md";
@@ -26,7 +32,18 @@ function compare(left: string, right: string): number {
 
 function loadRows(path: string, selection: boolean): RankRow[] {
   const label = selection ? "Rank output" : "Rank input";
-  const contents = decodeUtf8(readFile(path));
+  let contents: string;
+  try {
+    contents = decodeUtf8(readFile(path));
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    )
+      throw new Error(`${label} missing: ${path}`);
+    throw error;
+  }
   const lines = contents === "" ? [] : contents.split(/\r\n|[\r\n]/u);
   if (lines.at(-1) === "") lines.pop();
   const fields = selection
@@ -264,7 +281,7 @@ export function deepReviewInputCommand(
     print(message);
     return 0;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = filesystemErrorMessage(error);
     print(
       error instanceof ArgumentError
         ? `${usage}\n${command}: error: ${message}`
