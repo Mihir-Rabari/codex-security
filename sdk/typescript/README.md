@@ -1318,7 +1318,7 @@ supported when the saved scan records its base commit and snapshot identity.
 Older scans without frozen repository provenance require a new scan; the CLI
 does not infer their origin from the current checkout.
 
-`--dry-run` with a scan ID validates eligibility and prints local findings without
+`--dry-run` with a scan ID validates eligibility and individual artifact limits, then prints local findings without
 logging in or uploading. Interactive discovery requires Cloud access. Uploads
 use ChatGPT credentials saved to a file. Set this in Codex `config.toml`, then
 sign in with ChatGPT again:

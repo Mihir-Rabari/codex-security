@@ -49,6 +49,18 @@ const validateReceipt = ajv.compile<ImportedScanReceipt>({
   ...cloudSchema,
   $ref: "#/$defs/ImportedScanReceipt",
 });
+type ImportContent = Omit<
+  CreateImportedScan,
+  "environment_id" | "repository_id" | "connector_id"
+>;
+const validateImportContent = ajv.compile<ImportContent>({
+  $defs: cloudSchema.$defs,
+  ...cloudSchema.$defs.CreateImportedScan,
+  required: cloudSchema.$defs.CreateImportedScan.required.filter(
+    (field) =>
+      !["environment_id", "repository_id", "connector_id"].includes(field),
+  ),
+});
 const validateCreate = ajv.compile<CreateImportedScan>({
   ...cloudSchema,
   $ref: "#/$defs/CreateImportedScan",
@@ -190,24 +202,6 @@ export async function publishScanToCloud(
   });
   const repository = requireCloudScanEligibility(contract);
   const { scan } = contract.manifest;
-  if (dependencies.dryRun)
-    return {
-      scanId: scan.id,
-      findingIds: [],
-      findingCount: contract.findings.findings.length,
-      dryRun: true,
-      findings: contract.findings.findings,
-    };
-  const destinations = await listCloudDestinations(
-    dependencies,
-    scan.target.remote!,
-  );
-  const destination = await selectCloudDestination(
-    destinations.filter(
-      (item) => cloudRepositoryIdentity(item.repository_remote) === repository,
-    ),
-    dependencies,
-  );
   const names: ImportArtifactDeclaration["name"][] = [
     "scan-manifest.json",
     "findings.json",
@@ -245,11 +239,8 @@ export async function publishScanToCloud(
     bytes.set(name, contents);
     artifacts.push({ name, sha256: digest, size_bytes: contents.byteLength });
   }
-  const request: CreateImportedScan = {
+  const content: ImportContent = {
     protocol_version: 1,
-    environment_id: destination.environment_id,
-    repository_id: destination.repository_id,
-    connector_id: destination.connector_id,
     source_scan_id: scan.id,
     repository_remote: scan.target.remote!,
     repository_path: ".",
@@ -264,6 +255,34 @@ export async function publishScanToCloud(
     scan_started_at: scan.startedAt,
     scan_completed_at: scan.completedAt,
     artifacts,
+  };
+  if (!validateImportContent(content))
+    throw new CodexSecurityError(
+      `The scan does not satisfy the Cloud import contract: ${ajv.errorsText(validateImportContent.errors)}.`,
+    );
+  if (dependencies.dryRun)
+    return {
+      scanId: scan.id,
+      findingIds: [],
+      findingCount: contract.findings.findings.length,
+      dryRun: true,
+      findings: contract.findings.findings,
+    };
+  const destinations = await listCloudDestinations(
+    dependencies,
+    scan.target.remote!,
+  );
+  const destination = await selectCloudDestination(
+    destinations.filter(
+      (item) => cloudRepositoryIdentity(item.repository_remote) === repository,
+    ),
+    dependencies,
+  );
+  const request: CreateImportedScan = {
+    ...content,
+    environment_id: destination.environment_id,
+    repository_id: destination.repository_id,
+    connector_id: destination.connector_id,
   };
   if (!validateCreate(request))
     throw new CodexSecurityError(

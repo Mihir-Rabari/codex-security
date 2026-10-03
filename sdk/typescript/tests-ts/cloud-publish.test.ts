@@ -11,6 +11,7 @@ import {
   readFile,
   rm,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -258,7 +259,7 @@ describe("native Cloud publication", () => {
       await expect(
         publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
       ).rejects.toThrow();
-      expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
+      expect(cloud.calls).toHaveLength(0);
     },
   );
   test("resumes interrupted upload, skips verified objects and returns the same publication", async () => {
@@ -432,6 +433,41 @@ describe("native Cloud publication", () => {
     });
     expect(result.dryRun).toBe(true);
   });
+  test.each([true, false])(
+    "rejects an oversized artifact before network (dry-run: %s)",
+    async (dryRun) => {
+      const { scan } = await fixture();
+      await truncate(join(scan, "report.md"), 64 * 1024 * 1024 + 1);
+      await expect(
+        publishScanToCloud(scan, {
+          dryRun,
+          environment: {},
+          fetch: async () => {
+            throw new Error("unexpected network");
+          },
+        }),
+      ).rejects.toThrow("does not satisfy the Cloud import contract");
+    },
+  );
+  test.each([true, false])(
+    "rejects an unsupported commit format before network (dry-run: %s)",
+    async (dryRun) => {
+      const { scan } = await fixture();
+      const path = join(scan, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(path, "utf8"));
+      manifest.scan.target.revision = "a".repeat(64);
+      await writeFile(path, JSON.stringify(manifest));
+      await expect(
+        publishScanToCloud(scan, {
+          dryRun,
+          environment: {},
+          fetch: async () => {
+            throw new Error("unexpected network");
+          },
+        }),
+      ).rejects.toThrow("does not satisfy the Cloud import contract");
+    },
+  );
   test.each(["auto", "keyring"])(
     "rejects stale file credentials when %s storage is active",
     async (storage) => {
