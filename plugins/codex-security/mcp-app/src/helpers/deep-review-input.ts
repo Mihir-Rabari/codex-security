@@ -1,9 +1,9 @@
 import { decodeUtf8 } from "./utf8";
 import { dirname } from "node:path";
-import { mkdir, readFile, writeFile } from "./helper-files";
+import { mkdir, pythonPath, readFile, writeFile } from "./helper-files";
 import { encodePosixPath } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
-import { expandHome, parsedPath } from "./resolve-security-md";
+import { expandHome } from "./resolve-security-md";
 
 type Command = "copy-deep-review-input" | "select-deep-review-input";
 interface RankRow {
@@ -232,7 +232,7 @@ export function deepReviewInputCommand(
       return 0;
     }
     const path = (name: string) =>
-      parsedPath(expandHome(parsedPath(values[name] as string), posixHome));
+      pythonPath(expandHome(pythonPath(values[name] as string), posixHome));
     const rows = loadRows(path(input), selection);
     let selected = rows,
       total = rows.length;
