@@ -1,7 +1,7 @@
 import { decodeUtf8 } from "./utf8";
 import assessmentSchema from "../../../schemas/patch-risk-assessment.schema.json";
 import { validateAgainstSchema, type ContractSchema } from "./contract-schema";
-import { readFile } from "./helper-files";
+import { filesystemErrorMessage, readFile } from "./helper-files";
 import { decodePosixBytes } from "./posix-path";
 import { JsonSyntaxError, object, parseJson, pythonRepr } from "./python-json";
 import { parsedPath } from "./resolve-security-md";
@@ -147,9 +147,7 @@ function readAssessment(path: string): unknown {
               .join("/") || ".";
     contents = readFile(path === "-" ? 0 : input);
   } catch (error) {
-    throw new Error(
-      `cannot read assessment: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw new Error(`cannot read assessment: ${filesystemErrorMessage(error)}`);
   }
   const text =
     path === "-"

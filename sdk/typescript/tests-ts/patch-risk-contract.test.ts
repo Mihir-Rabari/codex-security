@@ -813,6 +813,20 @@ describe("patch risk assessment contract", () => {
     }
   });
 
+  test("escapes terminal controls in assessment file-read error paths", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "patch-risk-read-error-"));
+    try {
+      const file = join(outside, "missing-\u001b[2J.json");
+      const result = validateText("", outside, [file]);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("missing-\\x1b[2J.json");
+      expect(result.stderr).not.toContain("\u001b");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   // Temporary CI probe: remove once the silent Windows invocation is isolated.
   test.skipIf(process.platform !== "win32")(
     "diagnoses PowerShell startup and documented helper execution",
@@ -942,7 +956,7 @@ child.stdin.end(configuration.input);
             : String(error);
         }
       };
-      const shells = [
+      const shellAvailability: Array<readonly [string, string | null]> = [
         [
           "powershell5",
           join(
@@ -953,8 +967,11 @@ child.stdin.end(configuration.input);
             "powershell.exe",
           ),
         ],
-        ["powershell7", Bun.which("pwsh") ?? "pwsh.exe"],
-      ] as const;
+        ["powershell7", Bun.which("pwsh")],
+      ];
+      const shells = shellAvailability.filter(
+        (shell): shell is readonly [string, string] => shell[1] !== null,
+      );
       for (const [runtime, executable] of [
         ["node", node],
         ["bun", process.execPath],
@@ -1055,9 +1072,19 @@ child.stdin.end(configuration.input);
           }
         }
       }
-      const diagnostics = JSON.stringify(results, null, 2);
+      const diagnostics = JSON.stringify(
+        {
+          shells: shellAvailability.map(([shell, executable]) => ({
+            shell,
+            available: executable !== null,
+          })),
+          results,
+        },
+        null,
+        2,
+      );
       console.log(`PowerShell diagnostic matrix\n${diagnostics}`);
-      expect(results).toHaveLength(16);
+      expect(results).toHaveLength(shells.length * 8);
       for (const result of results) {
         expect(result.driverError, diagnostics).toBeNull();
         expect(result.driver?.status, diagnostics).toBe(0);
@@ -1150,6 +1177,7 @@ child.stdin.end(configuration.input);
             const script =
               "$ProgressPreference = 'SilentlyContinue'\n" +
               `Set-Location -LiteralPath '${quote(workingDirectory)}' -ErrorAction Stop\n` +
+              "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
               command!
                 .replace("<plugin-root>", quote(argument(plugin)))
                 .replace(
@@ -1214,9 +1242,7 @@ child.stdin.end(configuration.input);
                 "missing required schema property",
               );
             else if (input === "missing")
-              expect(result.stderr, diagnostics).toContain(
-                "cannot read assessment:",
-              );
+              expect(result.stderr, diagnostics).toContain("PathNotFound");
             else if (location !== "unc")
               expect(result.stderr, diagnostics).toBe("");
             if (input === "missing")
