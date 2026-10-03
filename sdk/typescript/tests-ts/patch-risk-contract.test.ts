@@ -1171,7 +1171,13 @@ child.stdin.end(configuration.input);
           Bun.which("pwsh"),
         ].filter((value): value is string => value !== null);
         for (const powershell of powershells) {
-          for (const input of ["invalid", "valid", "stdin", "missing"]) {
+          for (const input of [
+            "invalid",
+            "valid",
+            "stdin",
+            "pipeline",
+            "missing",
+          ]) {
             await writeFile(file, input === "invalid" ? "{}" : original);
             if (input === "missing") await rm(file);
             const script =
@@ -1182,9 +1188,13 @@ child.stdin.end(configuration.input);
                 .replace("<plugin-root>", quote(argument(plugin)))
                 .replace(
                   "<assessment.json>",
-                  quote(input === "stdin" ? "-" : argument(file)),
+                  quote(
+                    input === "stdin" || input === "pipeline"
+                      ? "-"
+                      : argument(file),
+                  ),
                 ) +
-              "\nexit $LASTEXITCODE\n";
+              "\n";
             const result = await runCommand(
               powershell,
               [
@@ -1192,7 +1202,15 @@ child.stdin.end(configuration.input);
                 "-NoProfile",
                 "-NonInteractive",
                 "-EncodedCommand",
-                Buffer.from(script, "utf16le").toString("base64"),
+                Buffer.from(
+                  input === "pipeline"
+                    ? script.replace(
+                        /^cmd\.exe/m,
+                        `'${quote(original)}' | cmd.exe`,
+                      )
+                    : script,
+                  "utf16le",
+                ).toString("base64"),
               ],
               {
                 cwd: outside,
@@ -1209,7 +1227,7 @@ child.stdin.end(configuration.input);
                   EXPAND: "expanded-bang",
                 },
                 timeout: 30_000,
-                input: original,
+                input: input === "pipeline" ? "" : original,
                 windowsHide: true,
               },
             );
@@ -1220,7 +1238,10 @@ child.stdin.end(configuration.input);
                 input,
                 workingDirectory,
                 plugin: argument(plugin),
-                assessment: input === "stdin" ? "-" : argument(file),
+                assessment:
+                  input === "stdin" || input === "pipeline"
+                    ? "-"
+                    : argument(file),
                 status: result.status,
                 signal: result.signal,
                 error: result.error?.message,
@@ -1242,7 +1263,7 @@ child.stdin.end(configuration.input);
                 "missing required schema property",
               );
             else if (input === "missing")
-              expect(result.stderr, diagnostics).toContain("PathNotFound");
+              expect(result.stderr, diagnostics).toContain("Convert-Path");
             else if (location !== "unc")
               expect(result.stderr, diagnostics).toBe("");
             if (input === "missing")
