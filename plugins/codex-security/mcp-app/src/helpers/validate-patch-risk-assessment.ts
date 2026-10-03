@@ -130,7 +130,22 @@ export function validatePatchRiskAssessment(value: unknown): string[] {
 function readAssessment(path: string): unknown {
   let contents: Buffer;
   try {
-    contents = readFile(path === "-" ? 0 : parsedPath(path));
+    const prefix =
+      path.startsWith("//") && !path.startsWith("///")
+        ? "//"
+        : path.startsWith("/")
+          ? "/"
+          : "";
+    // pathlib removes dot/empty components, but preserves symlink-sensitive "..".
+    const input =
+      process.platform === "win32"
+        ? parsedPath(path)
+        : prefix +
+            path
+              .split("/")
+              .filter((part) => part && part !== ".")
+              .join("/") || ".";
+    contents = readFile(path === "-" ? 0 : input);
   } catch (error) {
     throw new Error(
       `cannot read assessment: ${error instanceof Error ? error.message : String(error)}`,
