@@ -356,7 +356,13 @@ def test_repository_provenance_uses_first_configured_origin_before_transport_rew
     subprocess.run(["git", "remote", "add", "origin", canonical], cwd=target, check=True)
     if multiple_urls:
         subprocess.run(
-            ["git", "config", "--add", "remote.origin.url", "https://github.com/example/second.git"],
+            [
+                "git",
+                "config",
+                "--add",
+                "remote.origin.url",
+                "https://github.com/example/second.git",
+            ],
             cwd=target,
             check=True,
         )
@@ -365,6 +371,8 @@ def test_repository_provenance_uses_first_configured_origin_before_transport_rew
         cwd=target,
         check=True,
     )
-    expanded = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=target, text=True)
+    expanded = subprocess.check_output(
+        ["git", "remote", "get-url", "origin"], cwd=target, text=True
+    )
     assert expanded.strip() == "git@github-work:example/first.git"
     assert WORKBENCH_TARGET["git_repository_provenance"](target) == (canonical, ".")

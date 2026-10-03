@@ -793,7 +793,9 @@ def verify_repository_provenance(scan: sqlite3.Row, target: dict[str, Any]) -> N
                     f"scan-manifest.json target {field} must match saved scan provenance."
                 )
     elif target.get("repositoryPath") is not None:
-        raise SystemExit("scan-manifest.json target repositoryPath must match saved scan provenance.")
+        raise SystemExit(
+            "scan-manifest.json target repositoryPath must match saved scan provenance."
+        )
 
 
 def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
