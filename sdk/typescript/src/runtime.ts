@@ -2496,7 +2496,11 @@ export async function codexRuntimeReadDirectories(
 ): Promise<string[]> {
   const executable = await realpath(command.command);
   const directories = [dirname(executable)];
-  if (basename(executable) !== "codex.js") return directories;
+  // pnpm uses a regular .bin shim rather than a symlink to codex.js.
+  const packageShim =
+    basename(executable) === "codex" &&
+    basename(dirname(executable)) === ".bin";
+  if (basename(executable) !== "codex.js" && !packageShim) return directories;
   let packageJson: string;
   try {
     packageJson = createRequire(executable).resolve(
@@ -2507,7 +2511,10 @@ export async function codexRuntimeReadDirectories(
     if (nodeErrorCode(error) === "MODULE_NOT_FOUND") return directories;
     throw error;
   }
-  if (executable !== join(dirname(packageJson), "bin", "codex.js"))
+  if (
+    !packageShim &&
+    executable !== join(dirname(packageJson), "bin", "codex.js")
+  )
     return directories;
   directories.push(
     dirname(

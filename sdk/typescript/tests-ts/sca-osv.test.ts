@@ -1106,6 +1106,45 @@ packages:
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },
   );
+  test.each([false, true])(
+    "keeps relative Composer archive coverage incomplete with advisory matches: %s",
+    async (matched) => {
+      const { repository, output } = await setup();
+      await writeFile(
+        join(repository, "composer.lock"),
+        JSON.stringify({
+          packages: [
+            {
+              name: "synthetic-lib",
+              version: "1.2.0",
+              dist: { type: "zip", url: "archives/library.zip" },
+            },
+          ],
+        }),
+      );
+      const vulnerability = advisory("SYNTHETIC-ARCHIVE-1");
+      vulnerability.affected[0]!.package.ecosystem = "Packagist";
+      const raw = rawOutput("composer.lock", matched ? [vulnerability] : []);
+      raw.results[0]!.packages[0]!.package.ecosystem = "Packagist";
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_exe, argv) => ({
+            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
+            stderr: "",
+            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
+          }),
+        },
+      );
+      expect(result.status).toBe("partial");
+      expect(result.coverage.unresolvedPackages).toBe(1);
+      expect(result.coverage.limitations.join("\n")).toContain(
+        "archives/library.zip",
+      );
+      expect(result.matches).toHaveLength(matched ? 1 : 0);
+    },
+  );
   test.each(["dependencies", "devDependencies", "optionalDependencies"])(
     "preserves npm direct URL provenance recorded in %s without changing registry tarballs",
     async (group) => {

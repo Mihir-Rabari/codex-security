@@ -430,6 +430,15 @@ describe("additional SCA input contracts", () => {
             dist: { type: "path", url: "./local" },
             source: { type: "path", url: "./local" },
           },
+          {
+            name: "synthetic/archive",
+            version: "v1.2.3",
+            dist: { type: "zip", url: "archives/library.zip" },
+            source: {
+              type: "git",
+              url: "git@example.invalid:synthetic/library.git",
+            },
+          },
         ],
         "packages-dev": [],
       }),
@@ -441,6 +450,12 @@ describe("additional SCA input contracts", () => {
         ecosystem: "Packagist",
         name: "synthetic/local",
         version: "v1.2.3",
+      }),
+      expect.objectContaining({
+        ecosystem: "Packagist",
+        name: "synthetic/archive",
+        version: "v1.2.3",
+        resolution: "archives/library.zip",
       }),
     ]);
   });

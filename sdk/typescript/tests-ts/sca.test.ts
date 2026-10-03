@@ -457,12 +457,16 @@ async function fixture(
   };
 }
 
-(process.platform === "win32" ? test.skip : test)(
-  "dependency triage keeps the installed npm JavaScript launcher and grants its native runtime",
-  async () => {
-    const launcher = createRequire(import.meta.url).resolve(
-      "@openai/codex/bin/codex.js",
-    );
+(process.platform === "win32" ? test.skip : test).each([
+  "JavaScript",
+  "pnpm shim",
+])(
+  "dependency triage keeps the installed npm %s launcher and grants its native runtime",
+  async (kind) => {
+    const launcher =
+      kind === "JavaScript"
+        ? createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js")
+        : join(import.meta.dir, "../node_modules/.bin/codex");
     const f = await fixture({ codexLauncher: launcher });
     await using security = f.client;
     const result = await security.scanDependencies({
@@ -478,6 +482,38 @@ async function fixture(
       dirname(resolveCodexCommand({}).command),
     );
     expect(f.captured.codex!.env!["CODEX_CLI_PATH"]).toBe(launcher);
+
+    const receipt = join(f.outputDir, "launcher-child.json");
+    const preload = join(f.outputDir, "launcher-probe.mjs");
+    await writeFile(
+      preload,
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ argv: process.argv.slice(2), launcher: process.env.CODEX_CLI_PATH }));
+for (const event of [
+  { type: "thread.started", thread_id: "synthetic-launcher-thread" },
+  { type: "item.completed", item: { id: "message", type: "agent_message", text: "synthetic launcher response" } },
+  { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }
+]) console.log(JSON.stringify(event));
+process.exit(0);
+`,
+    );
+    const turn = await new Codex({
+      ...f.captured.codex,
+      env: {
+        ...f.captured.codex!.env,
+        NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+      },
+    })
+      .startThread(f.captured.thread)
+      .run("synthetic installed launcher probe");
+    expect(turn.finalResponse).toBe("synthetic launcher response");
+    const child = JSON.parse(await readFile(receipt, "utf8"));
+    expect(child.launcher).toBe(launcher);
+    expect(
+      child.argv.flatMap((value: string, index: number, argv: string[]) =>
+        value === "--add-dir" ? [argv[index + 1]] : [],
+      ),
+    ).toEqual(f.captured.thread!.additionalDirectories);
   },
 );
 

@@ -572,9 +572,11 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
 function localDistribution(value: unknown): string | null {
   if (typeof value !== "string" || value === "") return null;
   if (value.startsWith("//")) return null;
-  return /^(?:file:|\.{1,2}[/\\]|[/\\]|[A-Za-z]:[/\\])/.test(value)
-    ? value
-    : null;
+  if (/^(?:file:|\.{1,2}[/\\]|[/\\]|[A-Za-z]:[/\\])/.test(value)) return value;
+  // Bare relative archives are local too; URLs and scp-style Git remotes are not.
+  return /^(?:[A-Za-z][A-Za-z0-9+.-]*:|[^/\\]+@[^/\\]+:)/.test(value)
+    ? null
+    : value;
 }
 
 function inspectComposer(content: string, sourcePath: string): InputInspection {
