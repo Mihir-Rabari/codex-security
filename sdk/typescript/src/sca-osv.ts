@@ -1209,11 +1209,11 @@ export async function runOsvScan(
         stderrPath: invocation.stderrPath,
       });
       invocation.exitCode = output.exitCode;
+      const emptyInputReceipt = `Scanned ${join(repository, input.path)
+        .replaceAll("\r", "%0D")
+        .replaceAll("\n", "%0A")} file and found 0 package`;
       const emptyInput =
-        output.exitCode === 128 &&
-        output.stderr.includes(
-          `Scanned ${join(repository, input.path)} file and found 0 package`,
-        );
+        output.exitCode === 128 && output.stderr.includes(emptyInputReceipt);
       if (emptyInput) {
         emptyOutputPaths.add(invocation.rawOutputPath);
         input.reason = "OSV extracted no packages from this lockfile.";
@@ -1253,11 +1253,7 @@ export async function runOsvScan(
             ? undefined
             : consumeOutput(raw, output.stderr, input);
         if (sources !== undefined && !sources.has(input.path)) {
-          if (
-            output.stderr.includes(
-              `Scanned ${join(repository, input.path)} file and found 0 package`,
-            )
-          ) {
+          if (output.stderr.includes(emptyInputReceipt)) {
             input.reason = "OSV extracted no packages from this lockfile.";
           } else if (packageFilteringReceipts(output.stderr).length > 0) {
             input.reason =

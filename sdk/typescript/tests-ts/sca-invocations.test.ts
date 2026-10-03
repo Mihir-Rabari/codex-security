@@ -131,6 +131,52 @@ test("passes comma-bearing filenames literally, retaining each invocation before
   );
 });
 
+test.skipIf(process.platform === "win32")(
+  "recognizes OSV empty-input receipts for literal CR/LF paths",
+  async () => {
+    const paths = [
+      "empty\nline\rreturn/package-lock.json",
+      "normal/package-lock.json",
+    ];
+    const { repository, output } = await setup(paths);
+    await writeFile(
+      join(repository, paths[0]!),
+      JSON.stringify({ lockfileVersion: 3, packages: {} }),
+    );
+    // OSV-Scanner 2.6.0 encodes CR/LF in extraction receipts.
+    const emptyReceipt = `Scanned ${join(repository, "empty%0Aline%0Dreturn/package-lock.json")} file and found 0 packages\n`;
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) => {
+          if (argv[0] === "--version") return version;
+          return argv.at(-1) === join(repository, paths[0]!)
+            ? { stdout: "", stderr: emptyReceipt, exitCode: 128 }
+            : { stdout: outputFor(argv.at(-1)!), stderr: "", exitCode: 1 };
+        },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.coverage.status).toBe("complete");
+    expect(result.coverage.inputs.map(({ status }) => status)).toEqual([
+      "scanned",
+      "scanned",
+    ]);
+    expect(result.components.map(({ sourcePath }) => sourcePath)).toEqual([
+      paths[1]!,
+    ]);
+    expect(result.matches).toHaveLength(1);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.scanner.exitCode).toBe(1);
+    expect(result.scanner.invocations).toHaveLength(2);
+    const empty = result.scanner.invocations![0]!;
+    expect(empty.argv.at(-1)).toBe(join(repository, paths[0]!));
+    expect(await readFile(empty.rawOutputPath, "utf8")).toBe("");
+    expect(await readFile(empty.stderrPath, "utf8")).toBe(emptyReceipt);
+  },
+);
+
 test("scans monorepo inputs whose combined argv would exceed the Windows command-line limit", async () => {
   const paths = Array.from(
     { length: 400 },
