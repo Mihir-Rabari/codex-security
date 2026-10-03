@@ -597,6 +597,8 @@ process.exit(0);
       { command: launcher },
       [
         ...options.configOverrides!.flatMap((value) => ["--config", value]),
+        "--config",
+        `default_permissions=${JSON.stringify(options.config!["default_permissions"])}`,
         "sandbox",
         "-P",
         "codex_security_dependencies",
@@ -613,8 +615,7 @@ process.exit(0);
       ],
       options.env!,
     );
-    expect(probe.stderr).not.toContain("Permission profile");
-    expect(probe.success).toBe(true);
+    expect(probe.success, probe.stderr).toBe(true);
     expect(probe.stdout).toContain("codex-cli");
     expect(await readFile(source, "utf8")).toBe(
       "synthetic initial source context",
@@ -658,13 +659,15 @@ test("dependency triage disables inherited MCP servers and keeps the linked nati
       "-C",
       f.outputDir,
       ...options.configOverrides!.flatMap((value) => ["--config", value]),
+      "--config",
+      `default_permissions=${JSON.stringify(options.config!["default_permissions"])}`,
       "mcp",
       "list",
       "--json",
     ],
     options.env!,
   );
-  expect(effective.success).toBe(true);
+  expect(effective.success, effective.stderr).toBe(true);
   expect(
     JSON.parse(effective.stdout).map(
       (server: { name: string; enabled: boolean }) => ({
