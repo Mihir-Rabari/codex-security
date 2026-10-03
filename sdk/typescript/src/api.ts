@@ -805,6 +805,9 @@ export class CodexSecurity {
           [
             `mcp_servers=${inlineToml(mcpServers)}`,
             `permissions.${SCA_PERMISSION_PROFILE}=${inlineToml(dependencyPermissions(this.#dependencies.environment, runtime.codexHome))}`,
+            ...(hasCommandAuth(session.sessionConfig)
+              ? []
+              : modelProviderConfigOverride(session.sessionConfig)),
           ],
         );
         const threadOptions: ThreadOptions = {

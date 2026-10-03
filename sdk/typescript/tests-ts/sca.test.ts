@@ -18,7 +18,7 @@ import {
 } from "@openai/codex-sdk";
 import Ajv from "ajv";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { codexSecurityPrivatePaths } from "../src/auth.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
@@ -185,6 +185,8 @@ async function fixture(
     workbenchSnapshot?: boolean;
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
+    codexOverrides?: JsonObject;
+    codexFactory?: (options: CodexOptions) => Codex;
     linkedCodex?: boolean;
     codexLauncher?: string;
     wrappedCodex?: boolean;
@@ -292,6 +294,7 @@ process.exit(child.status ?? 1);
       codexOverrides: {
         model: options.model ?? "gpt-5.6-sol",
         model_reasoning_effort: "high",
+        ...options.codexOverrides,
         ...(options.mcpOverrides === undefined
           ? {}
           : { mcp_servers: options.mcpOverrides }),
@@ -376,6 +379,8 @@ process.exit(child.status ?? 1);
       createCodex: (codex) => {
         captured.codex = codex;
         calls.model++;
+        if (options.codexFactory !== undefined)
+          return options.codexFactory(codex);
         return {
           startThread: (thread) => {
             captured.thread = thread;
@@ -487,6 +492,114 @@ process.exit(child.status ?? 1);
     ambientHome,
   };
 }
+
+test.each(["api key", "command"] as const)(
+  "dependency triage snapshots %s provider configuration for each SDK child",
+  async (authentication) => {
+    const node = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    const provider = {
+      name: "Synthetic provider",
+      base_url: "https://provider.example.invalid/v1",
+      wire_api: "responses",
+      ...(authentication === "command"
+        ? { auth: { command: "synthetic-auth", cwd: dirname(node) } }
+        : { requires_openai_auth: true }),
+    };
+    const providerConfig = {
+      model_provider: "synthetic.provider",
+      model_providers: { "synthetic.provider": provider },
+    };
+    const initialConfig = stringifyToml(providerConfig);
+    const replacementConfig = stringifyToml({
+      model_provider: "another-provider",
+      model_providers: {
+        "another-provider": {
+          name: "Another provider",
+          base_url: "https://another.example.invalid/v1",
+          wire_api: "responses",
+        },
+      },
+    });
+    let preload: string;
+    const f = await fixture({
+      turns: ["completed", "completed"],
+      mcpConfig: initialConfig,
+      codexOverrides: providerConfig,
+      codexFactory: (options) =>
+        new Codex({
+          ...options,
+          codexPathOverride: node,
+          env: {
+            ...options.env,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+          },
+        }),
+    });
+    await using security = f.client;
+    const receipt = join(f.codexHome, "provider-children.jsonl");
+    preload = join(f.codexHome, "provider-child.mjs");
+    await writeFile(
+      preload,
+      `import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+const receipt = ${JSON.stringify(receipt)};
+const turn = existsSync(receipt) ? readFileSync(receipt, "utf8").trim().split("\\n").length + 1 : 1;
+const configPath = ${JSON.stringify(join(f.codexHome, "config.toml"))};
+appendFileSync(receipt, JSON.stringify({ argv: process.argv.slice(2), home: process.env.CODEX_HOME, sharedConfig: readFileSync(configPath, "utf8") }) + "\\n");
+// A concurrent client replaces the shared provider table before the next match.
+if (turn === 1) writeFileSync(configPath, ${JSON.stringify(replacementConfig)});
+const finding = { ...${JSON.stringify(triage())}, input_id: "match-" + turn, triage_item_id: "triage-" + turn };
+const response = { schema_version: "triage-finding/v0", repository: { path: ${JSON.stringify(f.repository)}, revision: "synthetic-revision" }, findings: [finding] };
+for (const event of [
+  { type: "thread.started", thread_id: "provider-thread-" + turn },
+  { type: "item.completed", item: { id: "message", type: "agent_message", text: JSON.stringify(response) } },
+  { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }
+]) console.log(JSON.stringify(event));
+process.exit(0);
+`,
+    );
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    });
+    expect(result.status).toBe("completed");
+    expect(result.assessments).toHaveLength(2);
+    const children = (await readFile(receipt, "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            argv: string[];
+            home: string;
+            sharedConfig: string;
+          },
+      );
+    expect(children).toHaveLength(2);
+    expect(children.map((child) => child.sharedConfig)).toEqual([
+      initialConfig,
+      replacementConfig,
+    ]);
+    for (const child of children) {
+      expect(child.home).toBe(f.codexHome);
+      expect(child.argv).toContain('model_provider="synthetic.provider"');
+      const providerOverrides = child.argv.filter((arg) =>
+        arg.startsWith("model_providers="),
+      );
+      expect(providerOverrides).toHaveLength(1);
+      expect(parseToml(providerOverrides[0]!)).toEqual({
+        model_providers: providerConfig.model_providers,
+      });
+      expect(child.argv.some((arg) => arg.startsWith("model_providers."))).toBe(
+        false,
+      );
+    }
+    expect(await readFile(join(f.codexHome, "config.toml"), "utf8")).toBe(
+      replacementConfig,
+    );
+  },
+);
 
 (process.platform === "win32" ? test.skip : test).each([
   "JavaScript",
