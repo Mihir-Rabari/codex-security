@@ -49,6 +49,26 @@ export function windowsHelperFixture(root: string) {
         `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;
+      const fixtureEnvironment = {
+        SystemRoot: systemRoot,
+        PATH: join(systemRoot, "System32"),
+        HOME: root,
+        USERPROFILE: root,
+        LOCALAPPDATA: root,
+        XDG_CACHE_HOME: root,
+        CODEX_MCP_NODE_PATH: Bun.which("node")!,
+        PLUGIN: "expanded-plugin",
+        USERNAME: "expanded-user",
+        EXPAND: "expanded-bang",
+      };
+      const overrides = new Set(
+        Object.keys(fixtureEnvironment).map((key) => key.toUpperCase()),
+      );
+      const inheritedEnvironment = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !overrides.has(key.toUpperCase()),
+        ),
+      );
       const result = await runCommand(
         powershell,
         [
@@ -61,16 +81,8 @@ export function windowsHelperFixture(root: string) {
         {
           cwd: root,
           env: {
-            SystemRoot: systemRoot,
-            PATH: join(systemRoot, "System32"),
-            HOME: root,
-            USERPROFILE: root,
-            LOCALAPPDATA: root,
-            XDG_CACHE_HOME: root,
-            CODEX_MCP_NODE_PATH: Bun.which("node")!,
-            PLUGIN: "expanded-plugin",
-            USERNAME: "expanded-user",
-            EXPAND: "expanded-bang",
+            ...inheritedEnvironment,
+            ...fixtureEnvironment,
           },
           timeout: 30_000,
           input,
