@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createRequire } = require("node:module");
+const { pathToFileURL } = require("node:url");
 const childProcess = require("node:child_process");
 const {
   stageSkillRuntime,
@@ -61,9 +62,28 @@ function stageProviderConfig(
   const provider = JSON.parse(
     fs.readFileSync(path.join(__dirname, "../provider.json"), "utf8"),
   );
-  provider.config.cli_config.mcp_servers = Object.fromEntries(
-    inherited.map(({ name }) => [name, { enabled: false }]),
+  // Promptfoo exposes SDK config, whose dotted-key flattening cannot retain
+  // literal server names. Delegate through the existing launcher with one table.
+  const mcpOverride = `mcp_servers={${inherited
+    .map(({ name }) => `${JSON.stringify(name)}={enabled=false}`)
+    .join(",")}}`;
+  const adapter = path.join(runtime, "codex-launcher.mjs");
+  const preload = `--import=${pathToFileURL(adapter).href}`;
+  fs.writeFileSync(
+    adapter,
+    `const preload = ${JSON.stringify(preload)};
+if (process.env.NODE_OPTIONS === preload) delete process.env.NODE_OPTIONS;
+else if (process.env.NODE_OPTIONS?.endsWith(" " + preload))
+  process.env.NODE_OPTIONS = process.env.NODE_OPTIONS.slice(0, -(preload.length + 1));
+// Node resolves the SDK's exec argument as a main path before loading this module.
+process.argv.splice(1, 1, ${JSON.stringify(codexScript)}, "--config", ${JSON.stringify(mcpOverride)}, "exec");
+await import(${JSON.stringify(pathToFileURL(codexScript).href)});
+`,
   );
+  provider.config.codex_path_override = process.execPath;
+  provider.config.cli_env.NODE_OPTIONS = process.env.NODE_OPTIONS
+    ? `${process.env.NODE_OPTIONS} ${preload}`
+    : preload;
   const output = path.join(runtime, "provider.json");
   fs.writeFileSync(output, JSON.stringify(provider));
   return output;

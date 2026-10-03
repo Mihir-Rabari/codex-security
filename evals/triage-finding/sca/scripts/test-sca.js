@@ -6,6 +6,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const { createRequire } = require("node:module");
+const { pathToFileURL } = require("node:url");
+const { execFileSync } = require("node:child_process");
 const {
   CORPUS,
   EXPECTED,
@@ -403,31 +406,50 @@ test("model staging contains source and skill runtime without the gold corpus or
   }
 });
 
-test("disables inherited integrations while retaining the persistent Codex home", () => {
+test("disables literal inherited integration names while retaining the persistent Codex home", async () => {
+  const previousNodeOptions = process.env.NODE_OPTIONS;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-provider-"));
   const runtime = path.join(root, "runtime");
   const codexHome = path.join(root, "saved-login");
   fs.mkdirSync(runtime);
   fs.mkdirSync(codexHome);
-  const savedConfig = 'web_search = "live"\n';
+  const serverNames = ["synthetic-files", "synthetic.http"];
+  const savedConfig = [
+    'web_search = "live"',
+    ...serverNames.map(
+      (name) =>
+        `[mcp_servers.${JSON.stringify(name)}]\ncommand = "synthetic-unused"`,
+    ),
+  ].join("\n");
   fs.writeFileSync(path.join(codexHome, "config.toml"), savedConfig);
   const receipt = path.join(codexHome, "invocation.json");
+  const childReceipt = path.join(runtime, "child.json");
   const codexScript = path.join(root, "codex.cjs");
   fs.writeFileSync(
     codexScript,
     `const fs = require("node:fs");
+     if (process.argv.includes("exec")) {
+       fs.writeFileSync(${JSON.stringify(childReceipt)}, JSON.stringify({
+         args: process.argv.slice(2), nodeOptions: process.env.NODE_OPTIONS,
+         codexHome: process.env.CODEX_HOME,
+       }));
+       for (const event of [
+         { type: "thread.started", thread_id: "synthetic-thread" },
+         { type: "item.completed", item: { id: "message", type: "agent_message", text: "synthetic response" } },
+         { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }
+       ]) console.log(JSON.stringify(event));
+       process.exit(0);
+     }
      fs.writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({
        args: process.argv.slice(2), codexHome: process.env.CODEX_HOME,
      }));
-     console.log(JSON.stringify([{name: "synthetic-files"}, {name: "synthetic-http"}]));`,
+     console.log(JSON.stringify(${JSON.stringify(serverNames.map((name) => ({ name })))}));`,
   );
   try {
+    process.env.NODE_OPTIONS = "--no-warnings";
     const providerPath = stageProviderConfig(runtime, codexHome, codexScript);
     const provider = JSON.parse(fs.readFileSync(providerPath, "utf8"));
-    assert.deepEqual(provider.config.cli_config.mcp_servers, {
-      "synthetic-files": { enabled: false },
-      "synthetic-http": { enabled: false },
-    });
+    assert.equal(provider.config.cli_config.mcp_servers, undefined);
     assert.deepEqual(JSON.parse(fs.readFileSync(receipt, "utf8")), {
       args: [
         "-C",
@@ -456,7 +478,92 @@ test("disables inherited integrations while retaining the persistent Codex home"
       "config.toml",
       "invocation.json",
     ]);
+
+    const sdkRequire = createRequire(
+      path.resolve(__dirname, "../../../../sdk/typescript/package.json"),
+    );
+    const { Codex } = await import(
+      pathToFileURL(
+        path.resolve(
+          __dirname,
+          "../../../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js",
+        ),
+      ).href
+    );
+    const turn = await new Codex({
+      codexPathOverride: provider.config.codex_path_override,
+      config: provider.config.cli_config,
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        NODE_OPTIONS: provider.config.cli_env.NODE_OPTIONS,
+      },
+    })
+      .startThread({ workingDirectory: runtime, skipGitRepoCheck: true })
+      .run("synthetic configuration probe");
+    assert.equal(turn.finalResponse, "synthetic response");
+    const child = JSON.parse(fs.readFileSync(childReceipt, "utf8"));
+    assert.equal(child.nodeOptions, "--no-warnings");
+    assert.equal(child.codexHome, codexHome);
+    const argv = child.args;
+    assert.equal(argv[2], "exec");
+    const configArgs = argv.flatMap((arg, index) =>
+      arg === "--config" ? [arg, argv[index + 1]] : [],
+    );
+    const effective = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          sdkRequire.resolve("@openai/codex/bin/codex.js"),
+          "-C",
+          runtime,
+          ...configArgs,
+          "mcp",
+          "list",
+          "--json",
+        ],
+        { env: { ...process.env, CODEX_HOME: codexHome }, encoding: "utf8" },
+      ),
+    );
+    assert.deepEqual(
+      effective.map(({ name, enabled }) => ({ name, enabled })),
+      serverNames.map((name) => ({ name, enabled: false })),
+    );
+    const nativeRuntime = path.join(root, "native-runtime");
+    fs.mkdirSync(nativeRuntime);
+    const nativeProvider = JSON.parse(
+      fs.readFileSync(
+        stageProviderConfig(
+          nativeRuntime,
+          codexHome,
+          sdkRequire.resolve("@openai/codex/bin/codex.js"),
+        ),
+        "utf8",
+      ),
+    );
+    assert.match(
+      execFileSync(
+        nativeProvider.config.codex_path_override,
+        ["exec", "--help"],
+        {
+          cwd: nativeRuntime,
+          env: {
+            ...process.env,
+            CODEX_HOME: codexHome,
+            NODE_OPTIONS: nativeProvider.config.cli_env.NODE_OPTIONS,
+          },
+          encoding: "utf8",
+        },
+      ),
+      /Usage: codex exec/,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(codexHome, "config.toml"), "utf8"),
+      savedConfig,
+    );
   } finally {
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previousNodeOptions;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
