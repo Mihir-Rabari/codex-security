@@ -1168,6 +1168,8 @@ def _populate_unsealed_manifest_envelope(
             for field in ("remote", "repositoryPath"):
                 if field not in completion_binding["target"]:
                     target.pop(field, None)
+        else:
+            target.pop("repositoryPath", None)
         allowed_kinds = completion_binding["allowedTargetKinds"]
         if len(allowed_kinds) == 1:
             target.setdefault("kind", allowed_kinds[0])
@@ -1291,6 +1293,8 @@ def _validate_completion_binding(
         for field in ("remote", "repositoryPath"):
             if target.get(field) != completion_binding["target"].get(field):
                 raise ContractError(f"scan.target.{field}: must match saved scan provenance")
+    elif target.get("repositoryPath") is not None:
+        raise ContractError("scan.target.repositoryPath: must match saved scan provenance")
     allowed_target_kinds = completion_binding["allowedTargetKinds"]
     if target.get("kind") not in allowed_target_kinds:
         raise ContractError("scan.target.kind: must match the workbench target")

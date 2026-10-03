@@ -2865,6 +2865,18 @@ export async function main(
         let publicationRepository =
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
+          const prompt =
+            dependencies.publishPrompt ??
+            createBulkScanDiscoveryDependencies({
+              output: errorOutput,
+              now: dependencies.now,
+              currentDirectory: dependencies.currentDirectory,
+            }).prompt;
+          if (!prompt.isInteractive()) {
+            throw new CodexSecurityError(
+              `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
+            );
+          }
           if (options.to === "cloud") {
             const destinations = await (
               dependencies.listCloudDestinations ?? listCloudDestinations
@@ -2879,18 +2891,6 @@ export async function main(
             cloudEnvironment = selected.environment_id;
             selectedCloudDestinations = destinations.filter(
               (item) => item.environment_id === cloudEnvironment,
-            );
-          }
-          const prompt =
-            dependencies.publishPrompt ??
-            createBulkScanDiscoveryDependencies({
-              output: errorOutput,
-              now: dependencies.now,
-              currentDirectory: dependencies.currentDirectory,
-            }).prompt;
-          if (!prompt.isInteractive()) {
-            throw new CodexSecurityError(
-              `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
           const saved = await dependencies.runWorkbench([

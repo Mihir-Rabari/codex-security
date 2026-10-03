@@ -792,6 +792,8 @@ def verify_repository_provenance(scan: sqlite3.Row, target: dict[str, Any]) -> N
                 raise SystemExit(
                     f"scan-manifest.json target {field} must match saved scan provenance."
                 )
+    elif target.get("repositoryPath") is not None:
+        raise SystemExit("scan-manifest.json target repositoryPath must match saved scan provenance.")
 
 
 def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
@@ -800,7 +802,8 @@ def git_repository_provenance(target: Path) -> tuple[str | None, str | None]:
     if root is None:
         return None, None
     repository_path = target.resolve().relative_to(Path(root).resolve()).as_posix()
-    remote = git_output(target, "remote", "get-url", "origin")
+    origins = git_output(target, "config", "--null", "--get-all", "remote.origin.url")
+    remote = origins.split("\0", 1)[0] if origins is not None else None
     if remote is None:
         return None, repository_path
     if PureWindowsPath(remote).drive:

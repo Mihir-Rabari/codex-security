@@ -1105,30 +1105,41 @@ describe("publish scan to Cloud", () => {
     }
   });
 
-  test("requests an explicit scan outside a terminal without suggesting Linear options", async () => {
-    const deps = dependencies();
-    deps.listCloudDestinations = async () => [cloudDestination];
-    deps.publishPrompt = {
-      isInteractive: () => false,
-      select: async () => {
-        throw new Error("unexpected picker");
-      },
-    };
-    deps.publishScanToCloud = async () => {
-      throw new Error("unexpected publication");
-    };
-    const stderr = capture();
-    expect(
-      await main(
-        ["publish", "scan", "--to", "cloud"],
-        capture().stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
-    expect(stderr.text()).not.toContain("--linear-team");
-  });
+  test.each([false, true])(
+    "requests an explicit scan outside a terminal before discovery (dryRun=%s)",
+    async (dryRun) => {
+      const deps = dependencies();
+      deps.listCloudDestinations = async () => {
+        throw new Error("unexpected discovery");
+      };
+      deps.publishPrompt = {
+        isInteractive: () => false,
+        select: async () => {
+          throw new Error("unexpected picker");
+        },
+      };
+      deps.publishScanToCloud = async () => {
+        throw new Error("unexpected publication");
+      };
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "--to",
+            "cloud",
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
+      expect(stderr.text()).not.toContain("--linear-team");
+    },
+  );
 
   test("rejects Linear-specific options before uploading to Cloud", async () => {
     for (const linearOptions of [

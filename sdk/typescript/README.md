@@ -1316,7 +1316,9 @@ Only full-repository SCM scans are eligible. Diff scans, scoped scans, directory
 snapshots and CSV imports are unsupported. Tracked local modifications are
 supported when the saved scan records its base commit and snapshot identity.
 Older scans without frozen repository provenance require a new scan; the CLI
-does not infer their origin from the current checkout.
+does not infer their origin from the current checkout. New scans capture the first
+configured origin URL, without transport-only `insteadOf` rewrites. Configure a
+canonical repository URL rather than a machine-local SSH alias or shorthand.
 
 `--dry-run` with a scan ID validates eligibility and individual artifact limits, then prints local findings without
 logging in or uploading. Interactive discovery requires Cloud access. Uploads

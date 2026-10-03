@@ -344,3 +344,27 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     if os.name != "nt":
         assert expected == host_git
     assert trusted_git_executable(repository) == str(expected)
+
+
+@pytest.mark.parametrize("multiple_urls", [False, True])
+def test_repository_provenance_uses_first_configured_origin_before_transport_rewrites(
+    tmp_path: Path, multiple_urls: bool
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    canonical = "https://github.com/example/first.git"
+    subprocess.run(["git", "remote", "add", "origin", canonical], cwd=target, check=True)
+    if multiple_urls:
+        subprocess.run(
+            ["git", "config", "--add", "remote.origin.url", "https://github.com/example/second.git"],
+            cwd=target,
+            check=True,
+        )
+    subprocess.run(
+        ["git", "config", "url.git@github-work:.insteadOf", "https://github.com/"],
+        cwd=target,
+        check=True,
+    )
+    expanded = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=target, text=True)
+    assert expanded.strip() == "git@github-work:example/first.git"
+    assert WORKBENCH_TARGET["git_repository_provenance"](target) == (canonical, ".")
