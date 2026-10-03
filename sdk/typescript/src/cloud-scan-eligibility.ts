@@ -4,7 +4,10 @@ import { CodexSecurityError } from "./errors.js";
 /** Identity captured in sealed provenance; never consult the current checkout. */
 export function cloudRepositoryIdentity(remote: string): string {
   const url = new URL(remote);
-  const path = url.pathname.replace(/^\//u, "").replace(/\.git$/u, "");
+  const path = url.pathname
+    .replace(/^\//u, "")
+    .replace(/\/+$/u, "")
+    .replace(/\.git$/u, "");
   if (
     !["https:", "ssh:"].includes(url.protocol) ||
     url.search ||

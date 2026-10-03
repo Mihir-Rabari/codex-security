@@ -15,6 +15,15 @@ async function contract(): Promise<LoadedContract> {
   return { manifest, findings, coverage };
 }
 describe("native Cloud scope eligibility", () => {
+  test.each([
+    "https://github.com/example/repo.git/",
+    "https://github.com/example/repo/",
+    "ssh://github.com/example/repo.git/",
+  ])("matches saved trailing-slash repository identity %s", async (remote) => {
+    const input = await contract();
+    input.manifest.scan.target.remote = remote;
+    expect(requireCloudScanEligibility(input)).toBe("github.com/example/repo");
+  });
   test.each(["git_diff", "directory_snapshot"] as const)(
     "rejects %s imports",
     async (kind) => {
