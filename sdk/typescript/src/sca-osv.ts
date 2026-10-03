@@ -1073,8 +1073,7 @@ export async function runOsvScan(
   const stderrOutputs: string[] = [];
   const emptyOutputPaths = new Set<string>();
   let unresolvedPackages = 0;
-  const consumeOutput = (stdout: string, stderr: string, input: ScaInput) => {
-    const raw: unknown = JSON.parse(stdout);
+  const consumeOutput = (raw: unknown, stderr: string, input: ScaInput) => {
     const normalized = normalizeOsvOutput(raw, {
       repositoryPath: repository,
       inputs: [input],
@@ -1242,8 +1241,18 @@ export async function runOsvScan(
       result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
       const matchCount = result.matches.length;
       if (output.stdout.trim() !== "") {
-        const sources = consumeOutput(output.stdout, output.stderr, input);
-        if (!sources.has(input.path)) {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(output.stdout);
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          result.diagnostics.push(`${input.path}: ${errorMessage(error)}`);
+        }
+        const sources =
+          raw === undefined
+            ? undefined
+            : consumeOutput(raw, output.stderr, input);
+        if (sources !== undefined && !sources.has(input.path)) {
           if (
             output.stderr.includes(
               `Scanned ${join(repository, input.path)} file and found 0 package`,
@@ -1333,7 +1342,7 @@ export async function runOsvScan(
       const stderr = await readFile(pending.invocation.stderrPath, "utf8");
       if (!reconciledSources.has(pending.input.path) && retained.trim()) {
         try {
-          consumeOutput(retained, stderr, pending.input);
+          consumeOutput(JSON.parse(retained), stderr, pending.input);
         } catch {
           // Truncated output remains available in this invocation's raw artifact.
         }

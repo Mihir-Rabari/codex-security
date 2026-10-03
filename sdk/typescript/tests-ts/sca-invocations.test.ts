@@ -168,9 +168,15 @@ test("scans monorepo inputs whose combined argv would exceed the Windows command
   ).toHaveLength(paths.length);
 });
 
-test.each(["exit", "invalid-json", "failure", "cancel"] as const)(
-  "retains completed inputs and partial evidence after a later invocation %s",
-  async (failure) => {
+test.each([
+  ["exit", 1],
+  ["invalid-json", 0],
+  ["invalid-json", 1],
+  ["failure", 1],
+  ["cancel", 1],
+] as const)(
+  "retains independent inputs and partial evidence after %s at input %d",
+  async (failure, failedIndex) => {
     const paths = [
       "a/package-lock.json",
       "b/package-lock.json",
@@ -191,7 +197,7 @@ test.each(["exit", "invalid-json", "failure", "cancel"] as const)(
           if (argv[0] === "--version") return version;
           scanned++;
           const stdout = outputFor(argv.at(-1)!);
-          if (scanned === 2) {
+          if (scanned === failedIndex + 1) {
             if (failure === "invalid-json")
               return {
                 stdout: "incomplete JSON",
@@ -221,26 +227,38 @@ test.each(["exit", "invalid-json", "failure", "cancel"] as const)(
         : await operation;
     expect(result.status).toBe("partial");
     expect(result.coverage.status).toBe("partial");
-    const retained =
-      failure === "exit" ? 3 : failure === "invalid-json" ? 1 : 2;
+    const continues = failure === "exit" || failure === "invalid-json";
+    const retained = failure === "exit" ? 3 : 2;
     expect(result.components).toHaveLength(retained);
     expect(result.matches).toHaveLength(retained);
-    expect(result.scanner.invocations).toHaveLength(failure === "exit" ? 3 : 2);
-    expect(result.coverage.inputs.map((input) => input.status)).toEqual([
-      "scanned",
-      "failed",
-      failure === "exit" ? "scanned" : "failed",
-    ]);
+    expect(scanned).toBe(continues ? 3 : 2);
+    expect(result.scanner.invocations).toHaveLength(continues ? 3 : 2);
+    expect(result.coverage.inputs.map((input) => input.status)).toEqual(
+      paths.map((_, index) =>
+        index === failedIndex || (!continues && index > failedIndex)
+          ? "failed"
+          : "scanned",
+      ),
+    );
     expect(
       JSON.parse(await readFile(result.scanner.rawOutputPath, "utf8")).results,
     ).toHaveLength(retained);
-    expect(
-      await readFile(result.scanner.invocations![1]!.rawOutputPath, "utf8"),
-    ).toBe(
-      failure === "invalid-json"
-        ? "incomplete JSON"
-        : outputFor(join(repository, paths[1]!)),
-    );
+    for (const [index, invocation] of result.scanner.invocations!.entries()) {
+      expect(await readFile(invocation.rawOutputPath, "utf8")).toBe(
+        failure === "invalid-json" && index === failedIndex
+          ? "incomplete JSON"
+          : outputFor(join(repository, paths[index]!)),
+      );
+      expect(await readFile(invocation.stderrPath, "utf8")).toBe(
+        index !== failedIndex
+          ? ""
+          : continues
+            ? "Synthetic failure"
+            : "Synthetic interrupted output",
+      );
+    }
+    if (failure === "invalid-json")
+      expect(result.diagnostics.join("\n")).toContain(paths[failedIndex]!);
     expect(result.scanner.exitCode).toBe(
       failure === "exit" ? 130 : failure === "invalid-json" ? 127 : null,
     );
