@@ -14,6 +14,7 @@ import { dirname, join, relative } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 import {
   hasWindowsLoopbackShare,
@@ -888,7 +889,7 @@ describe("patch risk assessment contract", () => {
                   quote(input === "stdin" ? "-" : argument(file)),
                 ) +
               "\nexit $LASTEXITCODE\n";
-            const result = spawnSync(
+            const result = await runCommand(
               powershell,
               [
                 "-NoLogo",
@@ -911,7 +912,7 @@ describe("patch risk assessment contract", () => {
                   USERNAME: "expanded-user",
                   EXPAND: "expanded-bang",
                 },
-                encoding: "utf8",
+                timeout: 30_000,
                 input: original,
                 windowsHide: true,
               },
