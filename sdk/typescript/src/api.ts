@@ -11,7 +11,6 @@ import {
   dependencyTriagePrompt,
 } from "./sca-triage.js";
 import type { ScaAssessment, ScaResult } from "./sca-types.js";
-import { statSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -26,7 +25,6 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
-  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -180,6 +178,7 @@ import {
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
+import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
@@ -368,11 +367,7 @@ export type ScanAuthentication =
   | { method: "command"; verified: false }
   | {
       method: "api_key";
-      source:
-        | "OPENAI_API_KEY"
-        | "CODEX_API_KEY"
-        | "OPENROUTER_API_KEY"
-        | "FIREWORKS_API_KEY";
+      source: string;
       verified: false;
     }
   | {
@@ -1563,6 +1558,7 @@ export class CodexSecurity {
     let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
+    let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
     let budgetRecovery: {
@@ -2551,7 +2547,6 @@ export class CodexSecurity {
           });
           checkOpen();
         } catch (error) {
-          if (signal.aborted || this.#closed) throw error;
           if (artifactRestorer !== null) {
             for (const artifact of completedArtifacts) {
               try {
@@ -2560,14 +2555,15 @@ export class CodexSecurity {
                   artifact.contents,
                 );
               } catch (cause) {
-                if (signal.aborted || this.#closed) throw cause;
-                throw new OutputDirectoryError(
+                artifactRestorationFailure = new OutputDirectoryError(
                   "Cannot restore an artifact outside the scan directory.",
                   { cause },
                 );
+                throw artifactRestorationFailure;
               }
             }
           }
+          if (signal.aborted || this.#closed) throw error;
           await collectResult(
             result.turnResult,
             result.threadId,
@@ -2638,6 +2634,7 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
+      if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       let failure =
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
@@ -5261,34 +5258,6 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
-}
-
-function bundledCodexSdkEnvironment(
-  command: string,
-  environment: Record<string, string>,
-): Record<string, string> {
-  // An SDK executable override disables its bundled-tool PATH setup.
-  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
-  try {
-    if (!statSync(toolsDirectory).isDirectory()) return environment;
-  } catch {
-    return environment;
-  }
-  const result = { ...environment };
-  const pathKeys = Object.keys(result).filter(
-    (key) => key.toLowerCase() === "path",
-  );
-  const pathKey = pathKeys.includes("Path")
-    ? "Path"
-    : (pathKeys.at(-1) ?? "PATH");
-  for (const key of pathKeys) {
-    if (key !== pathKey) delete result[key];
-  }
-  const entries = (result[pathKey] ?? "")
-    .split(delimiter)
-    .filter((entry) => entry.length > 0 && entry !== toolsDirectory);
-  result[pathKey] = [toolsDirectory, ...entries].join(delimiter);
-  return result;
 }
 
 function definedEnvironment(
