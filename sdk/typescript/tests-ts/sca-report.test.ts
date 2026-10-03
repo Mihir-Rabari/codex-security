@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, test } from "bun:test";
+import { discoverScaInputs, normalizeOsvOutput } from "../src/sca-osv.js";
+import { createApiTestFixtures } from "./support/api-events.js";
 import {
   compareScaResults,
   createScaUpdateHandoff,
@@ -9,6 +13,9 @@ import type {
   ScaResult,
   TriageFinding,
 } from "../src/sca-types.js";
+
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
+afterEach(cleanup);
 
 function fixture(): ScaResult {
   return {
@@ -318,6 +325,63 @@ describe("SCA comparison", () => {
     ]);
     expect(comparison.comparable).toBe(false);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves distinct drive-like POSIX inventory paths in saved comparisons",
+    async () => {
+      const repository = await temporaryDirectory();
+      const paths = [
+        "C:\\folder/package-lock.json",
+        "C:/folder/package-lock.json",
+      ];
+      for (const path of paths) {
+        await mkdir(dirname(join(repository, path)), { recursive: true });
+        await writeFile(
+          join(repository, path),
+          JSON.stringify({ lockfileVersion: 3, packages: {} }),
+        );
+      }
+      const { inputs } = await discoverScaInputs(repository);
+      expect(inputs.map(({ path }) => path).sort()).toEqual([...paths].sort());
+      const results = paths.map((path) => {
+        const result = fixture();
+        result.repository.path = repository;
+        result.coverage.inputs = inputs.filter((input) => input.path === path);
+        const normalized = normalizeOsvOutput(
+          {
+            results: [
+              {
+                source: { path: join(repository, path) },
+                packages: [
+                  {
+                    package: {
+                      ecosystem: "npm",
+                      name: "synthetic-package",
+                      version: "1.0.0",
+                    },
+                    vulnerabilities: [{ id: "SYNTHETIC-1" }],
+                  },
+                ],
+              },
+            ],
+          },
+          { repositoryPath: repository, inputs: result.coverage.inputs },
+        );
+        expect(normalized.diagnostics).toEqual([]);
+        expect(normalized.components[0]!.sourcePath).toBe(path);
+        result.components = normalized.components;
+        result.matches = normalized.matches;
+        return JSON.parse(JSON.stringify(result)) as ScaResult;
+      });
+      const comparison = compareScaResults(results[0]!, results[1]!);
+      expect(comparison.persisting).toEqual([]);
+      expect(comparison.newlyObserved).toEqual([results[1]!.matches[0]!.id]);
+      expect(comparison.noLongerObserved).toEqual([
+        { matchId: results[0]!.matches[0]!.id, resolved: false },
+      ]);
+      expect(comparison.comparable).toBe(false);
+    },
+  );
 
   test("keeps separate versions and correlates an unambiguous version change", () => {
     const base = fixture();

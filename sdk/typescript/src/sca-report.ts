@@ -38,13 +38,13 @@ export interface ScaUpdateHandoff {
 }
 
 function sourceIdentity(path: string, repositoryPath: string): string {
-  if (win32.isAbsolute(path) && !posix.isAbsolute(path)) {
-    return win32.relative(repositoryPath, path).replaceAll("\\", "/");
-  }
-  if (posix.isAbsolute(path)) return posix.relative(repositoryPath, path);
-  if (win32.isAbsolute(repositoryPath) && !posix.isAbsolute(repositoryPath))
-    return win32.normalize(path).replaceAll("\\", "/");
-  return posix.normalize(path);
+  const windows =
+    win32.isAbsolute(repositoryPath) && !posix.isAbsolute(repositoryPath);
+  const paths = windows ? win32 : posix;
+  const normalized = paths.isAbsolute(path)
+    ? paths.relative(repositoryPath, path)
+    : paths.normalize(path);
+  return windows ? normalized.replaceAll("\\", "/") : normalized;
 }
 
 function identifiers(match: ScaMatch): string[] {
