@@ -942,12 +942,13 @@ export class CodexSecurity {
         }
         throwIfAborted(signal, outputDir);
       } catch (error) {
-        result.status = "partial";
         const message = errorMessage(error);
         result.diagnostics.push(`Static assessment: ${message}`);
+        throwIfAborted(signal, outputDir);
+        result.status = "partial";
         for (const assessment of result.assessments) {
           if (assessment.status === "completed") continue;
-          assessment.status = signal.aborted ? "cancelled" : "failed";
+          assessment.status = "failed";
           assessment.error = message;
         }
         await saveDependencyScan(result);
