@@ -10,10 +10,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  hasWindowsLoopbackShare,
+  windowsLoopbackPath,
+} from "./windows-helper-location.js";
 
 interface Assessment {
   [key: string]: unknown;
@@ -800,116 +804,136 @@ describe("patch risk assessment contract", () => {
     }
   });
 
-  test.skipIf(process.platform !== "win32")(
-    "executes the documented PowerShell command with literal assessment and plugin paths",
-    async () => {
-      const outside = await mkdtemp(join(tmpdir(), "patch-risk-powershell-"));
-      try {
-        const plugin = join(outside, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
-        const expandedPlugin = plugin.replace("%PLUGIN%", "expanded-plugin");
-        const file = join(
-          outside,
-          "review-%USERNAME% !EXPAND! \u96ea's",
-          "assessment.json",
-        );
-        const expandedFile = file.replace("%USERNAME%", "expanded-user");
-        await mkdir(join(plugin, "scripts"), { recursive: true });
-        await cp(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), {
-          recursive: true,
-        });
-        await copyFile(
-          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
-          join(plugin, "scripts", "launch_codex_security_mcp.cmd"),
-        );
-        await mkdir(join(expandedPlugin, "scripts"), { recursive: true });
-        await writeFile(
-          join(expandedPlugin, "scripts", "launch_codex_security_mcp.cmd"),
-          "@echo expanded-plugin-used\r\n@exit /b 0\r\n",
-        );
-        for (const path of [file, expandedFile])
-          await mkdir(dirname(path), { recursive: true });
-        const original = JSON.stringify(assessment()).replace(
-          "example/project",
-          "example/caf\u00e9-\u96ea",
-        );
-        await writeFile(expandedFile, original);
-        const skill = await readFile(
-          join(PLUGIN_ROOT, "skills", "assess-patch-risk", "SKILL.md"),
-          "utf8",
-        );
-        const command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(
-          skill,
-        )?.[1];
-        expect(command).toBeDefined();
-        const quote = (value: string) => value.replaceAll("'", "''");
-        const powershells = [
-          join(
-            process.env["SystemRoot"]!,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe",
-          ),
-          Bun.which("pwsh"),
-        ].filter((value): value is string => value !== null);
-        for (const powershell of powershells) {
-          for (const input of ["invalid", "valid", "stdin"]) {
-            await writeFile(file, input === "invalid" ? "{}" : original);
-            const script =
-              command!
-                .replace("<plugin-root>", quote(plugin))
-                .replace(
-                  "<assessment.json>",
-                  quote(input === "stdin" ? "-" : file),
-                ) + "\nexit $LASTEXITCODE\n";
-            const result = spawnSync(
-              powershell,
-              [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                Buffer.from(script, "utf16le").toString("base64"),
-              ],
-              {
-                cwd: outside,
-                env: {
-                  SystemRoot: process.env["SystemRoot"],
-                  PATH: join(process.env["SystemRoot"]!, "System32"),
-                  HOME: outside,
-                  USERPROFILE: outside,
-                  LOCALAPPDATA: outside,
-                  XDG_CACHE_HOME: outside,
-                  CODEX_MCP_NODE_PATH: node,
-                  PLUGIN: "expanded-plugin",
-                  USERNAME: "expanded-user",
-                  EXPAND: "expanded-bang",
+  for (const location of ["absolute", "relative", "unc"] as const)
+    test.skipIf(
+      process.platform !== "win32" ||
+        (location === "unc" && !hasWindowsLoopbackShare),
+    )(
+      `executes the documented PowerShell command with ${location} literal assessment and plugin paths`,
+      async () => {
+        const outside = await mkdtemp(join(tmpdir(), "patch-risk-powershell-"));
+        try {
+          const plugin = join(outside, "plugin %PLUGIN% !EXPAND! caf\u00e9's");
+          const expandedPlugin = plugin.replace("%PLUGIN%", "expanded-plugin");
+          const file = join(
+            outside,
+            "review-%USERNAME% !EXPAND! \u96ea's",
+            "assessment.json",
+          );
+          const expandedFile = file.replace("%USERNAME%", "expanded-user");
+          await mkdir(join(plugin, "scripts"), { recursive: true });
+          await cp(join(PLUGIN_ROOT, "mcp"), join(plugin, "mcp"), {
+            recursive: true,
+          });
+          await copyFile(
+            join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp.cmd"),
+            join(plugin, "scripts", "launch_codex_security_mcp.cmd"),
+          );
+          await mkdir(join(expandedPlugin, "scripts"), { recursive: true });
+          await writeFile(
+            join(expandedPlugin, "scripts", "launch_codex_security_mcp.cmd"),
+            "@echo expanded-plugin-used\r\n@exit /b 0\r\n",
+          );
+          for (const path of [file, expandedFile])
+            await mkdir(dirname(path), { recursive: true });
+          const original = JSON.stringify(assessment()).replace(
+            "example/project",
+            "example/caf\u00e9-\u96ea",
+          );
+          await writeFile(expandedFile, original);
+          const skill = await readFile(
+            join(PLUGIN_ROOT, "skills", "assess-patch-risk", "SKILL.md"),
+            "utf8",
+          );
+          const command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(
+            skill,
+          )?.[1];
+          expect(command).toBeDefined();
+          const quote = (value: string) => value.replaceAll("'", "''");
+          const caller = join(outside, "caller");
+          await mkdir(caller);
+          const workingDirectory =
+            location === "unc" ? windowsLoopbackPath(caller) : caller;
+          const argument = (path: string) =>
+            location === "absolute" ? path : relative(caller, path);
+          const powershells = [
+            join(
+              process.env["SystemRoot"]!,
+              "System32",
+              "WindowsPowerShell",
+              "v1.0",
+              "powershell.exe",
+            ),
+            Bun.which("pwsh"),
+          ].filter((value): value is string => value !== null);
+          for (const powershell of powershells) {
+            for (const input of ["invalid", "valid", "stdin", "missing"]) {
+              await writeFile(file, input === "invalid" ? "{}" : original);
+              if (input === "missing") await rm(file);
+              const script =
+                `Set-Location -LiteralPath '${quote(workingDirectory)}' -ErrorAction Stop\n` +
+                command!
+                  .replace("<plugin-root>", quote(argument(plugin)))
+                  .replace(
+                    "<assessment.json>",
+                    quote(input === "stdin" ? "-" : argument(file)),
+                  ) +
+                "\nexit $LASTEXITCODE\n";
+              const result = spawnSync(
+                powershell,
+                [
+                  "-NoLogo",
+                  "-NoProfile",
+                  "-NonInteractive",
+                  "-EncodedCommand",
+                  Buffer.from(script, "utf16le").toString("base64"),
+                ],
+                {
+                  cwd: outside,
+                  env: {
+                    SystemRoot: process.env["SystemRoot"],
+                    PATH: join(process.env["SystemRoot"]!, "System32"),
+                    HOME: outside,
+                    USERPROFILE: outside,
+                    LOCALAPPDATA: outside,
+                    XDG_CACHE_HOME: outside,
+                    CODEX_MCP_NODE_PATH: node,
+                    PLUGIN: "expanded-plugin",
+                    USERNAME: "expanded-user",
+                    EXPAND: "expanded-bang",
+                  },
+                  encoding: "utf8",
+                  input: original,
+                  windowsHide: true,
                 },
-                encoding: "utf8",
-                input: original,
-                windowsHide: true,
-              },
-            );
-            expect(
-              result.status,
-              `${powershell}: ${result.stderr || result.error?.message || ""}`,
-            ).toBe(input === "invalid" ? 1 : 0);
-            expect(result.stdout).toBe("");
-            if (input === "invalid")
-              expect(result.stderr).toContain(
-                "missing required schema property",
               );
-            else expect(result.stderr).toBe("");
-            expect(await readFile(file, "utf8")).toBe(
-              input === "invalid" ? "{}" : original,
-            );
+              expect(
+                result.status,
+                `${powershell}: ${result.stderr || result.error?.message || ""}`,
+              ).toBe(input === "invalid" || input === "missing" ? 1 : 0);
+              if (location !== "unc") expect(result.stdout).toBe("");
+              if (input === "invalid")
+                expect(result.stderr).toContain(
+                  "missing required schema property",
+                );
+              else if (input === "missing")
+                expect(result.stderr).toContain("cannot read assessment:");
+              else if (location !== "unc") expect(result.stderr).toBe("");
+              if (input === "missing")
+                await expect(readFile(file)).rejects.toMatchObject({
+                  code: "ENOENT",
+                });
+              else
+                expect(await readFile(file, "utf8")).toBe(
+                  input === "invalid" ? "{}" : original,
+                );
+            }
           }
+        } finally {
+          await rm(outside, { recursive: true, force: true });
         }
-      } finally {
-        await rm(outside, { recursive: true, force: true });
-      }
-    },
-  );
+      },
+    );
 
   test.skipIf(process.platform === "win32")(
     "keeps stdin surrogate escapes distinct from replacement characters",
