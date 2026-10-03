@@ -12,11 +12,8 @@ interface RankRow {
   score?: bigint;
   include?: boolean;
 }
-const trim = (value: string) =>
-  value.replace(
-    /^[\p{White_Space}\u001c-\u001f]+|[\p{White_Space}\u001c-\u001f]+$/gu,
-    "",
-  );
+const blank = (value: string) =>
+  /^[\p{White_Space}\u001c-\u001f]*$/u.test(value);
 
 function compare(left: string, right: string): number {
   const a = Array.from(left, (character) => character.codePointAt(0)!);
@@ -39,7 +36,7 @@ function loadRows(path: string, selection: boolean): RankRow[] {
     const fail = (message: string): never => {
       throw new Error(`${path}:${index + 1}: ${message}`);
     };
-    if (trim(line) === "") fail("blank JSONL rows are not allowed");
+    if (blank(line)) fail("blank JSONL rows are not allowed");
     let row: unknown;
     try {
       row = parseJson(line);
@@ -67,7 +64,7 @@ function loadRows(path: string, selection: boolean): RankRow[] {
       : ["path", "area", "preview"]) {
       if (
         typeof row[field] !== "string" ||
-        (field === "path" && trim(row[field]) === "")
+        (field === "path" && blank(row[field]))
       )
         fail(
           `${field} must be ${field === "path" ? "a non-empty string" : "a string"}`,
@@ -79,7 +76,7 @@ function loadRows(path: string, selection: boolean): RankRow[] {
       if ((row.score as bigint) < 1n || (row.score as bigint) > 10n)
         fail("score must be from 1 through 10");
       if (typeof row.include !== "boolean") fail("include must be a boolean");
-      if (typeof row.reason !== "string" || trim(row.reason) === "")
+      if (typeof row.reason !== "string" || blank(row.reason))
         fail("reason must be a non-empty string");
     }
     return row as unknown as RankRow;
@@ -114,8 +111,11 @@ function writeRows(output: string, rows: RankRow[]): void {
 
 class ArgumentError extends Error {}
 function integer(value: string): bigint {
-  const text = value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
-  if (!/^[+-]?\p{Decimal_Number}+(?:_\p{Decimal_Number}+)*$/u.test(text))
+  const text =
+    /^\p{White_Space}*([+-]?\p{Decimal_Number}+(?:_\p{Decimal_Number}+)*)\p{White_Space}*$/u.exec(
+      value,
+    )?.[1];
+  if (text === undefined)
     throw new ArgumentError(
       `argument --top-percent: invalid int value: ${pythonRepr(value)}`,
     );
