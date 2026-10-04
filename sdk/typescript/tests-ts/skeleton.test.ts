@@ -229,7 +229,7 @@ describe("TypeScript package skeleton", () => {
       await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
     );
     expect(packageJson.scripts.test).toBe(
-      "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
+      "node --run build:ci && node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");

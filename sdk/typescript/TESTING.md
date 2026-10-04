@@ -9,6 +9,7 @@ Run these commands from `sdk/typescript`:
 ```sh
 pnpm install --frozen-lockfile
 pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
+pnpm run build:ci
 pnpm run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 pnpm run types
@@ -102,6 +103,8 @@ and macOS, and seven on Windows. The other Node versions run the installed
 package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
+
+`pnpm run build:ci` compiles the CI runner and shard helper from `.mts` to ignored `.mjs` files; `pnpm run test` runs this step automatically. Before invoking the runner directly, run `pnpm run build:ci`.
 
 `scripts/run-ci-tests.mjs` assigns the longest measured files first. Its
 `ci-test-durations.json` records per-file seconds from CI reports.

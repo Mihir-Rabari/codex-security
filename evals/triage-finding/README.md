@@ -8,13 +8,15 @@ The suite uses the Promptfoo Codex SDK provider because it only needs final assi
 
 Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the repository root to install dependencies under this eval directory.
 
-The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace, independent of the SDK and MCP app packages.
+The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling compilation uses the SDK’s TypeScript and esbuild dependencies.
 
-Install the local eval runner:
+Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and compile the TypeScript tooling:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
 ```
+
+After editing the tooling, rerun `pnpm --dir sdk/typescript run build:evals`. It type-checks the eval sources and emits ignored JavaScript beside them, preserving the existing Node and Promptfoo entrypoints.
 
 Validate the config:
 

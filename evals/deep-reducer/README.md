@@ -6,9 +6,10 @@ The fixture has a 32 MiB individual semantic field containing quotes, backslashe
 
 The grader requires a smaller byte budget on the retry with the same cursor and reference, byte-bounded subsequent pages, one successful result submission, every source accounted for exactly once, complete original payloads matching their SHA-256 hashes, and preservation of the previous finding identity and synthesized history.
 
-Install the MCP app's locked dependencies using the repository's normal setup, then run from the repository root:
+Install the SDK and MCP app’s locked dependencies using the repository's normal setup, then run from the repository root:
 
 ```sh
+pnpm --dir sdk/typescript run build:evals
 node evals/deep-reducer/run.mjs
 ```
 
@@ -23,5 +24,6 @@ The same fixture, real transport, and grading helpers live under `plugins/codex-
 Run that test directly from the repository root:
 
 ```sh
-node --test plugins/codex-security/mcp-app/tests/test_deep_reducer_paging_eval.mjs
+pnpm --dir plugins/codex-security/mcp-app run build:tests
+node --test plugins/codex-security/mcp-app/tests/test_deep_reducer_paging_eval.js
 ```

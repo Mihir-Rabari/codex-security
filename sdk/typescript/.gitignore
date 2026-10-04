@@ -7,3 +7,7 @@
 /private_release/dist/
 /*.tsbuildinfo
 /scripts/compare-test-reports.mjs
+
+# Compiled TypeScript tooling.
+/scripts/run-ci-tests.mjs
+/scripts/test-shards.mjs

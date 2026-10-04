@@ -3,7 +3,7 @@
   "private": true,
   "description": "Promptfoo evals for the Codex Security triage-finding skill",
   "scripts": {
-    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3",
+    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3 && pnpm --dir ../../sdk/typescript run build:evals",
     "calibration:generate": "node scripts/generate-calibration-tests.js",
     "calibration:hydrate": "node scripts/hydrate-calibration-repos.js",
     "sastbench:install": "node sastbench/scripts/install-sastbench.js",

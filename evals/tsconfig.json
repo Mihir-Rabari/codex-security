@@ -1,0 +1,18 @@
+{
+  "extends": "../plugins/codex-security/mcp-app/tsconfig.tests.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "moduleDetection": "force",
+    "typeRoots": ["../sdk/typescript/node_modules/@types"],
+    "module": "Preserve"
+  },
+  "include": [
+    "deep-reducer/*.mts",
+    "secret-discovery/*.mts",
+    "triage-finding/assertions/*.ts",
+    "triage-finding/scripts/*.ts",
+    "triage-finding/sastbench/assertions/*.ts",
+    "triage-finding/sastbench/scripts/*.ts",
+    "../plugins/codex-security/mcp-app/src/assets.d.ts"
+  ]
+}
