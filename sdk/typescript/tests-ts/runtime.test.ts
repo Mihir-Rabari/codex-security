@@ -1,5 +1,7 @@
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
+import { semanticFinding } from "./helpers/semantic-scan.js";
+import { prepareScanFindings } from "../src/scan-semantics.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -39,7 +41,6 @@ import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -291,36 +292,22 @@ describe("plugin runtime preparation", () => {
   });
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+    const findings = prepareScanFindings([
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-a" },
+      }),
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-b" },
+      }),
+    ]);
+
+    expect(
+      findings.map(
+        (finding) => (finding["identity"] as { anchor: string }).anchor,
       ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const source =
-      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string, fallback: string) => value || fallback) as (
-      findings: Array<{
-        title: string;
-        extensions: { candidateId: string };
-      }>,
-    ) => Array<{ identity: { anchor: string } }>;
-
-    const findings = buildFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
-    ]);
-
-    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
-      "candidate-a",
-      "candidate-b",
-    ]);
+    ).toEqual(["candidate-a", "candidate-b"]);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -1557,8 +1544,8 @@ describe("plugin runtime preparation", () => {
       const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
       const calls: string[][] = [];
       await mkdir(home);
-      const bootstrap = () =>
-        bootstrapPlugin(home, selected, {
+      const bootstrap = (source = selected) =>
+        bootstrapPlugin(home, source, {
           codexCommand: { command: "/codex" },
           runCodex: async (_command, args) => {
             calls.push([...args]);
@@ -1591,6 +1578,17 @@ describe("plugin runtime preparation", () => {
       expect((await bootstrap()).installedRoot).toBe(installed);
       expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
       expect(await readFile(generated, "utf8")).toBe("generated cache");
+    });
+
+    test("reuses unchanged source after relocation", async () => {
+      const { installed, calls, bootstrap } = await fixture();
+      const relocated = await plugin(await temporaryDirectory());
+
+      const result = await bootstrap(relocated);
+
+      expect(result.installedRoot).toBe(installed);
+      expect(result.pluginRoot).toBe(relocated);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
     });
 
     test.each(["changed", "added", "removed"] as const)(
@@ -1633,6 +1631,7 @@ describe("plugin runtime preparation", () => {
     });
 
     test.each([
+      "missing installed directory",
       "missing file",
       "changed file",
       "missing record",
@@ -1645,6 +1644,9 @@ describe("plugin runtime preparation", () => {
         await fixture();
       const helper = join(installed, "scripts", "helper.py");
       switch (damage) {
+        case "missing installed directory":
+          await rm(installed, { recursive: true });
+          break;
         case "missing file":
           await rm(helper);
           break;
@@ -5557,9 +5559,9 @@ describe("runtime directories and plugin Python boundary", () => {
           "archived_scan_dir = Path(sys.argv[3])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
           "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
           "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
@@ -5609,9 +5611,9 @@ describe("runtime directories and plugin Python boundary", () => {
           "scan_dir = Path(sys.argv[2])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
-          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL, parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans (id, status, scan_dir, updated_at) VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
           "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
           "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
