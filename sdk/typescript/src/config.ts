@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { isRecord } from "./record.js";
+import { environmentEntry } from "./codex-home.js";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
@@ -195,11 +197,9 @@ function selectedScanProfile(
 }
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const resolved = deepMerge(
-    structuredClone(config),
-    selectedScanProfile(config) ?? {},
-  );
-  delete resolved["profile"];
+  const selected = selectedScanProfile(config);
+  const resolved = deepMerge(structuredClone(config), selected ?? {});
+  if (selected !== undefined) delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
 }
@@ -238,28 +238,20 @@ export function removeManagedPluginRegistration(config: JsonObject): void {
   }
 }
 
-/** Apply a worker budget to a config owned by this scan. */
-export function setScanSubagentBudget(
-  config: JsonObject,
-  subagents: number,
-): void {
-  const features = isObject(config["features"]) ? config["features"] : {};
-  features["multi_agent_v2"] = {
-    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
-    enabled: true,
-    max_concurrent_threads_per_session: subagents + 1,
-  };
-  config["features"] = features;
-}
-
 /** Carry a selected scan into another ordinary client without copying managed plugin registration. */
 export function scanCompositionOverrides(
   config: JsonObject,
   subagents: number,
 ): JsonObject {
   const result = resolveCodexProfile(config);
-  setScanSubagentBudget(result, subagents);
   removeManagedPluginRegistration(result);
+  const features = isObject(result["features"]) ? result["features"] : {};
+  features["multi_agent_v2"] = {
+    ...(isObject(features["multi_agent_v2"]) ? features["multi_agent_v2"] : {}),
+    enabled: true,
+    max_concurrent_threads_per_session: subagents + 1,
+  };
+  result["features"] = features;
   if (isObject(result["agents"])) delete result["agents"]["max_threads"];
   return result;
 }
@@ -498,4 +490,80 @@ function isObject(value: unknown): value is Record<string, JsonValue> {
   }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+/** @internal Keep file-backed provider credentials out of native process arguments. */
+export function providerProcessConfiguration(
+  config: JsonObject,
+  environment: NodeJS.ProcessEnv,
+): { config: JsonObject; environment: NodeJS.ProcessEnv } {
+  const result = structuredClone(config);
+  const childEnvironment = { ...environment };
+  const prefix = `CODEX_SECURITY_INTERNAL_${randomUUID().replaceAll("-", "_")}`;
+  let index = 0;
+  const transfer = (value: string): string => {
+    const name = `${prefix}_${index++}_TOKEN`;
+    childEnvironment[name] = value;
+    return name;
+  };
+  const providers = (source: JsonObject): void => {
+    if (!isRecord(source["model_providers"])) return;
+    for (const [name, provider] of Object.entries(source["model_providers"])) {
+      // Bedrock accepts literal headers but rejects env_http_headers overrides.
+      if (
+        ["amazon-bedrock", "amazon-bedrock-runtime"].includes(name) ||
+        !isRecord(provider)
+      )
+        continue;
+      const bearer = provider["experimental_bearer_token"];
+      if (typeof bearer === "string" && /\P{White_Space}/u.test(bearer)) {
+        // Codex requires an existing env_key before considering a literal bearer.
+        if (provider["env_key"] === undefined)
+          provider["env_key"] = transfer(bearer);
+        delete provider["experimental_bearer_token"];
+      }
+      const headers = provider["http_headers"];
+      if (!isRecord(headers)) continue;
+      const environmentHeaders = isRecord(provider["env_http_headers"])
+        ? provider["env_http_headers"]
+        : {};
+      for (const [name, value] of Object.entries(headers)) {
+        // Env-backed headers omit blank values; retain those literal semantics.
+        if (typeof value !== "string" || !/\P{White_Space}/u.test(value))
+          continue;
+        const overridden = Object.entries(environmentHeaders).some(
+          ([header, variable]) => {
+            if (
+              header.toLowerCase() !== name.toLowerCase() ||
+              typeof variable !== "string"
+            )
+              return false;
+            const selected = environmentEntry(environment, variable);
+            // Codex validates UTF-8 header bytes, including non-ASCII values.
+            return (
+              typeof selected === "string" &&
+              /\P{White_Space}/u.test(selected) &&
+              !/[\u0000-\u0008\u000a-\u001f\u007f]/u.test(selected)
+            );
+          },
+        );
+        if (!overridden) environmentHeaders[name] = transfer(value);
+        delete headers[name];
+      }
+      provider["env_http_headers"] = environmentHeaders;
+    }
+  };
+  providers(result);
+  if (isRecord(result["profiles"]))
+    for (const profile of Object.values(result["profiles"]))
+      if (isRecord(profile)) providers(profile as JsonObject);
+  return { config: result, environment: childEnvironment };
+}
+
+/** Serialize full tables so dotted names and filesystem paths remain literal keys. */
+export function codexConfigOverrides(config: JsonObject): string[] {
+  return Object.entries(config).map(
+    ([name, value]) =>
+      `${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}=${inlineToml(value)}`,
+  );
 }
