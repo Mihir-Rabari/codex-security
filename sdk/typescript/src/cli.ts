@@ -307,7 +307,6 @@ type SignalName = "SIGINT" | "SIGTERM";
 
 const DISPLAY_SEVERITIES: readonly SeverityLevel[] = SCAN_SEVERITIES;
 const MODEL_REASONING_EFFORTS = [
-  "minimal",
   "low",
   "medium",
   "high",
@@ -979,7 +978,7 @@ function modelOptions(
     model: optionValue("--model").optional().describe(modelDescription),
     effort: z
       .enum(MODEL_REASONING_EFFORTS, {
-        error: "--effort must be minimal, low, medium, high, xhigh, or max.",
+        error: "--effort must be low, medium, high, xhigh, or max.",
       })
       .optional()
       .describe(effortDescription),

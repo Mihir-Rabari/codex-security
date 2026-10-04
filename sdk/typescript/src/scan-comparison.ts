@@ -165,8 +165,7 @@ export interface ReadOnlyCodexOptions {
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   signal?: AbortSignal;
   workingDirectory?: string;
 }

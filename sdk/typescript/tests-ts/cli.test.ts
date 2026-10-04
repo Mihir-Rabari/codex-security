@@ -162,7 +162,7 @@ describe("CLI", () => {
           verbose: { type: "boolean" },
           showCost: { type: "boolean", default: false },
           effort: {
-            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            enum: ["low", "medium", "high", "xhigh", "max"],
           },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
@@ -2477,7 +2477,7 @@ describe("CLI", () => {
         { model: "gpt-6.1-sol", model_reasoning_effort: "max" },
       ],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
-      [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort", "low"], { model_reasoning_effort: "low" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
       [["--effort", "max"], { model_reasoning_effort: "max" }],
       [
@@ -2817,7 +2817,15 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, xhigh, or max",
+        "--effort must be low, medium, high, xhigh, or max",
+      ],
+      [
+        ["scan", ".", "--effort", "minimal"],
+        "--effort must be low, medium, high, xhigh, or max",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--effort=minimal"],
+        "--effort must be low, medium, high, xhigh, or max",
       ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],

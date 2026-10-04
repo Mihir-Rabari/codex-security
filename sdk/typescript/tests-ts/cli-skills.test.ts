@@ -1058,7 +1058,11 @@ describe("CLI skill commands", () => {
       for (const [options, message] of [
         [
           ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, xhigh, or max",
+          "--effort must be low, medium, high, xhigh, or max",
+        ],
+        [
+          ["--effort", "minimal"],
+          "--effort must be low, medium, high, xhigh, or max",
         ],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],

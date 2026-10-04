@@ -945,7 +945,7 @@ max_concurrent_threads_per_session = 9
 sandbox = "unelevated"
 ```
 
-Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
+Use `--model` to choose a model and `--effort low|medium|high|xhigh|max`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
 `policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
 `scans match`, and `scans compare`.
