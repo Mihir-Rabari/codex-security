@@ -1,7 +1,11 @@
 import type { CoordinatorFixtures } from "./test_deep_scan_coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
-import type { DeepScanLogEvent } from "../src/deep-scan/types.js";
+import type {
+  DeepScanLogEvent,
+  PersistedDeepScanWorker,
+} from "../src/deep-scan/types.js";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { readFile } from "node:fs/promises";
 
 export function createDeepScanWorkerFailureCases({
@@ -9,6 +13,7 @@ export function createDeepScanWorkerFailureCases({
   FakeStore,
   FakeExecutor,
   createCoordinator,
+  DeepScanCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
   deferred,
@@ -20,6 +25,7 @@ export function createDeepScanWorkerFailureCases({
   | "fixtureRun"
   | "FakeStore"
   | "FakeExecutor"
+  | "DeepScanCoordinator"
   | "createCoordinator"
   | "DeepScanNonRetryableError"
   | "classifyCodexWorkerError"
@@ -28,6 +34,45 @@ export function createDeepScanWorkerFailureCases({
   | "workerIdFromPrompt"
   | "promptContext"
 >) {
+  async function testResumeRequiresHistoricalWorkerPrompt(
+    status: "failed" | "canceled",
+  ) {
+    const fixture = await fixtureRun({
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 2,
+      maxDiscoveryRuns: 2,
+    });
+    const promptPath = path.join(fixture.run.scanDir, "missing-prompt.md");
+    const store = new FakeStore({
+      ...fixture.run,
+      persistedWorkers: [
+        {
+          id: "historical-worker",
+          kind: "discovery",
+          status,
+          attempt: 1,
+          promptPath,
+          artifactDir: fixture.run.scanDir,
+        } as PersistedDeepScanWorker,
+      ],
+    });
+    const executor = new FakeExecutor();
+    const coordinator = new DeepScanCoordinator({
+      run: store.run,
+      store,
+      executor,
+      pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(undefined, 5_000);
+    assert.equal(terminal?.status, "failed");
+    assert.match(terminal.error, /ENOENT/);
+    assert.ok(terminal.error.includes(promptPath));
+    assert.equal(executor.discoveryCalls, 0);
+  }
+
   async function testRecoverableWorkerErrorsCannotFailScan() {
     const failures = ["config unknown", "authentication required"].map(
       (output) =>
@@ -114,7 +159,7 @@ export function createDeepScanWorkerFailureCases({
           .length,
         1,
       );
-      assert.equal(store.failCalls, 0);
+      assert.equal(store.failureInputs.length, 0);
     }
   }
 
@@ -127,8 +172,8 @@ export function createDeepScanWorkerFailureCases({
       maxDiscoveryRuns: 4,
     });
     const store = new FakeStore(fixture.run);
-    const nextDiscovery = deferred();
-    const siblingDiscovery = deferred();
+    const nextDiscovery = Promise.withResolvers<void>();
+    const siblingDiscovery = Promise.withResolvers<void>();
     const normalExecutor = new FakeExecutor({
       discoveryCandidateId: "candidate-1",
       canonicalCandidateId: "candidate-1",
@@ -209,7 +254,7 @@ export function createDeepScanWorkerFailureCases({
       ),
       ["candidate-1"],
     );
-    assert.equal(store.failCalls, 0);
+    assert.equal(store.failureInputs.length, 0);
   }
 
   async function testNonRetryableReducerAbortsScanWithoutRetry(
@@ -254,11 +299,12 @@ export function createDeepScanWorkerFailureCases({
     assert.deepEqual(attempts, [undefined]);
     assert.deepEqual(sleeps, []);
     assert.equal(normalExecutor.runningDiscovery, 0);
-    assert.equal(store.failCalls, 1);
+    assert.equal(store.failureInputs.length, 1);
     assert.equal(store.dedupCommits.length, 0);
   }
 
   return {
+    testResumeRequiresHistoricalWorkerPrompt,
     testRecoverableWorkerErrorsCannotFailScan,
     testPolicyRefusedReducerPreservesInputsAndCommittedAggregate,
     testNonRetryableReducerAbortsScanWithoutRetry,

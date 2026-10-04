@@ -21,12 +21,15 @@ import type {
   ExecutorOptions,
 } from "./deep_scan_fixture_types.js";
 
+import { sourceReferences } from "./support/source-references.js";
 import { deferred } from "./deferred.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { once } from "node:events";
+import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   realpath,
@@ -34,7 +37,6 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { importModule } from "./import-module.js";
 import { testDeepScanDeadlines } from "./deep_scan_deadline_cases.js";
@@ -46,7 +48,7 @@ const {
   DeepScanCoordinatorRegistry,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
-  DeepScanStartLock,
+  AsyncLock,
   classifyCodexWorkerError,
   startOrJoinDeepScanCoordinator,
 } = await importModule({
@@ -59,7 +61,21 @@ const {
   },
   loader: { ".md": "text" },
 });
-const temporaryRoots: string[] = [];
+const claimDedupInputs = (claim: StoreInput<"claimDedup">) =>
+  claim.workerIds.map((discoveryWorkerId, inputOrder) => ({
+    dedupWorkerId: claim.id,
+    discoveryWorkerId,
+    inputOrder,
+  }));
+
+const recordSleeps =
+  (sleeps: number[]): DeepScanClock["sleep"] =>
+  async (delayMs, signal) => {
+    assert.equal(signal.aborted, false);
+    sleeps.push(delayMs);
+  };
+
+const temporaryDirectories = createTemporaryDirectories(true);
 async function testCappedQueueAndSerialDedup() {
   const fixture = await fixtureRun({
     workers: 3,
@@ -230,7 +246,7 @@ async function testDiscoveryWorkersKeepOneContextAfterPersistedUpdate() {
     maxDiscoveryRuns: 2,
   });
   fixture.run.userContext = "Initial context.";
-  const firstWorkerGate = deferred();
+  const firstWorkerGate = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
     dedupNewFindings: [1],
@@ -238,7 +254,7 @@ async function testDiscoveryWorkersKeepOneContextAfterPersistedUpdate() {
   });
   const coordinator = createCoordinator(fixture, store, executor, {});
   coordinator.start();
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   store.run.userContext = "Updated context.";
   firstWorkerGate.resolve();
   await coordinator.wait(undefined, 5_000);
@@ -263,7 +279,7 @@ async function testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot(
     maxDiscoveryRuns: 2,
   });
   fixture.run.userContext = "Initial cross-process context.";
-  const firstWorkerGate = deferred();
+  const firstWorkerGate = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
     dedupNewFindings: [1],
@@ -278,7 +294,7 @@ async function testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot(
     clock: immediateClock,
   });
 
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   store.run.userContext = "Updated cross-process context.";
   firstWorkerGate.resolve();
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -429,10 +445,7 @@ async function testRetryKeepsLogicalWorker() {
     random: () => 0.5,
     clock: {
       now: () => 1_700_000_000_000,
-      sleep: async (delayMs, signal) => {
-        assert.equal(signal.aborted, false);
-        sleeps.push(delayMs);
-      },
+      sleep: recordSleeps(sleeps),
     },
   });
   coordinator.start();
@@ -533,7 +546,7 @@ async function testCompletionOrdering() {
     maxDiscoveryRuns: 3,
   });
   const store = new FakeStore(fixture.run);
-  const firstWorkerGate = deferred();
+  const firstWorkerGate = Promise.withResolvers<void>();
   const executor = new FakeExecutor({
     dedupNewFindings: [1, 0],
     discoveryGates: { "discovery-0001": firstWorkerGate.promise },
@@ -575,7 +588,7 @@ async function testSaturationDrainsBufferedAndCancelsInflight() {
   });
   const coordinator = createCoordinator(fixture, store, executor, {});
   coordinator.start();
-  await executor.dedupStarted;
+  await executor.dedupStarted.promise;
   await eventually(
     () => executor.discoveryCalls === 6 && executor.runningDiscovery === 2,
   );
@@ -618,7 +631,7 @@ async function testSaturationPreservesFindingAlreadyBuffered() {
     maxDiscoveryRuns: 4,
   });
   const store = new FakeStore(fixture.run);
-  const laterDiscoveries = deferred();
+  const laterDiscoveries = Promise.withResolvers<void>();
   const executor = new FakeExecutor({
     blockDedup: true,
     discoveryGates: {
@@ -635,7 +648,7 @@ async function testSaturationPreservesFindingAlreadyBuffered() {
     onComplete: async (draft) => completed.push(draft),
   });
   coordinator.start();
-  await executor.dedupStarted;
+  await executor.dedupStarted.promise;
   laterDiscoveries.resolve();
   await eventually(
     () =>
@@ -716,7 +729,7 @@ async function testSaturationIgnoresWorkerFailureSettledAfterStop() {
   coordinator.start();
 
   await Promise.all([
-    executor.dedupStarted,
+    executor.dedupStarted.promise,
     store.discoveryFailureBlocked.promise,
   ]);
   executor.releaseDedup();
@@ -736,7 +749,7 @@ async function testSaturationIgnoresWorkerFailureSettledAfterStop() {
   );
   assert.ok(failedWorker);
   assert.equal(failedWorker.status, "failed");
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
   assert.equal(store.finishCalls.length, 1);
   assert.equal(executor.discoveryCalls, 3);
   assert.equal(executor.dedupCalls, 1);
@@ -758,7 +771,7 @@ async function testSettledReducerIsNotStarvedByDiscoveryBacklog() {
   const coordinator = createCoordinator(fixture, store, executor, {});
   coordinator.start();
 
-  await executor.dedupStarted;
+  await executor.dedupStarted.promise;
   await eventually(
     () => executor.discoveryCalls >= 8 && executor.runningDiscovery === 4,
   );
@@ -1245,7 +1258,7 @@ async function testFailureManifestWriteDoesNotMaskOriginalError() {
   assert.equal(terminal?.status, "failed");
   assert.match(terminal?.error ?? "", /fixture configuration failure/);
   assert.equal(terminal?.manifestPath, undefined);
-  assert.equal(store.failCalls, 1);
+  assert.equal(store.failureInputs.length, 1);
 }
 
 async function testFinishPersistenceFailureRewritesManifestAsFailure() {
@@ -1291,7 +1304,7 @@ async function testLostFinishResponseReplaysWithoutOverwritingSuccessManifest() 
   assert.equal(terminal?.status, "succeeded");
   assert.equal(store.finishCalls.length, 2);
   assert.deepEqual(store.finishCalls[1], store.finishCalls[0]);
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
   const manifest = JSON.parse(await readFile(terminal.manifestPath, "utf8"));
   assert.equal(manifest.scan.scanId, fixture.run.scanId);
 }
@@ -1320,7 +1333,7 @@ async function testLostWorkerCommitResponsesReplayIdempotently() {
   assert.equal(store.dedupCommitResponseLosses, 1);
   assert.equal(store.dedupCommitCalls.length, 2);
   assert.equal(store.dedupCommits.length, 1);
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
 }
 
 async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() {
@@ -1330,7 +1343,7 @@ async function testCommittedReducerIsReconciledBeforeDiscoveryFailureManifest() 
     stopAfterNoNew: 10,
     maxDiscoveryRuns: 3,
   });
-  const thirdWorkerGate = deferred();
+  const thirdWorkerGate = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   store.blockDedupCommitResponse = true;
   const executor = new FakeExecutor({
@@ -1420,14 +1433,11 @@ async function testCancellationClearsRetryWait() {
     failFirstDiscoveryAttempt: true,
     blockDiscoveryAfterCalls: 1,
   });
-  const sleepStarted = deferred();
+  const sleepStarted = Promise.withResolvers<void>();
   const coordinator = createCoordinator(fixture, store, executor, {
-    clock: {
-      now: immediateClock.now,
-      sleep: async (_delayMs, signal) => {
-        sleepStarted.resolve();
-        await waitForAbort(signal);
-      },
+    clock: undefined,
+    log: (event) => {
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
     },
   });
   coordinator.start();
@@ -1533,10 +1543,7 @@ async function testInvalidArtifactsRetry() {
     retryDelaysMs: [1, 3, 9],
     clock: {
       now: immediateClock.now,
-      sleep: async (delayMs, signal) => {
-        assert.equal(signal.aborted, false);
-        sleeps.push(delayMs);
-      },
+      sleep: recordSleeps(sleeps),
     },
   });
   coordinator.start();
@@ -1885,7 +1892,7 @@ async function testExhaustedReducerPreservesCommittedArtifacts() {
     stopAfterConsecutiveErrors: 2,
     maxDiscoveryRuns: 3,
   });
-  const nextDiscovery = deferred();
+  const nextDiscovery = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
@@ -1931,7 +1938,7 @@ async function testCommittedAggregateIsNotSalvagedWhenUntrusted(
     stopAfterConsecutiveErrors: 1,
     maxDiscoveryRuns: 3,
   });
-  const nextDiscovery = deferred();
+  const nextDiscovery = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
@@ -1981,7 +1988,7 @@ async function testCancellationAfterCommittedAggregateRemainsCanceled() {
     stopAfterNoNew: 99,
     maxDiscoveryRuns: 3,
   });
-  const nextDiscovery = deferred();
+  const nextDiscovery = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const completedDrafts: ScanDraftInput[] = [];
   const coordinator = createCoordinator(
@@ -2060,7 +2067,7 @@ async function testRejectedStaleReducerCommitPreservesReplacementCandidates() {
     stopAfterNoNew: 99,
     maxDiscoveryRuns: 3,
   });
-  const nextDiscovery = deferred();
+  const nextDiscovery = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   store.failDedupCommitFromCall = 2;
   store.replacementCandidatesBeforeDedupRejection = JSON.stringify(
@@ -2135,7 +2142,7 @@ async function testAmbiguousReducerCommitPreservesPublishedCandidates() {
     stopAfterNoNew: 99,
     maxDiscoveryRuns: 3,
   });
-  const nextDiscovery = deferred();
+  const nextDiscovery = Promise.withResolvers<void>();
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({
     discoveryCandidateId: "candidate-1",
@@ -2271,7 +2278,7 @@ async function testWaiterDetachAndCancellation() {
   const executor = new FakeExecutor({ blockDiscovery: true });
   const coordinator = createCoordinator(fixture, store, executor, {});
   coordinator.start();
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   assert.equal(coordinator.snapshot().dispatchedCount, 2);
 
   const waiterAbort = new AbortController();
@@ -2349,8 +2356,8 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
   store.blockDiscoverySuccess = true;
   const executor = new FakeExecutor({ dedupNewFindings: [0] });
   const events: DeepScanLogEvent[] = [];
-  const preserved = deferred<TestRun>();
-  const releasePreservation = deferred();
+  const preserved = Promise.withResolvers<TestRun>();
+  const releasePreservation = Promise.withResolvers<void>();
   const coordinator = createCoordinator(fixture, store, executor, {
     log: (event) => events.push(event),
     threadId: "checkpoint-owner",
@@ -2459,23 +2466,19 @@ async function testRegistryEvictionAndExternalFailure() {
     pluginRoot: failedFixture.pluginRoot,
     clock: immediateClock,
   });
-  await failedExecutor.discoveryStarted;
+  await failedExecutor.discoveryStarted.promise;
   failedStore.run.status = "failed";
   failedStore.run.error = "failure already persisted by fail-scan";
-  assert.equal(
-    registry.failExternallyPersisted(
-      failedFixture.run.scanId,
-      failedStore.run.error,
-    ),
-    true,
-  );
+  registry
+    .get(failedFixture.run.scanId)
+    ?.failExternallyPersisted(failedStore.run.error);
   const terminal = await failed.wait(undefined, 5_000);
   assert.equal(terminal?.status, "failed");
   assert.equal(terminal?.error, "failure already persisted by fail-scan");
   await eventually(() => failedExecutor.runningDiscovery === 0);
   await eventually(() => registry.get(failedFixture.run.scanId) === undefined);
   assert.equal(
-    failedStore.failCalls,
+    failedStore.failureInputs.length,
     0,
     "an externally persisted failure must not be persisted again",
   );
@@ -2501,7 +2504,7 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
     },
   });
   coordinator.start();
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   store.run.status = "failed";
   store.run.error = `authoritative worker failure diagnostic ${"x".repeat(2_350)}`;
   coordinator.failExternallyPersisted(
@@ -2554,7 +2557,7 @@ async function testStoppedPublicationFailureBoundsPrefixedDiagnostic() {
     },
   });
   coordinator.start();
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   store.run.status = "canceled";
   coordinator.cancel("fixture persisted cancellation");
 
@@ -2579,15 +2582,13 @@ async function testTerminalReadFailureIsNotRecordedAsPublicationFailure() {
   });
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor({ blockDiscovery: true });
-  let publicationAttempts = 0;
+  const publicationAttempts = mock.fn(async () => {});
   const coordinator = createCoordinator(fixture, store, executor, {
     threadId: "checkpoint-owner",
-    onStopped: async () => {
-      publicationAttempts += 1;
-    },
+    onStopped: publicationAttempts,
   });
   coordinator.start();
-  await executor.discoveryStarted;
+  await executor.discoveryStarted.promise;
   store.run.status = "failed";
   store.run.error = "original worker failure diagnostic";
   store.failNextTerminalGet = true;
@@ -2596,7 +2597,7 @@ async function testTerminalReadFailureIsNotRecordedAsPublicationFailure() {
   const terminal = await coordinator.wait(undefined, 5_000);
 
   assert.equal(terminal?.error, "original worker failure diagnostic");
-  assert.equal(publicationAttempts, 0);
+  assert.equal(publicationAttempts.mock.callCount(), 0);
   assert.deepEqual(store.publicationFailureMessages, []);
 }
 
@@ -2613,11 +2614,10 @@ async function testCoordinatorHeartbeatsStopAfterOwnershipChanges() {
     updatedAt: new Date().toISOString(),
   };
   const store = new FakeStore(run);
-  let heartbeats = 0;
-  store.heartbeatCoordinator = async () => {
-    heartbeats += 1;
+  const heartbeatCoordinator = mock.fn(async () => {
     return structuredClone(store.run);
-  };
+  });
+  store.heartbeatCoordinator = heartbeatCoordinator;
   let reads = 0;
   store.get = async () => {
     reads += 1;
@@ -2649,7 +2649,7 @@ async function testCoordinatorHeartbeatsStopAfterOwnershipChanges() {
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.equal(
-    heartbeats,
+    heartbeatCoordinator.mock.callCount(),
     3,
     "heartbeat writes continue until a newer generation is confirmed",
   );
@@ -2661,7 +2661,7 @@ async function testCoordinatorHeartbeatsStopAfterOwnershipChanges() {
   assert.equal(current?.status, "succeeded");
   assert.equal(current?.coordinatorGeneration, 3);
   assert.equal(
-    store.failCalls,
+    store.failureInputs.length,
     0,
     "a stale coordinator must never fail the new owner",
   );
@@ -2676,7 +2676,7 @@ async function testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead() {
   });
   const run = { ...fixture.run, coordinatorGeneration: 2 };
   const store = new FakeStore(run);
-  const ownershipRead = deferred();
+  const ownershipRead = Promise.withResolvers<void>();
   let heartbeats = 0;
   let reads = 0;
   store.heartbeatCoordinator = async () => {
@@ -2860,7 +2860,7 @@ async function testStaleMutationObservesReplacement() {
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal?.coordinatorGeneration, 3);
   assert.equal(
-    store.failCalls,
+    store.failureInputs.length,
     0,
     "a fenced mutation must observe rather than fail the replacement",
   );
@@ -2879,30 +2879,25 @@ async function testJoinAndOrphanRules() {
     pluginRoot: fixture.pluginRoot,
     threadId: "thread-fixture",
   };
-  let starts = 0;
-  let failures = 0;
+  const starts = mock.fn(() => existingCoordinator);
+  const failures = mock.fn(async () => {});
   const existing = await startOrJoinDeepScanCoordinator({
     run: { ...fixture.run, persistedWorkerCount: 3 },
     registry: {
       get: () => existingCoordinator,
-      start: () => {
-        starts += 1;
-        return existingCoordinator;
-      },
+      start: starts,
     },
     options: {
       ...defaults,
       store: {
-        fail: async () => {
-          failures += 1;
-        },
+        fail: failures,
       },
     },
   });
   assert.equal(existing.coordinator, existingCoordinator);
   assert.equal(existing.joined, true);
-  assert.equal(starts, 0);
-  assert.equal(failures, 0);
+  assert.equal(starts.mock.callCount(), 0);
+  assert.equal(failures.mock.callCount(), 0);
 
   const running = {
     ...fixture.run,
@@ -2913,19 +2908,14 @@ async function testJoinAndOrphanRules() {
     run: running,
     registry: {
       get: () => undefined,
-      start: () => {
-        starts += 1;
-        return existingCoordinator;
-      },
+      start: starts,
     },
     options: {
       ...defaults,
       store: {
         claimCoordinator: async () => ({ run: running, acquired: false }),
         get: async () => ({ ...running, status: "succeeded" }),
-        fail: async () => {
-          failures += 1;
-        },
+        fail: failures,
       },
     },
   });
@@ -2935,13 +2925,19 @@ async function testJoinAndOrphanRules() {
     "succeeded",
   );
   assert.equal(
-    starts,
+    starts.mock.callCount(),
     0,
     "another process must not create a duplicate coordinator",
   );
-  assert.equal(failures, 0, "another process must not interrupt the live scan");
+  assert.equal(
+    failures.mock.callCount(),
+    0,
+    "another process must not interrupt the live scan",
+  );
 
-  let staleClaims = 0;
+  const staleClaims = mock.fn(async () => {
+    return { run: staleRunning, acquired: false };
+  });
   const staleRunning = { ...running, updatedAt: "2026-01-01T00:00:00Z" };
   const staleObserver = await startOrJoinDeepScanCoordinator({
     run: staleRunning,
@@ -2949,10 +2945,7 @@ async function testJoinAndOrphanRules() {
     options: {
       ...defaults,
       store: {
-        claimCoordinator: async () => {
-          staleClaims += 1;
-          return { run: staleRunning, acquired: false };
-        },
+        claimCoordinator: staleClaims,
         get: async () => staleRunning,
       },
     },
@@ -2962,7 +2955,7 @@ async function testJoinAndOrphanRules() {
     undefined,
   );
   assert.equal(
-    staleClaims,
+    staleClaims.mock.callCount(),
     1,
     "a confirmed live lease must not be reclaimed on every poll",
   );
@@ -2972,7 +2965,7 @@ async function testJoinAndOrphanRules() {
     registry: {
       get: () => undefined,
       start: (options: CoordinatorOptions) => {
-        starts += 1;
+        starts();
         assert.equal(options.run.coordinatorGeneration, 2);
         return existingCoordinator;
       },
@@ -2984,29 +2977,31 @@ async function testJoinAndOrphanRules() {
           acquired: true,
           run: { ...fixture.run, coordinatorGeneration: 2 },
         }),
-        fail: async () => {
-          failures += 1;
-        },
+        fail: failures,
       },
     },
   });
   assert.equal(recovered.coordinator, existingCoordinator);
   assert.equal(recovered.joined, false);
-  assert.equal(starts, 1, "only an expired coordinator may be adopted");
   assert.equal(
-    failures,
+    starts.mock.callCount(),
+    1,
+    "only an expired coordinator may be adopted",
+  );
+  assert.equal(
+    failures.mock.callCount(),
     0,
     "recovering an orphan must not fail the logical scan",
   );
 
-  const lock = new DeepScanStartLock();
-  const firstGate = deferred();
+  const lock = new AsyncLock();
+  const firstGate = Promise.withResolvers<void>();
   let liveCoordinator: { marker: string } | undefined;
-  starts = 0;
+  starts.mock.resetCalls();
   const registry = {
     get: () => liveCoordinator,
     start: () => {
-      starts += 1;
+      starts();
       liveCoordinator = { marker: "concurrent" };
       return liveCoordinator;
     },
@@ -3015,9 +3010,7 @@ async function testJoinAndOrphanRules() {
     ...defaults,
     store: {
       claimCoordinator: async () => ({ acquired: true, run: fixture.run }),
-      fail: async () => {
-        failures += 1;
-      },
+      fail: failures,
     },
   };
   const first = lock.run(async () => {
@@ -3038,7 +3031,7 @@ async function testJoinAndOrphanRules() {
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
-    starts,
+    starts.mock.callCount(),
     0,
     "the second caller must wait through begin plus registry start",
   );
@@ -3047,8 +3040,8 @@ async function testJoinAndOrphanRules() {
   assert.equal(created.joined, false);
   assert.equal(joined.joined, true);
   assert.equal(created.coordinator, joined.coordinator);
-  assert.equal(starts, 1);
-  assert.equal(failures, 0);
+  assert.equal(starts.mock.callCount(), 1);
+  assert.equal(failures.mock.callCount(), 0);
 }
 
 async function testPausedDiscoverySurvivesCoordinatorRestart() {
@@ -3109,7 +3102,7 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   assert.equal(store.run.status, "running");
   assert.equal(store.run.phase, "discovery");
   assert.equal(store.finishCalls.length, 0);
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
   assert.equal(store.run.manifestPath, undefined);
   await assert.rejects(
     readFile(
@@ -3159,7 +3152,7 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   assert.equal(continuationClaims.length, 1);
   assert.equal(continuationClaims[0].handoffClaimToken, handoffClaimToken);
   assert.equal(terminal?.status, "succeeded");
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
   assert.equal(replacementExecutor.logicalDiscoveryWorkers.size, 1);
   assert.equal(
     replacementExecutor.logicalDiscoveryWorkers.has(
@@ -3248,12 +3241,12 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
     clock,
   });
   resumed.start();
-  if (!alreadyExpired) await resumedExecutor.discoveryStarted;
+  if (!alreadyExpired) await resumedExecutor.discoveryStarted.promise;
 
   const terminal = await resumed.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal?.terminalReason, "capped");
-  assert.equal(store.failCalls, 0);
+  assert.equal(store.failureInputs.length, 0);
   assert.equal(resumedExecutor.discoveryCalls, alreadyExpired ? 0 : 1);
   assert.equal(resumedExecutor.dedupCalls, 1);
   assert.equal(resumedExecutor.runningDiscovery, 0);
@@ -3340,13 +3333,7 @@ async function testResumedManifestPreservesCompletedReducer(
     persistedWorkers: [...store.workers.values()].map((worker) =>
       structuredClone(worker),
     ),
-    persistedDedupInputs: store.dedupClaims.flatMap((claim) =>
-      claim.workerIds.map((discoveryWorkerId, inputOrder) => ({
-        dedupWorkerId: claim.id,
-        discoveryWorkerId,
-        inputOrder,
-      })),
-    ),
+    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
   const replacement = createCoordinator(fixture, store, new FakeExecutor(), {
     run: store.run,
@@ -3367,9 +3354,7 @@ async function testResumedManifestPreservesCompletedReducer(
   );
 }
 
-async function testResumeUsesHistoricalCandidateSnapshotForEachReducer(
-  legacyLayout = false,
-) {
+async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   const fixture = await fixtureRun({
     workers: 3,
     subagents: 0,
@@ -3399,16 +3384,12 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer(
     persistedWorkers: [...store.workers.values()].map((worker) =>
       structuredClone(worker),
     ),
-    persistedDedupInputs: store.dedupClaims.flatMap((claim) =>
-      claim.workerIds.map((discoveryWorkerId, inputOrder) => ({
-        dedupWorkerId: claim.id,
-        discoveryWorkerId,
-        inputOrder,
-      })),
-    ),
+    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
+  const completedDrafts: ScanDraftInput[] = [];
   const replacement = createCoordinator(fixture, store, new FakeExecutor(), {
     run: store.run,
+    onComplete: async (draft) => completedDrafts.push(structuredClone(draft)),
   });
   replacement.start();
 
@@ -3437,6 +3418,10 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer(
   assert.equal(
     latestResult.findings[0]?.rootCause.summary,
     "final reducer evidence",
+  );
+  assert.deepEqual(
+    completedDrafts.map((draft) => draft.findings),
+    [latestResult.findings],
   );
 }
 
@@ -3552,10 +3537,9 @@ async function fixtureRun(
     stopAfterConsecutiveErrors?: number;
   },
 ): Promise<{ pluginRoot: string; run: TestRun }> {
-  const root = await realpath(
-    await mkdtemp(path.join(tmpdir(), "codex-security-deep-coordinator-")),
+  const root = await temporaryDirectories.create(
+    "codex-security-deep-coordinator-",
   );
-  temporaryRoots.push(root);
   const targetPath = path.join(root, "target");
   const scanDir = path.join(root, "scan");
   const pluginRoot = path.join(root, "plugin");
@@ -3599,7 +3583,6 @@ class FakeStore {
   failDedupCommitFromCall: number | undefined = undefined;
   loseEveryDedupCommitResponseAfterCommit = false;
   progressCalls = 0;
-  failCalls = 0;
   failureInputs: { message: string; status: string; manifestPath?: string }[] =
     [];
   finishCalls: StoreInput<"finish">[] = [];
@@ -3613,19 +3596,18 @@ class FakeStore {
   loseFirstDedupCommitResponseAfterCommit = false;
   dedupCommitResponseLosses = 0;
   blockDedupCommitResponse = false;
-  dedupCommitPersisted = deferred();
-  dedupCommitResponseGate = deferred();
+  dedupCommitPersisted = Promise.withResolvers<void>();
+  dedupCommitResponseGate = Promise.withResolvers<void>();
   blockDiscoverySuccess = false;
-  discoverySuccessBlocked = deferred();
-  discoverySuccessGate = deferred();
+  discoverySuccessBlocked = Promise.withResolvers<void>();
+  discoverySuccessGate = Promise.withResolvers<void>();
   blockDiscoveryFailure = false;
-  discoveryFailureBlocked = deferred();
-  discoveryFailureGate = deferred();
-  dedupCommitted = deferred();
+  discoveryFailureBlocked = Promise.withResolvers<void>();
+  discoveryFailureGate = Promise.withResolvers<void>();
+  dedupCommitted = Promise.withResolvers<void>();
   failNextTerminalGet = false;
   publicationFailureMessages: string[] = [];
 
-  begin(_input?: StoreInput<"begin">): Promise<TestRun>;
   async begin() {
     return structuredClone(this.run);
   }
@@ -3898,7 +3880,6 @@ class FakeStore {
     manifestPath?: string,
     stagedManifestPath?: string,
   ) {
-    this.failCalls += 1;
     this.failureInputs.push({ message, status, manifestPath });
     if (this.rejectFailurePersistence) {
       throw new DeepScanNonRetryableError(
@@ -3955,24 +3936,18 @@ class FakeStore {
 
 class FakeExecutor {
   declare options: ExecutorOptions;
-  declare discoveryStarted: Promise<void>;
-  declare dedupStarted: Promise<void>;
-  declare resolveDiscoveryStarted: () => void;
-  declare resolveDedupStarted: () => void;
+  declare discoveryStarted: PromiseWithResolvers<void>;
+  declare dedupStarted: PromiseWithResolvers<void>;
   declare dedupGate: ReturnType<typeof deferred<void>>;
   declare dedupArtifactsWritten: ReturnType<typeof deferred<void>>;
   declare discoveryArtifactsWritten: ReturnType<typeof deferred<void>>;
   constructor(options: ExecutorOptions = {}) {
     this.options = options;
-    this.discoveryStarted = new Promise((resolve) => {
-      this.resolveDiscoveryStarted = resolve;
-    });
-    this.dedupStarted = new Promise((resolve) => {
-      this.resolveDedupStarted = resolve;
-    });
-    this.dedupGate = deferred();
-    this.dedupArtifactsWritten = deferred();
-    this.discoveryArtifactsWritten = deferred();
+    this.discoveryStarted = Promise.withResolvers<void>();
+    this.dedupStarted = Promise.withResolvers<void>();
+    this.dedupGate = Promise.withResolvers<void>();
+    this.dedupArtifactsWritten = Promise.withResolvers<void>();
+    this.discoveryArtifactsWritten = Promise.withResolvers<void>();
   }
 
   discoveryCalls = 0;
@@ -4028,7 +4003,7 @@ class FakeExecutor {
         this.maximumDiscoveryConcurrency,
         this.runningDiscovery,
       );
-      this.resolveDiscoveryStarted();
+      this.discoveryStarted.resolve();
       try {
         if (this.options.policyRefusalWorkers?.includes(workerId)) {
           const message =
@@ -4126,7 +4101,7 @@ class FakeExecutor {
       this.maximumDedupConcurrency,
       this.runningDedup,
     );
-    this.resolveDedupStarted();
+    this.dedupStarted.resolve();
     try {
       if (this.options.blockDedup) await this.dedupGate.promise;
       if (request.signal.aborted) throw abortError();
@@ -4239,15 +4214,7 @@ async function writeDedupArtifacts(
   const workerDrafts = await Promise.all(
     reducer.claimedWorkers.map(async (worker) => {
       const result = JSON.parse(await readFile(worker.resultPath, "utf8"));
-      result.findings = result.findings.map(
-        (finding: CoordinatorFinding, index: number) => ({
-          ...finding,
-          provenance: {
-            ...finding.provenance,
-            sourceFindingIds: [`${worker.id}:${index}`],
-          },
-        }),
-      );
+      result.findings = result.findings.map(sourceReferences(worker));
       return result;
     }),
   );
@@ -4352,11 +4319,8 @@ function standardScanDraft(
 
 async function waitForAbort(signal: AbortSignal) {
   if (signal.aborted) throw abortError();
-  await new Promise((_, reject) => {
-    signal.addEventListener("abort", () => reject(abortError()), {
-      once: true,
-    });
-  });
+  await once(signal, "abort");
+  throw abortError();
 }
 
 function abortError() {
@@ -4421,6 +4385,7 @@ function boundedFixtureErrorText(message: string, maximum: number) {
 }
 
 const {
+  testResumeRequiresHistoricalWorkerPrompt,
   testRecoverableWorkerErrorsCannotFailScan,
   testPolicyRefusedReducerPreservesInputsAndCommittedAggregate,
   testNonRetryableReducerAbortsScanWithoutRetry,
@@ -4429,6 +4394,7 @@ const {
   FakeStore,
   FakeExecutor,
   createCoordinator,
+  DeepScanCoordinator,
   DeepScanNonRetryableError,
   classifyCodexWorkerError,
   deferred,
@@ -4532,6 +4498,8 @@ try {
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
   await testRemoteObserverRetriesTransientPersistenceFailures();
   await testJoinAndOrphanRules();
+  await testResumeRequiresHistoricalWorkerPrompt("failed");
+  await testResumeRequiresHistoricalWorkerPrompt("canceled");
   await testPausedDiscoverySurvivesCoordinatorRestart();
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime();
   await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true);
@@ -4540,13 +4508,10 @@ try {
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
   await testResumeUsesHistoricalCandidateSnapshotForEachReducer();
-  await testResumeUsesHistoricalCandidateSnapshotForEachReducer(true);
   await testPersistedErrorLimitStopsBeforeRescheduling();
   await testPersistedReducerErrorLimitStopsBeforeRescheduling();
 } finally {
-  await Promise.all(
-    temporaryRoots.map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await temporaryDirectories.cleanup();
 }
 
 function createCoordinator(
@@ -4566,6 +4531,7 @@ function createCoordinator(
 }
 
 export type CoordinatorFixtures = {
+  DeepScanCoordinator: typeof DeepScanCoordinator;
   fixtureRun: typeof fixtureRun;
   FakeStore: typeof FakeStore;
   FakeExecutor: typeof FakeExecutor;

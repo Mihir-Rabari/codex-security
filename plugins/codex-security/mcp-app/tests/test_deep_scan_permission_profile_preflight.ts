@@ -10,13 +10,13 @@ interface PreflightFixture {
   terminatedPath: string;
   children: ChildProcess[];
 }
+import { temporaryDirectory } from "./support/temporary-directories.js";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import {
   chmod,
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.js";
 
 const {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: profileId,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
 } = await importSource(
@@ -42,7 +42,6 @@ const {
   ),
 );
 
-const profileId: string = DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID;
 const expectedProfile = {
   description: "Generated Deep Scan worker profile.",
   filesystem: {
@@ -55,6 +54,10 @@ const rawOverrides = [
   `default_permissions="${profileId}"`,
   `permissions.${profileId}={filesystem={":root"="read","/repo/.env"="deny"},network={enabled=false}}`,
 ];
+
+const unsupportedConfiguration = (error: Error) =>
+  error?.name === "Error" &&
+  error.message.includes("with this Codex configuration");
 
 await testAllowedProfileAndRawArgv();
 await testPreflightStartsInWorkerCwd();
@@ -294,9 +297,7 @@ async function testMalformedStreamFailsClosed() {
       async ({ codexPath, cwd, terminatedPath, children }) => {
         await assert.rejects(
           preflight(codexPath, cwd),
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes("with this Codex configuration"),
+          unsupportedConfiguration,
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -314,12 +315,7 @@ async function testRepeatedCatalogCursorFailsClosed() {
       ],
     },
     async ({ codexPath, cwd, callsPath }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration"),
-      );
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
       const calls = await readJsonLines(callsPath);
       assert.equal(
         calls.filter((call) => call.method === "permissionProfile/list").length,
@@ -456,8 +452,7 @@ async function testSelectedProfileClassificationRequiresVerifiedString() {
             selected === ":read-only"
               ? error?.name === "DeepScanNonRetryableError" &&
                 error.message.includes("did not select the required")
-              : error?.name === "Error" &&
-                error.message.includes("with this Codex configuration"),
+              : unsupportedConfiguration(error),
         );
         await assertPreflightStopped(children, terminatedPath);
       },
@@ -477,12 +472,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       ],
     },
     async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration"),
-      );
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
     },
   );
 
@@ -497,8 +487,7 @@ async function testMalformedAndUnsupportedResponsesFailClosed() {
       await assert.rejects(
         preflight(codexPath, cwd),
         (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "Error" &&
-          error.message.includes("with this Codex configuration") &&
+          unsupportedConfiguration(error) &&
           !error.message.includes("does not support"),
       );
     },
@@ -795,9 +784,7 @@ async function withFakeCodex(
   callback: (fixture: PreflightFixture) => Promise<void>,
   { longExecutable = false } = {},
 ) {
-  const root = await mkdtemp(
-    path.join(tmpdir(), "deep-scan-profile-preflight-"),
-  );
+  const root = await temporaryDirectory("deep-scan-profile-preflight-");
   const scriptPath = path.join(root, "fake-codex.mjs");
   let codexPath = scriptPath;
   const argvPath = path.join(root, "argv.json");

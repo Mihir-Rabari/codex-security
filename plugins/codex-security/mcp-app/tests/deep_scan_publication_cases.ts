@@ -29,9 +29,9 @@ export async function testDeepScanPublication({
       maxDiscoveryRuns: 3,
     });
     const store = new FakeStore(fixture.run);
-    const releaseLateWorker = deferred();
-    const lateAcceptance = deferred();
-    const releaseAcceptance = deferred();
+    const releaseLateWorker = Promise.withResolvers<void>();
+    const lateAcceptance = Promise.withResolvers<void>();
+    const releaseAcceptance = Promise.withResolvers<void>();
     const updateWorker = store.updateWorker.bind(store);
     let acceptedLateWorker;
     store.updateWorker = async (update) => {
@@ -59,7 +59,7 @@ export async function testDeepScanPublication({
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
-    await executor.dedupStarted;
+    await executor.dedupStarted.promise;
     releaseLateWorker.resolve();
     await lateAcceptance.promise;
     executor.releaseDedup();
@@ -180,7 +180,7 @@ export async function testDeepScanPublication({
       onComplete: async (draft) => completed.push(structuredClone(draft)),
     });
     coordinator.start();
-    await executor.dedupStarted;
+    await executor.dedupStarted.promise;
     await eventually(
       () => executor.discoveryCalls === 4 && executor.runningDiscovery === 2,
     );
@@ -194,7 +194,7 @@ export async function testDeepScanPublication({
     );
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     assert.equal(terminal.terminalReason, "saturated");
-    assert.equal(store.failCalls, 0);
+    assert.equal(store.failureInputs.length, 0);
     assert.equal(store.finishCalls.length, 1);
     assert.equal(store.finishCalls[0].reason, "saturated");
     assert.equal(
