@@ -1,12 +1,18 @@
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { build } from "esbuild";
 
 const root = path.resolve(import.meta.dirname, "..");
 const tests = path.join(root, "tests");
+const files = await readdir(tests, { recursive: true });
+await Promise.all(
+  files
+    .filter((file) => file.endsWith(".js"))
+    .map((file) => rm(path.join(tests, file))),
+);
 
 await build({
-  entryPoints: (await readdir(tests, { recursive: true }))
+  entryPoints: files
     .filter((file) => file.endsWith(".ts"))
     .map((file) => path.join(tests, file)),
   outbase: tests,

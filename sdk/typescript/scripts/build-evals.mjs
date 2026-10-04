@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { build } from "esbuild";
 
@@ -20,6 +20,11 @@ const files = (
     ),
   )
 ).flat();
+await Promise.all(
+  files
+    .filter((file) => file.endsWith(".mjs") || file.endsWith(".js"))
+    .map((file) => rm(file)),
+);
 for (const [extension, format, output] of [
   [".mts", "esm", ".mjs"],
   [".ts", "cjs", ".js"],
