@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-"use strict";
 
 import type { SastBenchRecord, SampleSpec } from "../../types.js";
 

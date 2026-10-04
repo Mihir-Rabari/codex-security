@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-"use strict";
 
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const fs = require("node:fs") as typeof import("node:fs");
