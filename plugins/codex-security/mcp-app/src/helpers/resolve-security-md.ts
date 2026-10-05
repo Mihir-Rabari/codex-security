@@ -363,14 +363,19 @@ function resolveSecurityMd(
 
   const sections: string[] = [];
   for (const directory of directories) {
-    if (
-      !directoryEntries(directory).some(
-        (entry) => decodePath(entry.name) === "SECURITY.md",
-      )
-    )
-      continue;
     const policy = appendPath(directory, encodePath("SECURITY.md"));
     if (!fileStat(policy)?.isFile()) continue;
+    try {
+      if (
+        !directoryEntries(directory).some(
+          (entry) => decodePath(entry.name) === "SECURITY.md",
+        )
+      )
+        continue;
+    } catch (error) {
+      // A search-only directory can still permit reading a known policy.
+      if ((error as NodeJS.ErrnoException).code !== "EACCES") throw error;
+    }
     const resolvedPolicy = resolvedPath(policy);
     inside(resolvedPolicy, root, "SECURITY.md");
     const content = readPolicy(resolvedPolicy, policy);

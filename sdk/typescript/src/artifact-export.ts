@@ -262,7 +262,7 @@ export async function resolveArtifactExportOutput(
           );
   if (arguments_.output !== "-") {
     const outputFromCurrent = relative(currentDirectory, arguments_.output);
-    if (!isOutsidePath(outputFromCurrent)) {
+    if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
       for (
         let directory = dirname(arguments_.output);
         relative(currentDirectory, directory) !== "";

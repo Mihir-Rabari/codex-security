@@ -51,7 +51,7 @@ def git_output(
     work_tree: Path | None = None,
 ) -> str | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
-    output = os.fsdecode(completed.stdout).strip()
+    output = os.fsdecode(completed.stdout).removesuffix("\n")
     return output if completed.returncode == 0 and output else None
 
 
@@ -430,7 +430,14 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     prefix = git_bytes(target, "rev-parse", "--show-prefix")
     if prefix is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
-    return repository, os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
+    pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
+    scoped = (repository / pathspec).resolve()
+    try:
+        if not scoped.is_relative_to(repository) or not scoped.samefile(target):
+            raise ValueError("Git working tree does not contain the selected target")
+    except (OSError, ValueError) as exc:
+        raise SystemExit("Scan target must stay inside its Git working tree.") from exc
+    return repository, pathspec
 
 
 def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:

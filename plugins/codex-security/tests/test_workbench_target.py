@@ -344,3 +344,40 @@ def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
     assert repository.samefile(target)
     assert (repository / pathspec).samefile(scoped)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")
+@pytest.mark.parametrize("sibling_exists", [False, True])
+def test_git_context_preserves_trailing_root_whitespace(
+    tmp_path: Path, sibling_exists: bool
+) -> None:
+    target = tmp_path / "target "
+    initialize_git_repository(target)
+    if sibling_exists:
+        initialize_git_repository(tmp_path / "target")
+    assert WORKBENCH_TARGET["git_target_metadata"](target)["reviewChangesSupported"]
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](target)
+    assert repository.samefile(target)
+    assert pathspec == "."
+    original_digest = worktree_content_digest(target)
+    (target / "synthetic.txt").write_text("selected target content\n")
+    assert worktree_content_digest(target) != original_digest
+    destination = tmp_path / "copied"
+    WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
+    assert (destination / "synthetic.txt").read_text() == "selected target content\n"
+
+
+def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    unrelated = tmp_path / "unrelated"
+    initialize_git_repository(target)
+    unrelated.mkdir()
+    subprocess.run(["git", "config", "core.worktree", str(unrelated)], cwd=target, check=True)
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        WORKBENCH_TARGET["git_worktree_context"](target)
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        worktree_content_digest(target)
+    destination = tmp_path / "copied"
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
+    assert not destination.exists()

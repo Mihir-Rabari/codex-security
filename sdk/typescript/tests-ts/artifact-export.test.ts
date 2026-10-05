@@ -28,6 +28,23 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
+  test("resolves the current directory without traversing outside it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cwd-output-"));
+    try {
+      const currentDirectory = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(currentDirectory);
+      await mkdir(scanDir);
+      const result = await resolveArtifactExportOutput(
+        { scanDir, output: currentDirectory, format: "json" },
+        currentDirectory,
+      );
+      expect(result.output).toBe(currentDirectory);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("resolves a scan-local export before its exports directory exists", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-new-export-"));
     try {

@@ -66,6 +66,25 @@ function expectGuidance(text: string, policies: [string, string][]): void {
 afterEach(cleanup);
 
 describe("built SECURITY.md helper", () => {
+  test.skipIf(process.platform === "win32" || userInfo().uid === 0)(
+    "reads known policies through a search-only ancestor",
+    () => {
+      const { root } = fixture();
+      write(root, "SECURITY.md", "Synthetic inherited policy\n");
+      write(root, "component/example.txt", "synthetic scope");
+      chmodSync(root, 0o111);
+      try {
+        const result = resolve(root, "component");
+        expect(result.status, result.stderr).toBe(0);
+        expectGuidance(result.stdout, [
+          ["SECURITY.md", "Synthetic inherited policy\n"],
+        ]);
+      } finally {
+        chmodSync(root, 0o700);
+      }
+    },
+  );
+
   test("policy listing and scoped resolution agree on exact filename case", () => {
     const { root } = fixture();
     write(root, "component/example.txt", "synthetic scope");
