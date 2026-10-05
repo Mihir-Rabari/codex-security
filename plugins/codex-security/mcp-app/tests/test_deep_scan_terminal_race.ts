@@ -9,6 +9,7 @@ import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { FakeExecutor } from "./deep_scan_coordinator_fixture.ts";
 
 const execFileAsync = promisify(execFile);
 const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -34,8 +35,20 @@ for (const ordering of [
   "failure response first",
   "failure response last",
   "lost cancellation response",
+  "cancellation before admission",
+  "cancellation before failure",
+  "lost cancellation before failure",
+  "cancellation before failure during publication",
+  "lost cancellation before failure during publication",
 ]) {
   await test(ordering, { timeout: 30_000 }, async () => {
+    const canceledBeforeAdmission =
+      ordering === "cancellation before admission";
+    const canceledBeforeFailure = ordering.includes(
+      "cancellation before failure",
+    );
+    const lostCancellation = ordering.startsWith("lost cancellation");
+    const failureDuringPublication = ordering.endsWith("during publication");
     const root = await temporaryDirectory("deep-scan-terminal-race-");
     const registry = new DeepScanCoordinatorRegistry();
     const cleanupEntered = Promise.withResolvers<void>();
@@ -44,6 +57,11 @@ for (const ordering of [
     const cancelRelease = Promise.withResolvers<void>();
     const failureCommitted = Promise.withResolvers<void>();
     const failureResponse = Promise.withResolvers<void>();
+    const finishCommitted = Promise.withResolvers<void>();
+    const finishResponse = Promise.withResolvers<void>();
+    const admissionRead = Promise.withResolvers<void>();
+    const publicationEntered = Promise.withResolvers<void>();
+    const publicationRelease = Promise.withResolvers<void>();
     let server:
       | ReturnType<(typeof import("../server.ts"))["createCodexSecurityServer"]>
       | undefined;
@@ -64,7 +82,8 @@ for (const ordering of [
       });
       await writeFile(
         join(environment.CODEX_HOME, "codex-security", "config.toml"),
-        "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\nmax_time_hours = 1e-12\n",
+        "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n" +
+          (canceledBeforeFailure ? "" : "max_time_hours = 1e-12\n"),
         { mode: 0o600 },
       );
       const runWorkbench = async (args: string[]) => {
@@ -75,27 +94,31 @@ for (const ordering of [
         );
         return JSON.parse(stdout);
       };
+      const workbench = async (args: string[]) => {
+        if (args[0] === "cancel-scan" && !canceledBeforeFailure) {
+          cancelEntered.resolve();
+          await cancelRelease.promise;
+        }
+        const result = await runWorkbench(args);
+        if (args[0] === "finish-deep-scan" && canceledBeforeAdmission) {
+          finishCommitted.resolve();
+          await finishResponse.promise;
+        }
+        if (args[0] === "get-scan") admissionRead.resolve();
+        if (args[0] === "cancel-scan" && canceledBeforeFailure) {
+          cancelEntered.resolve();
+          await cancelRelease.promise;
+        }
+        if (args[0] === "fail-scan") {
+          failureCommitted.resolve();
+          await failureResponse.promise;
+        }
+        if (args[0] === "cancel-scan" && lostCancellation)
+          throw new Error("synthetic committed cancellation response lost");
+        return result;
+      };
       Object.assign(globalThis, {
-        terminalRaceFixture: {
-          registry,
-          async workbench(args: string[]) {
-            if (args[0] === "cancel-scan") {
-              cancelEntered.resolve();
-              await cancelRelease.promise;
-            }
-            const result = await runWorkbench(args);
-            if (args[0] === "fail-scan") {
-              failureCommitted.resolve();
-              await failureResponse.promise;
-            }
-            if (
-              args[0] === "cancel-scan" &&
-              ordering === "lost cancellation response"
-            )
-              throw new Error("synthetic committed cancellation response lost");
-            return result;
-          },
-        },
+        terminalRaceFixture: { registry, workbench },
       });
       const { createCodexSecurityServer } = await importModule({
         stdin: {
@@ -126,7 +149,7 @@ for (const ordering of [
           .handler;
       const fail =
         application._registeredTools.fail_codex_security_scan.handler;
-      const store = new WorkbenchDeepScanStore(runWorkbench);
+      const store = new WorkbenchDeepScanStore(workbench);
       const run = await store.begin({
         targetPath: target,
         scope: ".",
@@ -141,21 +164,28 @@ for (const ordering of [
       let held = false;
       store.get = async (...args: [string, string]) => {
         const result = await get(...args);
-        if (!held && result.status === "succeeded") {
+        if (
+          !held &&
+          result.status === "succeeded" &&
+          !canceledBeforeAdmission
+        ) {
           held = true;
           cleanupEntered.resolve();
           await cleanupRelease.promise;
         }
         return result;
       };
+      const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
       const coordinator = registry.start({
         run: claim.run,
         store,
-        executor: {
-          async run() {
-            throw new Error("expired deadline must not launch a worker");
-          },
-        },
+        executor: canceledBeforeFailure
+          ? executor
+          : {
+              async run() {
+                throw new Error("expired deadline must not launch a worker");
+              },
+            },
         pluginRoot,
         threadId: "fixture-owner",
         heartbeatIntervalMs: 60_000,
@@ -172,6 +202,10 @@ for (const ordering of [
           );
         },
         onStopped: async (stopped: DeepScanRunState) => {
+          if (failureDuringPublication) {
+            publicationEntered.resolve();
+            await publicationRelease.promise;
+          }
           await runWorkbench([
             "preserve-scan-results",
             "--scan-id",
@@ -185,6 +219,66 @@ for (const ordering of [
       });
       terminal = coordinator.settled();
       void terminal!.catch(() => {});
+      if (canceledBeforeAdmission) {
+        await finishCommitted.promise;
+        await runWorkbench(["cancel-scan", "--scan-id", run.scanId]);
+        cancelRelease.resolve();
+        cancellation = cancel({ scanId: run.scanId });
+        void cancellation!.catch(() => {});
+        await admissionRead.promise;
+        finishResponse.resolve();
+        const result = await terminal!;
+        assert.equal(result.status, "canceled");
+        assert.equal(result.error, undefined);
+        await cancellation;
+        return;
+      }
+      if (canceledBeforeFailure) {
+        await executor.discoveryStarted.promise;
+        cancellation = cancel({ scanId: run.scanId });
+        void cancellation!.catch(() => {});
+        await cancelEntered.promise;
+        if (failureDuringPublication) {
+          cancelRelease.resolve();
+          await publicationEntered.promise;
+        }
+        failureResponse.resolve();
+        await fail(
+          { scanId: run.scanId, message: "synthetic no-op failure" },
+          {},
+        );
+        assert.equal(
+          (await runWorkbench(["get-scan", "--scan-id", run.scanId])).workspace
+            .results.progress.status,
+          "canceled",
+        );
+        assert.equal(
+          (await store.get(run.scanId, "fixture-owner")).status,
+          "canceled",
+        );
+        cancelRelease.resolve();
+        publicationRelease.resolve();
+        if (lostCancellation) {
+          await assert.rejects(
+            cancellation!,
+            /synthetic committed cancellation response lost/,
+          );
+          await assert.rejects(
+            terminal!,
+            /synthetic committed cancellation response lost/,
+          );
+        } else {
+          await cancellation;
+          const result = await terminal!;
+          assert.equal(result.status, "canceled");
+          assert.equal(
+            result.error,
+            (await store.get(run.scanId, "fixture-owner")).error,
+          );
+          assert.doesNotMatch(result.error ?? "", /synthetic no-op failure/);
+        }
+        return;
+      }
       await cleanupEntered.promise;
       cancellation = cancel({ scanId: run.scanId });
       void cancellation!.catch(() => {});
@@ -253,6 +347,8 @@ for (const ordering of [
       cleanupRelease.resolve();
       cancelRelease.resolve();
       failureResponse.resolve();
+      finishResponse.resolve();
+      publicationRelease.resolve();
       registry.shutdown("fixture cleanup");
       await Promise.allSettled([terminal, cancellation, failure]);
       await server?.close();

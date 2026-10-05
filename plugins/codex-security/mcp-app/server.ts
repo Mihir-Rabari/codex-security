@@ -1811,7 +1811,10 @@ export function createCodexSecurityServer(): McpServer {
         message,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
-      deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
+      const scan = failed["scan"];
+      const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+      if (isJsonObject(progress) && progress["status"] === "failed")
+        deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",

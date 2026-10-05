@@ -449,7 +449,6 @@ export class DeepScanCoordinator {
               this.state.scanId,
               this.options.threadId,
             );
-            this.failurePersisted ||= current.status === "failed";
           } catch (error) {
             this.log({
               event: "coordinator_terminal_state_read_failed",
@@ -458,7 +457,10 @@ export class DeepScanCoordinator {
             });
           }
         } while (persistence !== this.cancellationPersistence?.promise);
-        if (current?.status === "failed") this.state = current;
+        if (current?.status === "failed" || current?.status === "canceled") {
+          this.state = current;
+          this.failurePersisted = current.status === "failed";
+        }
         if (
           current &&
           (current.status === "failed" || current.status === "canceled") &&

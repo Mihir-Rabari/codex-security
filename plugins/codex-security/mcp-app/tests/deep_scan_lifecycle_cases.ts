@@ -113,7 +113,10 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             current.store.run.status = "failed";
             current.store.run.error = "synthetic external failure";
             current.workspace.results.progress.status = "failed";
-            return { workspace: current.workspace };
+            return {
+              scan: current.workspace.results,
+              workspace: current.workspace,
+            };
           }
           assert.equal(command, "cancel-scan");
           if (current.workspace.results.progress.status !== "running")
