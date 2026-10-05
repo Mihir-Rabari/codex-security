@@ -21,6 +21,9 @@ def test_check_scan_target_matches_recorded_contents(tmp_path: Path, kind: str) 
     source = repository / "README.md"
     if kind in {"dirty", "working_tree"}:
         source.write_text("scanned changes\n")
+    if kind == "refs":
+        source.write_text("committed changes\n")
+        subprocess.run(["git", "commit", "-qam", "Scanned revision"], cwd=repository, check=True)
     original = source.read_bytes()
     scan = create_cli_scan(
         state_dir,
@@ -28,7 +31,12 @@ def test_check_scan_target_matches_recorded_contents(tmp_path: Path, kind: str) 
         repository,
         complete=False,
         target=(
-            {"kind": kind, "paths": [], "base": "HEAD", "head": "HEAD"}
+            {
+                "kind": kind,
+                "paths": [],
+                "base": "HEAD^" if kind == "refs" else "HEAD",
+                "head": "HEAD",
+            }
             if kind in {"working_tree", "refs"}
             else None
         ),
