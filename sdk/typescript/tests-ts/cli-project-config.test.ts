@@ -2,6 +2,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
+import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
@@ -1188,3 +1189,44 @@ test.each([
     expect(onRun).not.toHaveBeenCalled();
   },
 );
+
+test("headless component scans show usage without a cost estimate", async () => {
+  const input = await fixture({
+    output: { directory: "../component-results" },
+  });
+  await writeFile(
+    join(input.repository, "lib", "index.ts"),
+    "export const value = 1;\n",
+  );
+  const usage: ScanTokenUsage = {
+    input_tokens: 1250,
+    cached_input_tokens: 200,
+    cache_write_input_tokens: 0,
+    output_tokens: 30,
+    reasoning_output_tokens: 0,
+    total_tokens: 1280,
+  };
+  const { stderr, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan-components",
+        input.repository,
+        "-c",
+        input.config,
+        "--component",
+        "lib",
+        "--headless",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.root,
+        result: fakeResult([], "complete", null),
+        onTurn: (_repository, options) => options.onUsage?.(usage),
+      }),
+    ),
+  ).toBe(0);
+  expect(stderr.text()).toContain("Tokens: 1,050 uncached input");
+  expect(stderr.text()).toContain("30 output");
+  expect(stderr.text()).not.toContain("Cost:");
+});

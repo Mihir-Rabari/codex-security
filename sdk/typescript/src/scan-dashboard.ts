@@ -754,6 +754,10 @@ export class ScanDashboard {
       10,
       width - 52 - (this.#showCost ? costWidth + 1 : 0),
     );
+    const cell = (value: string, width: number): string => {
+      const text = fitLine(value, width);
+      return text + " ".repeat(width - stringWidth(text));
+    };
     const row = (
       marker: string,
       name: string,
@@ -762,7 +766,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitLine(name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${cell(name, nameWidth)} ${cell(status, 24)} ${files.padStart(11)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
     const table = this.#components
       .slice(first, first + rows)
       .map(({ receipt, dashboard }, index) => {
