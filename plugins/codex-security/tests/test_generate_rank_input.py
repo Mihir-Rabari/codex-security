@@ -24,6 +24,7 @@ def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="Python -P requires 3.11+")
 def test_cli_loads_preview_helper_with_safe_path() -> None:
     result = subprocess.run(
         [sys.executable, "-P", str(SCRIPT), "--help"],

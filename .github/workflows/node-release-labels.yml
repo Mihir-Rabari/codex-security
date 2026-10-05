@@ -91,34 +91,27 @@ jobs:
               --jq '.[].name'
           )"
 
-          preserve_skip_label=false
-          while IFS= read -r current_label; do
-            if [[ "$current_label" == "skip-release-notes" ]]; then
-              skip_label_actors="$(
-                gh api \
-                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
-                  --paginate \
-                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | if (.actor.login // "") == "" then "__unattributed__" else .actor.login end'
-              )"
-              skip_label_actor=""
-              while IFS= read -r event_actor; do
-                skip_label_actor="$event_actor"
-              done <<< "$skip_label_actors"
-
-              if [[ "$skip_label_actor" != "github-actions[bot]" ]]; then
-                echo "Preserving existing skip-release-notes label."
-                preserve_skip_label=true
+          declare -A label_actors=()
+          if [[ -n "$current_labels" ]]; then
+            label_events="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
+                --paginate \
+                --jq '.[] | select(.event == "labeled") | [.label.name, (.actor.login // "__unattributed__")] | @tsv'
+            )"
+            while IFS=$'\t' read -r event_label event_actor; do
+              if [[ -n "$event_label" ]]; then
+                label_actors["$event_label"]="$event_actor"
               fi
-              break
-            fi
-          done <<< "$current_labels"
+            done <<< "$label_events"
+          fi
 
           label_already_present=false
           while IFS= read -r current_label; do
             case "$current_label" in
               breaking-change | enhancement | bug | documentation | skip-release-notes)
-                if [[ "$current_label" == "skip-release-notes" &&
-                      "$preserve_skip_label" == true ]]; then
+                if [[ "${label_actors[$current_label]:-}" != "github-actions[bot]" ]]; then
+                  echo "Preserving existing $current_label label."
                   if [[ "$current_label" == "$label" ]]; then
                     label_already_present=true
                   fi

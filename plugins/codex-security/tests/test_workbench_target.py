@@ -40,6 +40,16 @@ def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.Mo
     assert result.args[0] == "git"
 
 
+def set_subprocess_text_encoding(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
+    class EncodedPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("text") and not kwargs.get("encoding"):
+                kwargs["encoding"] = encoding
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", EncodedPopen)
+
+
 @pytest.mark.parametrize(
     ("log_encoding", "subject"),
     [
@@ -61,7 +71,7 @@ def test_git_metadata_preserves_unicode_commit_subject(
     subprocess.run(
         ["git", "config", "i18n.logOutputEncoding", log_encoding], cwd=target, check=True
     )
-    monkeypatch.setattr(subprocess, "_text_encoding", lambda: encoding)
+    set_subprocess_text_encoding(monkeypatch, encoding)
 
     assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == subject
     assert WORKBENCH_TARGET["git_bytes"](
@@ -75,7 +85,7 @@ def test_git_output_decodes_repository_paths_as_utf8(
 ) -> None:
     target = tmp_path / "Jos\u00e9-\u65e5\u672c\u8a9e-\ud55c\uad6d\uc5b4"
     initialize_git_repository(target)
-    monkeypatch.setattr(subprocess, "_text_encoding", lambda: encoding)
+    set_subprocess_text_encoding(monkeypatch, encoding)
 
     output = WORKBENCH_TARGET["git_output"](target, "rev-parse", "--show-toplevel")
     assert Path(output) == target

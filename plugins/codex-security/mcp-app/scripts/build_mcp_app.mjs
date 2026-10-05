@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -58,7 +59,21 @@ export async function buildMcpApp({ output, native = "universal" }) {
     }
     const destination = join(mcpDir, "native", path);
     await mkdir(dirname(destination), { recursive: true });
-    await copyFile(join(nativeRoot, path), destination);
+    try {
+      await copyFile(join(nativeRoot, path), destination);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const preparation =
+        native === "host"
+          ? "Run node plugins/codex-security/mcp-app/scripts/build_native.mjs first."
+          : "Download a source-matched native-universal artifact as described in plugins/codex-security/native/README.md before running SDK tests or universal builds.";
+      throw new Error(
+        `Missing native payload ${path}. ${preparation} ${error.message}`,
+        {
+          cause: error,
+        },
+      );
+    }
   }
   await writeRuntime("helpers", "helpers-main.ts");
 
@@ -75,6 +90,19 @@ export async function buildMcpApp({ output, native = "universal" }) {
       logOverride: { "empty-import-meta": "silent" },
       outfile: bundle,
       platform: "node",
+      plugins: [
+        {
+          name: "native-typescript-source",
+          setup(builder) {
+            builder.onResolve({ filter: /\.mjs$/ }, (args) => {
+              const source = resolve(args.resolveDir, args.path);
+              if (dirname(source) === resolve(root, "../native")) {
+                return { path: source.slice(0, -4) + ".mts" };
+              }
+            });
+          },
+        },
+      ],
       target: "node20",
       write: false,
     });
@@ -99,7 +127,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
 const invokedPath = process.argv[1];
 if (
   invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
+  pathToFileURL(realpathSync(invokedPath)).href === import.meta.url
 ) {
   const args = process.argv.slice(2);
   if (

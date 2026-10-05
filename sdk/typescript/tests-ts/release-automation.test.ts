@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
@@ -4028,16 +4028,9 @@ describe("GitHub release workflow safeguards", () => {
       )?.if,
     ).toBe("steps.scope.outputs.ci-mode == 'markdown'");
     const markdownCommand =
-      validationSteps.find(({ name }) => name === "Check Markdown formatting")
-        ?.run ?? "";
-    expect(markdownCommand).toContain(
-      "git diff --no-renames --name-only -z HEAD^1 HEAD",
-    );
-    expect(markdownCommand).toContain("! -L");
-    expect(markdownCommand).toContain(
-      "pnpm --dir sdk/typescript exec prettier --check",
-    );
-    expect(markdownCommand).not.toContain("--ignore-path");
+      validationSteps.find(({ name }) => name === "Check formatting")?.run ??
+      "";
+    expect(markdownCommand).toBe("pnpm --dir sdk/typescript run format");
     const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
@@ -4059,6 +4052,7 @@ describe("GitHub release workflow safeguards", () => {
         "needs.static-checks.result": upstream,
         "needs.plugin-host.result": upstream,
         "needs.plugin-source.result": upstream,
+        "needs.python-compatibility.result": upstream,
         "needs.package.result": upstream,
         "needs.compatibility.result": upstream,
         "needs.mcp.result": upstream,
@@ -4085,6 +4079,7 @@ describe("GitHub release workflow safeguards", () => {
         "mcp",
         "plugin-host",
         "plugin-source",
+        "python-compatibility",
       ],
       windows: [
         "static-checks",
@@ -4149,7 +4144,7 @@ describe("GitHub release workflow safeguards", () => {
       "Markdown-only PR",
       "pull_request",
       false,
-      ["README.md", "docs/guide.md"],
+      ["docs/guide.md"],
       "markdown",
       true,
     ],
@@ -4177,6 +4172,23 @@ describe("GitHub release workflow safeguards", () => {
       "full",
       true,
     ],
+    ...[
+      "README.md",
+      "RELEASING.md",
+      "sdk/typescript/README.md",
+      ".github/PULL_REQUEST_TEMPLATE.md",
+      ".github/release-notes.md",
+    ].map(
+      (path) =>
+        [
+          "test-consumed Markdown",
+          "pull_request",
+          false,
+          [path],
+          "full",
+          true,
+        ] as const,
+    ),
     ["base retarget", "pull_request", true, ["README.md"], "full", false],
     [
       "mixed PR",
@@ -4239,7 +4251,7 @@ describe("GitHub release workflow safeguards", () => {
         for (const stepName of [
           "Set up TypeScript tools",
           "Install dependencies",
-          "Check Markdown formatting",
+          "Check formatting",
         ]) {
           const condition =
             validationSteps.find(({ name }) => name === stepName)?.if ?? "";
@@ -4299,52 +4311,6 @@ describe("GitHub release workflow safeguards", () => {
         expect(result.stderr).toContain(
           "README.md: file is 150001 bytes; maximum is 150000 bytes",
         );
-      } finally {
-        rmSync(workspace, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "formats every changed regular non-symlink Markdown file",
-    () => {
-      const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
-      const argsFile = join(workspace, "prettier-args");
-      const guide = join(workspace, "docs", "guide with spaces.md");
-      const readme = join(workspace, "README.md");
-      mkdirSync(join(workspace, "docs"));
-      writeFileSync(guide, "# Guide\n");
-      writeFileSync(readme, "# Readme\n");
-      symlinkSync(readme, join(workspace, "docs", "link.md"));
-      const mocks = `git() {
-      printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
-    }
-    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
-      try {
-        const result = spawnSync(
-          bash,
-          [
-            "-c",
-            `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
-          ],
-          {
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: workspace,
-              MOCK_PNPM_ARGS: argsFile,
-            },
-          },
-        );
-        expect(result.status).toBe(0);
-        expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
-          "--dir",
-          "sdk/typescript",
-          "exec",
-          "prettier",
-          "--check",
-          readme,
-          guide,
-        ]);
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }
@@ -4491,7 +4457,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' enhancement skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]' 'trusted-reviewer'",
+        "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
         "      printf '%s\\n' 'removed a stale managed category'",
@@ -4563,9 +4529,9 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
       '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
       '      if [[ "$*" == *"__unattributed__"* ]]; then',
-      "        printf '%s\\n' 'github-actions[bot]' '__unattributed__'",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t__unattributed__'",
       "      else",
-      "        printf '%s\\n' 'github-actions[bot]' ''",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t'",
       "      fi",
       "      ;;",
       '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
@@ -4630,7 +4596,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]'",
+        "      printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
         "      printf '%s\\n' 'removed automatically applied skip-release-notes'",
@@ -4803,3 +4769,69 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves manual release categories while replacing stale automated labels",
+  async () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
+      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
+      *) echo "Unexpected request: $*" >&2; return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Preserving existing breaking-change label.",
+    );
+    expect(result.stdout).toContain("removed-stale-bug");
+    expect(result.stdout).toContain("labels[]=enhancement");
+    expect(result.stdout).not.toContain("removed-manual-label");
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "runs release automation through a symlink",
+  () => {
+    const directory = mkdtempSync(join(tmpdir(), "release-entrypoint-"));
+    try {
+      const script = resolve(
+        import.meta.dir,
+        "../scripts/release-automation.mjs",
+      );
+      const alias = join(directory, "release.mjs");
+      symlinkSync(script, alias);
+      const packageFile = resolve(import.meta.dir, "../package.json");
+      const direct = spawnSync("node", [script, "version", packageFile], {
+        encoding: "utf8",
+      });
+      const linked = spawnSync("node", [alias, "version", packageFile], {
+        encoding: "utf8",
+      });
+      expect(linked.status).toBe(0);
+      expect(linked.stdout).toBe(direct.stdout);
+      expect(linked.stdout.trim()).toBe(
+        JSON.parse(readFileSync(packageFile, "utf8")).version,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

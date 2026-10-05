@@ -1,15 +1,17 @@
+import { isMain } from "./script-main.mjs";
 import { execFile } from "node:child_process";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
@@ -87,43 +89,49 @@ export async function buildBundledPlugin({
     }),
   );
 
-  await rm(destination, { force: true, recursive: true });
-  if (files.some((path) => path.startsWith("mcp/"))) {
-    const mcpApp = join(source, "mcp-app");
-    await execFileAsync(
-      process.execPath,
-      [
-        join(mcpApp, "scripts/build_mcp_app.mjs"),
-        "--output",
-        join(destination, "mcp"),
-      ],
-      { cwd: mcpApp, maxBuffer: 10 * 1024 * 1024 },
-    );
-  }
-  for (const { file, mode, path } of sourceFiles) {
-    const output = join(destination, path);
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(file, output);
-    await chmod(output, mode);
-  }
+  await mkdir(dirname(destination), { recursive: true });
+  const staging = await mkdtemp(join(dirname(destination), ".bundled-plugin-"));
+  try {
+    if (files.some((path) => path.startsWith("mcp/"))) {
+      const mcpApp = join(source, "mcp-app");
+      await execFileAsync(
+        process.execPath,
+        [
+          join(mcpApp, "scripts/build_mcp_app.mjs"),
+          "--output",
+          join(staging, "mcp"),
+        ],
+        { cwd: mcpApp, maxBuffer: 10 * 1024 * 1024 },
+      ).catch((error) => {
+        if (error.stdout) process.stdout.write(error.stdout);
+        throw error;
+      });
+    }
+    for (const { file, mode, path } of sourceFiles) {
+      const output = join(staging, path);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(file, output);
+      await chmod(output, mode);
+    }
 
-  const generated = await destinationFiles(destination);
-  const expected = [...files].sort();
-  if (
-    generated.length !== expected.length ||
-    generated.some((path, index) => path !== expected[index])
-  ) {
-    throw new Error("Bundled plugin generated files outside its contract.");
+    const generated = await destinationFiles(staging);
+    const expected = [...files].sort();
+    if (
+      generated.length !== expected.length ||
+      generated.some((path, index) => path !== expected[index])
+    ) {
+      throw new Error("Bundled plugin generated files outside its contract.");
+    }
+    await rm(destination, { force: true, recursive: true });
+    await rename(staging, destination);
+  } finally {
+    await rm(staging, { force: true, recursive: true });
   }
 
   return files;
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+if (isMain(import.meta.url)) {
   buildBundledPlugin()
     .then((files) => {
       console.log(`Generated bundled plugin with ${files.length} files.`);

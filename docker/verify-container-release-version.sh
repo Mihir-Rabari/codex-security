@@ -2,13 +2,14 @@
 
 set -eu
 
-if [ "$#" -ne 2 ]; then
-    printf '%s\n' 'Usage: verify-container-release-version.sh PACKAGE_ENDPOINT VERSION' >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    printf '%s\n' 'Usage: verify-container-release-version.sh PACKAGE_ENDPOINT VERSION [VERIFIED_DIGEST]' >&2
     exit 2
 fi
 
 endpoint=$1
 version=$2
+verified_digest=${3:-}
 
 if ! versions="$(gh api --paginate "$endpoint/versions?per_page=100")"; then
     printf '%s\n' "::error::Unable to verify whether container version $version already exists; refusing to publish." >&2
@@ -17,11 +18,16 @@ fi
 
 if ! already_published="$(
     printf '%s\n' "$versions" |
-        jq --slurp --arg version "$version" '
+        jq --slurp --arg version "$version" --arg digest "$verified_digest" '
             if length == 0 or any(.[]; type != "array") then
                 error("Container package versions must contain at least one JSON array.")
             else
-                any(.[]; any(.[]; any(.metadata.container.tags[]?; . == $version)))
+                [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
+                if ($existing | length) == 0 then false
+                elif ($digest | test("^sha256:[a-fA-F0-9]{64}$")) then
+                    any($existing[]; .name != $digest)
+                else true
+                end
             end
         '
 )"; then

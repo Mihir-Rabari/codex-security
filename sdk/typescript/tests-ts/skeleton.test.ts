@@ -184,6 +184,7 @@ describe("TypeScript package skeleton", () => {
       "mcp",
       "plugin-host",
       "plugin-source",
+      "python-compatibility",
       "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
@@ -297,8 +298,9 @@ describe("TypeScript package skeleton", () => {
       ["Check formatting", "static-checks"],
       ["Check MCP formatting", "static-checks"],
     ] as const) {
-      expect(steps.filter((step) => step.name === name)).toHaveLength(1);
-      expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
+      expect(
+        jobs[job]!.steps!.filter((step) => step.name === name),
+      ).toHaveLength(1);
     }
     for (const name of [
       "Upload test reports",

@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { binaryPath } from "./binding.mjs";
 import { libc } from "./platform.mjs";
@@ -41,7 +40,7 @@ function versionAfter(value: string, floor: string): boolean {
 
 if (
   process.argv[1] !== undefined &&
-  pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+  pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
 ) {
   const bytes = readFileSync(binaryPath);
   checkPrivatePaths(bytes);

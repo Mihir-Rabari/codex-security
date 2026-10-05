@@ -442,7 +442,9 @@ class ThreatModelProjectionTest(unittest.TestCase):
                 path.write_text(body)
                 self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
                 self.assertEqual(path.read_text(), body)
-                self.assertEqual(FINALIZER.describe_threat_model(source)["path"], str(path))
+                self.assertTrue(
+                    Path(FINALIZER.describe_threat_model(source)["path"]).samefile(path)
+                )
 
     def test_malformed_canonical_model_does_not_export_a_stale_legacy_document(self) -> None:
         body = "# Earlier model\n\nEarlier service boundaries.\n"

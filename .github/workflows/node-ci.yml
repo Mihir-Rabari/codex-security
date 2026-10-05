@@ -63,15 +63,19 @@ jobs:
 
             changed=false
             markdown_only=true
-            plugin_changed=false
+            test_inputs_changed=false
             while IFS= read -r -d '' path; do
               changed=true
               if [[ "$path" != *.md ]]; then
                 markdown_only=false
               fi
               if [[ "$path" == plugins/codex-security/* ||
-                    "$path" == sdk/typescript/_bundled_plugin/* ]]; then
-                plugin_changed=true
+                    "$path" == sdk/typescript/_bundled_plugin/* ||
+                    "$path" == README.md || "$path" == RELEASING.md ||
+                    "$path" == sdk/typescript/README.md ||
+                    "$path" == .github/PULL_REQUEST_TEMPLATE.md ||
+                    "$path" == .github/release-notes.md ]]; then
+                test_inputs_changed=true
               fi
               case "$path" in
                 .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
@@ -100,7 +104,7 @@ jobs:
             done < "$changed_files"
             if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
               check_markdown=true
-              if [[ "$plugin_changed" == "false" ]]; then
+              if [[ "$test_inputs_changed" == "false" ]]; then
                 ci_mode=markdown
               fi
             fi
@@ -142,20 +146,9 @@ jobs:
         run: |
           node .github/scripts/check_plugin_source_compatibility.mjs
 
-      - name: Check Markdown formatting
+      - name: Check formatting
         if: steps.scope.outputs.check-markdown == 'true'
-        shell: bash
-        run: |
-          files=()
-          while IFS= read -r -d '' path; do
-            if [[ -f "$GITHUB_WORKSPACE/$path" &&
-                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
-              files+=("$GITHUB_WORKSPACE/$path")
-            fi
-          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
-          if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
-          fi
+        run: pnpm --dir sdk/typescript run format
 
   workflow-quality:
     needs: validate-title
@@ -475,6 +468,49 @@ jobs:
       - name: Test secret discovery eval contracts
         run: node --test evals/secret-discovery/test_*.mjs
 
+  python-compatibility:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+            tests: plugins/codex-security/tests
+          - os: macos-latest
+            python: "3.12"
+            tests: plugins/codex-security/tests/test_threat_model_projection.py plugins/codex-security/tests/test_workbench_scan_usage.py
+          - os: windows-latest
+            python: "3.12"
+            tests: plugins/codex-security/tests/test_windows_scan_local_files.py plugins/codex-security/tests/test_threat_model_projection.py
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: plugins/codex-security/pyproject.toml
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+      - name: Install ripgrep for the compatibility suite
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+      - name: Test supported Python and native filesystem behavior
+        env:
+          PYTHON_TEST_PATHS: ${{ matrix.tests }}
+        shell: bash
+        run: |
+          read -ra tests <<< "$PYTHON_TEST_PATHS"
+          python -m pytest "${tests[@]}" -q -n 4 --dist worksteal --max-worker-restart 0
+
   required-test:
     name: ${{ matrix.os }} / node-22
     needs:
@@ -488,6 +524,7 @@ jobs:
         mcp,
         plugin-host,
         plugin-source,
+        python-compatibility,
         container-validate,
       ]
     if: always()
@@ -501,7 +538,7 @@ jobs:
         if: needs.validate-title.outputs.workflow-quality == 'true' && needs.workflow-quality.result != 'success'
         run: exit 1
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.static-checks.result != 'success' || needs.package.result != 'success' || needs.test.result != 'success' || needs.compatibility.result != 'success' || needs.mcp.result != 'success' || needs.plugin-host.result != 'success' || needs.plugin-source.result != 'success' || needs.python-compatibility.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
       - name: Require selected container coverage
         if: needs.validate-title.outputs.container-validate == 'true' && needs.container-validate.result != 'success'

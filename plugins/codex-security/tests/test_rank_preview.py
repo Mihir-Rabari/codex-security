@@ -589,7 +589,13 @@ second_runtime_line()
 @pytest.mark.parametrize(
     "prefix", ["", "def visible():\n    pass\n"], ids=["sampled-source", "simple-outline"]
 )
-def test_python_preview_falls_back_on_ast_recursion(tmp_path: Path, prefix: str) -> None:
+def test_python_preview_falls_back_on_ast_recursion(
+    tmp_path: Path, prefix: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_parse(_text):
+        raise RecursionError("synthetic parser recursion")
+
+    monkeypatch.setattr("rank_preview.ast.parse", fail_parse)
     source = prefix + "value = " + " + ".join(["x"] * 10000) + "\n"
     path = tmp_path / "generated.py"
     data = source.encode("utf-8")

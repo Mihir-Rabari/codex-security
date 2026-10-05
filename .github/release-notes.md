@@ -27,5 +27,5 @@
 <!-- release-section: upgrades:start -->
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+No additional migration steps are documented for this release.
 <!-- release-section: upgrades:end -->

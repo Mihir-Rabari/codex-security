@@ -11,7 +11,7 @@ export async function serveFindings(
   const server = await startFindingsServer({
     store: new SqliteFindingsStore(environment),
     embeddings: new OpenAiFindingEmbedder(
-      environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"],
+      environment["OPENAI_API_KEY"] || environment["CODEX_API_KEY"],
       fetch,
       environment["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),
