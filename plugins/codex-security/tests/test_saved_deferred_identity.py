@@ -759,3 +759,72 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
             {key: value for key, value in row.items() if key != "id"} == summary for row in pending
         )
     assert replay[2] == first[2]
+
+
+@pytest.mark.parametrize("same_title", [False, True])
+def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
+    tmp_path, saved_results, same_title
+):
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "First review",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+    }
+    workers = [
+        save_worker(
+            tmp_path,
+            saved_results,
+            worker,
+            [],
+            saved_draft("identity-scan", findings=[{**finding, "title": title}]),
+        )
+        for worker, title in [
+            ("reviewer-a", "First review"),
+            ("reviewer-b", "First review" if same_title else "Second review"),
+        ]
+    ]
+    documents = recover(tmp_path, saved_results, workers)
+    replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        rows = result[1]["findings"]
+        assert len(rows) == 2
+        assert {row["provenance"]["workerId"] for row in rows} == {"reviewer-a", "reviewer-b"}
+        assert len({json.dumps(row["identity"], sort_keys=True) for row in rows}) == 2
+    assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("metadata", ["extensions", "provenance"])
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+def test_worker_report_metadata_enrichment_keeps_first_identity(
+    tmp_path, saved_results, metadata, identifier
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic report",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-1"},
+    }
+    second = {**first, metadata: {**first[metadata], "candidateId": "candidate-1"}}
+    drafts = [saved_draft("identity-scan", findings=[value]) for value in (first, second)]
+    worker = save_worker(tmp_path, saved_results, "reviewer", drafts, drafts[1])
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        assert len(result[1]["findings"]) == 1
+        assert result[1]["findings"][0]["identity"] == {
+            "anchor": "synthetic-report",
+            "instance": "report-1",
+        }
+    assert documents[1] == replay[1]

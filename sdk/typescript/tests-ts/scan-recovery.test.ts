@@ -858,8 +858,8 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(2);
-    expect(completed.warnings).toHaveLength(5);
+    expect(completed.findingCount).toBe(1);
+    expect(completed.warnings).toHaveLength(6);
     expect(
       completed.warnings.every((warning) =>
         warning.startsWith("Skipped malformed finding"),
@@ -876,11 +876,14 @@ describe("malformed scan artifact recovery", () => {
         completed.warnings.some((warning) => warning.includes(reason)),
       ).toBe(true);
     }
-    const recovered = (await readJson<FindingsDocument>(path)).findings;
-    expect(recovered).toHaveLength(2);
     expect(
-      recovered.every((finding) => Boolean(finding?.identity.anchor)),
-    ).toBe(true);
+      completed.warnings.filter((warning) =>
+        warning.includes("duplicate logical finding"),
+      ),
+    ).toHaveLength(2);
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.identity).toEqual(valid.identity);
     const coverage = await readJson<CoverageDocument>(
       join(fixture.scanDir, "coverage.json"),
     );

@@ -671,15 +671,20 @@ async function preserveScanDraft(
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );
+      const containing = matches.filter((current) =>
+        containsSavedFinding(current, finding),
+      );
       if (
         matches.length === 1 &&
         source.findings.filter((current) => sameSavedFinding(current, finding))
           .length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
-      } else {
-        if (!matches.some((current) => containsSavedFinding(current, finding)))
-          result.findings.push(structuredClone(finding));
+      } else if (containing.length === 1) {
+        // An unchanged sibling still owns its previously published identity.
+        preserveFindingDetails(containing[0]!, finding);
+      } else if (containing.length === 0) {
+        result.findings.push(structuredClone(finding));
       }
     }
     const resolvedIds = new Set(
