@@ -157,7 +157,7 @@ const checks = {
       "",
     );
     return [
-      ...(/(?:do not|don't)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:do not|don't)\s+(?:ask|seek|request)/i.test(
+      ...(/(?:do not|don't|no need to|need not)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:do not|don't|no need to|need not)\s+(?:ask|seek|request)/i.test(
         text,
       ) ||
       /REST[^.\n]*without (?:approval|permission)/i.test(fallbackInstructions)

@@ -80,6 +80,10 @@ for (const response of [
   "Use the GitHub Connector read-only tools. If its capability is unavailable, do not ask before switching to REST.",
   "Use the GitHub Connector read-only tools. If its capability is unavailable, switch to REST without permission.",
   "Use the GitHub Connector read-only tools. If its capability is unavailable, I will silently switch to REST without approval.",
+  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. There is no need to ask before switching to REST.",
+  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. You need not ask before switching to REST.",
+  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. To switch to REST, there is no need to ask.",
+  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. To switch to REST, you need not ask.",
 ])
   assert.equal(github(response, connectorContext).pass, false);
 
@@ -91,6 +95,9 @@ for (const prohibition of [
   "I won’t use REST without permission.",
   "Do not fall back to REST without approval.",
   "Don't use REST without permission.",
+  "We need to ask before switching to REST.",
+  "There is a need to ask before switching to REST.",
+  "To switch to REST, we need to ask.",
 ]) {
   const response = `Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. ${prohibition}`;
   assert.equal(github(response, connectorContext).pass, true);
