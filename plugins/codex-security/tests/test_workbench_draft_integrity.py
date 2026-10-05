@@ -505,3 +505,53 @@ def test_raw_checkpoint_and_published_rows_reuse_saved_identities(
     assert {"anchor": expected_anchor} in identities
     if candidate_siblings:
         assert {"anchor": expected_anchor, "instance": "saved-2"} in identities
+
+
+@pytest.mark.parametrize("discriminator", ["reportId", "ledgerRowId", "saved anchor"])
+def test_saved_identity_reuse_preserves_independent_worker_findings(
+    tmp_path: Path, discriminator: str
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    first.update(title="Synthetic finding", identity={"anchor": "synthetic-finding"})
+    first["provenance"]["candidateId"] = "candidate-a"
+    second = json.loads(json.dumps(first))
+    del second["identity"]
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    if discriminator == "saved anchor":
+        del first["identity"]
+        second["title"] = "Other finding"
+        second["provenance"]["candidateId"] = "candidate-b"
+        saved = {**second, "identity": {"anchor": "synthetic-finding"}}
+        write_checkpoint(result_path.parent / "checkpoints", saved_draft(scan_id, findings=[saved]))
+    else:
+        first["identity"]["instance"] = "report-a"
+        first["extensions"] = {discriminator: "report-a"}
+        second["extensions"] = {discriminator: "report-b"}
+    document = json.loads(result_path.read_text())
+    document["findings"] = [first, second]
+    result_path.write_text(json.dumps(document))
+    run_workbench(
+        state,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+        environment={"CODEX_HOME": str(home)},
+    )
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 2
+    if discriminator == "saved anchor":
+        assert {finding["provenance"]["candidateId"] for finding in findings} == {
+            "candidate-a",
+            "candidate-b",
+        }
+    else:
+        published = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        assert {finding["extensions"][discriminator] for finding in published} == {
+            "report-a",
+            "report-b",
+        }

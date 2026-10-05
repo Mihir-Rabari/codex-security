@@ -2362,11 +2362,20 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         ])
       : undefined;
   });
-  const candidateIdentities = new Map<string, JsonObject>();
+  const candidateIdentities = new Map<string, JsonObject | null>();
   for (const [index, finding] of findings.entries()) {
     const key = candidateKeys[index];
-    if (key && finding.identity !== undefined)
-      candidateIdentities.set(key, finding.identity as JsonObject);
+    if (!key || finding.identity === undefined) continue;
+    const previous = candidateIdentities.get(key);
+    candidateIdentities.set(
+      key,
+      previous === null ||
+        (previous !== undefined &&
+          scanFindingIdentity({ ...finding, identity: previous }) !==
+            scanFindingIdentity(finding))
+        ? null
+        : (finding.identity as JsonObject),
+    );
   }
   return identified.map((finding, index) => {
     const key = scanFindingIdentity(finding);
@@ -2379,7 +2388,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     if (previous) return { ...finding, identity: { ...previous } };
     if (!used.has(key) || (mode !== "deep" && !candidateKey)) {
       used.add(key);
-      if (candidateKey)
+      if (candidateKey && previous !== null)
         candidateIdentities.set(candidateKey, finding.identity as JsonObject);
       return finding;
     }
@@ -2404,7 +2413,8 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         provenance.preservedIdentity ?? structuredClone(identity),
     };
     used.add(scanFindingIdentity(distinct));
-    if (candidateKey) candidateIdentities.set(candidateKey, distinct.identity);
+    if (candidateKey && previous !== null)
+      candidateIdentities.set(candidateKey, distinct.identity);
     return distinct;
   });
 }

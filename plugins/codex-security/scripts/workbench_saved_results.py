@@ -1364,11 +1364,18 @@ def merge_saved_results(
     def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
         provenance = finding.get("provenance", {})
         candidate = finding_candidate_id(finding)
+        extensions = finding.get("extensions")
         return _digest(
             [
                 provenance.get("workerId") or owner,
                 candidate,
-                [finding.get("ruleId"), _finding_locations(finding)]
+                [
+                    finding.get("ruleId"),
+                    _finding_locations(finding),
+                    [extensions.get(key) for key in ("candidateId", "reportId", "ledgerRowId")]
+                    if isinstance(extensions, dict)
+                    else [None, None, None],
+                ]
                 if candidate
                 else _finding_content(finding),
             ]
@@ -1387,15 +1394,17 @@ def merge_saved_results(
                 saved_identities[key] = finding["identity"]
             elif saved_identities[key] != finding["identity"]:
                 saved_identities[key] = None
-    for _, draft, owner in all_sources:
-        for finding in draft["findings"]:
-            if not isinstance(finding, dict) or "identity" in finding:
-                continue
-            if not isinstance(finding.get("provenance"), dict):
-                continue
+
+    def ensure_saved_identity(finding: Any, owner: str | None) -> None:
+        if (
+            isinstance(finding, dict)
+            and "identity" not in finding
+            and isinstance(finding.get("provenance"), dict)
+        ):
             identity = saved_identities.get(saved_identity_key(finding, owner))
             if identity is not None:
                 finding["identity"] = copy.deepcopy(identity)
+        _ensure_finding_identity(finding)
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
@@ -1815,7 +1824,7 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
-                _ensure_finding_identity(finding)
+                ensure_saved_identity(finding, worker_id)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -1879,7 +1888,7 @@ def merge_saved_results(
                 continue
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
-            _ensure_finding_identity(finding)
+            ensure_saved_identity(finding, worker_id)
             if not valid_finding(finding):
                 findings.append(finding)
                 continue

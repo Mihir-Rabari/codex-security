@@ -1986,3 +1986,29 @@ for (const layout of ["standard", "diff"]) {
     );
   });
 }
+
+for (const layout of ["standard", "diff"]) {
+  test(`${layout}: conflicting saved instances do not select the last candidate identity`, async (t) => {
+    const f = await fixture(t, layout);
+    const first = {
+      ...findingFor("candidate-a"),
+      identity: { anchor: "synthetic-review-finding", instance: "first" },
+    };
+    const second = {
+      ...findingFor("candidate-a"),
+      identity: { anchor: "synthetic-review-finding", instance: "second" },
+      summary: "An independent report must remain published.",
+    };
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        first,
+        second,
+        { ...findingFor("candidate-a"), severity: { level: "high" } },
+      ],
+    });
+    const findings = await recoverPublishedFindings(f);
+    assert.ok(findings.some((finding) => finding.summary === second.summary));
+    assert.ok(findings.some((finding) => finding.severity.level === "high"));
+  });
+}
