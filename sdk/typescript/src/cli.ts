@@ -8647,6 +8647,7 @@ async function executeScan(
                   workflowId: arguments_.workflowId,
                   finding,
                   auth,
+                  cyberAccessProgram: arguments_.cyberAccessProgram,
                   safetyIdentifier: arguments_.safetyIdentifier,
                   signal: preparationAbortController.signal,
                 });

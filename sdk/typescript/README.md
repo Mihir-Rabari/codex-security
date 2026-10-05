@@ -708,8 +708,9 @@ with `2`, writing available results to stdout and a coverage warning to stderr.
 
 Scans already validate findings against local source. Add `--validate` to run
 the existing standalone validation workflow for each reported finding after
-the scan. Each assessment uses a separate evidence directory; the combined
-report is saved as `<scan-dir>/validation.md`, or a uniquely suffixed report
+the scan, using the same selected Cyber access program. Each assessment uses a
+separate evidence directory; the combined report is saved as
+`<scan-dir>/validation.md`, or a uniquely suffixed report
 if that path already exists. Each completed assessment is saved immediately;
 failed or interrupted runs retain the partial report. JSON scan output includes
 the execution status, completed assessment count, and report path. Completion means the assessments finished,

@@ -318,7 +318,7 @@ export interface ScanOptions extends ScanSettings {
 
 export interface ValidationOptions extends Pick<
   ScanOptions,
-  "auth" | "outputDir" | "safetyIdentifier" | "signal"
+  "auth" | "cyberAccessProgram" | "outputDir" | "safetyIdentifier" | "signal"
 > {
   repositoryPath: string;
   /** Finding text or a JSON-serializable object. Strings are never file paths. */
@@ -730,6 +730,7 @@ export class CodexSecurity {
           effort: model.reasoningEffort,
           settingsDigest: workflowDigest({
             configuration: session.effectiveConfig,
+            cyberAccessProgram: options.cyberAccessProgram ?? null,
             baseUrl: environmentValue(runtime.environment, "OPENAI_BASE_URL"),
             command: this.#codexCommand(),
             pluginVersion: runtime.plugin.version,
@@ -787,6 +788,7 @@ export class CodexSecurity {
       ].join("\n");
       const { events } = await thread.runStreamed(prompt, {
         signal,
+        cyberAccessProgram: options.cyberAccessProgram,
         outputSchema,
       });
       const { status, finalResponse, threadId } = await readCodexTurn({

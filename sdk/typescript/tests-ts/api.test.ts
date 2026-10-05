@@ -24,6 +24,7 @@ import {
   type CodexOptions,
   type ThreadEvent,
   type ThreadOptions,
+  type TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -448,6 +449,7 @@ describe("CodexSecurity finding validation", () => {
       codex?: CodexOptions;
       thread?: ThreadOptions;
       prompt?: string;
+      turn?: TurnOptions;
     } = {};
     const workbench = mock(
       async (
@@ -495,6 +497,7 @@ describe("CodexSecurity finding validation", () => {
                 id: null,
                 async runStreamed(prompt, options) {
                   captured.prompt = prompt;
+                  captured.turn = options;
                   return { events: events(options.signal!) };
                 },
               };
@@ -577,6 +580,28 @@ describe("CodexSecurity finding validation", () => {
       );
     },
   );
+
+  test("applies each validation's Cyber selection to session config and the turn", async () => {
+    const { client, options, captured } = await validationClient();
+    await using security = client;
+    for (const cyberAccessProgram of [
+      "daybreak_blue",
+      "daybreak_red",
+      "standard",
+      undefined,
+    ] as const) {
+      await security.validate({
+        ...options,
+        outputDir: undefined,
+        cyberAccessProgram,
+      });
+      expect(captured.turn?.cyberAccessProgram).toBe(cyberAccessProgram);
+      const features = captured.codex?.config?.["features"] as JsonObject;
+      expect(features["api_key_cyber_access_programs"]).toBe(
+        cyberAccessProgram === undefined ? undefined : true,
+      );
+    }
+  });
 
   test("checks recorded targets through the selected validation runtime before and after the model", async () => {
     const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
@@ -729,11 +754,31 @@ describe("CodexSecurity finding validation", () => {
     client.config.codexOverrides!["model"] = "changed-validation-model";
     await client.validate(request);
     expect(modelCalls).toBe(4);
+    const blue = await client.validate({
+      ...request,
+      cyberAccessProgram: "daybreak_blue",
+    });
+    expect(modelCalls).toBe(5);
+    const red = await client.validate({
+      ...request,
+      cyberAccessProgram: "daybreak_red",
+    });
+    expect(modelCalls).toBe(6);
+    expect(
+      await client.validate({
+        ...request,
+        cyberAccessProgram: "daybreak_blue",
+      }),
+    ).toEqual(blue);
+    expect(
+      await client.validate({ ...request, cyberAccessProgram: "daybreak_red" }),
+    ).toEqual(red);
+    expect(modelCalls).toBe(6);
     targetChanged = true;
     await expect(client.validate(request)).rejects.toThrow(
       "scan target changed",
     );
-    expect(modelCalls).toBe(4);
+    expect(modelCalls).toBe(6);
   });
 
   test("rejects invalid inputs, unsafe output, and cancellation before preparing credentials", async () => {
