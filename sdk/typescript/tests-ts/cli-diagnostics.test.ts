@@ -221,6 +221,11 @@ describe("CLI diagnostics", () => {
       structured: false,
     },
     {
+      command: "validate",
+      args: ["validate", "Synthetic finding"],
+      structured: false,
+    },
+    {
       command: "verify-fix",
       args: ["verify-fix", "Synthetic finding"],
       structured: false,

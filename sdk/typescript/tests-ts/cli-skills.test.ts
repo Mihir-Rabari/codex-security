@@ -1263,6 +1263,12 @@ process.stdout.write(JSON.stringify({
       ],
       ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
       [
+        "tokens per minute limit exceeded sk-proj-SYNTHETIC_SECRET",
+        "rate limited",
+      ],
+      ["tokens-per-minute limit exceeded", "rate limited"],
+      ["tokens_per_minute limit exceeded", "rate limited"],
+      [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
@@ -1280,6 +1286,7 @@ process.stdout.write(JSON.stringify({
     "Failed after 1401 bytes",
     "permission denied opening cache",
     "line 1429 could not be parsed",
+    "count_tokens_per_minute_limit is undefined",
   ])("does not misclassify an operational skill failure: %s", (detail) => {
     const message = skillCommandFailure("patch", 1, detail);
     expect(message).toContain(detail);

@@ -1,5 +1,5 @@
 import { nodeCommand } from "./support/shell.js";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -366,7 +366,11 @@ setInterval(() => {}, 1000);
 });
 
 test("retains the Codex configuration path and parsing error", async () => {
-  const root = await temporaryDirectory();
+  const root = join(
+    await temporaryDirectory(),
+    "configuration-\u009b-sk-proj-SYNTHETIC_SECRET",
+  );
+  await mkdir(root);
   const path = join(root, "config.toml");
   await writeFile(path, "invalid = [");
   try {
