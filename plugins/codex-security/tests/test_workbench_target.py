@@ -22,6 +22,56 @@ update_digest_field = cast(
 )
 
 
+@pytest.mark.parametrize("native_junction", [False, True])
+def test_reviewed_patch_accepts_unchanged_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_junction: bool
+) -> None:
+    import workbench_db
+
+    if native_junction and os.name != "nt":
+        pytest.skip("requires native Windows junctions")
+    source = tmp_path / "source"
+    source.mkdir()
+    junction = source / "linked_directory"
+    if native_junction:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True)
+    else:
+        junction.mkdir()
+        real_lstat = Path.lstat
+
+        def metadata(path: Path, *args: Any, **kwargs: Any) -> Any:
+            result = real_lstat(path, *args, **kwargs)
+            if path == junction:
+                return SimpleNamespace(st_mode=result.st_mode, st_reparse_tag=0xA0000003)
+            return result
+
+        monkeypatch.setattr(Path, "lstat", metadata)
+    (junction / "unchanged.txt").write_text("fixture\n")
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    (source / "app.txt").write_text("before\n")
+    remediation = {
+        "base_revision": "unversioned",
+        "base_content_digest": workbench_db.directory_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+    with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+        workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+
+
 def initialize_unborn_git_repository(target: Path) -> None:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)

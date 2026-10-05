@@ -664,6 +664,8 @@ def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Pa
             continue
 
     def ignored(directory: str, names: list[str]) -> list[str]:
+        if getattr(Path(directory).lstat(), "st_reparse_tag", 0) & 0x20000000:
+            return names
         relative = Path(directory).relative_to(source)
         return [
             path.name
