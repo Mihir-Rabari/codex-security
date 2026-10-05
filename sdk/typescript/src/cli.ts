@@ -1218,6 +1218,7 @@ interface CliDependencies {
     args: readonly string[],
     repository: string,
     options?: {
+      directory?: string;
       trim?: boolean;
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
@@ -1312,7 +1313,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       );
     }
     const { stdout } = await execFile(executable.executable, [...args], {
-      cwd: repository,
+      cwd: options?.directory ?? repository,
       env: { ...executable.environment, ...options?.environment },
       maxBuffer: options?.maxBuffer,
       windowsHide: true,
@@ -5287,6 +5288,8 @@ export async function main(
             options.assessPatchRisk || options.createPr
               ? await patchRepositoryRoot(repository, dependencies)
               : repository;
+          let commandDirectory = repository;
+          let commandEnvironment: NodeJS.ProcessEnv | undefined;
           const gitDependencies: CliDependencies =
             options.assessPatchRisk || options.createPr
               ? {
@@ -5295,8 +5298,15 @@ export async function main(
                     dependencies.runRepositoryCommand(
                       command,
                       args,
-                      repository,
-                      options,
+                      gitRepository,
+                      {
+                        ...options,
+                        directory: commandDirectory,
+                        environment: {
+                          ...commandEnvironment,
+                          ...options?.environment,
+                        },
+                      },
                     ),
                 }
               : dependencies;
@@ -5304,7 +5314,11 @@ export async function main(
             options.assessPatchRisk || options.createPr
               ? await snapshotPatchTree(gitRepository, gitDependencies)
               : undefined;
-          const patchBase = await snapshotPatchState(repository, dependencies);
+          const patchBase = await snapshotPatchState(
+            gitRepository,
+            gitDependencies,
+            options.assessPatchRisk || options.createPr,
+          );
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
               gitRepository,
@@ -5320,6 +5334,15 @@ export async function main(
                 gitDependencies,
               )
             : undefined;
+          const relocatedEnvironment =
+            (options.assessPatchRisk || options.createPr) &&
+            existsSync(repository)
+              ? await patchCommandEnvironment(
+                  repository,
+                  gitRepository,
+                  gitDependencies,
+                )
+              : undefined;
           const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
@@ -5336,6 +5359,10 @@ export async function main(
             },
           );
           if (!jsonOutput) output.write(report.text());
+          if (relocatedEnvironment !== undefined && !existsSync(repository)) {
+            commandDirectory = gitRepository;
+            commandEnvironment = relocatedEnvironment;
+          }
           const files = await changedPatchFiles(
             gitRepository,
             patchBase,
@@ -5372,7 +5399,7 @@ export async function main(
             ? await runPatchRiskAssessment(
                 {
                   repository: gitRepository,
-                  directory: repository,
+                  directory: commandDirectory,
                   environment,
                   base: patchGitBase!,
                   files,
@@ -6807,6 +6834,49 @@ async function patchRepositoryRoot(
   return resolve(output.replace(/\n$/u, ""));
 }
 
+async function patchCommandEnvironment(
+  directory: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<NodeJS.ProcessEnv> {
+  const gitPath = async (args: string[]) =>
+    (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", ...args],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\n$/u, "");
+  const environment: NodeJS.ProcessEnv = {
+    GIT_DIR: await gitPath(["--absolute-git-dir"]),
+    GIT_WORK_TREE: repository,
+  };
+  // Resolve Git's own path semantics before a patch can remove the caller's cwd.
+  for (const [name, args] of [
+    ["GIT_COMMON_DIR", ["--git-common-dir"]],
+    ["GIT_INDEX_FILE", ["--git-path", "index"]],
+    ["GIT_OBJECT_DIRECTORY", ["--git-path", "objects"]],
+  ] as const) {
+    if (dependencies.environment[name] !== undefined)
+      environment[name] = await gitPath([...args]);
+  }
+  for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
+    const value = dependencies.environment[name];
+    if (value === undefined) continue;
+    const path = `${directory}${sep}${value}`;
+    environment[name] =
+      value === "" || isAbsolute(value)
+        ? value
+        : await realpath(path).catch(async () =>
+            realpath(dirname(path))
+              .then((parent) => join(parent, basename(path)))
+              .catch(() => path),
+          );
+  }
+  return environment;
+}
+
 async function preparePatchPublication(
   repository: string,
   patchId: string,
@@ -7114,7 +7184,8 @@ async function changedPatchFiles(
   const heads =
     typeof base === "string"
       ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
-      : (await snapshotGitPatchState(repository, dependencies)).trees;
+      : (await snapshotGitPatchState(repository, dependencies, rootRelative))
+          .trees;
   const files = new Set<string>();
   for (const [directory, tree] of bases) {
     const head = heads.get(directory);
@@ -7145,6 +7216,7 @@ async function changedPatchFiles(
 async function snapshotPatchState(
   repository: string,
   dependencies: CliDependencies,
+  rootRelative = false,
 ): Promise<GitPatchState | Map<string, string>> {
   try {
     await dependencies.runRepositoryCommand(
@@ -7162,12 +7234,13 @@ async function snapshotPatchState(
       throw error;
     return snapshotPatchDirectory(repository);
   }
-  return snapshotGitPatchState(repository, dependencies);
+  return snapshotGitPatchState(repository, dependencies, rootRelative);
 }
 
 async function snapshotGitPatchState(
   repository: string,
   dependencies: CliDependencies,
+  rootRelative = false,
 ): Promise<GitPatchState> {
   const trees = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
@@ -7193,7 +7266,7 @@ async function snapshotGitPatchState(
     trees.set(directory, tree);
     const entries = await gitDependencies.runRepositoryCommand(
       "git",
-      ["ls-tree", "-r", "-z", tree],
+      ["ls-tree", "-r", "-z", ...(rootRelative ? ["--full-tree"] : []), tree],
       checkout,
       { trim: false, maxBuffer: Infinity },
     );
