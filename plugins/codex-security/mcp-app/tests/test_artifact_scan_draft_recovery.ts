@@ -2093,3 +2093,98 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const malformed of ["sourceFindingIds", "sourceFindings", "none"]) {
+    test(`${layout}: deferred provenance promotion ${malformed}`, async (t) => {
+      const f = await fixture(t, layout);
+      const source = {
+        id: "source-1",
+        finding: { summary: "Original source." },
+      };
+      const old = findingFor("review");
+      Object.assign(old.provenance, {
+        sourceFindingIds:
+          malformed === "sourceFindingIds" ? [null] : ["source-1"],
+        sourceFindings:
+          malformed === "sourceFindings"
+            ? [{ id: "source-1", finding: null }]
+            : [source],
+        originalCandidates: [null, { original: "candidate" }],
+      });
+      await f.write(
+        f.draft({
+          deferred: [
+            {
+              id: "review",
+              candidateId: "review",
+              reason: "Review remains.",
+              finding: old,
+            },
+          ],
+        }),
+      );
+      const reported = {
+        ...old,
+        provenance: { source: "local_plugin", candidateId: "review" },
+      };
+      const input = { ...f.draft({}, true), findings: [reported] };
+      await f.write(input);
+      await f.write(input);
+      const saved = await readJson(
+        f.root,
+        layout === "worker" ? "result.json" : "findings.json",
+      );
+      assert.equal(saved.findings.length, 1);
+      const provenance = saved.findings[0].provenance;
+      for (const field of ["sourceFindingIds", "sourceFindings"] as const) {
+        if (malformed === field) {
+          assert.equal(provenance[field], undefined);
+          assert.ok(
+            (provenance.previousFindings as FixtureFinding[]).some((row) =>
+              isDeepStrictEqual(row.provenance[field], old.provenance[field]),
+            ),
+          );
+        } else assert.deepEqual(provenance[field], old.provenance[field]);
+      }
+      assert.deepEqual(provenance.originalCandidates, [
+        null,
+        { original: "candidate" },
+      ]);
+      const parent = layout === "worker" ? await fixture(t, "deep") : f;
+      if (layout === "worker")
+        await parent.write({
+          ...parent.draft({}, true),
+          findings: saved.findings,
+        });
+      const manifestPath = path.join(parent.root, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      Object.assign(manifest.scan, {
+        id: parent.context.scanId,
+        producer: { name: "codex-security-plugin", version: "0.1.0" },
+        status: "completed",
+        startedAt: "2026-05-31T18:00:00Z",
+        completedAt: "2026-05-31T18:09:00Z",
+      });
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      for (const file of ["findings.json", "coverage.json"]) {
+        const document = await readJson(parent.root, file);
+        document.scanId = parent.context.scanId;
+        await writeFile(path.join(parent.root, file), JSON.stringify(document));
+      }
+      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+        fileURLToPath(
+          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+        ),
+        "--scan-dir",
+        parent.root,
+      ]);
+      assert.equal(
+        JSON.parse(
+          await readFile(path.join(parent.root, "findings.json"), "utf8"),
+        ).findings.length,
+        1,
+      );
+    });
+  }
+}

@@ -2861,10 +2861,15 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
 
 
 def _write_sarif_projection_if_possible(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    *,
+    sealed_paths: list[str],
 ) -> None:
     try:
-        write_sarif_projection(scan_dir, source_root, schema_dir)
+        if not _is_sealed_artifact(scan_dir, "exports/results.sarif", sealed_paths):
+            write_sarif_projection(scan_dir, source_root, schema_dir)
     except (ContractError, OSError) as error:
         print(
             f"codex-security: warning: automatic SARIF export failed: {error}. "
@@ -3040,8 +3045,9 @@ def _write_prepared_scan_finalization(
     if not was_sealed:
         _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
         _validate_existing_seal(scan_dir, scan)
-    if not _is_sealed_artifact(scan_dir, "exports/results.sarif", sealed_paths):
-        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
+    _write_sarif_projection_if_possible(
+        scan_dir, source_root, schema_dir, sealed_paths=sealed_paths
+    )
     warning = write_threat_model_projection_if_possible(scan_dir, manifest)
     if (
         warning is not None

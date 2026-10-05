@@ -90,6 +90,14 @@ const findingIdentitySchema = loadArtifactZodSchema(
   "identity",
 );
 
+const findingProvenanceSchema = (
+  loadArtifactZodSchema(
+    schemaDocuments,
+    scanDraftDocument.$id,
+    "finding",
+  ) as z.ZodObject<{ provenance: z.ZodObject }>
+).shape.provenance;
+
 /** Replace the three existing final-input documents without completing or sealing a scan. */
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
@@ -1664,11 +1672,22 @@ export function preserveFindingDetails(
       Array.isArray(provenance[field]) ? provenance[field] : [],
       Array.isArray(oldProvenance[field]) ? oldProvenance[field] : [],
     );
-    if (values.length) provenance[field] = values;
+    const fieldSchema = findingProvenanceSchema.shape[field];
+    if (
+      values.length &&
+      (!fieldSchema || fieldSchema.safeParse(values).success)
+    )
+      provenance[field] = values;
   }
   if (!containsSavedFinding(current, previous)) {
     const original = withoutPreviousFindings(previous);
-    if (isObject(original.provenance))
+    if (
+      isObject(original.provenance) &&
+      containsSavedValue(
+        provenance.sourceFindings,
+        original.provenance.sourceFindings,
+      )
+    )
       delete original.provenance.sourceFindings;
     provenance.previousFindings = exactUnion(
       Array.isArray(provenance.previousFindings)

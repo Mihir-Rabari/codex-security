@@ -1427,6 +1427,34 @@ The extraction root is not enforced.
 
         self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
 
+    def test_optional_sarif_failure_does_not_abort_first_or_repeated_finalization(self) -> None:
+        root = self.scan_dir
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                with tempfile.TemporaryDirectory(dir=root) as directory:
+                    self.scan_dir = Path(directory)
+                    if sealed:
+                        self.write_sealed_scan()
+                        (self.scan_dir / "exports" / "results.sarif").unlink()
+                        (self.scan_dir / "exports").rmdir()
+                    else:
+                        self.write_scan()
+                    contents = b"Saved optional export destination.\n"
+                    (self.scan_dir / "exports").write_bytes(contents)
+                    errors = io.StringIO()
+                    with mock.patch.object(FINALIZER.sys, "stderr", errors):
+                        FINALIZER.finalize_scan(self.scan_dir)
+                        manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertIn("automatic SARIF export failed", errors.getvalue())
+                    self.assertEqual((self.scan_dir / "exports").read_bytes(), contents)
+                    self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest)
+                    self.assertEqual(
+                        self.read_json("scan-manifest.json")["scan"]["status"], "completed"
+                    )
+                    self.assertEqual(len(self.read_json("findings.json")["findings"]), 1)
+        self.scan_dir = root
+
     def test_sarif_output_fails_closed_without_secure_file_backend(self) -> None:
         with mock.patch.object(FINALIZER.os, "supports_dir_fd", set()):
             with self.assertRaisesRegex(FINALIZER.ContractError, "descriptor-relative"):
