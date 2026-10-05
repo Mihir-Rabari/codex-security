@@ -469,12 +469,19 @@ export async function testDeepScanLifecycle({
                   (await terminal).error,
                   /synthetic worker failure/,
                 );
-              if (repeatedCancellation)
-                assert.equal(
-                  (await repeatedCancellation).structuredContent.workspace
-                    .results.progress.status,
-                  "failed",
-                );
+              if (repeatedCancellation) {
+                if (unavailableRead)
+                  await assert.rejects(
+                    repeatedCancellation,
+                    /synthetic terminal state unavailable/,
+                  );
+                else
+                  assert.equal(
+                    (await repeatedCancellation).structuredContent.workspace
+                      .results.progress.status,
+                    "failed",
+                  );
+              }
               continue;
             }
             await persistEntered.promise;
@@ -567,6 +574,114 @@ export async function testDeepScanLifecycle({
               repeatedCancellation,
             ]);
           }
+        }
+      }
+      for (const joined of [false, true]) {
+        const fixture = await fixtureRun(config);
+        const store = new FakeStore(fixture.run);
+        const registry = new DeepScanCoordinatorRegistry();
+        const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+        const readEntered = Promise.withResolvers<void>();
+        const readRelease = Promise.withResolvers<void>();
+        const persistEntered = Promise.withResolvers<void>();
+        const persistRelease = Promise.withResolvers<void>();
+        let reads = 0;
+        current = {
+          store,
+          registry,
+          persistEntered,
+          persistRelease,
+          rejectPersistence: false,
+          calls: [],
+          workspace: {
+            setup: { submitted: true },
+            results: { progress: { status: "running" } },
+          },
+          readParent: async () => {
+            if (reads++ === 0) {
+              readEntered.resolve();
+              await readRelease.promise;
+              throw new Error("synthetic temporary parent read failure");
+            }
+            return { workspace: structuredClone(current.workspace) };
+          },
+        };
+        const coordinator = registry.start({
+          run: fixture.run,
+          store,
+          executor,
+          pluginRoot: fixture.pluginRoot,
+          clock: immediateClock,
+          threadId: "fixture-owner",
+          heartbeatIntervalMs: 60_000,
+        });
+        const outcome = (operation: ReturnType<typeof cancel>) =>
+          operation.then(
+            () => undefined,
+            (error: Error) => error,
+          );
+        let first: Promise<Error | undefined> | undefined;
+        let second: Promise<Error | undefined> | undefined;
+        let retry: ReturnType<typeof cancel> | undefined;
+        try {
+          await executor.discoveryStarted.promise;
+          first = outcome(cancel({ scanId: fixture.run.scanId }));
+          await readEntered.promise;
+          if (joined) second = outcome(cancel({ scanId: fixture.run.scanId }));
+          readRelease.resolve();
+          assert.match(
+            (await first)?.message ?? "",
+            /temporary parent read failure/,
+          );
+          if (second) {
+            const result = await Promise.race([
+              second,
+              coordinator.wait(undefined, 25).then(() => undefined),
+            ]);
+            assert.match(
+              result?.message ?? "",
+              /temporary parent read failure/,
+            );
+          }
+          assert.equal(coordinator.snapshot().status, "running");
+          assert.equal(await coordinator.wait(undefined, 25), undefined);
+          retry = cancel({ scanId: fixture.run.scanId });
+          void retry.catch(() => {});
+          assert.equal(
+            await Promise.race([
+              persistEntered.promise.then(() => true),
+              coordinator.wait(undefined, 25).then(() => false),
+            ]),
+            true,
+            "a rejected admission must allow another cancellation attempt",
+          );
+          assert.equal(await coordinator.wait(undefined, 25), undefined);
+          persistRelease.resolve();
+          assert.equal(
+            (await retry).structuredContent.workspace.results.progress.status,
+            "canceled",
+          );
+          assert.equal((await coordinator.settled()).status, "canceled");
+          assert.equal(
+            current.calls.filter((command) => command === "cancel-scan").length,
+            1,
+          );
+        } catch (error) {
+          failures.push(
+            new Error(`Admission read failure; joined=${joined}`, {
+              cause: error,
+            }),
+          );
+        } finally {
+          readRelease.resolve();
+          persistRelease.resolve();
+          registry.shutdown("fixture cleanup");
+          await Promise.allSettled([
+            first,
+            second,
+            retry,
+            coordinator.settled(),
+          ]);
         }
       }
       if (failures.length)

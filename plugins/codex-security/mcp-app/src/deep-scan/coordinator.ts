@@ -245,20 +245,33 @@ export class DeepScanCoordinator {
     persistCancellation: () => Promise<void>,
     readParentStatus: () => Promise<string | undefined>,
   ): Promise<DeepScanRunState> {
+    const existing = this.cancellationPersistence;
+    if (existing) {
+      await existing.promise;
+      return await this.settled();
+    }
     if (
       this.terminal ||
       this.canceled ||
-      this.cancellationPersistence ||
       this.failurePersisted ||
       this.state.status === "canceled" ||
       this.state.status === "interrupted"
     )
       return await this.settled();
     let resolve!: () => void;
-    const promise = new Promise<void>((resolvePromise) => {
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
       resolve = resolvePromise;
+      reject = rejectPromise;
     });
-    this.cancellationPersistence = { promise, resolve };
+    // Cancellation callers share operation errors; terminal waiters inspect only
+    // persistence failures below. Handle a rejection even with no joined caller.
+    void promise.catch(() => {});
+    const persistence: NonNullable<typeof this.cancellationPersistence> = {
+      promise,
+      resolve,
+    };
+    this.cancellationPersistence = persistence;
     try {
       const parentStatus = await readParentStatus();
       if (
@@ -283,15 +296,19 @@ export class DeepScanCoordinator {
                 // Preserve the cancellation diagnostic if reconciliation fails.
               }
             }
-            if (!completed) this.cancellationPersistence.failure = { error };
+            if (!completed) persistence.failure = { error };
             throw error;
           }
         }
       }
+    } catch (error) {
+      if (!persistence.failure) this.cancellationPersistence = undefined;
+      reject(error);
+      throw error;
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
-      this.cancellationPersistence.resolve();
+      persistence.resolve();
     }
     return await this.settled();
   }
@@ -423,7 +440,7 @@ export class DeepScanCoordinator {
         let persistence: Promise<void> | undefined;
         do {
           persistence = this.cancellationPersistence?.promise;
-          await persistence;
+          await persistence?.catch(() => {});
           current = undefined;
           try {
             current = await this.options.store.get(
@@ -494,7 +511,7 @@ export class DeepScanCoordinator {
         });
       }
       if (this.cancellationPersistence)
-        await this.cancellationPersistence.promise;
+        await this.cancellationPersistence.promise.catch(() => {});
       if (this.cancellationPersistence?.failure) {
         throw this.cancellationPersistence.failure.error;
       }
