@@ -5248,11 +5248,7 @@ export async function main(
           const directory = dependencies.currentDirectory();
           const repository =
             options.assessPatchRisk || options.createPr
-              ? await dependencies.runRepositoryCommand(
-                  "git",
-                  ["rev-parse", "--show-toplevel"],
-                  directory,
-                )
+              ? await patchRepositoryRoot(directory, dependencies)
               : directory;
           const validationPrompt = await resolvePatchValidationPrompt(
             options.validationPromptFile,
@@ -6754,6 +6750,19 @@ async function patchPublicationDestination(
   };
 }
 
+async function patchRepositoryRoot(
+  directory: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const output = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "--show-toplevel"],
+    directory,
+    { trim: false },
+  );
+  return output.replace(/\n$/u, "");
+}
+
 async function preparePatchPublication(
   repository: string,
   patchId: string,
@@ -6774,11 +6783,7 @@ async function preparePatchPublication(
       `Patch branch or pull request already exists for ${branch}. Resume its saved commit with 'codex-security patch --resume-pr ${branch}', or review and publish further changes separately.`,
     );
   }
-  const root = await dependencies.runRepositoryCommand(
-    "git",
-    ["rev-parse", "--show-toplevel"],
-    repository,
-  );
+  const root = await patchRepositoryRoot(repository, dependencies);
   const status = await dependencies.runRepositoryCommand(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -6958,6 +6963,7 @@ async function createPatchPullRequest(
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
+  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...files]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );

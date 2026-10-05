@@ -2714,6 +2714,110 @@ describe("patch publication integrity", () => {
     },
   );
 
+  test("keeps the original branch when a verified file belongs to a nested repository", async () => {
+    const directory = await fixtures.create("patch-nested-publication-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const inner = repositoryGit(nested);
+    inner("init", "--initial-branch=main");
+    inner("config", "user.name", "Synthetic User");
+    inner("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "unsafe\n");
+    inner("add", ".");
+    inner("commit", "-m", "Synthetic nested baseline");
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const remote = await fixtures.create("patch-nested-remote-");
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    const result = resultWithFindings(["high"]);
+    result.findings.findings[0]!.locations[0]!.path = "nested/app.ts";
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : "",
+        onCodex: async (args, output) => {
+          await writeFile(join(nested, "app.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("submodule");
+    expect(git("branch", "--show-current")).toBe("main");
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(git("write-tree")).toBe(index);
+    expect(
+      git(
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads/codex-security/patch-scan-1",
+      ),
+    ).toBe("");
+    expect(git("ls-remote", "origin")).toBe("");
+    expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing spaces in worktree roots during risk assessment and publication",
+    async () => {
+      for (const flag of ["--assess-patch-risk", "--create-pr"]) {
+        const parent = await fixtures.create("patch-space-root-");
+        const directory = join(parent, "checkout ");
+        await mkdir(directory);
+        const git = repositoryGit(directory);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(directory, "app.ts"), "unsafe\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const remote = await fixtures.create("patch-space-remote-");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", flag, "--json"],
+          {
+            currentDirectory: directory,
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              await writeFile(join(directory, "app.ts"), "fixed\n");
+              output?.stdout.write("Fixed and checked.");
+              return 0;
+            },
+          },
+          {
+            configure: (current) => {
+              current.assessPatchRisk = async (request) => {
+                expect(request.repository).toBe(directory);
+                return patchRiskAssessment();
+              };
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(JSON.parse(outcome.stdout)).toMatchObject({ applied: true });
+      }
+    },
+  );
+
   test("patches a repository with a Git tree listing larger than one MiB", async () => {
     const directory = await fixtures.create("patch-large-tree-");
     const git = repositoryGit(directory);
