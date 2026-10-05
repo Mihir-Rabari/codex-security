@@ -193,6 +193,7 @@ import {
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
+  prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   probeCodexSandbox,
   requireModelSafeOutputDir,
@@ -1344,7 +1345,10 @@ export class CodexSecurity {
       scanDir =
         options.resumeScanId !== undefined
           ? requestedOutput!
-          : await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
+          : await (
+              this.#dependencies.prepareOutputDir ??
+              prepareScanRegistrationOutput
+            )(
               requestedOutput ?? undefined,
               basename(repo),
               scanOutputRoot,
@@ -3116,7 +3120,7 @@ export class CodexSecurity {
               basename(local.repository),
             )
           : undefined;
-      scanDir = await prepareOutputDir(
+      scanDir = await prepareScanRegistrationOutput(
         local.outputDir ?? undefined,
         basename(local.repository),
         outputRoot,
@@ -4725,11 +4729,11 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
-  // Keep the effective summary even when preflight filters the profile name.
+  // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
-  const reasoningSummary = resolved["model_reasoning_summary"];
-  if (safeString(reasoningSummary)) {
-    result["model_reasoning_summary"] = reasoningSummary;
+  for (const key of ["model_reasoning_summary", "service_tier"]) {
+    const value = resolved[key];
+    if (safeString(value)) result[key] = value;
   }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [

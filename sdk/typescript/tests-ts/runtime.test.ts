@@ -1,4 +1,4 @@
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
@@ -76,6 +76,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
+  prepareScanRegistrationOutput,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -101,18 +102,13 @@ import {
 import { rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory, cleanup, temporaryDirectories } =
+  createApiTestFixtures("codex-security-runtime-");
 const testPosix = process.platform === "win32" ? test.skip : test;
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
 
-afterEach(temporaryDirectories.cleanup);
-
-async function temporaryDirectory(
-  prefix = "codex-security-runtime-",
-): Promise<string> {
-  return temporaryDirectories.create(prefix);
-}
+afterEach(cleanup);
 
 function windowsCredentialAclOutput(descriptors: readonly string[]): string {
   return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
@@ -5781,7 +5777,13 @@ describe("runtime directories and plugin Python boundary", () => {
     await expect(stat(preview!)).rejects.toThrow();
 
     expect(
-      await prepareOutputDir(output, "repo", undefined, undefined, true),
+      await prepareScanRegistrationOutput(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+      ),
     ).toBe(output);
     expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
@@ -5804,6 +5806,45 @@ describe("runtime directories and plugin Python boundary", () => {
     }
 
     expect(await planOutputArchive(output)).not.toBeNull();
+  });
+
+  test("archives prior output through the exported preparation helper", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "scan");
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+    const archived: string[] = [];
+
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
+    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    expect(await readdir(output)).toEqual([]);
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
   });
 
   test("validates explicit output directories and creates private temporary paths", async () => {

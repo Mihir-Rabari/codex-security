@@ -1946,12 +1946,51 @@ export async function prepareOutputDir(
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
   archiveExisting = false,
+  onOutputArchived?: (archiveDir: string) => void,
+): Promise<string> {
+  return prepareOutputDirectory(
+    outputDirectory,
+    repositoryName,
+    temporaryRoot,
+    validateLocation,
+    archiveExisting ? "archive" : "reject",
+    onOutputArchived,
+  );
+}
+
+/** Leave archival to the scan registration transaction. */
+export async function prepareScanRegistrationOutput(
+  outputDirectory: string | undefined,
+  repositoryName: string,
+  temporaryRoot: string = tmpdir(),
+  validateLocation?: (path: string) => void,
+  archiveExisting = false,
+): Promise<string> {
+  return prepareOutputDirectory(
+    outputDirectory,
+    repositoryName,
+    temporaryRoot,
+    validateLocation,
+    archiveExisting ? "preserve" : "reject",
+  );
+}
+
+async function prepareOutputDirectory(
+  outputDirectory: string | undefined,
+  repositoryName: string,
+  temporaryRoot: string,
+  validateLocation: ((path: string) => void) | undefined,
+  existingOutput: "reject" | "archive" | "preserve",
+  onOutputArchived?: (archiveDir: string) => void,
 ): Promise<string> {
   if (outputDirectory === undefined) {
     requireModelSafeOutputDir(temporaryRoot);
     requireModelSafeOutputDir(await realpath(temporaryRoot));
   }
-  const path = await validateOutputDir(outputDirectory, archiveExisting);
+  const path = await validateOutputDir(
+    outputDirectory,
+    existingOutput !== "reject",
+  );
   validateLocation?.(path ?? (await realpath(temporaryRoot)));
   if (path === null) {
     const created = await mkdtemp(
@@ -1967,7 +2006,15 @@ export async function prepareOutputDir(
   }
   let createdRoot: string | undefined;
   try {
-    const existing = await lstat(path).catch(nullIfMissingFileError);
+    let existing = await lstat(path).catch(nullIfMissingFileError);
+    if (existing !== null && existingOutput === "archive") {
+      const archiveDir = await planOutputArchive(path);
+      if (archiveDir !== null) {
+        await rename(path, archiveDir);
+        onOutputArchived?.(archiveDir);
+        existing = null;
+      }
+    }
     if (existing === null) {
       createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
@@ -1975,7 +2022,7 @@ export async function prepareOutputDir(
     return await validatePreparedOutputDir(
       path,
       validateLocation,
-      archiveExisting,
+      existingOutput === "preserve",
     );
   } catch (error) {
     if (createdRoot !== undefined) {
