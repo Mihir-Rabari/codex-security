@@ -212,6 +212,38 @@ def test_archive_does_not_replace_a_running_scan(tmp_path: Path) -> None:
         ).fetchone() == (str(scan_dir), "running")
 
 
+@pytest.mark.parametrize("archived", [False, True])
+def test_nonempty_output_is_rejected_before_parsing_the_recipe(
+    tmp_path: Path, archived: bool
+) -> None:
+    repository, scan_dir = tmp_path / "repository", tmp_path / "scan"
+    repository.mkdir()
+    scan_dir.mkdir(mode=0o700)
+    (scan_dir / "checkpoint.txt").write_text("preserved output")
+    arguments = []
+    if archived:
+        previous_dir = tmp_path / "scan.previous-test"
+        previous_dir.mkdir(mode=0o700)
+        arguments = ["--archive-existing", "--archived-scan-dir", str(previous_dir)]
+
+    rejected = run_workbench(
+        tmp_path / "state",
+        "register-cli-scan",
+        "--repository",
+        str(repository),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        "{}",
+        *arguments,
+        check=False,
+    )
+
+    assert rejected["returncode"] != 0
+    assert "must be empty before the scan starts" in str(rejected["stderr"])
+    assert (scan_dir / "checkpoint.txt").read_text() == "preserved output"
+
+
 @pytest.mark.parametrize("state_subdirectory", [".", "state"])
 def test_archive_cannot_move_the_active_workbench_database(
     tmp_path: Path, state_subdirectory: str

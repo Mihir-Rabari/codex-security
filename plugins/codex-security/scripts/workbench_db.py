@@ -1631,6 +1631,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
         )
+    if (not args.archive_existing or args.archived_scan_dir is not None) and next(
+        scan_dir.iterdir(), None
+    ) is not None:
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+
     user_context = None
     workflow_id = None
     if args.registration_json_stdin:
