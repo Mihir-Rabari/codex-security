@@ -112,6 +112,7 @@ export class DeepScanCoordinator {
   private terminal = false;
   private canceled = false;
   private externallyFailed = false;
+  private failurePersisted = false;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -243,7 +244,11 @@ export class DeepScanCoordinator {
     reason: string,
     persistCancellation: () => Promise<void>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal || this.state.status !== "running")
+    if (
+      this.terminal ||
+      this.state.status === "canceled" ||
+      (this.state.status === "failed" && this.failurePersisted)
+    )
       return await this.settled();
     if (!this.cancellationPersistence) {
       let resolve!: () => void;
@@ -270,6 +275,7 @@ export class DeepScanCoordinator {
   failExternallyPersisted(reason: string): void {
     if (this.externallyFailed || this.terminal) return;
     this.externallyFailed = true;
+    this.failurePersisted = true;
     this.state = { ...this.state, status: "failed", error: reason };
     this.log({
       event: "coordinator_external_failure",
@@ -364,6 +370,7 @@ export class DeepScanCoordinator {
           persistedMessage,
           "failed",
         );
+        this.failurePersisted = this.state.status === "failed";
       } catch (persistError) {
         this.state = {
           ...this.state,
@@ -387,21 +394,26 @@ export class DeepScanCoordinator {
       await this.settleSchedulerWork();
       await this.ownershipCheck;
       this.resolveCancellationReady();
-      await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
         let current: DeepScanRunState | undefined;
-        try {
-          current = await this.options.store.get(
-            this.state.scanId,
-            this.options.threadId,
-          );
-        } catch (error) {
-          this.log({
-            event: "coordinator_terminal_state_read_failed",
-            scanId: this.state.scanId,
-            reason: errorKind(error),
-          });
-        }
+        let persistence: Promise<void> | undefined;
+        do {
+          persistence = this.cancellationPersistence?.promise;
+          await persistence;
+          current = undefined;
+          try {
+            current = await this.options.store.get(
+              this.state.scanId,
+              this.options.threadId,
+            );
+          } catch (error) {
+            this.log({
+              event: "coordinator_terminal_state_read_failed",
+              scanId: this.state.scanId,
+              reason: errorKind(error),
+            });
+          }
+        } while (persistence !== this.cancellationPersistence?.promise);
         if (
           current &&
           (current.status === "failed" || current.status === "canceled") &&
@@ -456,6 +468,8 @@ export class DeepScanCoordinator {
           scanId: this.state.scanId,
         });
       }
+      if (this.cancellationPersistence)
+        await this.cancellationPersistence.promise;
       if (this.cancellationPersistence?.failure) {
         throw this.cancellationPersistence.failure.error;
       }
@@ -565,6 +579,7 @@ export class DeepScanCoordinator {
     let current: DeepScanRunState;
     try {
       current = await this.options.store.get(this.state.scanId, threadId);
+      this.failurePersisted = current.status === "failed";
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",
@@ -594,7 +609,9 @@ export class DeepScanCoordinator {
           current,
           this.observationAbortController.signal,
         );
+        this.failurePersisted = this.state.status === "failed";
       } catch (observeError) {
+        this.failurePersisted = false;
         this.log({
           event: "coordinator_replacement_observation_failed",
           scanId: this.state.scanId,

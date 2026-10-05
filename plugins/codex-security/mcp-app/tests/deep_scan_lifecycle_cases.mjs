@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { importModule } from "./import-module.mjs";
 
 export async function testDeepScanLifecycle({
   fixtureRun,
@@ -19,6 +21,7 @@ export async function testDeepScanLifecycle({
   };
   const errors = [];
   for (const test of [
+    lateCancellationWaitsForPersistence,
     canceledPublicationWaitsForHeartbeat,
     delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -37,6 +40,266 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
+
+  async function lateCancellationWaitsForPersistence() {
+    const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
+    const source = await readFile(
+      new URL("../server.ts", import.meta.url),
+      "utf8",
+    );
+    let current;
+    globalThis.deepScanCancellationFixture = {
+      registry: {
+        get: (...args) => current.registry.get(...args),
+        cancelAndWait: (...args) => current.registry.cancelAndWait(...args),
+        shutdown: (...args) => current.registry.shutdown(...args),
+      },
+      async workbench([command]) {
+        current.calls.push(command);
+        if (command === "get-scan") return { workspace: current.workspace };
+        assert.equal(command, "cancel-scan");
+        current.persistEntered.resolve();
+        await current.persistRelease.promise;
+        if (current.rejectPersistence)
+          throw new Error("synthetic cancellation persistence failure");
+        current.store.run.status = "canceled";
+        current.workspace.results.progress.status = "canceled";
+        return current.workspace;
+      },
+    };
+    const { createCodexSecurityServer } = await importModule({
+      stdin: {
+        contents: source
+          .replace(
+            "const deepScanCoordinators = new DeepScanCoordinatorRegistry();",
+            "const deepScanCoordinators = globalThis.deepScanCancellationFixture.registry;",
+          )
+          .replace(
+            "async function runWorkbench(",
+            "const runWorkbench = (...args) => globalThis.deepScanCancellationFixture.workbench(...args);\nasync function unusedRunWorkbench(",
+          ),
+        loader: "ts",
+        resolveDir: applicationRoot,
+      },
+      define: {
+        __dirname: JSON.stringify(applicationRoot),
+        "import.meta.url": JSON.stringify(
+          new URL("../server.ts", import.meta.url).href,
+        ),
+      },
+      loader: { ".md": "text" },
+    });
+    const server = createCodexSecurityServer();
+    const cancel =
+      server._registeredTools.cancel_codex_security_scan_from_app.handler;
+    const failures = [];
+    try {
+      for (const stage of [
+        "final read",
+        "final read heartbeat",
+        "final read heartbeat microtask",
+        "onComplete",
+        "unpersisted failure",
+        "persisted failure",
+        "observed failure",
+      ]) {
+        for (const rejectPersistence of [false, true]) {
+          const fixture = await fixtureRun(config);
+          fixture.run.coordinatorGeneration = 1;
+          const store = new FakeStore(fixture.run);
+          const registry = new DeepScanCoordinatorRegistry();
+          const entered = Promise.withResolvers();
+          const release = Promise.withResolvers();
+          const persistEntered = Promise.withResolvers();
+          const persistRelease = Promise.withResolvers();
+          let publications = 0;
+          let cancellation;
+          let coordinator;
+          const observeFailure = stage === "observed failure";
+          const durableFailure =
+            stage === "persisted failure" || stage === "observed failure";
+          current = {
+            store,
+            registry,
+            persistEntered,
+            persistRelease,
+            rejectPersistence,
+            calls: [],
+            workspace: {
+              setup: { submitted: true },
+              results: { progress: { status: "running" } },
+            },
+          };
+          if (stage.startsWith("final read") || observeFailure) {
+            const get = store.get.bind(store);
+            let paused = false;
+            store.get = async () => {
+              const snapshot = await get();
+              if (
+                !paused &&
+                (observeFailure
+                  ? coordinator?.snapshot().status === "failed"
+                  : snapshot.status === "succeeded")
+              ) {
+                paused = true;
+                entered.resolve();
+                await release.promise;
+              }
+              return snapshot;
+            };
+          }
+          if (stage === "unpersisted failure")
+            store.fail = async () => {
+              throw new Error("synthetic failure persistence unavailable");
+            };
+          const executor = new FakeExecutor(
+            observeFailure
+              ? { blockDiscovery: true }
+              : stage.endsWith("failure")
+                ? {
+                    nonRetryableDiscovery: true,
+                    nonRetryableDiscoveryMessage: "synthetic worker failure",
+                  }
+                : {},
+          );
+          coordinator = registry.start({
+            run: fixture.run,
+            store,
+            executor,
+            pluginRoot: fixture.pluginRoot,
+            clock: immediateClock,
+            threadId: "fixture-owner",
+            heartbeatIntervalMs: 60_000,
+            onComplete: async () => {
+              if (stage === "onComplete") {
+                entered.resolve();
+                await release.promise;
+              }
+            },
+            onStopped: async () => {
+              publications++;
+            },
+            log: (event) => {
+              if (
+                stage.endsWith("microtask") &&
+                event.event === "coordinator_cleanup_settled"
+              )
+                queueMicrotask(() => {
+                  cancellation = cancel({ scanId: fixture.run.scanId });
+                  void cancellation.catch(() => {});
+                });
+              if (
+                !stage.endsWith("failure") ||
+                event.event !== "coordinator_failed"
+              )
+                return;
+              if (stage === "persisted failure")
+                current.workspace.results.progress.status = "failed";
+              entered.resolve();
+              cancellation = cancel({ scanId: fixture.run.scanId });
+              void cancellation.catch(() => {});
+            },
+          });
+          const terminal = coordinator.settled();
+          void terminal.catch(() => {});
+          try {
+            if (observeFailure) {
+              await executor.discoveryStarted.promise;
+              store.run.status = "failed";
+              current.workspace.results.progress.status = "failed";
+              await coordinator.renewHeartbeat();
+            }
+            await entered.promise;
+            if (stage.includes("heartbeat")) await coordinator.renewHeartbeat();
+            if (!stage.endsWith("microtask")) {
+              cancellation ??= cancel({ scanId: fixture.run.scanId });
+              void cancellation.catch(() => {});
+            }
+            release.resolve();
+            if (durableFailure) {
+              assert.equal((await terminal).status, "failed");
+              assert.equal(
+                (await cancellation).structuredContent.workspace.results
+                  .progress.status,
+                "failed",
+              );
+              assert.deepEqual(current.calls, ["get-scan"]);
+              assert.equal(publications, 1);
+              continue;
+            }
+            await persistEntered.promise;
+            const waiting = await coordinator.wait(undefined, 25);
+            persistRelease.resolve();
+            if (stage.endsWith("microtask")) {
+              assert.equal(
+                waiting?.status,
+                "succeeded",
+                "settlement must finish before admitting another cancellation",
+              );
+              if (rejectPersistence)
+                await assert.rejects(
+                  cancellation,
+                  /synthetic cancellation persistence failure/,
+                );
+              else
+                assert.equal(
+                  (await cancellation).structuredContent.workspace.results
+                    .progress.status,
+                  "canceled",
+                );
+              assert.equal((await terminal).status, "succeeded");
+              assert.equal(publications, 0);
+              assert.deepEqual(current.calls, ["get-scan", "cancel-scan"]);
+              continue;
+            }
+            assert.equal(
+              waiting,
+              undefined,
+              "start waiter must await durable cancellation",
+            );
+            if (rejectPersistence) {
+              await assert.rejects(
+                cancellation,
+                /synthetic cancellation persistence failure/,
+              );
+              await assert.rejects(
+                terminal,
+                /synthetic cancellation persistence failure/,
+              );
+              assert.equal(publications, 0);
+            } else {
+              assert.equal(
+                (await cancellation).structuredContent.workspace.results
+                  .progress.status,
+                "canceled",
+              );
+              assert.equal((await terminal).status, "canceled");
+              assert.equal(store.run.status, "canceled");
+              assert.equal(publications, 1);
+            }
+            assert.deepEqual(current.calls, ["cancel-scan"]);
+          } catch (error) {
+            failures.push(
+              new Error(
+                `${stage}; persistence rejects=${rejectPersistence}: ${error.message}`,
+                { cause: error },
+              ),
+            );
+          } finally {
+            release.resolve();
+            persistRelease.resolve();
+            registry.shutdown("fixture cleanup");
+            await Promise.allSettled([terminal, cancellation]);
+          }
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(failures, "Late cancellation responses");
+    } finally {
+      await server.close();
+      delete globalThis.deepScanCancellationFixture;
+    }
+  }
 
   async function canceledPublicationWaitsForHeartbeat() {
     const fixture = await fixtureRun(config);
@@ -265,6 +528,7 @@ export async function testDeepScanLifecycle({
       const cancellation = registry
         .cancelAndWait(fixture.run.scanId, "cancel parent", async () => {
           persisted = true;
+          store.run.status = "canceled";
         })
         .then((handled) => {
           resolved = true;
@@ -280,17 +544,14 @@ export async function testDeepScanLifecycle({
       assert.equal(
         await cancellation,
         true,
-        "local cleanup completed; the server checks durable parent state",
+        "local cleanup and durable cancellation completed",
       );
       assert.equal(
         persisted,
-        false,
-        "the server performs durable cancellation after coordinator cleanup",
+        true,
+        "persist cancellation before releasing coordinator waiters",
       );
-      assert.equal(
-        store.run.status,
-        status === "failed" ? "running" : "succeeded",
-      );
+      assert.equal(store.run.status, "canceled");
     }
   }
 
