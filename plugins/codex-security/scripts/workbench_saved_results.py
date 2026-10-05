@@ -1374,6 +1374,7 @@ def merge_saved_results(
 
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
+    canonical_candidates: dict[tuple[str, str, Any, Any, Any], dict[str, Any]] = {}
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1678,6 +1679,7 @@ def merge_saved_results(
                             previous_key = represented_candidates.get(candidate_key)
                             if candidate_key not in represented_candidates:
                                 represented_candidates[candidate_key] = canonical_key
+                                canonical_candidates[candidate_key] = finding
                             elif previous_key != canonical_key:
                                 # Candidate ids are only authoritative within one
                                 # logical worker. Multiple canonical owners make
@@ -1686,7 +1688,6 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
-    canonical_candidates = set(represented_candidates)
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -1993,10 +1994,15 @@ def merge_saved_results(
                 if worker_id and candidate_id
                 else None
             )
-            if not represented_by_parent and not (
+            if (
                 canonical_candidate in canonical_candidates
                 and represented_candidates[canonical_candidate] is not None
             ):
+                key = candidate_position_key(
+                    canonical_candidates[canonical_candidate],
+                    represented_candidates[canonical_candidate],
+                )
+            elif not represented_by_parent:
                 key = candidate_position_key(finding, key)
             if key in finding_positions:
                 position = finding_positions[key]

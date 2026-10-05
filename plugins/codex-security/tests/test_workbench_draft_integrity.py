@@ -411,6 +411,56 @@ def test_retained_identityless_worker_source_is_not_republished(tmp_path: Path, 
     assert findings[0]["identity"] == reduced["identity"]
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("distinct_parent_candidate", [False, True])
+def test_canonical_worker_update_keeps_independent_alias_sibling(
+    tmp_path: Path, reverse: bool, retry: bool, distinct_parent_candidate: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding_path = scan_dir / "findings.json"
+    document = json.loads(finding_path.read_text())
+    original = document["findings"][0]
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    independent = json.loads(json.dumps(original))
+    independent.update(
+        identity={"anchor": "reviewed-a"}, title="Beta", summary="Independent candidate A."
+    )
+    independent["severity"]["level"] = "medium"
+    independent["provenance"]["candidateId"] = "candidate-a"
+    earlier = json.loads(json.dumps(independent))
+    earlier.pop("identity")
+    independent["provenance"]["previousFindings"] = [earlier]
+    canonical = json.loads(json.dumps(original))
+    canonical.update(identity={"anchor": "beta"}, title="Beta", summary="Candidate B.")
+    canonical["severity"]["level"] = "low"
+    canonical["provenance"].update(candidateId="candidate-b", workerId=worker_id)
+    historical = json.loads(json.dumps(canonical))
+    canonical["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+    if distinct_parent_candidate:
+        canonical["provenance"]["candidateId"] = "canonical-b"
+    document["findings"] = [canonical, independent] if reverse else [independent, canonical]
+    finding_path.write_text(json.dumps(document))
+    historical["severity"]["level"] = "high"
+    historical["summary"] = "Stronger candidate B observation."
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [historical]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 2
+    assert {row["provenance"]["candidateId"] for row in findings} == {
+        "candidate-a",
+        "candidate-b",
+    }
+    assert {row["summary"] for row in findings} == {
+        "Independent candidate A.",
+        "Stronger candidate B observation.",
+    }
+
+
 def test_recovered_identity_does_not_depend_on_worker_assignment(tmp_path: Path):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]

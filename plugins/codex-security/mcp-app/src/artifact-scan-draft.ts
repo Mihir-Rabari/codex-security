@@ -1574,12 +1574,6 @@ export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
 ): void {
-  if (
-    current.identity === undefined &&
-    findingIdentitySchema.safeParse(previous.identity).success
-  ) {
-    current.identity = structuredClone(previous.identity);
-  }
   const provenance = requireObject(
     current.provenance,
     "saved finding provenance",
@@ -1587,6 +1581,20 @@ export function preserveFindingDetails(
   const oldProvenance = isObject(previous.provenance)
     ? previous.provenance
     : {};
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
+    current.identity = structuredClone(previous.identity);
+    if (
+      provenance.preservedIdentity === undefined &&
+      oldProvenance.preservedIdentity !== undefined
+    ) {
+      provenance.preservedIdentity = structuredClone(
+        oldProvenance.preservedIdentity,
+      );
+    }
+  }
   for (const field of [
     "sourceFindingIds",
     "sourceFindings",
