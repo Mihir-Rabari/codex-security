@@ -489,6 +489,8 @@ for (const {
 test.each([
   "cyber_policy",
   "Request blocked by a safety policy violation.",
+  "This request was refused under the safety policy",
+  "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",

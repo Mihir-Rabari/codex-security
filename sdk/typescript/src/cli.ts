@@ -2465,7 +2465,7 @@ export async function main(
           scanArguments.showCost = options.showCost;
         } catch (error) {
           const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          if (exitCode !== 2) errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
           if (format === "json" || format === "jsonl") {
             if (!argv.includes("--full-output"))

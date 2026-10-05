@@ -14,6 +14,29 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
 describe("CLI diagnostics", () => {
+  test.each([{ flags: [] }, { flags: ["--json"] }])(
+    "reports rerun history failures once: $flags",
+    async ({ flags }) => {
+      for (const lookupFails of [false, true]) {
+        const message = lookupFails
+          ? "Synthetic history failure."
+          : "No completed scans found for the current repository.";
+        const calls: string[] = [];
+        const deps = dependencies({
+          onWorkbench: (args) => {
+            calls.push(args[0]!);
+            if (lookupFails) throw new Error(message);
+            return { scans: [] };
+          },
+        });
+        const { stderr, runCli } = createCliTest(main);
+        expect(await runCli(["scans", "rerun", ...flags], deps)).toBe(2);
+        expect(stderr.text()).toBe(`codex-security: ${message}\n`);
+        expect(calls).toEqual(["list-scans"]);
+      }
+    },
+  );
+
   test("retains local filesystem errors through artifact failure wrappers", async () => {
     // Reading a directory produces a real local errno on the supported platforms.
     const cause = await readFile(import.meta.dir).then(
