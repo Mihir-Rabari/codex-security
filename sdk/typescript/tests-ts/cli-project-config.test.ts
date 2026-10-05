@@ -689,7 +689,7 @@ test("rerun accepts replacement scan and validation files relative to the invoca
       ],
       dependencies({
         currentDirectory: input.configDirectory,
-        onWorkbench: async () => ({ recipe }),
+        onWorkbench: async () => ({ recipe, scanId: "saved" }),
         onTurn,
       }),
     ),
@@ -1142,7 +1142,7 @@ test("rerun restores all saved deep settings and authentication without loading 
           OPENAI_API_KEY: "synthetic-test-key",
           CODEX_SECURITY_PROJECT_CONFIG: input.config,
         },
-        onWorkbench: async () => ({ recipe }),
+        onWorkbench: async () => ({ recipe, scanId: "saved" }),
         onTurn,
       }),
     ),
@@ -1179,7 +1179,7 @@ test.each([
         ["scans", "rerun", "saved", "--json"],
         dependencies({
           currentDirectory: input.repository,
-          onWorkbench: async () => ({ recipe }),
+          onWorkbench: async () => ({ recipe, scanId: "saved" }),
           onRun,
         }),
       ),
