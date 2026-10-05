@@ -114,7 +114,7 @@ describe("CLI diagnostics", () => {
     "escapes terminal controls in $command failures while preserving details",
     async ({ command, args, structured }) => {
       const message =
-        "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail";
+        "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail\u009b2J\u009d0;title\u009c";
       const fail = throwing(message);
       const deps = dependencies({ onCodex: fail, onRepositoryCommand: fail });
       deps.classifyScanSeverity = fail;
@@ -127,7 +127,7 @@ describe("CLI diagnostics", () => {
 
       expect(await runCli(args, deps)).toBe(2);
       expect(stderr.text()).toContain(
-        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail\n",
+        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail 2J 0;title \n",
       );
       expect(stderr.text()).not.toContain("\u001b");
       if (structured) {

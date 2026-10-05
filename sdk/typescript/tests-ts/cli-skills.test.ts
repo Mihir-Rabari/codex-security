@@ -1367,6 +1367,37 @@ process.stdout.write(JSON.stringify({
     }
   });
 
+  test.each(["turn.failed", "stderr"])(
+    "escapes C1 controls in child %s failures while preserving diagnostic text",
+    async (channel) => {
+      const controls = String.fromCharCode(
+        ...Array.from({ length: 33 }, (_, index) => 0x7f + index),
+      );
+      const prefix = "Synthetic failure token=SYNTHETIC_VALUE Café 🔒 ";
+      const suffix = " retained detail";
+      const detail = `${prefix}${controls}${suffix}`;
+      const source =
+        channel === "turn.failed"
+          ? `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`
+          : `process.stderr.write(${JSON.stringify(detail)});process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        `codex-security: validate failed with exit code 7.\n${prefix}${" ".repeat(33)}${suffix}\n`,
+      );
+    },
+  );
+
   test("runs patching in a saved app-server thread", async () => {
     const source = `
 const assert = require("node:assert/strict");

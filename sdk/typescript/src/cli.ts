@@ -8024,7 +8024,7 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticValue(value: unknown): string {
   return errorMessage(value).replaceAll(
-    /[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu,
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
     " ",
   );
 }
