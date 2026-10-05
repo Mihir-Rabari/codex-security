@@ -57,6 +57,7 @@ export function afterEach(context: {
   const closed = verdict === "not_actionable";
   const review = verdict === "needs_review";
   const scores: Record<string, number> = {
+    ...context.result.namedScores,
     strict_tp: positive && confirmed ? sampleWeight : 0,
     strict_tn: !positive && closed ? sampleWeight : 0,
     strict_fp: !positive && !closed ? sampleWeight : 0,
@@ -87,10 +88,7 @@ export function afterEach(context: {
     test: context.test,
     result: {
       ...context.result,
-      namedScores: {
-        ...context.result.namedScores,
-        ...scores,
-      },
+      namedScores: scores,
       metadata: {
         ...context.result.metadata,
         sastbench: {

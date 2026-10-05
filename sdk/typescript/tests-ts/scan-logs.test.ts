@@ -3,11 +3,13 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { readSavedScanLogs, readScanLogs } from "../src/scan-logs.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories = createTemporaryDirectories();
+const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
+  "codex-security-scan-logs-",
+);
 
-afterEach(directories.cleanup);
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -44,11 +46,6 @@ async function writeSession(
       .map((event) => JSON.stringify(event))
       .join("\n"),
   );
-}
-
-async function temporaryHome(): Promise<string> {
-  const directory = await directories.create("codex-security-scan-logs-");
-  return directory;
 }
 
 function commandEvent(command: string, id: string, timestamp?: string) {

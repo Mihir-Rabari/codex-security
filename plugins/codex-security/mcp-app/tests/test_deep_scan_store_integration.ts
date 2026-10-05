@@ -52,19 +52,13 @@ async function createWorkbenchFixture(prefix: string) {
   }
 }
 
-function createWorkbenchRunner(
-  environment: NodeJS.ProcessEnv,
-  options: { timeout?: number; maxBuffer?: number } = {
-    timeout: 30_000,
-    maxBuffer: 4 * 1024 * 1024,
-  },
-) {
+function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
   const python = process.env.PYTHON?.trim() || "python3";
   return async (args: string[]) => {
     const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
       env: environment,
-      ...options,
+      ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
     });
     return JSON.parse(stdout);
   };
@@ -609,7 +603,7 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
   );
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-zero-discovery-thread";
-  const runWorkbench = createWorkbenchRunner(environment, {});
+  const runWorkbench = createWorkbenchRunner(environment, false);
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {

@@ -115,16 +115,6 @@ function extensionContext({
   };
 }
 
-function sumNamedScores(rows: ReturnType<typeof addSastBenchMetrics>[]) {
-  const totals: Record<string, number> = {};
-  for (const row of rows) {
-    for (const [name, value] of Object.entries(row.result.namedScores)) {
-      totals[name] = (totals[name] || 0) + value;
-    }
-  }
-  return totals;
-}
-
 const outcomes = [
   {
     caseId: "tp-confirmed",
@@ -165,7 +155,12 @@ const nativeContexts = outcomes.map((outcome) =>
   }),
 );
 const nativeMetricRows = nativeContexts.map(addSastBenchMetrics);
-const totals = sumNamedScores(nativeMetricRows);
+const totals: Record<string, number> = {};
+for (const row of nativeMetricRows) {
+  for (const [name, value] of Object.entries(row.result.namedScores)) {
+    totals[name] = (totals[name] || 0) + value;
+  }
+}
 
 assert.deepEqual(
   {

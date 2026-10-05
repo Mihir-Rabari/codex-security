@@ -653,6 +653,9 @@ async function writeDedupArtifacts(
     mergedFindings.set(findingIdentity, {
       ...mergedFindings.get(findingIdentity),
       ...finding,
+      ...(options.evidence === undefined
+        ? {}
+        : { rootCause: { summary: options.evidence } }),
       provenance: {
         ...finding.provenance,
         sourceFindingIds: [
@@ -670,12 +673,7 @@ async function writeDedupArtifacts(
     undefined,
     context.reducerLabel,
   );
-  draft.findings = [...mergedFindings.values()].map((finding) => ({
-    ...finding,
-    ...(options.evidence === undefined
-      ? {}
-      : { rootCause: { summary: options.evidence } }),
-  }));
+  draft.findings = [...mergedFindings.values()];
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }

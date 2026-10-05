@@ -5,14 +5,19 @@ import { join } from "node:path";
 export function createTemporaryDirectories(canonicalize = false) {
   const roots: string[] = [];
   return {
+    track(root: string): void {
+      roots.push(root);
+    },
     async create(prefix: string) {
       const root = await temporaryDirectory(prefix, canonicalize);
       roots.push(root);
       return root;
     },
-    cleanup() {
-      return Promise.all(
-        roots.map((root) => rm(root, { recursive: true, force: true })),
+    async cleanup(): Promise<void> {
+      await Promise.all(
+        roots
+          .splice(0)
+          .map((root) => rm(root, { recursive: true, force: true })),
       );
     },
   };

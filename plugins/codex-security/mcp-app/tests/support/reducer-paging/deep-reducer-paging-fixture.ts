@@ -41,11 +41,11 @@ export async function createReducerPagingFixture(root: string) {
       "The account lookup builds a query by concatenating request-controlled text. Parameter binding is absent on this path.",
     remediation: "Use parameter binding for account lookup query values.",
   });
-  const synthesizedHistory = finding("query-injection", {
+  const synthesizedHistory = {
     ...previousOriginal,
     summary:
       "Earlier synthesis also established that the transactional account lookup calls the same unsafe query builder. Both paths need the shared parameter-binding fix.",
-  });
+  };
   const previousSourceId = "previous-worker:0";
   const previousCanonical = {
     ...previousOriginal,
@@ -225,13 +225,13 @@ export async function gradeReducerPagingResult(
 
 function finding(
   id: "reflected-html" | "archive-path" | "query-injection",
-  extra = {},
+  extra: Record<"title" | "summary" | "remediation", string>,
 ) {
   return {
     ruleId: "synthetic." + id,
     identity: { anchor: id },
-    title: "Synthetic finding " + id,
-    summary: "An untrusted input reaches a sensitive operation.",
+    title: extra.title,
+    summary: extra.summary,
     severity: { level: "high" },
     confidence: { level: "high", rationale: "Synthetic validated fixture." },
     taxonomy: {
@@ -245,9 +245,8 @@ function finding(
       ],
     },
     locations: [{ path: `src/${id}.ts`, startLine: 1, endLine: 2 }],
-    remediation: "Apply the issue-specific boundary check.",
+    remediation: extra.remediation,
     provenance: { source: "local_plugin" },
-    ...extra,
   };
 }
 

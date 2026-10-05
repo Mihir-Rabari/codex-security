@@ -1,32 +1,13 @@
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { copyCompletedScanFixture } from "../plugin-root.js";
+import {
+  createTemporaryDirectories,
+  temporaryDirectory as createPluginTemporaryDirectory,
+} from "../../../../plugins/codex-security/mcp-app/tests/support/temporary-directories.ts";
 
-export function createTemporaryDirectories(canonical = true) {
-  const directories: string[] = [];
-
-  return {
-    track(path: string): void {
-      directories.push(path);
-    },
-
-    async create(prefix: string): Promise<string> {
-      const path = await temporaryDirectory(prefix, canonical);
-      directories.push(path);
-      return path;
-    },
-
-    async cleanup(): Promise<void> {
-      await Promise.all(
-        directories
-          .splice(0)
-          .map((path) => rm(path, { recursive: true, force: true })),
-      );
-    },
-  };
-}
+export { createTemporaryDirectories };
 
 export function createApiTestFixtures(
   prefix = "codex-security-api-",
@@ -49,10 +30,9 @@ export function createApiTestFixtures(
   };
 }
 
-export async function temporaryDirectory(
+export function temporaryDirectory(
   prefix: string,
   canonicalize = true,
 ): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), prefix));
-  return canonicalize ? realpath(path) : path;
+  return createPluginTemporaryDirectory(prefix, canonicalize);
 }

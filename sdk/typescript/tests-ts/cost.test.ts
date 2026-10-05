@@ -25,9 +25,11 @@ import {
   scanThreadId,
 } from "./support/usage-rollout.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
+  "codex-security-cost-",
+);
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
 type SessionParentField = (typeof parentFields)[number];
 
@@ -49,12 +51,7 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the cost tracker.");
 }
 
-afterEach(temporaryDirectories.cleanup);
-
-async function codexHome(): Promise<string> {
-  const directory = await temporaryDirectories.create("codex-security-cost-");
-  return directory;
-}
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
