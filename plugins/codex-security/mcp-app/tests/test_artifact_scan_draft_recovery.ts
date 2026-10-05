@@ -2028,3 +2028,51 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const linkedById of [false, true]) {
+    test(`${layout}: newly deferred work reopens reviewed surface id=${linkedById}`, async (t) => {
+      const f = await fixture(t, layout);
+      const surface = {
+        id: "api",
+        label: "API",
+        disposition: "no_issue_found",
+      };
+      const other = {
+        id: "independent",
+        kind: "generic",
+        reason: "Independent work remains.",
+      };
+      await f.write(f.draft({ surfaces: [surface], deferred: [other] }, true));
+      const next = {
+        id: linkedById ? "api" : "new-review",
+        kind: "generic",
+        reason: "Review the new caller.",
+        ...(linkedById ? {} : { surfaceIds: ["api"] }),
+      };
+      const progress = f.draft({
+        surfaces: [{ ...surface, disposition: "needs_follow_up" }],
+        deferred: [next],
+      });
+      for (const input of [progress, f.draft()]) {
+        const result = await f.write(input);
+        assert.equal(
+          result.coverage.surfaces.find(
+            ({ id }: { id: string }) => id === surface.id,
+          ).disposition,
+          "needs_follow_up",
+        );
+        assert.ok(
+          result.coverage.deferred.some(
+            ({ id }: { id: string }) => id === next.id,
+          ),
+        );
+        assert.ok(
+          result.coverage.deferred.some(
+            ({ id }: { id: string }) => id === other.id,
+          ),
+        );
+      }
+    });
+  }
+}

@@ -554,14 +554,15 @@ async function preserveScanDraft(
         [],
       );
       for (const surface of resolved) reopenedSurfaces.add(surface);
+      const deferred = (progress.coverage.deferred as JsonObject[]).filter(
+        (row) =>
+          keepsGenericWork(row) ||
+          !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
+      );
       result.coverage = preserveScanCoverage(
         {
           ...result.coverage,
-          deferred: (progress.coverage.deferred as JsonObject[]).filter(
-            (row) =>
-              keepsGenericWork(row) ||
-              !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
-          ),
+          deferred,
           surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
             (surface) =>
               (keepsGenericWork(surface) ||
@@ -571,7 +572,16 @@ async function preserveScanDraft(
                 !terminalSurfaceIds.has(
                   (surface.candidateId ?? surface.id) as string,
                 ) ||
-                reopenedIds.has((surface.candidateId ?? surface.id) as string)),
+                reopenedIds.has(
+                  (surface.candidateId ?? surface.id) as string,
+                ) ||
+                deferred.some(
+                  (row) =>
+                    row.id === surface.id ||
+                    ((row.surfaceIds as string[] | undefined) ?? []).includes(
+                      surface.id as string,
+                    ),
+                )),
           ),
         },
         [result.coverage],
@@ -668,6 +678,19 @@ async function preserveScanDraft(
         disposition.finding ??= structuredClone(finding);
         continue;
       }
+      if (
+        result.findings.some((current) => {
+          const history = (current.provenance as JsonObject).previousFindings;
+          return (
+            Array.isArray(history) &&
+            history.some(
+              (previous) =>
+                isObject(previous) && containsSavedFinding(previous, finding),
+            )
+          );
+        })
+      )
+        continue;
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );

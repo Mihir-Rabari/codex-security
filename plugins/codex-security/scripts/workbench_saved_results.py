@@ -1909,7 +1909,12 @@ def merge_saved_results(
                 elif (
                     latest.get("title") == value.get("title")
                     and raw_scope(latest) == scope
-                    and identifiers(latest) == identifiers(value)
+                    and all(
+                        previous is None or current == previous
+                        for current, previous in zip(
+                            identifiers(value), identifiers(latest), strict=True
+                        )
+                    )
                 ):
                     rank = 1
                 else:
@@ -2257,6 +2262,15 @@ def merge_saved_results(
                             "previousFindings", []
                         )
                     retained_provenance = retained["provenance"]
+                    for field in ("sourceFindingIds", "sourceFindings", "originalCandidates"):
+                        values = retained_provenance.get(field, [])
+                        values = list(values) if isinstance(values, list) else []
+                        previous_values = previous.get("provenance", {}).get(field, [])
+                        for item in previous_values if isinstance(previous_values, list) else []:
+                            if item not in values:
+                                values.append(copy.deepcopy(item))
+                        if values:
+                            retained_provenance[field] = values
                     retained_history = retained_provenance.get("previousFindings")
                     history = (
                         [item for item in retained_history if isinstance(item, dict)]
