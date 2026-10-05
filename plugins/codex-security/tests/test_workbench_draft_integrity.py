@@ -944,7 +944,9 @@ def test_saved_identity_collision_across_workers_preserves_explicit_sibling(
         assert explicit["identity"] == {"anchor": "beta"}
 
 
-@pytest.mark.parametrize("discriminator", ["anchor", "instance", "anchor without candidate"])
+@pytest.mark.parametrize(
+    "discriminator", ["anchor", "instance", "anchor without candidate", "restored instances"]
+)
 @pytest.mark.parametrize("retry", [False, True])
 def test_raw_checkpoint_preserves_explicit_sibling_identity(
     tmp_path: Path, discriminator: str, retry: bool
@@ -958,20 +960,25 @@ def test_raw_checkpoint_preserves_explicit_sibling_identity(
     second = json.loads(json.dumps(first))
     second.update(summary="Stronger independent report", identity={"anchor": "shared-title"})
     second["severity"]["level"] = "high"
-    if discriminator == "instance":
+    if discriminator in {"instance", "restored instances"}:
         first["identity"] = {"anchor": "shared-title", "instance": "sibling-a"}
+        if discriminator == "restored instances":
+            second["identity"] = {"anchor": "shared-title", "instance": "sibling-b"}
     elif discriminator == "anchor without candidate":
         del first["provenance"]["candidateId"]
         del second["provenance"]["candidateId"]
     raw = json.loads(json.dumps(first))
     del raw["identity"]
+    earlier = [raw]
+    if discriminator == "restored instances":
+        earlier.append({key: value for key, value in second.items() if key != "identity"})
     expected = {finding["summary"]: finding["identity"] for finding in (first, second)}
     for name in ("findings.json", "scan-manifest.json", "coverage.json"):
         (scan_dir / name).unlink()
     _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
     document = json.loads(result_path.read_text())
     document["findings"] = [first, second]
-    write_checkpoint(result_path.parent / "checkpoints", saved_draft(scan_id, findings=[raw]))
+    write_checkpoint(result_path.parent / "checkpoints", saved_draft(scan_id, findings=earlier))
     result_path.write_text(json.dumps(document))
     stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
     published_ids = None

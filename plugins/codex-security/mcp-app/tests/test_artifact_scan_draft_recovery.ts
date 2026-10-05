@@ -2307,3 +2307,42 @@ for (const layout of ["standard", "diff"] as const) {
     });
   }
 }
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const workerId of [
+    { note: "synthetic metadata" },
+    ["synthetic metadata"],
+  ]) {
+    for (const history of [false, true]) {
+      test(`${layout}: structured worker metadata remains recoverable, array=${Array.isArray(workerId)}, history=${history}`, async (t) => {
+        const f = await fixture(t, layout);
+        const original = {
+          ...findingFor("shared-candidate"),
+          provenance: {
+            ...findingFor("shared-candidate").provenance,
+            workerId,
+          },
+        };
+        const finding = history
+          ? {
+              ...findingFor("shared-candidate"),
+              severity: { level: "high" },
+              provenance: {
+                ...findingFor("shared-candidate").provenance,
+                previousFindings: [original],
+              },
+            }
+          : original;
+        await f.write({ ...f.draft({}, true), findings: [finding] });
+        for (const stopped of [false, "first", true] as const) {
+          const findings = await recoverPublishedFindings(f, stopped);
+          assert.equal(findings.length, 1);
+          const retained = history
+            ? Reflect.get(findings[0]!.provenance, "previousFindings")[0]
+            : findings[0];
+          assert.deepEqual(retained.provenance.workerId, workerId);
+        }
+      });
+    }
+  }
+}

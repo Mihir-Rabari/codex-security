@@ -1412,12 +1412,13 @@ def merge_saved_results(
                         key = _finding_key(retained)
                         candidate = finding_candidate_id(retained)
                         finding_owner = retained["provenance"].get("workerId") or retained_owner
-                        if candidate and finding_owner:
+                        if candidate and isinstance(finding_owner, str) and finding_owner:
                             candidate_owners.setdefault((key, candidate), set()).add(finding_owner)
                         if isinstance(retained.get("identity"), dict):
                             explicit_identities.setdefault(key, []).append(
                                 (retained, retained_owner)
                             )
+    restorations = []
     for matches in observations.values():
         identities = {
             _encoded([finding["identity"], finding["provenance"].get("preservedIdentity")]): (
@@ -1431,14 +1432,24 @@ def merge_saved_results(
         if len(identities) != 1 or raw is None:
             continue
         identity, preserved = next(iter(identities.values()))
-        if preserved is None:
-            normalized = dict(raw[0])
-            _ensure_finding_identity(normalized)
-            if normalized["identity"] != identity and all(
-                distinct_candidates(normalized, finding, raw[1], owner)
+        normalized = dict(raw[0])
+        _ensure_finding_identity(normalized)
+        restorations.append((matches, identity, preserved, raw, normalized))
+        if preserved is None and normalized["identity"] != identity:
+            explicit_identities.setdefault(_finding_key(normalized), []).append(
+                ({**raw[0], "identity": identity}, raw[1])
+            )
+    for matches, identity, preserved, raw, normalized in restorations:
+        if (
+            preserved is None
+            and normalized["identity"] != identity
+            and all(
+                finding["identity"] == identity
+                or distinct_candidates(normalized, finding, raw[1], owner)
                 for finding, owner in explicit_identities.get(_finding_key(normalized), [])
-            ):
-                preserved = normalized["identity"]
+            )
+        ):
+            preserved = normalized["identity"]
         for finding, _ in matches:
             if "identity" not in finding:
                 inferred_identities[id(finding)] = finding
