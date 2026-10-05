@@ -54,6 +54,37 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("retains the beginning and end of a large wrapped session result", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 88, rows: 24 },
+      { input },
+    );
+    dashboard.start();
+    input.emit("data", "d");
+    dashboard.recordDetails({
+      threadId: "synthetic-thread",
+      parentThreadId: null,
+      event: {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          output: "START\n" + "x".repeat(4 * 1024 * 1024) + "\nEND",
+        },
+      },
+    });
+    expect(lastFrame(stderr)).toContain("END");
+    dashboard.scroll(Number.MAX_SAFE_INTEGER);
+    expect(lastFrame(stderr)).toContain("START");
+    dashboard.scroll(-Number.MAX_SAFE_INTEGER);
+    expect(lastFrame(stderr)).toContain("END");
+    for (const line of lastFrame(stderr).split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(88);
+    }
+    dashboard.stop();
+  });
+
   test.each(["\t", "\u0007"])(
     "wraps code after escaping terminal control %j",
     (control) => {

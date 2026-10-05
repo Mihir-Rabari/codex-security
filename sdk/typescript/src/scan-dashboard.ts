@@ -1251,6 +1251,12 @@ const graphemes = new Intl.Segmenter();
 
 function columnChunks(value: string, width: number): string[] {
   const parts: string[] = [];
+  if (/^[\u0020-\u007E]*$/u.test(value)) {
+    for (let start = 0; start < value.length; start += width) {
+      parts.push(value.slice(start, start + width));
+    }
+    return parts.length === 0 ? [""] : parts;
+  }
   let current = "";
   let columns = 0;
   for (const { segment } of graphemes.segment(value)) {
@@ -1268,13 +1274,12 @@ function columnChunks(value: string, width: number): string[] {
 }
 
 function wrapCode(prefix: string, value: string, width: number): string[] {
+  const prefixWidth = stringWidth(prefix);
+  const continuation = " ".repeat(prefixWidth);
   return columnChunks(
     terminalText(value),
-    Math.max(1, width - stringWidth(prefix)),
-  ).map(
-    (part, index) =>
-      `${index === 0 ? prefix : " ".repeat(stringWidth(prefix))}${part}`,
-  );
+    Math.max(1, width - prefixWidth),
+  ).map((part, index) => `${index === 0 ? prefix : continuation}${part}`);
 }
 
 function styleLine(
