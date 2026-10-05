@@ -13,6 +13,7 @@ from test_workbench_standard_deep_results import (
     write_saved_parent,
 )
 from workbench_test_support import (
+    fail_deep_scan,
     run_workbench,
     saved_discovery_worker,
     saved_draft,
@@ -69,6 +70,108 @@ def recover(root: Path, module, workers, frozen=None):
     )
     assert result is not None
     return result
+
+
+@pytest.mark.parametrize("field", ["disposition", "completeness"])
+def test_malformed_coverage_does_not_interrupt_saved_evidence(
+    tmp_path: Path, saved_results, field: str
+):
+    draft = saved_draft("identity-scan", deferred=[{"id": "review", "reason": "Review remains."}])
+    if field == "disposition":
+        draft["coverage"]["surfaces"] = [
+            {"id": "review", "candidateId": "review", "disposition": ["rejected"]}
+        ]
+    else:
+        draft["coverage"]["completeness"] = ["complete"]
+    write_saved_parent(tmp_path, draft, 100)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [], draft)
+    result = recover(tmp_path, saved_results, [worker])
+    assert any(row["id"] == "review" for row in result[2]["deferred"])
+
+
+def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, saved_results):
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review finding",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    draft = saved_draft("identity-scan", findings=[finding])
+    write_saved_parent(tmp_path, draft, 100)
+    first = recover(tmp_path, saved_results, [])
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (tmp_path / name).unlink()
+    replay = recover(tmp_path, saved_results, [], first[0]["scan"]["preservedSources"])
+    assert len(first[1]["findings"]) == len(replay[1]["findings"]) == 1
+    assert first[1]["findings"][0]["identity"] == replay[1]["findings"][0]["identity"]
+
+
+@pytest.mark.parametrize("artifacts", ["omitted", None, []])
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, artifacts, outcome):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    write_saved_parent(
+        scan_dir,
+        saved_draft(scan_id, deferred=[{"id": "review", "reason": "Review remains."}]),
+        100,
+    )
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if artifacts != "omitted":
+        manifest["scan"]["artifacts"] = artifacts
+    manifest_path.write_text(json.dumps(manifest))
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan_id,
+        "--artifact-path",
+        "artifacts/review.txt",
+        input_text="Synthetic review receipt.",
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    assert (scan_dir / "artifacts/review.txt").read_text() == "Synthetic review receipt."
+    if outcome == "failed":
+        fail_deep_scan(state, codex_home, scan_id)
+    else:
+        run_workbench(
+            state,
+            "cancel-scan",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    sealed = json.loads(manifest_path.read_text())
+    assert sealed["scan"]["status"] == outcome
+    assert sealed["scan"]["sealedAt"]
+    original = manifest_path.read_bytes()
+    if outcome == "failed":
+        run_workbench(
+            state,
+            "recover-scan-results",
+            "--scan-id",
+            scan_id,
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    else:
+        run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+    assert manifest_path.read_bytes() == original
 
 
 @pytest.mark.parametrize("reason", ["Review remains.", "Unicode review: é \ud800"])

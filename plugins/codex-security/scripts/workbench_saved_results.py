@@ -37,6 +37,7 @@ from finalize_scan_contract import (
     _write_prepared_scan_finalization,
     finalize_scan,
     finding_candidate_id,
+    manifest_is_sealed,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
@@ -361,7 +362,7 @@ def _read_saved_parent_result(
     parent_scan = manifest.get("scan")
     if not isinstance(parent_scan, dict):
         raise ContractError("Saved parent manifest has no scan object")
-    if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
+    if manifest_is_sealed(parent_scan) and (
         parent_scan.get("id", scan_id) != scan_id
         or findings.get("scanId", scan_id) != scan_id
         or coverage.get("scanId", scan_id) != scan_id
@@ -478,9 +479,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
         manifest_scan = manifest.get("scan")
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
-        if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        ):
+        if scan["seal_manifest_digest"] is not None or manifest_is_sealed(manifest_scan):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"],
@@ -615,10 +614,8 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
+def _ensure_finding_identity(finding: Any) -> None:
     if not isinstance(finding, dict) or "identity" in finding:
-        return
-    if candidate_only and not finding_candidate_id(finding):
         return
     extensions = finding.get("extensions")
     source = str(
@@ -861,7 +858,7 @@ def _generic_surface_updates(
                 id(row)
                 for _, row in matches
                 if reopening
-                or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+                or row.get("disposition") in ("needs_follow_up", surface.get("disposition"))
             )
             if update not in updates:
                 updates.append(update)
@@ -1337,7 +1334,7 @@ def merge_saved_results(
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
         if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0], candidate_only=True)
+            _ensure_finding_identity(document["findings"][0])
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
@@ -1491,7 +1488,7 @@ def merge_saved_results(
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and item.get("disposition") in ("rejected", "not_applicable")
                 ):
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
@@ -1710,7 +1707,7 @@ def merge_saved_results(
                 draft.get("complete") is False
                 or draft["coverage"].get("completeness") != "complete"
             )
-            and coverage.get("completeness") in {"complete", "unknown"}
+            and coverage.get("completeness") in ("complete", "unknown")
         ):
             coverage["completeness"] = "partial"
         skip_superseded_findings = (
@@ -1764,7 +1761,7 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
-                _ensure_finding_identity(finding, candidate_only=True)
+                _ensure_finding_identity(finding)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -1772,7 +1769,7 @@ def merge_saved_results(
                     stopped_parent_seal
                     and isinstance(owner, str)
                     and candidate_id
-                    and resolved.get((owner, candidate_id)) in {"rejected", "not_applicable"}
+                    and resolved.get((owner, candidate_id)) in ("rejected", "not_applicable")
                 ):
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
@@ -1948,7 +1945,7 @@ def merge_saved_results(
                 if (
                     field == "surfaces"
                     and isinstance(item, dict)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and item.get("disposition") in ("rejected", "not_applicable")
                     and isinstance(item.get("candidateId"), str)
                     and (history_findings := rejected_history.get((worker_id, item["candidateId"])))
                 ):
@@ -2177,10 +2174,7 @@ def preserve_scan_results_locked(
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
     existing = None
     if scan["seal_manifest_digest"] is not None or (
-        isinstance(existing_scan, dict)
-        and (
-            existing_scan.get("sealedAt") is not None or existing_scan.get("artifacts") is not None
-        )
+        isinstance(existing_scan, dict) and manifest_is_sealed(existing_scan)
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
         existing, existing_findings, _ = finalize_scan(
@@ -2370,7 +2364,7 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
         if manifest_path is not None:
             manifest = db.read_json_object(manifest_path).get("scan", {})
-            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+            if manifest_is_sealed(manifest):
                 raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
         output = args.artifact_path
         key = output.lower()

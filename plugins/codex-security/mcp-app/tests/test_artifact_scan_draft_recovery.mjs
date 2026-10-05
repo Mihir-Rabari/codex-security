@@ -39,6 +39,75 @@ const findingFor = (candidateId) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const layout of ["standard", "diff", "worker"]) {
+  for (const title of [".env review", "/admin review", "_debug review"]) {
+    test(`${layout}: generated identity permits repeated writes for ${title}`, async (t) => {
+      const f = await fixture(t, layout);
+      const submitted = {
+        ...f.draft(),
+        findings: [{ ...findingFor("review"), title }],
+      };
+      await f.write(submitted);
+      await f.write(submitted);
+      await f.write(f.draft({}, true));
+      const saved = JSON.parse(
+        await readFile(
+          path.join(
+            f.root,
+            layout === "worker" ? "result.json" : "findings.json",
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(saved.findings.length, 1);
+    });
+  }
+  test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
+    const f = await fixture(t, layout);
+    for (const candidate of ["first", "second"])
+      await f.write({ ...f.draft(), findings: [findingFor(candidate)] });
+    await f.write(f.draft({}, true));
+    const saved = JSON.parse(
+      await readFile(
+        path.join(
+          f.root,
+          layout === "worker" ? "result.json" : "findings.json",
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(saved.findings.length, 2);
+    assert.deepEqual(
+      new Set(saved.findings.map((finding) => finding.provenance.candidateId)),
+      new Set(["first", "second"]),
+    );
+  });
+  test(`${layout}: malformed deferred identity cannot poison subsequent writes`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write(
+      f.draft({
+        deferred: [
+          {
+            id: "review",
+            candidateId: "review",
+            ...generic,
+            finding: {
+              ...findingFor("review"),
+              identity: { anchor: ".invalid" },
+            },
+          },
+        ],
+      }),
+    );
+    const submitted = {
+      ...f.draft({}, true),
+      findings: [findingFor("review")],
+    };
+    await f.write(submitted);
+    await f.write(submitted);
+  });
+}
+
 for (const observation of ["checkpoint head", "worker result"]) {
   test(`worker: reopening survives replacement of the ${observation} during a read`, async (t) => {
     const f = await fixture(t, "worker");
@@ -1569,7 +1638,7 @@ for (const layout of ["standard", "diff", "worker"]) {
     });
   }
 
-  test(`${layout}: ignored late progress keeps an accepted terminal marker`, async (t) => {
+  test(`${layout}: late progress survives an identical terminal retry`, async (t) => {
     const f = await fixture(t, layout);
     await f.write(f.draft({}, true));
     await f.write(f.draft({ deferred: [{ id: "late", ...generic }] }));
@@ -1582,11 +1651,14 @@ for (const layout of ["standard", "diff", "worker"]) {
         "utf8",
       ),
     );
-    assert.notEqual(
+    assert.equal(
       layout === "worker" ? published.complete : published.scan.complete,
       false,
     );
-    assert.deepEqual((await f.read()).deferred, []);
+    const pending = (await f.read()).deferred;
+    assert.deepEqual(pending, [{ id: "late", ...generic }]);
+    await f.write(f.draft({}, true));
+    assert.deepEqual((await f.read()).deferred, pending);
   });
 
   for (const reverse of [false, true]) {

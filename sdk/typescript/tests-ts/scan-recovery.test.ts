@@ -816,7 +816,7 @@ describe("malformed scan artifact recovery", () => {
     ).toBe(true);
   });
 
-  test("keeps valid findings and skips malformed or duplicate findings", async () => {
+  test("repairs missing identities and skips malformed or duplicate findings", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
@@ -858,8 +858,8 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(6);
+    expect(completed.findingCount).toBe(2);
+    expect(completed.warnings).toHaveLength(5);
     expect(
       completed.warnings.every((warning) =>
         warning.startsWith("Skipped malformed finding"),
@@ -868,7 +868,6 @@ describe("malformed scan artifact recovery", () => {
     for (const reason of [
       "summary",
       "safe repository-relative",
-      "identity",
       "codeEvidence[0].id",
       "duplicate logical finding",
       "expected an object",
@@ -877,7 +876,11 @@ describe("malformed scan artifact recovery", () => {
         completed.warnings.some((warning) => warning.includes(reason)),
       ).toBe(true);
     }
-    expect((await readJson<FindingsDocument>(path)).findings).toHaveLength(1);
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    expect(recovered).toHaveLength(2);
+    expect(
+      recovered.every((finding) => Boolean(finding?.identity.anchor)),
+    ).toBe(true);
     const coverage = await readJson<CoverageDocument>(
       join(fixture.scanDir, "coverage.json"),
     );
@@ -885,7 +888,7 @@ describe("malformed scan artifact recovery", () => {
     expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
       "needs_follow_up",
     );
-    expect(coverage.deferred).toHaveLength(5);
+    expect(coverage.deferred).toHaveLength(4);
   });
 
   test.each([

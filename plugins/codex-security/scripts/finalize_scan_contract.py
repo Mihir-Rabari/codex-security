@@ -211,11 +211,7 @@ def _read_saved_threat_model(
             if filename == "scan-manifest.json"
             else manifest
         )
-        if (
-            validate_seal
-            and filename == "scan-manifest.json"
-            and (scan.get("sealedAt") is not None or scan.get("artifacts"))
-        ):
+        if validate_seal and filename == "scan-manifest.json" and manifest_is_sealed(scan):
             if "threatModel" not in scan:
                 _validate_manifest(manifest)
                 recorded_paths = {
@@ -859,7 +855,7 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 def _validate_remote(remote: str, context: str) -> None:
     parsed = urlsplit(remote)
-    if not parsed.scheme or not parsed.netloc:
+    if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ContractError(
@@ -2884,6 +2880,10 @@ PreparedScanFinalization = tuple[
 ]
 
 
+def manifest_is_sealed(scan: dict[str, Any]) -> bool:
+    return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
+
+
 def _prepare_scan_finalization(
     scan_dir: Path,
     schema_dir: Path | None = None,
@@ -2905,7 +2905,7 @@ def _prepare_scan_finalization(
     scan = _require_dict(manifest, "scan", "manifest")
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
-    was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    was_sealed = manifest_is_sealed(scan)
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -3028,12 +3028,16 @@ def _write_prepared_scan_finalization(
     if not was_sealed:
         _write_scan_local_json(scan_dir, "findings.json", findings)
         _write_scan_local_json(scan_dir, "coverage.json", coverage)
-    write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
-    _remove_scan_local_file_if_exists(scan_dir, "report.html")
+    sealed_paths = {artifact["path"] for artifact in scan["artifacts"]} if was_sealed else set()
+    if "report.md" not in sealed_paths:
+        write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
+    if "report.html" not in sealed_paths:
+        _remove_scan_local_file_if_exists(scan_dir, "report.html")
     if not was_sealed:
         _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
         _validate_existing_seal(scan_dir, scan)
-    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
+    if "exports/results.sarif" not in sealed_paths:
+        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
     warning = write_threat_model_projection_if_possible(scan_dir, manifest)
     if (
         warning is not None

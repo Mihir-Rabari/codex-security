@@ -84,6 +84,12 @@ export const completedScanInputSchema = loadArtifactZodSchema(
   "completedScanInput",
 ) as z.ZodType<CompletedScanInput>;
 
+const findingIdentitySchema = loadArtifactZodSchema(
+  schemaDocuments,
+  scanDraftDocument.$id,
+  "identity",
+);
+
 /** Replace the three existing final-input documents without completing or sealing a scan. */
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
@@ -499,7 +505,6 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
-    let acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const reopenedIds = new Set(
@@ -509,8 +514,6 @@ async function preserveScanDraft(
           ),
         ),
       );
-      if (reopenedIds.size > 0) acceptProgress = true;
-      if (!acceptProgress) continue;
       result.complete = false;
       const resolved = reconcileDeferredSurfaces(
         progress.coverage,
@@ -712,6 +715,7 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
+  result = scanDraftInputSchema.parse(result);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
 }
@@ -1508,7 +1512,8 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   if (left.identity && right.identity)
     return scanFindingIdentity(left) === scanFindingIdentity(right);
   const leftCandidate = findingCandidateId(left);
-  if (leftCandidate && leftCandidate === findingCandidateId(right)) return true;
+  const rightCandidate = findingCandidateId(right);
+  if (leftCandidate && rightCandidate) return leftCandidate === rightCandidate;
   return (
     scanFindingIdentity({ ...left, identity: undefined }) ===
     scanFindingIdentity({ ...right, identity: undefined })
@@ -1526,7 +1531,10 @@ export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
 ): void {
-  if (current.identity === undefined && previous.identity !== undefined) {
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
     current.identity = structuredClone(previous.identity);
   }
   const provenance = requireObject(
@@ -2628,6 +2636,6 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[\u0300-\u036f]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
+    .replace(/^[^a-z0-9]+|-+$/gu, "");
   return identifier || fallback;
 }

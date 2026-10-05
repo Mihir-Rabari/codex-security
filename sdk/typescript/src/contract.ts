@@ -182,7 +182,7 @@ export async function loadContractWithScanDirectory(
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
@@ -234,6 +234,7 @@ export function normalizePersistedFindings(payload: unknown): unknown {
     }
 
     for (const [sectionName, listFields] of [
+      ["rootCause", ["evidenceRefs", "evidence_refs"]],
       ["root_cause", ["evidenceRefs", "evidence_refs"]],
       [
         "validation",
@@ -377,7 +378,31 @@ function removeUnsupportedLegacyStrings(
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument,
 ): void {
+  const requireText = (values: Record<string, string | undefined>) => {
+    for (const [context, value] of Object.entries(values)) {
+      if (value !== undefined && !value.trim())
+        throw new ContractValidationError(
+          `${context}: expected a non-empty string.`,
+        );
+    }
+  };
+  requireText({
+    "manifest.scan.id": manifest.scan.id,
+    "scan.target.targetId": manifest.scan.target.targetId,
+    "scan.target.displayName": manifest.scan.target.displayName,
+    "scan.target.revision": manifest.scan.target.revision,
+    "scan.target.snapshotDigest": manifest.scan.target.snapshotDigest,
+    "manifest.scan.producer.name": manifest.scan.producer.name,
+    "manifest.scan.producer.version": manifest.scan.producer.version,
+    "coverage.inventoryStrategy": coverage.inventoryStrategy,
+  });
+  for (const [index, surface] of coverage.surfaces.entries())
+    requireText({
+      [`coverage.surfaces[${index}].id`]: surface.id,
+      [`coverage.surfaces[${index}].label`]: surface.label,
+    });
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
@@ -432,10 +457,35 @@ function validateCanonicalContract(
     }
   }
 
+  const occurrenceIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
+    requireText({
+      [`${context}.title`]: finding.title,
+      [`${context}.summary`]: finding.summary,
+      [`${context}.remediation`]: finding.remediation,
+      [`${context}.confidence.rationale`]: finding.confidence.rationale,
+      [`${context}.severity.scoringSystem`]:
+        finding.severity.score === undefined
+          ? undefined
+          : finding.severity.scoringSystem,
+      [`${context}.taxonomy.category`]: finding.taxonomy.category,
+      [`${context}.provenance.source`]: finding.provenance.source,
+    });
+    if (occurrenceIds.has(finding.occurrenceId))
+      throw new ContractValidationError(
+        `${context}: duplicate occurrence identity; use identity.instance to split siblings.`,
+      );
+    occurrenceIds.add(finding.occurrenceId);
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
+      if (
+        location.endLine !== undefined &&
+        location.endLine < location.startLine
+      )
+        throw new ContractValidationError(
+          `${locationContext}.endLine: expected an integer >= startLine.`,
+        );
       try {
         safeRelativePath(location.path, `${locationContext}.path`);
       } catch (error) {
@@ -915,7 +965,9 @@ async function readJson(
 function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
   } catch (error) {
     throw new ContractValidationError(`${path}: unreadable JSON document.`, {
       cause: error,
