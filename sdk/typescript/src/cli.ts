@@ -5361,14 +5361,30 @@ export async function main(
           );
           if (!jsonOutput) output.write(report.text());
           if (commandContext !== undefined) {
-            commandEnvironment = commandContext.environment;
             const directory = await realpath(repository)
               .then(async (path) =>
                 (await lstat(path)).isDirectory() ? path : undefined,
               )
               .catch(() => undefined);
-            if (directory !== commandContext.directory)
+            if (
+              directory !== commandContext.directory ||
+              (options.assessPatchRisk &&
+                ((await patchRepositoryRoot(
+                  gitRepository,
+                  gitDependencies,
+                ).catch(() => undefined)) !== gitRepository ||
+                  (await gitDependencies
+                    .runRepositoryCommand(
+                      "git",
+                      ["rev-parse", "--absolute-git-dir"],
+                      gitRepository,
+                      { trim: false },
+                    )
+                    .then((path) => realpath(path.replace(/\n$/u, "")))
+                    .catch(() => undefined)) !== commandContext.gitDirectory))
+            )
               commandDirectory = gitRepository;
+            commandEnvironment = commandContext.environment;
           }
           const { files, rootFiles: publicationFiles } =
             await changedPatchFiles(
@@ -6873,7 +6889,11 @@ async function patchCommandContext(
   directory: string,
   repository: string,
   dependencies: CliDependencies,
-): Promise<{ directory: string; environment: NodeJS.ProcessEnv }> {
+): Promise<{
+  directory: string;
+  gitDirectory: string;
+  environment: NodeJS.ProcessEnv;
+}> {
   const gitPath = async (args: string[]) =>
     (
       await dependencies.runRepositoryCommand(
@@ -6908,7 +6928,11 @@ async function patchCommandContext(
     if (value === undefined) continue;
     environment[name] = value === "" ? value : resolve(directory, value);
   }
-  return { directory: await realpath(directory), environment };
+  return {
+    directory: await realpath(directory),
+    gitDirectory: await realpath(environment["GIT_DIR"]!),
+    environment,
+  };
 }
 
 async function preparePatchPublication(
@@ -6954,7 +6978,16 @@ async function preparePatchPublication(
   const tree = await snapshotPatchTree(repository, dependencies);
   const worktreeChanges = await dependencies.runRepositoryCommand(
     "git",
-    ["diff", "--cached", "--name-only", "--no-renames", "-z", tree, "--"],
+    [
+      "diff",
+      "--cached",
+      "--name-only",
+      "--no-relative",
+      "--no-renames",
+      "-z",
+      tree,
+      "--",
+    ],
     root,
     { trim: false, maxBuffer: Infinity },
   );
