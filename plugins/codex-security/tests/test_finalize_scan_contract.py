@@ -123,11 +123,11 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     def test_cli_resolves_noncanonical_scan_directory_arguments(self) -> None:
         self.write_scan()
         for spelling in (
-            os.path.relpath(self.scan_dir),
+            self.scan_dir.name,
             str(self.scan_dir / ".." / self.scan_dir.name),
         ):
             with self.subTest(spelling=spelling):
-                result = self.run_finalizer("--scan-dir", spelling)
+                result = self.run_finalizer("--scan-dir", spelling, cwd=self.scan_dir.parent)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipIf(os.name == "nt", "POSIX directory alias fixture")
@@ -157,7 +157,9 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
                 with self.assertRaises(FINALIZER.ContractError):
                     FINALIZER.open_scan_local_file_descriptor(source_root, name, "artifact")
 
-    def run_finalizer(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_finalizer(
+        self, *args: str, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -169,6 +171,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
 
     def write_scan(self) -> None:

@@ -234,7 +234,13 @@ function asciiJson(value: string): string {
 function directoryEntries(directory: Buffer) {
   return windows
     ? windowsFiles().entriesWithTypes(directory)
-    : readdirSync(directory, { encoding: "buffer", withFileTypes: true });
+    : readdirSync(directory, { encoding: "latin1", withFileTypes: true }).map(
+        (entry) => ({
+          name: Buffer.from(entry.name, "latin1"),
+          isDirectory: () => entry.isDirectory(),
+          isSymbolicLink: () => entry.isSymbolicLink(),
+        }),
+      );
 }
 
 function listSecurityMd(repo: string, posixHome: string | undefined): string[] {

@@ -358,12 +358,28 @@ require("node:module").syncBuiltinESMExports();
       );
       write(root, "é\ue000/SECURITY.md", "BMP policy\n");
       write(root, "é\u{10000}/SECURITY.md", "supplementary policy\n");
-      const result = inventory(root);
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        '["SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md"]\n',
-      );
-      expect(result.stderr).toBe("");
+      const rawRoot = Buffer.concat([Buffer.from(root), Buffer.from([0xff])]);
+      renameSync(root, rawRoot);
+      symlinkSync(rawRoot, root);
+      for (const runtime of ["node", process.execPath]) {
+        const result = spawnSync(
+          runtime,
+          [helper, "resolve-security-md", "--repo", root, "--list"],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe(
+          '["SECURITY.md", "\\u00e9\\ud800\\udc00/SECURITY.md", "\\u00e9\\udcff/SECURITY.md", "\\u00e9\\ue000/SECURITY.md"]\n',
+        );
+        expect(result.stderr).toBe("");
+        const scoped = spawnSync(
+          runtime,
+          [helper, "resolve-security-md", "--repo", root, "--scope", "."],
+          { encoding: "utf8" },
+        );
+        expect(scoped.status, scoped.stderr).toBe(0);
+        expectGuidance(scoped.stdout, [["SECURITY.md", "root policy"]]);
+      }
     },
   );
 
