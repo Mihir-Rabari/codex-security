@@ -70,7 +70,7 @@ describe("live scan dashboard", () => {
         type: "response_item",
         payload: {
           type: "function_call_output",
-          output: "START\n" + "x".repeat(4 * 1024 * 1024) + "\nEND",
+          output: "START\n" + "x".repeat(4 * 1024 * 1024) + "界\nEND",
         },
       },
     });
@@ -84,6 +84,30 @@ describe("live scan dashboard", () => {
     }
     dashboard.stop();
   });
+
+  test.each(["A\u0301", "A\uFE0F", "1\uFE0F\u20E3", "\u0600A", "👩‍💻"])(
+    "keeps %s intact at ASCII wrapping boundaries",
+    (cluster) => {
+      for (let padding = 0; padding < 40; padding++) {
+        const stderr = capture(true);
+        const dashboard = createDashboard({
+          ...stderr.stream,
+          columns: 40,
+          rows: 24,
+        });
+        dashboard.start();
+        dashboard.record({
+          id: "mixed-code",
+          kind: "message",
+          status: "completed",
+          description: "```text\n" + "x".repeat(padding) + cluster + "yyy\n```",
+          paths: [],
+        });
+        expect(lastFrame(stderr)).toContain(cluster);
+        dashboard.stop();
+      }
+    },
+  );
 
   test.each(["\t", "\u0007"])(
     "wraps code after escaping terminal control %j",

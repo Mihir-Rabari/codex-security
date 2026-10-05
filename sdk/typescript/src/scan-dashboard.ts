@@ -1251,24 +1251,41 @@ const graphemes = new Intl.Segmenter();
 
 function columnChunks(value: string, width: number): string[] {
   const parts: string[] = [];
-  if (/^[\u0020-\u007E]*$/u.test(value)) {
-    for (let start = 0; start < value.length; start += width) {
-      parts.push(value.slice(start, start + width));
-    }
-    return parts.length === 0 ? [""] : parts;
-  }
   let current = "";
   let columns = 0;
-  for (const { segment } of graphemes.segment(value)) {
-    const size = stringWidth(segment);
+  const append = (text: string, size: number): void => {
     if (current !== "" && columns + size > width) {
       parts.push(current);
       current = "";
       columns = 0;
     }
-    current += segment;
+    current += text;
     columns += size;
+  };
+  const appendGraphemes = (text: string): void => {
+    for (const { segment } of graphemes.segment(text)) {
+      append(segment, stringWidth(segment));
+    }
+  };
+  let cursor = 0;
+  for (const match of value.matchAll(/[\u0020-\u007E]{2,}/gu)) {
+    // Keep edge characters with Unicode that can attach to their grapheme.
+    appendGraphemes(value.slice(cursor, match.index + 1));
+    let start = match.index + 1;
+    const end = match.index + match[0].length - 1;
+    while (start < end) {
+      if (columns >= width) {
+        parts.push(current);
+        current = "";
+        columns = 0;
+      }
+      const size = Math.min(width - columns, end - start);
+      append(value.slice(start, start + size), size);
+      start += size;
+    }
+    cursor = end;
   }
+  appendGraphemes(value.slice(cursor));
   if (current !== "" || parts.length === 0) parts.push(current);
   return parts;
 }
