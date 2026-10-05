@@ -5188,7 +5188,7 @@ export async function main(
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
-            const files = await changedPatchFiles(
+            const { files } = await changedPatchFiles(
               selected.repository,
               patchBase,
               dependencies,
@@ -5369,12 +5369,13 @@ export async function main(
             if (directory !== commandContext.directory)
               commandDirectory = gitRepository;
           }
-          const files = await changedPatchFiles(
-            gitRepository,
-            patchBase,
-            gitDependencies,
-            options.assessPatchRisk || options.createPr,
-          );
+          const { files, rootFiles: publicationFiles } =
+            await changedPatchFiles(
+              gitRepository,
+              patchBase,
+              gitDependencies,
+              options.assessPatchRisk || options.createPr,
+            );
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -5401,14 +5402,6 @@ export async function main(
             );
           }
           errorOutput.write(`Patch applied. Files changed: ${files.length}.\n`);
-          const publicationFiles = publication
-            ? await changedPatchFiles(
-                gitRepository,
-                patchGitBase!,
-                gitDependencies,
-                true,
-              )
-            : [];
           const patchRisk = options.assessPatchRisk
             ? await runPatchRiskAssessment(
                 {
@@ -7189,24 +7182,25 @@ interface GitPatchState {
 
 async function changedPatchFiles(
   repository: string,
-  base: string | GitPatchState | Map<string, string>,
+  base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
   rootRelative = false,
-): Promise<string[]> {
+): Promise<{ files: string[]; rootFiles: string[] }> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
-    return [...new Set([...base.keys(), ...head.keys()])]
+    const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
+    return { files, rootFiles: files };
   }
-  const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
-  const heads =
-    typeof base === "string"
-      ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
-      : (await snapshotGitPatchState(repository, dependencies, rootRelative))
-          .trees;
+  const { trees: heads } = await snapshotGitPatchState(
+    repository,
+    dependencies,
+    rootRelative,
+  );
   const files = new Set<string>();
-  for (const [directory, tree] of bases) {
+  const rootFiles: string[] = [];
+  for (const [directory, tree] of base.trees) {
     const head = heads.get(directory);
     if (head === undefined) continue;
     const gitDependencies = directory
@@ -7226,10 +7220,12 @@ async function changedPatchFiles(
       join(repository, directory),
       { trim: false },
     );
-    for (const path of output.split("\0").filter(Boolean))
+    for (const path of output.split("\0").filter(Boolean)) {
       files.add(directory ? `${directory}/${path}` : path);
+      if (!directory) rootFiles.push(path);
+    }
   }
-  return [...files].sort();
+  return { files: [...files].sort(), rootFiles: rootFiles.sort() };
 }
 
 async function snapshotPatchState(
@@ -7603,11 +7599,11 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
-      changedFiles = await changedPatchFiles(
+      ({ files: changedFiles } = await changedPatchFiles(
         selected.repository,
         base,
         dependencies,
-      );
+      ));
     } finally {
       progress.stop();
     }
