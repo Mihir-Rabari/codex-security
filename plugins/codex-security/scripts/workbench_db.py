@@ -1744,7 +1744,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         raise
     scan = require_scan(connection, scan_id)
     return {
-        "archivedScanDir": str(archived_scan_dir) if archived_scan_dir is not None else None,
+        **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
         "contract": scan_contract(scan),
         "scanDir": str(scan_dir),
         "scanId": scan_id,

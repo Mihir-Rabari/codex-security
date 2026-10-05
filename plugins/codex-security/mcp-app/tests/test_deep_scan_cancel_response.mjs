@@ -25,6 +25,7 @@ globalThis.cancelResponseFixture = {
   },
   async workbench(args) {
     calls.push(args);
+    if (args[0] === "cancel-scan") workspace.scan.progress.status = "canceled";
     return args[0] === "get-scan"
       ? { workspace, scan: workspace.scan }
       : workspace;
@@ -85,6 +86,21 @@ try {
     calls.at(-1)[0],
     "get-scan",
     "late cancellation must not overwrite a saved failure",
+  );
+  workspace = {
+    setup: { submitted: true },
+    scan: { progress: { status: "running" } },
+  };
+  globalThis.cancelResponseFixture.registry.cancelAndWait = async () => false;
+  const parentCanceled = await cancel({ scanId: "fixture-scan" });
+  assert.equal(
+    parentCanceled.structuredContent.workspace.scan.progress.status,
+    "canceled",
+  );
+  assert.equal(
+    calls.at(-1)[0],
+    "cancel-scan",
+    "completed discovery still permits cancellation of its running parent",
   );
   await server.close();
 } finally {

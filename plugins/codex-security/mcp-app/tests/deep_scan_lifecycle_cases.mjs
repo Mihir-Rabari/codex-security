@@ -25,6 +25,7 @@ export async function testDeepScanLifecycle({
     shutdownStopsReplacementObservation,
     failedCancellationStillPreservesResults,
     lateCancellationKeepsPersistedFailure,
+    successfulDiscoveryAllowsParentCancellation,
     orphanWorkerDirectoriesAreNotReused,
     ancestorNamesDoNotChooseWorkerSequence,
   ]) {
@@ -229,6 +230,59 @@ export async function testDeepScanLifecycle({
       "a failed scan cannot be canceled while publication settles",
     );
     assert.equal(result.status, "failed");
+  }
+
+  async function successfulDiscoveryAllowsParentCancellation() {
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    const finalRead = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const originalGet = store.get.bind(store);
+    store.get = async (...args) => {
+      if (store.run.status === "succeeded") {
+        finalRead.resolve();
+        await release.promise;
+      }
+      return await originalGet(...args);
+    };
+    const registry = new DeepScanCoordinatorRegistry();
+    registry.start({
+      run: fixture.run,
+      store,
+      executor: new FakeExecutor(),
+      pluginRoot: fixture.pluginRoot,
+      clock: immediateClock,
+      threadId: "fixture-owner",
+      onStopped: async () => {},
+    });
+    await finalRead.promise;
+    let persisted = false;
+    let resolved = false;
+    const cancellation = registry
+      .cancelAndWait(fixture.run.scanId, "cancel parent", async () => {
+        persisted = true;
+      })
+      .then((handled) => {
+        resolved = true;
+        return handled;
+      });
+    await Promise.resolve();
+    assert.equal(
+      resolved,
+      false,
+      "wait for all coordinator cleanup before durable parent cancellation",
+    );
+    release.resolve();
+    assert.equal(
+      await cancellation,
+      false,
+      "successful discovery still has a cancelable parent scan",
+    );
+    assert.equal(
+      persisted,
+      false,
+      "the server performs durable cancellation after coordinator cleanup",
+    );
   }
 
   async function orphanWorkerDirectoriesAreNotReused() {
