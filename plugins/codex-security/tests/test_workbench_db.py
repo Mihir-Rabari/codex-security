@@ -4176,3 +4176,23 @@ def test_patch_statistics_distinguish_hunk_content_from_file_headers(
     )
     assert preview == patch.decode()
     assert stats == {"additions": 4, "deletions": 4, "fileCount": 2, "previewTruncated": False}
+
+
+@pytest.mark.parametrize("blank_context", [b" \n", b"\n"])
+def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_context: bytes) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    patch = b""
+    for filename in (b"first.txt", b"second.txt"):
+        (tmp_path / filename.decode()).write_bytes(b"old\n\nlast\n")
+        patch += b"--- a/" + filename + b"\n+++ b/" + filename + b"\n"
+        patch += b"@@ -1,3 +1,3 @@\n-old\n+new\n" + blank_context + b" last\n"
+    (tmp_path / "patch.diff").write_bytes(patch)
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "apply", "patch.diff"], cwd=tmp_path, check=True)
+    for filename in ("first.txt", "second.txt"):
+        assert (tmp_path / filename).read_bytes() == b"new\n\nlast\n"
+    preview, stats = namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    )
+    assert preview == patch.decode()
+    assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}

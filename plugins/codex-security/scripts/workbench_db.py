@@ -3181,7 +3181,7 @@ def patch_artifact_preview(
                     elif chunk.startswith(b"-"):
                         deletions += 1
                         hunk_lines = max(0, hunk_lines - 1)
-                    elif chunk.startswith(b" "):
+                    elif chunk.startswith((b" ", b"\n")):
                         hunk_lines = max(0, hunk_lines - 2)
                 at_line_start = chunk.endswith(b"\n")
     except SystemExit:
