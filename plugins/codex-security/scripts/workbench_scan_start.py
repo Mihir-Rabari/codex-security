@@ -8,7 +8,8 @@ import os
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,13 +87,14 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     return target
 
 
+@contextmanager
 def archive_scan(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     scan_dir: Path,
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
-) -> None:
+) -> Iterator[Path | None]:
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -108,44 +110,65 @@ def archive_scan(
     previous_scan = connection.execute(
         "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
     ).fetchone()
-    if previous_scan is None:
-        return
-    if not args.archive_existing:
-        raise SystemExit(
-            "The scan artifact directory belongs to an existing scan. "
-            "Use --archive-existing to preserve that scan and start a new one."
-        )
-    if previous_scan["status"] == "running":
-        raise SystemExit("Cannot archive the output of a running scan.")
-    artifacts = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
-        (previous_scan["id"],),
-    ).fetchall()
-    if archived_scan_dir is None:
-        if artifacts:
+    if previous_scan is not None:
+        if not args.archive_existing:
             raise SystemExit(
-                "The archived scan directory is required to preserve existing scan artifacts."
+                "The scan artifact directory belongs to an existing scan. "
+                "Use --archive-existing to preserve that scan and start a new one."
             )
-        archived_scan_dir = Path(
-            tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
-        ).resolve()
-    connection.execute(
-        "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(archived_scan_dir), timestamp, previous_scan["id"]),
-    )
-    for artifact in artifacts:
-        try:
-            relative_path = Path(artifact["path"]).relative_to(scan_dir)
-        except ValueError:
-            continue
+        if previous_scan["status"] == "running":
+            raise SystemExit("Cannot archive the output of a running scan.")
+    has_contents = next(scan_dir.iterdir(), None) is not None
+    if previous_scan is None and not (args.archive_existing and has_contents):
+        yield archived_scan_dir
+        return
+    artifacts = (
         connection.execute(
-            "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-            (
-                str(archived_scan_dir / relative_path),
-                previous_scan["id"],
-                artifact["kind"],
-            ),
-        )
+            "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (previous_scan["id"],)
+        ).fetchall()
+        if previous_scan is not None
+        else []
+    )
+    moved = False
+    try:
+        if archived_scan_dir is None:
+            if artifacts and not has_contents:
+                raise SystemExit(
+                    "The archived scan directory is required to preserve existing scan artifacts."
+                )
+            archived_scan_dir = Path(
+                tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+            ).resolve()
+            archived_scan_dir.rmdir()
+            scan_dir.rename(archived_scan_dir)
+            moved = True
+            scan_dir.mkdir(mode=0o700)
+            scan_dir.chmod(0o700)
+        if previous_scan is not None:
+            connection.execute(
+                "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
+                (str(archived_scan_dir), timestamp, previous_scan["id"]),
+            )
+            for artifact in artifacts:
+                try:
+                    relative_path = Path(artifact["path"]).relative_to(scan_dir)
+                except ValueError:
+                    continue
+                connection.execute(
+                    "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+                    (str(archived_scan_dir / relative_path), previous_scan["id"], artifact["kind"]),
+                )
+        # The caller commits registration before leaving this context. Older SDKs
+        # supplied an already-moved directory; only restore moves we own.
+        yield archived_scan_dir
+    except BaseException:
+        if moved:
+            try:
+                scan_dir.rmdir()
+            except FileNotFoundError:
+                pass
+            archived_scan_dir.rename(scan_dir)
+        raise
 
 
 def insert_running_scan(

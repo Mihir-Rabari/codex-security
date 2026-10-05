@@ -165,6 +165,27 @@ async function storedScans(context: Awaited<ReturnType<typeof fixture>>) {
   }>;
 }
 
+test("a rejected import registration keeps existing output in place", async () => {
+  const context = await fixture();
+  const outputDir = join(context.root, "scan");
+  await mkdir(outputDir, { mode: 0o700 });
+  await writeFile(join(outputDir, "previous.txt"), "previous scan\n");
+  await expect(
+    importScan(
+      { ...context.options, outputDir, archiveExisting: true },
+      {
+        ...context.dependencies,
+        runWorkbench: async () => {
+          throw new Error("fixture registration rejected");
+        },
+      },
+    ),
+  ).rejects.toThrow("fixture registration rejected");
+  expect(await readFile(join(outputDir, "previous.txt"), "utf8")).toBe(
+    "previous scan\n",
+  );
+});
+
 test.each(["csv", "json"] as const)(
   "%s import seals every source occurrence and indexes a separate dataset scan",
   async (format) => {

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from test_workbench_db import (
     SCRIPT,
     create_saved_workspace,
@@ -222,6 +223,65 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     )
     assert next_phase["scan"]["progress"]["phase"] == "discovery"
     assert next_phase["scan"]["userContext"] == updated_context
+
+
+@pytest.mark.parametrize("target_changes", [False, True])
+def test_prompt_scan_checks_target_without_holding_database_lock(
+    tmp_path: Path, target_changes: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "fixture.py"
+    source.write_text("original\n")
+    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_lock_test")
+    start = namespace["_start_prompt_driven_scan"]
+    globals_ = start.__globals__
+    identity = globals_["scan_target_identity"]
+    calls = 0
+    args = argparse.Namespace(
+        thread_id="thread-fixture",
+        target_path=str(target),
+        scope=".",
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+        user_context=None,
+        user_context_stdin=False,
+        target_summary=None,
+        scan_root=str(tmp_path / "scans"),
+        model=None,
+        reasoning_effort=None,
+    )
+
+    def inspect_identity(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        # Another command must be able to open its own migration transaction
+        # while this scan hashes the target, even on a large source tree.
+        with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
+            other.execute("BEGIN IMMEDIATE")
+        if target_changes and calls == 2:
+            source.write_text("changed\n")
+        return identity(*args, **kwargs)
+
+    with mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}):
+        connection = globals_["connect"]()
+        try:
+            with mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}):
+                if target_changes:
+                    with pytest.raises(SystemExit, match="target changed"):
+                        start(connection, args, headless_standard=False)
+                else:
+                    assert (
+                        start(connection, args, headless_standard=False)["startDisposition"]
+                        == "created"
+                    )
+        finally:
+            connection.close()
+    assert calls == 2
 
 
 def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:

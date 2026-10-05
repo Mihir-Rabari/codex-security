@@ -1204,7 +1204,6 @@ export class CodexSecurity {
     let latestCost: Readonly<ScanCost> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
-    let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -1351,16 +1350,17 @@ export class CodexSecurity {
               scanOutputRoot,
               (path) => requireOutputOutsideRepository(protectedRoot, path),
               options.archiveExisting,
-              archiveObserver(options, (path) => (archivedScanDir = path)),
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        scanDir,
-      );
+      if (!options.archiveExisting) {
+        notifyObserver(
+          "onOutputDirReady",
+          options.onOutputDirReady,
+          options.onObserverError,
+          scanDir,
+        );
+      }
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -1597,6 +1597,9 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      checkOpen();
+      // Archival moves files and commits their new location in one helper call.
+      // Let it settle before honoring cancellation so those changes stay together.
       const registration =
         options.resumeScanId !== undefined
           ? await workbench(workbenchOptions, [
@@ -1605,7 +1608,9 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : await workbench(
-              workbenchOptions,
+              options.archiveExisting
+                ? { ...workbenchOptions, signal: undefined }
+                : workbenchOptions,
               [
                 "register-cli-scan",
                 "--repository",
@@ -1616,9 +1621,6 @@ export class CodexSecurity {
                 ...(options.archiveExisting === true
                   ? ["--archive-existing"]
                   : []),
-                ...(archivedScanDir === null
-                  ? []
-                  : ["--archived-scan-dir", archivedScanDir]),
                 ...(options.parentScanId === undefined
                   ? []
                   : ["--parent-scan-id", options.parentScanId]),
@@ -1733,6 +1735,23 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (typeof registration["archivedScanDir"] === "string") {
+        notifyObserver(
+          "onOutputArchived",
+          options.onOutputArchived,
+          options.onObserverError,
+          registration["archivedScanDir"],
+        );
+      }
+      if (options.archiveExisting) {
+        notifyObserver(
+          "onOutputDirReady",
+          options.onOutputDirReady,
+          options.onObserverError,
+          scanDir,
+        );
+      }
+      throwIfAborted(signal, scanDir);
       if (mode === "deep" && options.onDeepProgress !== undefined) {
         let progressWarningReported = false;
         deepProgressTracker = new DeepScanProgressTracker({
@@ -3097,22 +3116,22 @@ export class CodexSecurity {
               basename(local.repository),
             )
           : undefined;
-      let archivedScanDir: string | undefined;
       scanDir = await prepareOutputDir(
         local.outputDir ?? undefined,
         basename(local.repository),
         outputRoot,
         (path) => requireOutputOutsideRepository(local.protectedRoot, path),
         options.archiveExisting,
-        archiveObserver(options, (path) => (archivedScanDir = path)),
       );
       requireModelSafeOutputDir(scanDir);
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        scanDir,
-      );
+      if (!options.archiveExisting) {
+        notifyObserver(
+          "onOutputDirReady",
+          options.onOutputDirReady,
+          options.onObserverError,
+          scanDir,
+        );
+      }
       const revision = await repositoryRevision(local.repository, signal);
       const { model } = scanModelConfiguration({
         ...DEFAULT_CODEX_CONFIG,
@@ -3128,8 +3147,11 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the mock scan",
       };
+      throwIfAborted(signal, scanDir);
       const registration = await workbench(
-        workbenchOptions,
+        options.archiveExisting
+          ? { ...workbenchOptions, signal: undefined }
+          : workbenchOptions,
         [
           "register-cli-scan",
           "--repository",
@@ -3138,9 +3160,6 @@ export class CodexSecurity {
           scanDir,
           "--registration-json-stdin",
           ...(options.archiveExisting ? ["--archive-existing"] : []),
-          ...(archivedScanDir === undefined
-            ? []
-            : ["--archived-scan-dir", archivedScanDir]),
           ...(options.parentScanId === undefined
             ? []
             : ["--parent-scan-id", options.parentScanId]),
@@ -3180,6 +3199,23 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (typeof registration["archivedScanDir"] === "string") {
+        notifyObserver(
+          "onOutputArchived",
+          options.onOutputArchived,
+          options.onObserverError,
+          registration["archivedScanDir"],
+        );
+      }
+      if (options.archiveExisting) {
+        notifyObserver(
+          "onOutputDirReady",
+          options.onOutputDirReady,
+          options.onObserverError,
+          scanDir,
+        );
+      }
+      throwIfAborted(signal, scanDir);
       notifyObserver(
         "onScanStarted",
         options.onScanStarted,
@@ -4340,17 +4376,6 @@ export function selectedScanEnvironment(
     }),
   );
 }
-
-const archiveObserver =
-  (options: ScanOptions, save: (path: string) => void) => (path: string) => {
-    save(path);
-    notifyObserver(
-      "onOutputArchived",
-      options.onOutputArchived,
-      options.onObserverError,
-      path,
-    );
-  };
 
 function notifyObserver<Arguments extends unknown[]>(
   observerName: ScanObserverName,

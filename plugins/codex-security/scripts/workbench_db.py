@@ -940,27 +940,26 @@ def _start_prompt_driven_scan(
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
 
+    current_target = require_remediation_target(target_path)
+    current_diff_target = (
+        require_diff_target(
+            current_target,
+            args.diff_target_kind,
+            args.diff_base_revision,
+            args.diff_head_revision,
+            args.diff_content_digest,
+        )
+        if args.mode == "diff"
+        else None
+    )
+    if (
+        scan_target_identity(current_target, current_diff_target) != target_identity
+        or scan_diff_identity(current_diff_target) != diff_identity
+    ):
+        raise SystemExit("The selected scan target changed while the scan was starting. Try again.")
+
     connection.execute("BEGIN IMMEDIATE")
     try:
-        current_target = require_remediation_target(target_path)
-        current_diff_target = (
-            require_diff_target(
-                current_target,
-                args.diff_target_kind,
-                args.diff_base_revision,
-                args.diff_head_revision,
-                args.diff_content_digest,
-            )
-            if args.mode == "diff"
-            else None
-        )
-        if (
-            scan_target_identity(current_target, current_diff_target) != target_identity
-            or scan_diff_identity(current_diff_target) != diff_identity
-        ):
-            raise SystemExit(
-                "The selected scan target changed while the scan was starting. Try again."
-            )
         existing = connection.execute(
             """
             SELECT scans.* FROM scans
@@ -1626,7 +1625,9 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
     if scan_dir == repository or repository in scan_dir.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
-    if next(scan_dir.iterdir(), None) is not None:
+    if (not args.archive_existing or args.archived_scan_dir is not None) and next(
+        scan_dir.iterdir(), None
+    ) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
     user_context = None
@@ -1678,63 +1679,72 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     workspace_id = str(uuid.uuid4())
 
     connection.execute("BEGIN IMMEDIATE")
-    with connection:
-        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
-        if parent_scan_id is not None:
-            parent = require_scan(connection, parent_scan_id)
-            if parent["target_id"] != target_id:
-                raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+    try:
+        with archive_scan(
+            connection, args, scan_dir, timestamp, require_canonical_scan_directory
+        ) as archived_scan_dir:
+            target_id = ensure_security_target(connection, str(repository))
+            if parent_scan_id is not None:
+                parent = require_scan(connection, parent_scan_id)
+                if parent["target_id"] != target_id:
+                    raise SystemExit(
+                        "A rerun must belong to the same repository as its parent scan."
+                    )
 
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_id, target_path, target_title, default_scope, default_mode,
-                diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                workspace_id,
-                target_id,
-                str(repository),
-                repository.name,
-                scope,
-                mode,
-                *scan_diff_identity(diff_target),
-                timestamp,
-                timestamp,
-            ),
-        )
-        workspace = require_workspace(connection, workspace_id)
-        insert_running_scan(
-            connection,
-            scan_id=scan_id,
-            workspace=workspace,
-            target=repository,
-            scope=scope,
-            diff_target=diff_target,
-            target_identity=target_identity,
-            target_root=scan_dir.parent,
-            target_summary=None,
-            scope_file_count=scope_file_count,
-            timestamp=timestamp,
-            handoff_status="delivered",
-            scan_dir=scan_dir,
-        )
-        connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
-            (
-                json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
-                parent_scan_id,
-                user_context,
-                scan_id,
-            ),
-        )
-        if workflow_id is not None:
-            register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            connection.execute(
+                """
+                INSERT INTO workspaces (
+                    id, target_id, target_path, target_title, default_scope, default_mode,
+                    diff_target_kind, diff_base_revision, diff_head_revision,
+                    diff_content_digest, submitted, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    target_id,
+                    str(repository),
+                    repository.name,
+                    scope,
+                    mode,
+                    *scan_diff_identity(diff_target),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            workspace = require_workspace(connection, workspace_id)
+            insert_running_scan(
+                connection,
+                scan_id=scan_id,
+                workspace=workspace,
+                target=repository,
+                scope=scope,
+                diff_target=diff_target,
+                target_identity=target_identity,
+                target_root=scan_dir.parent,
+                target_summary=None,
+                scope_file_count=scope_file_count,
+                timestamp=timestamp,
+                handoff_status="delivered",
+                scan_dir=scan_dir,
+            )
+            connection.execute(
+                "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
+                (
+                    json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
+                    parent_scan_id,
+                    user_context,
+                    scan_id,
+                ),
+            )
+            if workflow_id is not None:
+                register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
     scan = require_scan(connection, scan_id)
     return {
+        "archivedScanDir": str(archived_scan_dir) if archived_scan_dir is not None else None,
         "contract": scan_contract(scan),
         "scanDir": str(scan_dir),
         "scanId": scan_id,

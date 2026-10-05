@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import argparse
+import json
+import runpy
+import sqlite3
+import subprocess
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+from workbench_test_support import SCRIPT, run_workbench
+
+
+def recipe(target: Path) -> str:
+    return json.dumps(
+        {
+            "repository": str(target),
+            "target": {"kind": "repository", "paths": []},
+            "mode": "standard",
+            "config": {},
+        }
+    )
+
+
+def register(state: Path, target: Path, output: Path, *args: str) -> dict:
+    return run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(output),
+        "--recipe-json",
+        recipe(target),
+        *args,
+    )
+
+
+@pytest.fixture
+def previous_scan(tmp_path):
+    state, target, output = (tmp_path / name for name in ("state", "target", "scan"))
+    target.mkdir()
+    (target / "fixture.py").write_text("value = 1\n")
+    output.mkdir(mode=0o700)
+    previous = register(state, target, output)
+    (output / "report.md").write_text("previous scan\n")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO scan_artifacts VALUES (?, 'markdownReport', ?, 'before')",
+            (previous["scanId"], str(output / "report.md")),
+        )
+    return state, target, output, previous["scanId"]
+
+
+def mark_stopped(state, scan_id):
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET status = 'failed' WHERE id = ?", (scan_id,))
+
+
+def stored_paths(state, scan_id):
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        return (
+            connection.execute("SELECT scan_dir FROM scans WHERE id = ?", (scan_id,)).fetchone()[0],
+            connection.execute(
+                "SELECT path FROM scan_artifacts WHERE scan_id = ?", (scan_id,)
+            ).fetchone()[0],
+        )
+
+
+def test_concurrent_registration_keeps_running_scan_output(previous_scan):
+    state, target, output, scan_id = previous_scan
+
+    def attempt(_):
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            register(state, target, output, "--archive-existing")
+        assert "Cannot archive the output of a running scan" in error.value.stderr
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(attempt, range(2)))
+    assert (output / "report.md").read_text() == "previous scan\n"
+    assert list(output.parent.glob("scan.previous-*")) == []
+    assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
+
+
+def test_only_one_concurrent_registration_archives_previous_output(previous_scan):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+
+    def attempt(_):
+        try:
+            return register(state, target, output, "--archive-existing")
+        except subprocess.CalledProcessError as error:
+            assert "Cannot archive the output of a running scan" in error.stderr
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [result for result in pool.map(attempt, range(2)) if result is not None]
+    assert len(results) == 1
+    archive = Path(results[0]["archivedScanDir"])
+    assert (archive / "report.md").read_text() == "previous scan\n"
+    assert list(output.iterdir()) == []
+    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
+
+
+def test_registration_rejection_restores_files_and_database(previous_scan):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+    with pytest.raises(subprocess.CalledProcessError):
+        register(state, target, output, "--archive-existing", "--parent-scan-id", str(uuid.uuid4()))
+    assert (output / "report.md").read_text() == "previous scan\n"
+    assert list(output.parent.glob("scan.previous-*")) == []
+    assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
+
+
+def test_commit_failure_restores_archived_output(previous_scan, monkeypatch):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    module = runpy.run_path(str(SCRIPT))
+    connection = module["connect"]()
+
+    class FailedCommit:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+        def commit(self):
+            raise sqlite3.OperationalError("fixture commit failed")
+
+    args = argparse.Namespace(
+        repository=str(target),
+        scan_dir=str(output),
+        archive_existing=True,
+        archived_scan_dir=None,
+        recipe_json=recipe(target),
+        recipe_json_stdin=False,
+        registration_json_stdin=False,
+        parent_scan_id=None,
+    )
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="fixture commit failed"):
+            module["register_cli_scan"](FailedCommit(), args)
+    finally:
+        connection.close()
+    assert (output / "report.md").read_text() == "previous scan\n"
+    assert list(output.parent.glob("scan.previous-*")) == []
+    assert stored_paths(state, scan_id) == (str(output), str(output / "report.md"))
+
+
+def test_legacy_caller_can_supply_already_archived_output(previous_scan):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+    archive = output.with_name("scan.previous-fixture")
+    output.rename(archive)
+    output.mkdir(mode=0o700)
+    registered = register(
+        state, target, output, "--archive-existing", "--archived-scan-dir", str(archive)
+    )
+    assert registered["archivedScanDir"] == str(archive)
+    assert (archive / "report.md").read_text() == "previous scan\n"
+    assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))

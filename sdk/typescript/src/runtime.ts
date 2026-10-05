@@ -1870,7 +1870,6 @@ export async function prepareOutputDir(
   temporaryRoot: string = tmpdir(),
   validateLocation?: (path: string) => void,
   archiveExisting = false,
-  onOutputArchived?: (archiveDir: string) => void,
 ): Promise<string> {
   if (outputDirectory === undefined) {
     requireModelSafeOutputDir(temporaryRoot);
@@ -1892,20 +1891,16 @@ export async function prepareOutputDir(
   }
   let createdRoot: string | undefined;
   try {
-    let existing = await lstat(path).catch(nullIfMissingFileError);
-    if (existing !== null && archiveExisting) {
-      const archiveDir = await planOutputArchive(path);
-      if (archiveDir !== null) {
-        await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
-        existing = null;
-      }
-    }
+    const existing = await lstat(path).catch(nullIfMissingFileError);
     if (existing === null) {
       createdRoot = await mkdir(path, { recursive: true, mode: 0o700 });
       if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
     }
-    return await validatePreparedOutputDir(path, validateLocation);
+    return await validatePreparedOutputDir(
+      path,
+      validateLocation,
+      archiveExisting,
+    );
   } catch (error) {
     if (createdRoot !== undefined) {
       await removeEmptyDirectories(path, createdRoot);
@@ -1923,6 +1918,7 @@ export async function prepareOutputDir(
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
+  allowNonempty = false,
 ): Promise<string> {
   const metadata = await lstat(path);
   if (!metadata.isDirectory()) {
@@ -1932,7 +1928,7 @@ export async function validatePreparedOutputDir(
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
-  if (entries.length !== 0) {
+  if (!allowNonempty && entries.length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );
