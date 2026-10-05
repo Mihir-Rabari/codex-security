@@ -347,6 +347,12 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
         resolvedHome: expectedHome,
       });
     }
+    const missingHome = path.join(root, "missing", "home");
+    process.env.CODEX_HOME = missingHome;
+    const environment = await snapshotNativeEnvironment();
+    assert.equal(environment.CODEX_HOME, missingHome);
+    assert.equal(process.env.CODEX_HOME, missingHome);
+    await assert.rejects(realpath(missingHome), { code: "ENOENT" });
   } finally {
     restoreEnv("CODEX_HOME", previousCodexHome);
     restoreEnv("HOME", previousHome);

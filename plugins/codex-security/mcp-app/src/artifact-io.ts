@@ -2,7 +2,7 @@ import { canonicalDirectory } from "./artifact-context.js";
 import { isRecord } from "./record.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 
 /**
  * Host-bound artifact state. Never construct this object from model tool input.

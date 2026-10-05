@@ -1161,6 +1161,136 @@ test("native API-key preparation creates a missing default Codex home", async ()
 });
 
 test(
+  "native missing absolute homes reach fresh and resumed SDK children",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Synthetic executable uses a POSIX shebang."
+        : false,
+  },
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-missing-home-")),
+    );
+    const repository = join(root, "repository");
+    const pluginRoot = join(root, "plugin");
+    const executable = join(root, "codex");
+    const capture = join(root, "child.json");
+    const restoreEnvironment = captureEnvironment([
+      "HOME",
+      "USERPROFILE",
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    ]);
+    try {
+      await mkdir(repository);
+      await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+      await writeFile(
+        join(pluginRoot, ".codex-plugin/plugin.json"),
+        JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+      );
+      await writeFile(
+        executable,
+        `#!${process.execPath}
+const fs = require("node:fs");
+${syntheticPermissionAppServer()}
+if (process.argv.includes("app-server")) {
+  servePermissionProfiles();
+} else {
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ home: process.env.CODEX_HOME, argv: process.argv.slice(2) }));
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-new-home-thread" }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+}
+`,
+        { mode: 0o700 },
+      );
+      Object.assign(process.env, {
+        HOME: root,
+        USERPROFILE: root,
+        CODEX_CLI_PATH: executable,
+        CODEX_API_KEY: "synthetic-new-home-key",
+      });
+      for (const key of [
+        "OPENAI_API_KEY",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      ])
+        delete process.env[key];
+      for (const resumed of [false, true]) {
+        const home = join(root, resumed ? "resumed-home" : "fresh-home");
+        process.env.CODEX_HOME = home;
+        await assert.rejects(stat(home), { code: "ENOENT" });
+        const prepared = await prepareNativeScan({
+          ...input(),
+          pluginRoot,
+          recipe: {
+            auth: "api-key",
+            ...(resumed
+              ? {
+                  config: { model: "synthetic-saved" },
+                  deepScan: { workers: 3 },
+                }
+              : {}),
+          },
+        });
+        await assert.rejects(stat(home), { code: "ENOENT" });
+        const runtime = await prepareAmbientRuntime(
+          prepared.client.dependencies.ambientExecution,
+        );
+        try {
+          for (const role of ["discovery", "merge"]) {
+            const workerDirectory = join(root, role);
+            await mkdir(workerDirectory, { recursive: true });
+            const sdk = createPermissionCheckedCodex({
+              codexPathOverride: executable,
+              config: scanRuntimeCodexConfig(
+                prepared.client.config.codexOverrides,
+                repository,
+                prepared.client.dependencies.inheritedPermissions,
+              ),
+              env: runtime.environment,
+            });
+            const options = {
+              workingDirectory: workerDirectory,
+              skipGitRepoCheck: true,
+              approvalPolicy: "never",
+            };
+            const thread = resumed
+              ? sdk.resumeThread("synthetic-new-home-thread", options)
+              : sdk.startThread(options);
+            const events = await collectNativeEvents(
+              thread,
+              "Synthetic home selection.",
+            );
+            assert.equal(events.at(-1).type, "turn.completed");
+            const observed = JSON.parse(await readFile(capture, "utf8"));
+            assert.equal(observed.home, await realpath(home));
+            assert.equal(
+              observed.argv[observed.argv.indexOf("--cd") + 1],
+              workerDirectory,
+            );
+            assert.equal(observed.argv.includes("resume"), resumed);
+            assert.equal(process.env.CODEX_HOME, home);
+          }
+        } finally {
+          await rm(runtime.bootstrapWorkspace, {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+    } finally {
+      restoreEnvironment();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "native blank config overrides reach fresh and resumed SDK children",
   {
     skip:

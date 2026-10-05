@@ -61,9 +61,19 @@ export async function snapshotNativeEnvironment(): Promise<
     delete environment.CODEX_HOME;
   } else if (codexHome !== undefined && codexHome.length > 0) {
     // Resolve symlink/.. paths before consumers normalize them or change cwd.
-    environment.CODEX_HOME = await fs.realpath(
-      expandHome(codexHome.trim(), environment),
-    );
+    const home = expandHome(codexHome.trim(), environment);
+    environment.CODEX_HOME = await fs
+      .realpath(home)
+      .catch((error: NodeJS.ErrnoException) => {
+        // Runtime preparation creates an explicitly selected absolute home.
+        if (
+          error.code === "ENOENT" &&
+          isAbsolute(home) &&
+          !isNativeWindowsRootRelativePath(home)
+        )
+          return home;
+        throw error;
+      });
   }
   return environment;
 }

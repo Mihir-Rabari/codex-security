@@ -43,6 +43,45 @@ def select_checkpoint(directory: Path, checkpoint: Path) -> None:
     committed.write_text(json.dumps(document))
 
 
+@pytest.mark.parametrize("invalid_id", [["review"], {"task": "review"}], ids=["list", "object"])
+def test_stopped_scan_recovers_checkpoint_with_non_string_coverage_id(
+    tmp_path: Path, invalid_id: object
+) -> None:
+    from workbench_test_support import saved_draft, write_checkpoint
+
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(contract_dir, scan["scanId"], target, relative_path="app.py")
+    findings = json.loads((contract_dir / "findings.json").read_text())["findings"]
+    valid_work = {"id": "valid-review", "reason": "Other review remains."}
+    malformed_work = {"id": invalid_id, "reason": "Review remains."}
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan["scanId"], findings=findings, deferred=[valid_work, malformed_work]),
+    )
+    checkpoint_bytes = checkpoint.read_bytes()
+
+    stopped = run_workbench(
+        state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic interruption"
+    )["scan"]
+
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == 1
+    assert stopped["resultsRecoveryNeeded"] is False
+    assert any(
+        "Skipped malformed deferred coverage item" in warning for warning in stopped["warnings"]
+    )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert valid_work in coverage["deferred"]
+    assert malformed_work not in coverage["deferred"]
+    assert checkpoint.read_bytes() == checkpoint_bytes
+    assert (scan_dir / "report.md").is_file()
+
+
 @pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
 @pytest.mark.parametrize("instance", ["saved", "null"])
 def test_stopped_parent_retains_absent_and_explicit_child_instances(
