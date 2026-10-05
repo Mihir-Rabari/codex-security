@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { importModule } from "./import-module.mjs";
+import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.mjs";
 import { testDeepScanDeadlines } from "./deep_scan_deadline_cases.mjs";
 import { testDeepScanPublication } from "./deep_scan_publication_cases.mjs";
 import { createDeepScanWorkerFailureCases } from "./deep_scan_worker_failure_cases.mjs";
@@ -4286,6 +4287,15 @@ const {
 });
 
 try {
+  await testDeepScanLifecycle({
+    fixtureRun,
+    FakeStore,
+    FakeExecutor,
+    createCoordinator,
+    DeepScanCoordinatorRegistry,
+    immediateClock,
+    eventually,
+  });
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();

@@ -15,6 +15,7 @@ export {
 /** Owns the live coordinators in this MCP server process. */
 export class DeepScanCoordinatorRegistry {
   private readonly coordinators = new Map<string, DeepScanCoordinator>();
+  private readonly shutdownController = new AbortController();
 
   get(scanId: string): DeepScanCoordinator | undefined {
     return this.coordinators.get(scanId);
@@ -34,7 +35,7 @@ export class DeepScanCoordinatorRegistry {
           run,
           registry: this,
           options,
-        }).wait(undefined);
+        }).wait(this.shutdownController.signal);
       },
     });
     this.coordinators.set(options.run.scanId, coordinator);
@@ -62,6 +63,7 @@ export class DeepScanCoordinatorRegistry {
   shutdown(reason: string): void {
     for (const coordinator of this.coordinators.values())
       coordinator.cancel(reason);
+    this.shutdownController.abort(reason);
   }
 }
 

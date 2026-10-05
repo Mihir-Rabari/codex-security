@@ -2494,6 +2494,20 @@ async function runWorkbench(
     if (launchError) {
       throw new Error(launchError);
     }
+    if (
+      isExecError(error) &&
+      "killed" in error &&
+      error.killed === true &&
+      "signal" in error &&
+      error.signal === "SIGTERM" &&
+      "code" in error &&
+      error.code === null
+    ) {
+      throw new Error(
+        `Codex Security workbench command timed out. ${failureDiagnostic(error)}`,
+        { cause: error },
+      );
+    }
     if (isExecError(error) && error.stderr.trim()) {
       throw new Error(error.stderr.trim(), { cause: error });
     }
@@ -2585,6 +2599,8 @@ async function executeWorkbench(
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
       timeout: [
         "begin-deep-scan",
+        "cancel-scan",
+        "fail-scan",
         "claim-deep-scan-dedup",
         "commit-deep-scan-dedup",
         "complete-scan",
