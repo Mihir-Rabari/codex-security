@@ -691,9 +691,6 @@ def copy_directory_excluding(
         for name in names:
             if name in skipped:
                 continue
-            if name == ".git":
-                skipped.append(name)
-                continue
             path = Path(directory) / name
             metadata = path.lstat()
             if (

@@ -106,6 +106,53 @@ def initialize_unborn_git_repository(target: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
 
 
+@pytest.mark.parametrize("change", ["unchanged", "ignored_file", "unrelated_file"])
+def test_reviewed_patch_preserves_unborn_git_inventory(tmp_path: Path, change: str) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    (source / "src").mkdir()
+    app = source / "src" / "app.txt"
+    app.write_text("before\n")
+    (source / ".gitignore").write_text("ignored-cache/\n")
+    cache = source / "ignored-cache"
+    cache.mkdir()
+    cached_file = cache / "output.txt"
+    cached_file.write_text("ignored build output\n")
+    subprocess.run(["git", "add", ".gitignore", "src/app.txt"], cwd=source, check=True)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = (
+        b"diff --git a/src/app.txt b/src/app.txt\n"
+        b"--- a/src/app.txt\n+++ b/src/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    )
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    revision, digest = workbench_db.remediation_checkout_snapshot(scan)
+    assert revision == "unversioned"
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": digest,
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    app.write_text("after\n")
+    if change == "ignored_file":
+        cached_file.write_text("updated ignored build output\n")
+    elif change == "unrelated_file":
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+    if change == "unrelated_file":
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+
+
 def test_stale_git_binding_does_not_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(tmp_path / "missing-git"))
 
