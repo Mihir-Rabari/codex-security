@@ -1411,12 +1411,17 @@ def merge_saved_results(
         else:
             _ensure_finding_identity(finding)
 
+    valid_findings: dict[bytes, bool] = {}
+
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
         if isinstance(document["findings"][0], dict):
             restore_legacy_identity(document["findings"][0])
+        key = _encoded(document["findings"][0])
+        if key in valid_findings:
+            return valid_findings[key]
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
@@ -1424,7 +1429,8 @@ def merge_saved_results(
             scan_dir,
             [],
         )
-        return bool(document["findings"])
+        valid_findings[key] = bool(document["findings"])
+        return valid_findings[key]
 
     for _, draft, owner in all_sources:
         for value in draft["findings"]:
@@ -1758,22 +1764,29 @@ def merge_saved_results(
                 terminal_worker_orders.get(worker_id, order), order
             )
     # Reconcile raw records before generating context-dependent publication IDs.
-    logical_rows: list[dict[str, Any]] = []
+    logical_rows: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     row_groups: dict[tuple[str, int], dict[str, Any]] = {}
     published_groups: list[dict[str, Any]] = []
 
     def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
         extensions = value.get("extensions")
         return tuple(
-            extensions.get(field) if isinstance(extensions, dict) else None
-            for field in ("reportId", "ledgerRowId")
+            identifier if isinstance(identifier, str) and identifier.strip() else None
+            for identifier in (
+                extensions.get(field) if isinstance(extensions, dict) else None
+                for field in ("reportId", "ledgerRowId")
+            )
         )
 
+    def raw_owner(value: dict[str, Any], source_owner: str | None) -> str | None:
+        provenance = value.get("provenance", {})
+        owner = provenance.get("workerId")
+        return owner if isinstance(owner, str) else source_owner
+
+    def raw_scope(value: dict[str, Any], source_owner: str | None) -> tuple[Any, ...]:
+        return raw_owner(value, source_owner), value.get("ruleId"), tuple(_finding_locations(value))
+
     def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        if left.get("ruleId") != right.get("ruleId") or _finding_locations(
-            left
-        ) != _finding_locations(right):
-            return False
         if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
             return _finding_identity(left) == _finding_identity(right)
         candidates = (_identity_candidate(left), _identity_candidate(right))
@@ -1805,55 +1818,62 @@ def merge_saved_results(
     for relative, draft, source_owner in sorted(
         all_sources, key=lambda item: source_order[item[0]]
     ):
-        current = [
-            (index, value)
-            for index, value in enumerate(draft["findings"])
-            if isinstance(value, dict) and valid_finding(value)
-        ]
-        prior = list(logical_rows)
-        current_groups: list[dict[str, Any]] = []
-        for index, value in current:
-            provenance = value.get("provenance", {})
-            owner = provenance.get("workerId", source_owner)
-            matches = [
-                group
-                for group in prior
-                if group["owner"] == owner
-                and all(same_raw_finding(value, previous) for previous in group["rows"])
-            ]
-            exact = [
-                group
-                for group in matches
-                if any(same_raw_content(value, previous) for previous in group["rows"])
-            ]
-            match = None
-            if (
-                len(matches) == 1
-                and sum(same_raw_finding(sibling, value) for _, sibling in current) == 1
-            ):
-                match = matches[0]
-            elif (
-                len(exact) == 1
-                and sum(same_raw_content(sibling, value) for _, sibling in current) == 1
-            ):
-                match = exact[0]
-            if match is None:
-                match = {
-                    "owner": owner,
-                    "rows": [],
-                    "identity": None,
-                    "key": f"raw:{len(logical_rows)}",
-                }
-                logical_rows.append(match)
-            match["rows"].append(value)
-            match["latest"] = value
-            if "identity" in value and (match["identity"] is None or relative == "parent"):
-                match["identity"] = copy.deepcopy(_finding_identity(value))
-            row_groups[(relative, index)] = match
-            current_groups.append(match)
+        current: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = {}
+        for index, value in enumerate(draft["findings"]):
+            if isinstance(value, dict) and valid_finding(value):
+                current.setdefault(raw_scope(value, source_owner), []).append((index, value))
+        prior = {scope: list(groups) for scope, groups in logical_rows.items()}
+        current_groups: list[tuple[int, dict[str, Any]]] = []
+        for scope, siblings in current.items():
+            for index, value in siblings:
+                matches = [
+                    group
+                    for group in prior.get(scope, [])
+                    if (
+                        (relative == "parent" and parent_is_canonical)
+                        or group["identity"] is None
+                        or "identity" not in value
+                        or group["identity"] == _finding_identity(value)
+                    )
+                    and all(same_raw_finding(value, previous) for previous in group["rows"])
+                ]
+                exact = [
+                    group
+                    for group in matches
+                    if any(same_raw_content(value, previous) for previous in group["rows"])
+                ]
+                match = None
+                if (
+                    len(matches) == 1
+                    and sum(same_raw_finding(sibling, value) for _, sibling in siblings) == 1
+                ):
+                    match = matches[0]
+                elif (
+                    len(exact) == 1
+                    and sum(same_raw_content(sibling, value) for _, sibling in siblings) == 1
+                ):
+                    match = exact[0]
+                if match is None:
+                    match = {
+                        "owner": scope[0],
+                        "rows": [],
+                        "identity": None,
+                        "key": f"raw:{len(row_groups)}",
+                    }
+                    logical_rows.setdefault(scope, []).append(match)
+                if value not in match["rows"]:
+                    match["rows"].append(value)
+                match["latest"] = value
+                if "identity" in value and (match["identity"] is None or relative == "parent"):
+                    match["identity"] = copy.deepcopy(_finding_identity(value))
+                row_groups[(relative, index)] = match
+                current_groups.append((index, match))
         if source_owner is None:
-            ordered = current_groups + [
-                group for group in published_groups if group not in current_groups
+            current_ordered = [
+                group for _, group in sorted(current_groups, key=lambda item: item[0])
+            ]
+            ordered = current_ordered + [
+                group for group in published_groups if group not in current_ordered
             ]
             normalized = []
             for group in ordered:
@@ -1867,18 +1887,19 @@ def merge_saved_results(
             published_groups = ordered
 
     # An absorbed source represents every reconciled version of that worker report.
-    for group in logical_rows:
-        destinations = set()
-        for value in group["rows"]:
-            history_key = _finding_key(value)
-            if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
-                destinations.add(represented.get(history_key))
-            elif group["owner"] and (candidate_id := finding_candidate_id(value)):
-                candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
-                if candidate_key in represented_candidates:
-                    destinations.add(represented_candidates[candidate_key])
-        if len(destinations) == 1 and None not in destinations:
-            group["parent_key"] = destinations.pop()
+    for groups in logical_rows.values():
+        for group in groups:
+            destinations = set()
+            for value in group["rows"]:
+                history_key = _finding_key(value)
+                if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
+                    destinations.add(represented.get(history_key))
+                elif group["owner"] and (candidate_id := finding_candidate_id(value)):
+                    candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
+                    if candidate_key in represented_candidates:
+                        destinations.add(represented_candidates[candidate_key])
+            if len(destinations) == 1 and None not in destinations:
+                group["parent_key"] = destinations.pop()
 
     generated_worker_findings: list[dict[str, Any]] = []
     for relative, draft, worker_id in all_sources:
