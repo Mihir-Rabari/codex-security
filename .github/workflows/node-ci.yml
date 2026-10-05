@@ -469,6 +469,8 @@ jobs:
           path: reports/python.xml
           if-no-files-found: warn
           retention-days: 14
+      - name: Set up triage eval dependencies and host runtime
+        run: pnpm --dir evals/triage-finding run setup
       - name: Test deterministic triage eval contracts
         working-directory: evals/triage-finding
         run: node --run test:deterministic

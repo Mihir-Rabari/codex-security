@@ -28,6 +28,36 @@ test("runtime contains checkout skill and fixtures without calibration labels", 
   }
 });
 
+test("runner launches the installed Promptfoo JavaScript entry point through Node", async () => {
+  const driver = `
+    const assert = require('node:assert/strict');
+    const cp = require('node:child_process');
+    const spawn = cp.spawn;
+    cp.spawn = (command, args, options) => {
+      assert.equal(command, process.execPath);
+      if (args[0].endsWith('build_mcp_app.mjs')) {
+        return spawn(process.execPath, ['--eval', ''], options);
+      }
+      assert.equal(args[0], ${JSON.stringify(path.resolve(__dirname, "../node_modules/promptfoo/dist/src/entrypoint.js"))});
+      return spawn(command, args, options);
+    };
+    require(${JSON.stringify(require.resolve("./run-promptfoo"))}).runPromptfoo(['--version']).then(code => { process.exitCode = code; });
+  `;
+  const child = spawn(process.execPath, ["--eval", driver]);
+  let output = "";
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (chunk) => {
+      output += chunk;
+    });
+  }
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  assert.equal(code, 0, output);
+  assert.match(output, /0\.123\.1/);
+});
+
 for (const [signal, exitCode] of [
   ["SIGINT", 130],
   ["SIGTERM", 143],
@@ -50,7 +80,7 @@ for (const [signal, exitCode] of [
         const driver = `
       const cp = require('node:child_process');
       const spawn = cp.spawn;
-      cp.spawn = (command, args, options) => spawn(process.execPath, ['--eval', command === process.execPath ? "" : ${JSON.stringify(target)}], options);
+      cp.spawn = (command, args, options) => spawn(process.execPath, ['--eval', args[0].endsWith("build_mcp_app.mjs") ? "" : ${JSON.stringify(target)}], options);
       require(${JSON.stringify(require.resolve("./run-promptfoo"))}).runPromptfoo([]).then(code => { process.exitCode = code; });
     `;
         const child = spawn(process.execPath, ["--eval", driver], {

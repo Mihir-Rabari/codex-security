@@ -15,7 +15,14 @@ const PLUGIN_ROOT = path.resolve(
   "codex-security",
 );
 const TRIAGE_SKILL_ROOT = path.join(PLUGIN_ROOT, "skills", "triage-finding");
-const PROMPTFOO_BIN = path.join(EVAL_ROOT, "node_modules", ".bin", "promptfoo");
+const PROMPTFOO_ENTRYPOINT = path.join(
+  EVAL_ROOT,
+  "node_modules",
+  "promptfoo",
+  "dist",
+  "src",
+  "entrypoint.js",
+);
 
 function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
   fs.mkdirSync(targetRoot, { recursive: true });
@@ -142,7 +149,11 @@ async function runPromptfoo(promptfooArgs, environment = {}) {
       path.join(PLUGIN_ROOT, "mcp-app"),
     );
     if (built !== 0) return built;
-    return await runChild(PROMPTFOO_BIN, promptfooArgs, EVAL_ROOT);
+    return await runChild(
+      process.execPath,
+      [PROMPTFOO_ENTRYPOINT, ...promptfooArgs],
+      EVAL_ROOT,
+    );
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
