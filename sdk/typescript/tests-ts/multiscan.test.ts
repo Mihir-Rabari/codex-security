@@ -2495,21 +2495,46 @@ describe("multiscan", () => {
   });
 });
 
-test("bulk checkout preserves SHA-256 repository object format", async () => {
-  const paths = await fixture();
-  const repo = await repository(paths.root, "source", "sha256");
-  await writeFile(
-    paths.input,
-    `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
-  );
-  const run = mock(async (checkout: string, scanOptions = {}) => {
-    expect(git(checkout, "rev-parse", "--show-object-format")).toBe("sha256");
-    return completeRun(checkout, scanOptions);
-  });
-  const result = await runMultiscan(options(paths, client(run)));
-  expect(result.failed).toBe(0);
-  expect(run).toHaveBeenCalledTimes(1);
-});
+test.each([
+  ["sha1", "sha1"],
+  ["sha1", "sha256"],
+  ["sha256", "sha1"],
+  ["sha256", "sha256"],
+])(
+  "bulk checkout preserves %s object format with a %s default",
+  async (objectFormat, defaultFormat) => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/multiscan.test.ts",
+        `bulk checkout preserves ${objectFormat} object format with a ${defaultFormat} default`,
+      )
+    )
+      return;
+    const paths = await fixture();
+    const repo = await repository(paths.root, "source", objectFormat);
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+    );
+    const run = mock(async (checkout: string, scanOptions = {}) => {
+      expect(git(checkout, "rev-parse", "--show-object-format")).toBe(
+        objectFormat,
+      );
+      expect(git(checkout, "rev-parse", "HEAD")).toBe(repo.revision);
+      return completeRun(checkout, scanOptions);
+    });
+    const previous = process.env["GIT_DEFAULT_HASH"];
+    process.env["GIT_DEFAULT_HASH"] = defaultFormat;
+    try {
+      const result = await runMultiscan(options(paths, client(run)));
+      expect(result.failed).toBe(0);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previous === undefined) delete process.env["GIT_DEFAULT_HASH"];
+      else process.env["GIT_DEFAULT_HASH"] = previous;
+    }
+  },
+);
 
 test.each([
   "GIT_DIR",

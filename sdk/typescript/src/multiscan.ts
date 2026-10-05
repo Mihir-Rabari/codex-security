@@ -1096,7 +1096,7 @@ async function checkoutRevision(
   await git(
     "init",
     "--quiet",
-    ...(task.revision.length === 64 ? ["--object-format=sha256"] : []),
+    `--object-format=${task.revision.length === 64 ? "sha256" : "sha1"}`,
   );
   await git(
     "fetch",
