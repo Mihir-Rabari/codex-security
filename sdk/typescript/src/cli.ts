@@ -8042,7 +8042,7 @@ async function runExport(
     }
     return 0;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
     return 2;
   }
 }
