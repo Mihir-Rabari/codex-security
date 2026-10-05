@@ -20,16 +20,15 @@ export class DeepScanProgressTracker {
   readonly #options: DeepScanProgressTrackerOptions;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> | null = null;
-  #abortController: AbortController | null = null;
+  readonly #abortController = new AbortController();
   #lastProgress: DeepScanProgress | null = null;
-  #stopped = false;
 
   public constructor(options: DeepScanProgressTrackerOptions) {
     this.#options = options;
   }
 
   public start(): void {
-    if (this.#timer !== null || this.#stopped) return;
+    if (this.#timer !== null || this.#abortController.signal.aborted) return;
     const poll = () => {
       void this.refresh().catch((error: unknown) => {
         this.#options.onError?.(error);
@@ -41,15 +40,14 @@ export class DeepScanProgressTracker {
   }
 
   public async refresh(): Promise<void> {
-    if (this.#stopped) return;
+    if (this.#abortController.signal.aborted) return;
     if (this.#pending !== null) return await this.#pending;
-    const abortController = new AbortController();
-    this.#abortController = abortController;
+    const abortController = this.#abortController;
     let update: Promise<void> | null = null;
     update = (async () => {
       try {
         const response = await this.#options.read(abortController.signal);
-        if (this.#stopped || abortController.signal.aborted) return;
+        if (abortController.signal.aborted) return;
         if (isRecord(response) && isRecord(response["scan"])) {
           const saved = response["scan"]["progress"];
           if (
@@ -65,13 +63,10 @@ export class DeepScanProgressTracker {
         this.#lastProgress = progress;
         this.#options.onProgress(progress);
       } catch (error) {
-        if (this.#stopped || abortController.signal.aborted) return;
+        if (abortController.signal.aborted) return;
         throw error;
       } finally {
         if (this.#pending === update) this.#pending = null;
-        if (this.#abortController === abortController) {
-          this.#abortController = null;
-        }
       }
     })();
     this.#pending = update;
@@ -79,12 +74,10 @@ export class DeepScanProgressTracker {
   }
 
   public stop(): void {
-    if (this.#stopped) return;
-    this.#stopped = true;
+    if (this.#abortController.signal.aborted) return;
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
-    this.#abortController?.abort();
-    this.#abortController = null;
+    this.#abortController.abort();
   }
 }
 

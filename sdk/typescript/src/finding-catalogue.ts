@@ -13,17 +13,7 @@ export function groupFindings(
   knownFindingGroups: readonly (readonly string[])[] = [],
   occurrenceGroups: readonly (readonly string[])[] = [],
 ): ComparisonFinding[][] {
-  const parents = new Map<string, string>();
-  const root = (value: string): string => {
-    const path: string[] = [];
-    let current = value;
-    while (parents.has(current)) {
-      path.push(current);
-      current = parents.get(current)!;
-    }
-    for (const item of path) parents.set(item, current);
-    return current;
-  };
+  const { parents, root } = findingGroupRoots();
   const link = (first: string, second: string): void => {
     const previous = root(first);
     const current = root(second);
@@ -186,4 +176,21 @@ function present(value: Record<string, unknown>): Record<string, unknown> {
         (record(item) === undefined || Object.keys(item as object).length > 0),
     ),
   );
+}
+
+/** @internal */
+export function findingGroupRoots() {
+  const parents = new Map<string, string>();
+  const root = (identity: string): string => {
+    if (!parents.has(identity)) parents.set(identity, identity);
+    const path: string[] = [];
+    let current = identity;
+    while (parents.get(current) !== current) {
+      path.push(current);
+      current = parents.get(current)!;
+    }
+    for (const item of path) parents.set(item, current);
+    return current;
+  };
+  return { parents, root };
 }
