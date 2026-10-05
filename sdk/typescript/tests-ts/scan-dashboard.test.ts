@@ -154,6 +154,45 @@ describe("live scan dashboard", () => {
     );
     dashboard.stop();
   });
+  test.each([21, 32, 120])(
+    "keeps worker labels outside inline markup at width %d",
+    (columns) => {
+      for (const kind of ["message", "reasoning"] as const) {
+        for (const markup of ["`1`", "[1](https://example.test/report)"]) {
+          const stderr = capture(true);
+          const dashboard = createDashboard(
+            { ...stderr.stream, columns, rows: 24 },
+            { color: true },
+          );
+          dashboard.start();
+          dashboard.record({
+            id: "worker-markup",
+            worker: 1,
+            kind,
+            status: "completed",
+            description: `See ${markup}.`,
+            paths: [],
+          });
+          const marked = stderr
+            .text()
+            .split("\u001B[H")
+            .at(-1)!
+            .replaceAll("\u001B[2m1\u001B[22m", "<code>1</code>")
+            .replaceAll(
+              "\u001B]8;;https://example.test/report\u00071\u001B]8;;\u0007",
+              "<link>1</link>",
+            );
+          const frame = stripVTControlCharacters(marked).replaceAll(
+            /\s+/gu,
+            " ",
+          );
+          const tag = markup.startsWith("`") ? "code" : "link";
+          expect(frame).toContain(`worker 1 · See <${tag}>1</${tag}>.`);
+          dashboard.stop();
+        }
+      }
+    },
+  );
   test.each([
     ["single line", () => "START" + "x".repeat(4 * 1024 * 1024) + "界END"],
     [

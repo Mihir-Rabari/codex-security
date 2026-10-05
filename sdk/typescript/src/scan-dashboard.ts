@@ -996,6 +996,7 @@ export class ScanDashboard {
       prefix: string,
       value: string,
       kind: DashboardActivityLine["kind"],
+      generatedPrefix = "",
     ): void => {
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
@@ -1041,8 +1042,11 @@ export class ScanDashboard {
             kind: fenced ? "code" : kind,
             links,
             code,
-            contentStart: prefix.length,
+            contentStart: prefix.length + generatedPrefix.length,
           });
+          generatedPrefix = generatedPrefix
+            .slice(text.length - prefix.length)
+            .trimStart();
           started = true;
         }
       }
@@ -1071,7 +1075,7 @@ export class ScanDashboard {
       const worker =
         entry.worker === undefined ? "" : `worker ${entry.worker} · `;
       const prefix = `  ${timestamp} ${icon} `;
-      append(prefix, `${worker}${entry.description}`, kind);
+      append(prefix, `${worker}${entry.description}`, kind, worker);
       for (const path of entry.paths) {
         append(" ".repeat(prefix.length), path, "path");
       }
