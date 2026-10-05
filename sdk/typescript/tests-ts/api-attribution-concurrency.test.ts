@@ -1,27 +1,30 @@
-import { mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
+import { mkdir, readFile, realpath, symlink } from "node:fs/promises";
+import { delimiter, join } from "node:path";
+import type {
+  CodexOptions,
+  ThreadOptions,
+  TurnOptions,
+} from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { CodexSecurity } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { InternalSecurity } from "./support/internal-security.js";
 
 const fixtures = createApiTestFixtures();
-const InternalCodexSecurity = CodexSecurity as unknown as new (
-  config: Record<string, unknown>,
-  dependencies: Record<string, unknown>,
-  runtimeOptions?: { surface: "cli" | "sdk" },
-) => CodexSecurity;
 
-afterEach(async () => {
-  await fixtures.cleanup();
-});
+afterEach(fixtures.cleanup);
 
 describe("delegated scan attribution", () => {
-  test.each(["standard", "deep"] as const)(
-    "keeps overlapping API-key CLI and SDK %s scans concurrent with isolated models and attribution",
-    async (mode) => {
+  test.each([
+    ["standard", true, false],
+    ["deep", true, false],
+    ["standard", false, false],
+    ["standard", false, true],
+    ["deep", false, true],
+  ] as const)(
+    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p and explicit models %p",
+    async (mode, selectProgram, selectModel) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
       const ambientHome = join(root, "ambient-home");
@@ -32,27 +35,62 @@ describe("delegated scan attribution", () => {
       let active = 0;
       let maximumActive = 0;
       const configPaths = new Set<string>();
-      let releaseConcurrentScans!: () => void;
-      const concurrentScans = new Promise<void>((resolve) => {
-        releaseConcurrentScans = resolve;
-      });
+      const programs = selectProgram
+        ? (["daybreak_blue", "standard"] as const)
+        : ([undefined, undefined] as const);
+      const concurrentScans = Promise.withResolvers<void>();
 
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface) => {
-          const model =
-            surface === "cli" ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol";
+          const model = selectModel
+            ? surface === "cli"
+              ? "gpt-daybreak-blue-latest"
+              : "gpt-5.6-sol"
+            : undefined;
+          const program = surface === "cli" ? programs[0] : programs[1];
+          const features = selectProgram
+            ? {
+                api_key_cyber_access_programs: surface === "cli",
+                ...(surface === "sdk"
+                  ? { api_key_model_discovery: false }
+                  : {}),
+              }
+            : {};
           const scanDirectory = join(root, `${surface}-scan`);
+          const gitDirectory = join(root, `${surface}-tools`);
+          await mkdir(gitDirectory);
+          const hostGit = Bun.which("git");
+          expect(hostGit).not.toBeNull();
+          const git = join(
+            gitDirectory,
+            process.platform === "win32" ? "git.exe" : "git",
+          );
+          await symlink(await realpath(hostGit!), git);
+          const expectedGitDirectory = await realpath(gitDirectory);
           await mkdir(scanDirectory, { mode: 0o700 });
-          return new InternalCodexSecurity(
-            { pluginPath: PLUGIN_ROOT, codexOverrides: { model } },
+          return new InternalSecurity(
+            {
+              pluginPath: PLUGIN_ROOT,
+              ...(surface === "sdk" || model !== undefined
+                ? {
+                    codexOverrides: {
+                      ...(surface === "sdk" ? { features } : {}),
+                      ...(model === undefined ? {} : { model }),
+                    },
+                  }
+                : {}),
+            },
             {
               environment: {
+                PATH: gitDirectory,
+                GIT_SSH_COMMAND: `synthetic-${surface}-ssh`,
                 CODEX_HOME: ambientHome,
                 CODEX_SECURITY_STATE_DIR: stateDirectory,
                 CODEX_SECURITY_SURFACE: "spoofed",
                 OPENAI_API_KEY: `synthetic-${surface}-key`,
               },
               resolvePluginPython: async () => "/managed/python",
+              probeCodexSandbox: async () => {},
               prepareOutputDir: async () => scanDirectory,
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (
@@ -61,9 +99,11 @@ describe("delegated scan attribution", () => {
                 input?: string,
               ) => {
                 if (args[0] === "register-cli-scan") {
-                  expect(JSON.parse(input!).recipe).toMatchObject({
-                    config: { model },
-                  });
+                  if (model !== undefined) {
+                    expect(JSON.parse(input!).recipe).toMatchObject({
+                      config: { model },
+                    });
+                  }
                   return {
                     scanId: `scan_${surface}`,
                     targetId: `target_${surface}`,
@@ -84,34 +124,75 @@ describe("delegated scan attribution", () => {
               createCodex: (options: CodexOptions) => ({
                 startThread: (threadOptions: ThreadOptions) => ({
                   id: null,
-                  async runStreamed() {
+                  async runStreamed(
+                    _input: unknown,
+                    turnOptions?: TurnOptions,
+                  ) {
                     active += 1;
                     maximumActive = Math.max(maximumActive, active);
-                    if (active === 2) releaseConcurrentScans();
+                    if (active === 2) concurrentScans.resolve();
                     try {
-                      await concurrentScans;
-                      expect(options.apiKey).toBe(`synthetic-${surface}-key`);
+                      const initialEnvironment = { ...options.env };
                       expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
                       expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
                         surface,
                       );
+                      expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                      expect(options.env?.["PATH"]?.split(delimiter)).toContain(
+                        expectedGitDirectory,
+                      );
+                      expect(
+                        options.env?.["PATH"]?.split(delimiter),
+                      ).not.toContain(
+                        join(
+                          root,
+                          `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                        ),
+                      );
+                      expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                        `synthetic-${surface}-ssh`,
+                      );
+                      expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
+                      expect(options.apiKey).toBe(`synthetic-${surface}-key`);
+                      expect(turnOptions?.cyberAccessProgram).toBe(program);
                       expect(options.config).toMatchObject({
-                        model,
+                        features,
+                        ...(model === undefined ? {} : { model }),
                         responses_api_metadata: {
                           codex_security_surface: surface,
                         },
                       });
                       expect(threadOptions.threadSource).toBe("security_scan");
-                      expect(
-                        threadOptions.model ?? options.config?.["model"],
-                      ).toBe(model);
+                      if (model !== undefined) {
+                        expect(
+                          threadOptions.model ?? options.config?.["model"],
+                        ).toBe(model);
+                      }
                       const configPath =
                         options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-                      expect(typeof configPath).toBe("string");
+                      expect(configPath).toBeString();
                       configPaths.add(configPath!);
-                      expect(
-                        parseToml(await readFile(configPath!, "utf8")),
-                      ).toMatchObject({ model });
+                      const initialConfig = await readFile(configPath!, "utf8");
+                      const runtimeConfig = parseToml(initialConfig);
+                      expect(runtimeConfig).toMatchObject({
+                        features,
+                        ...(model === undefined ? {} : { model }),
+                      });
+                      if (program === undefined) {
+                        expect(runtimeConfig).not.toHaveProperty(
+                          "codex_security",
+                        );
+                        for (const config of [options.config, runtimeConfig]) {
+                          expect(config?.["features"]).not.toHaveProperty(
+                            "api_key_cyber_access_programs",
+                          );
+                        }
+                      } else {
+                        expect(runtimeConfig).toMatchObject({
+                          codex_security: { cyber_access_program: program },
+                        });
+                      }
+                      await concurrentScans.promise;
                       const sharedConfig = parseToml(
                         await readFile(
                           join(credentialHome, "config.toml"),
@@ -122,6 +203,23 @@ describe("delegated scan attribution", () => {
                         "responses_api_metadata",
                       );
                       expect(sharedConfig).not.toHaveProperty("model");
+                      expect(sharedConfig).not.toHaveProperty("codex_security");
+                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
+                        "api_key_cyber_access_programs",
+                      );
+                      expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
+                        "api_key_model_discovery",
+                      );
+                      expect(JSON.stringify(sharedConfig)).not.toContain(
+                        "synthetic-cli-key",
+                      );
+                      expect(JSON.stringify(sharedConfig)).not.toContain(
+                        "synthetic-sdk-key",
+                      );
+                      expect(await readFile(configPath!, "utf8")).toBe(
+                        initialConfig,
+                      );
+                      expect(options.env).toEqual(initialEnvironment);
                       throw new Error("delegated attribution observed");
                     } finally {
                       active -= 1;
@@ -130,23 +228,29 @@ describe("delegated scan attribution", () => {
                 }),
               }),
             },
-            { surface },
+            surface === "sdk" && !selectProgram ? undefined : { surface },
           );
         }),
       );
 
       try {
-        await Promise.all(
-          clients.map(async (client, index) => {
-            expect(await client.preflight(repository, { mode })).toMatchObject({
-              model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
-              authentication: { method: "api_key", verified: false },
-            });
-          }),
-        );
+        if (selectModel) {
+          await Promise.all(
+            clients.map(async (client, index) => {
+              expect(
+                await client.preflight(repository, { mode }),
+              ).toMatchObject({
+                model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+                authentication: { method: "api_key", verified: false },
+              });
+            }),
+          );
+        }
         const results = await Promise.allSettled(
-          clients.map((client) =>
-            client.run(repository, { mode }).finally(releaseConcurrentScans),
+          clients.map((client, index) =>
+            client
+              .run(repository, { mode, cyberAccessProgram: programs[index] })
+              .finally(concurrentScans.resolve),
           ),
         );
         for (const result of results) {
@@ -160,7 +264,7 @@ describe("delegated scan attribution", () => {
         expect(maximumActive).toBe(2);
         expect(configPaths.size).toBe(2);
       } finally {
-        releaseConcurrentScans();
+        concurrentScans.resolve();
         await Promise.all(clients.map(async (client) => await client.close()));
       }
     },
