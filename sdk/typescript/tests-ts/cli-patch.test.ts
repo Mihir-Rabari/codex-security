@@ -944,11 +944,11 @@ describe("scan and patch workflow", () => {
             workingDirectory,
             commandOptions,
           ) => {
-            expect(workingDirectory).toBe(
-              args.includes("--show-toplevel")
-                ? join(repository, "src")
-                : repository,
-            );
+            if (args.includes("--show-toplevel"))
+              expect([repository, join(repository, "src")]).toContain(
+                workingDirectory,
+              );
+            else expect(workingDirectory).toBe(repository);
             if (command === "git") {
               return runGitRepositoryCommand(
                 command,
@@ -2606,6 +2606,147 @@ describe("patch publication integrity", () => {
     },
   );
 
+  test.each(["outer", "nested"])(
+    "ignores %s build output when a repository contains a gitlink",
+    async (location) => {
+      const directory = await fixtures.create("patch-git-ignore-");
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, ".gitignore"), "build.log\n");
+      const nested = join(directory, "nested");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, ".gitignore"), "build.log\n");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(
+              join(location === "outer" ? directory : nested, "build.log"),
+              "build finished\n",
+            );
+            output?.stdout.write("No source changes were needed.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: false,
+        files: [],
+      });
+      expect(git("status", "--porcelain")).toBe("");
+    },
+  );
+
+  test.each([false, true])(
+    "resolves pre-existing dirty paths from the Git root for a subdirectory scan: overlap=%s",
+    async (overlap) => {
+      const directory = await fixtures.create(
+        "patch-subdirectory-publication-",
+      );
+      const git = repositoryGit(directory);
+      const scanned = join(directory, "package");
+      await mkdir(scanned);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "package.json"), "root original\n");
+      await writeFile(join(scanned, "package.json"), "unsafe\noriginal\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const dirty = overlap ? "package/package.json" : "package.json";
+      await writeFile(join(directory, dirty), "unsafe\nlocal edit\n");
+      git("add", dirty);
+      const originalHead = git("rev-parse", "HEAD");
+      const originalIndex = git("write-tree");
+      const remote = await fixtures.create("patch-subdirectory-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "package.json";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: scanned,
+          onWorkbench: () => savedScan(result, "scan-1", scanned),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? ""
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            await writeFile(
+              join(scanned, "package.json"),
+              overlap ? "fixed\nlocal edit\n" : "fixed\noriginal\n",
+            );
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(overlap ? 2 : 0);
+      if (overlap) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(git("rev-parse", "HEAD")).toBe(originalHead);
+        expect(git("write-tree")).toBe(originalIndex);
+        expect(git("ls-remote", "origin")).toBe("");
+      } else {
+        expect(git("diff", "--cached", "--name-only")).toBe("package.json");
+        expect(git("diff", "--name-only", originalHead, "HEAD")).toBe(
+          "package/package.json",
+        );
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      }
+    },
+  );
+
+  test("patches a repository with a Git tree listing larger than one MiB", async () => {
+    const directory = await fixtures.create("patch-large-tree-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    const name = "a".repeat(70);
+    await Promise.all(
+      Array.from({ length: 10000 }, (_, index) =>
+        writeFile(
+          join(directory, `${name}${index.toString().padStart(5, "0")}.ts`),
+          "original\n",
+        ),
+      ),
+    );
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: directory,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, "fix.ts"), "fixed\n");
+        output?.stdout.write("Fixed and checked.");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: true,
+      files: ["fix.ts"],
+    });
+  });
+
   test.each(["unborn", "nested"])(
     "detects local patches in %s Git repositories",
     async (kind) => {
@@ -2667,6 +2808,7 @@ const runGitRepositoryCommand: NonNullable<
   const result = gitText(args, {
     cwd: workingDirectory,
     env: { ...process.env, ...options?.environment },
+    maxBuffer: options?.maxBuffer,
     stdio: ["ignore", "pipe", "pipe"],
   });
   return options?.trim === false ? result : result.trim();

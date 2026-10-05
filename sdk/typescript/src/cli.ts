@@ -1212,7 +1212,11 @@ interface CliDependencies {
     command: "git" | "gh" | "glab",
     args: readonly string[],
     repository: string,
-    options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
+    options?: {
+      trim?: boolean;
+      environment?: NodeJS.ProcessEnv;
+      maxBuffer?: number;
+    },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
   bulkScan?: BulkScanDiscoveryDependencies;
@@ -1305,6 +1309,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     const { stdout } = await execFile(executable.executable, [...args], {
       cwd: repository,
       env: { ...executable.environment, ...options?.environment },
+      maxBuffer: options?.maxBuffer,
       windowsHide: true,
     });
     return options?.trim === false ? stdout : stdout.trim();
@@ -6769,22 +6774,25 @@ async function preparePatchPublication(
       `Patch branch or pull request already exists for ${branch}. Resume its saved commit with 'codex-security patch --resume-pr ${branch}', or review and publish further changes separately.`,
     );
   }
+  const root = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "--show-toplevel"],
+    repository,
+  );
   const status = await dependencies.runRepositoryCommand(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     repository,
-    { trim: false },
+    { trim: false, maxBuffer: Infinity },
   );
   const paths = status.split("\0");
   const dirtyFiles = new Set<string>();
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
-    dirtyFiles.add(relative(repository, resolve(repository, entry.slice(3))));
+    dirtyFiles.add(relative(repository, resolve(root, entry.slice(3))));
     if (/[RC]/u.test(entry.slice(0, 2)))
-      dirtyFiles.add(
-        relative(repository, resolve(repository, paths[++index]!)),
-      );
+      dirtyFiles.add(relative(repository, resolve(root, paths[++index]!)));
   }
   return { branch, dirtyFiles };
 }
@@ -7028,9 +7036,13 @@ async function requireCleanPatchPullRequestBase(
   }
 }
 
+interface GitPatchState {
+  trees: Map<string, string>;
+}
+
 async function changedPatchFiles(
   repository: string,
-  base: string | Map<string, string>,
+  base: string | GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
 ): Promise<string[]> {
   if (base instanceof Map) {
@@ -7039,20 +7051,31 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
-  const head = await snapshotPatchTree(repository, dependencies);
-  const output = await dependencies.runRepositoryCommand(
-    "git",
-    ["--literal-pathspecs", "diff", "--name-only", "-z", base, head],
-    repository,
-    { trim: false },
-  );
-  return output.split("\0").filter(Boolean);
+  const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
+  const heads =
+    typeof base === "string"
+      ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
+      : (await snapshotGitPatchState(repository, dependencies)).trees;
+  const files = new Set<string>();
+  for (const [directory, tree] of bases) {
+    const head = heads.get(directory);
+    if (head === undefined) continue;
+    const output = await dependencies.runRepositoryCommand(
+      "git",
+      ["--literal-pathspecs", "diff", "--name-only", "-z", tree, head],
+      join(repository, directory),
+      { trim: false },
+    );
+    for (const path of output.split("\0").filter(Boolean))
+      files.add(directory ? `${directory}/${path}` : path);
+  }
+  return [...files].sort();
 }
 
 async function snapshotPatchState(
   repository: string,
   dependencies: CliDependencies,
-): Promise<string | Map<string, string>> {
+): Promise<GitPatchState | Map<string, string>> {
   try {
     await dependencies.runRepositoryCommand(
       "git",
@@ -7069,16 +7092,33 @@ async function snapshotPatchState(
       throw error;
     return snapshotPatchDirectory(repository);
   }
-  const tree = await snapshotPatchTree(repository, dependencies);
-  const entries = await dependencies.runRepositoryCommand(
-    "git",
-    ["ls-tree", "-r", "-z", tree],
-    repository,
-    { trim: false },
-  );
-  return entries.split("\0").some((entry) => entry.startsWith("160000 "))
-    ? snapshotPatchDirectory(repository)
-    : tree;
+  return snapshotGitPatchState(repository, dependencies);
+}
+
+async function snapshotGitPatchState(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<GitPatchState> {
+  const trees = new Map<string, string>();
+  const visit = async (directory: string): Promise<void> => {
+    const checkout = join(repository, directory);
+    const tree = await snapshotPatchTree(checkout, dependencies);
+    trees.set(directory, tree);
+    const entries = await dependencies.runRepositoryCommand(
+      "git",
+      ["ls-tree", "-r", "-z", tree],
+      checkout,
+      { trim: false, maxBuffer: Infinity },
+    );
+    for (const entry of entries.split("\0")) {
+      if (!entry.startsWith("160000 ")) continue;
+      const path = entry.slice(entry.indexOf("\t") + 1);
+      if (existsSync(join(checkout, path, ".git")))
+        await visit(directory ? `${directory}/${path}` : path);
+    }
+  };
+  await visit("");
+  return { trees };
 }
 
 // Literal patch inputs also work in directories without Git metadata.
