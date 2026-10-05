@@ -54,6 +54,58 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("flushes queued activity before stopping without rendering afterward", () => {
+    const stderr = capture(true);
+    const pending: (() => void)[] = [];
+    const dashboard = createDashboard(stderr.stream, {
+      clock: {
+        ...fakeClock(),
+        queueMicrotask: (callback) => pending.push(callback),
+      },
+    });
+    dashboard.start();
+    dashboard.note("First event");
+    dashboard.note("Final event");
+    dashboard.stop();
+    const stopped = stderr.text();
+    expect(stripVTControlCharacters(stopped)).toContain("Final event");
+    for (const callback of pending) callback();
+    expect(stderr.text()).toBe(stopped);
+  });
+
+  test("keeps modified SS3 function keys out of worker selection", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    input.emit("data", "d");
+    for (const key of ["\u001BO1;5P", "\u001BO1;2Q"]) {
+      input.emit("data", key);
+      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    }
+    input.emit("data", "3");
+    expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+    dashboard.stop();
+  });
+
+  test("styles numeric inline content without matching its timestamp", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { color: true });
+    dashboard.start();
+    dashboard.record({
+      id: "numeric-markup",
+      kind: "message",
+      status: "completed",
+      description: "Inspect `1` and [09](https://example.test/report).",
+      paths: [],
+    });
+    expect(stderr.text()).toContain("\u001B[2m[09:41:00]\u001B[22m");
+    expect(stderr.text()).toContain("Inspect \u001B[2m1\u001B[22m");
+    expect(stderr.text()).toContain(
+      "and \u001B]8;;https://example.test/report\u000709\u001B]8;;\u0007.",
+    );
+    dashboard.stop();
+  });
   test.each([
     ["single line", () => "START" + "x".repeat(4 * 1024 * 1024) + "界END"],
     [
@@ -377,6 +429,10 @@ describe("live scan dashboard", () => {
       cost,
       signal: controller.signal,
     });
+    input.emit("data", "\u001BO1;5P");
+    expect(stderr.text().split("\u001B[H").at(-1)).toContain(
+      "Raise total USD limit",
+    );
     input.emit("data", "-30\r");
     expect(stderr.text()).toContain("Enter a finite total above");
     input.emit("data", "\u00150\r");
@@ -552,6 +608,8 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API only activity");
     expect(frame()).not.toContain("Web only activity");
     expect(frame()).toContain("$1.00");
+    input.emit("data", "\u001BO1;5P");
+    expect(frame()).toContain("API only activity");
     input.emit("data", "d");
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");

@@ -87,6 +87,7 @@ type DashboardActivityKind = ScanActivity["kind"] | "status" | "warning";
 interface DashboardActivityLine {
   text: string;
   kind: DashboardActivityKind | "path" | "code";
+  contentStart?: number;
   links?: readonly DashboardActivityLink[];
   code?: readonly string[];
   bold?: readonly string[];
@@ -164,7 +165,7 @@ export class ScanDashboard {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
     if (this.#budget !== null) {
-      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
+      for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
         []) {
         const budget = this.#budget;
         if (budget === null) break;
@@ -201,7 +202,8 @@ export class ScanDashboard {
       return;
     }
     let lines = 0;
-    for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
+    for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
+      []) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -290,6 +292,7 @@ export class ScanDashboard {
 
   public stop(): void {
     if (this.#timer === null) return;
+    if (this.#refreshPending) this.#refresh();
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     this.#budget?.finish();
@@ -681,6 +684,7 @@ export class ScanDashboard {
                     ? styleInlineCode(colored, line)
                     : colored,
                   line.links,
+                  line.contentStart,
                 );
           return `${ERASE_LINE}${formatted}`;
         })
@@ -689,7 +693,8 @@ export class ScanDashboard {
   }
 
   #componentInput(input: string): void {
-    for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
+    for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
+      []) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {
@@ -961,7 +966,13 @@ export class ScanDashboard {
                 ),
               );
         for (const text of lines) {
-          cache.lines.push({ text, kind: "path", code, bold });
+          cache.lines.push({
+            text,
+            kind: "path",
+            code,
+            bold,
+            contentStart: prefix.length,
+          });
         }
       }
       return cache.lines;
@@ -1016,7 +1027,13 @@ export class ScanDashboard {
           ? wrapCode(started ? continuation : prefix, description, width)
           : wrapActivity(started ? continuation : prefix, description, width);
         for (const text of wrapped) {
-          lines.push({ text, kind: fenced ? "code" : kind, links, code });
+          lines.push({
+            text,
+            kind: fenced ? "code" : kind,
+            links,
+            code,
+            contentStart: prefix.length,
+          });
           started = true;
         }
       }
@@ -1127,27 +1144,43 @@ function replaceVisibleText(
   value: string,
   search: string,
   replacement: string,
+  contentStart = 0,
 ): string {
   let replaced = false;
+  let offset = 0;
   return value
     .split(/(\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][\s\S]*?(?:\u0007|\u001B\\))/gu)
     .map((part, index) => {
-      if (index % 2 === 1 || replaced || !part.includes(search)) return part;
-      replaced = true;
-      return part.replace(search, () => replacement);
+      if (index % 2 === 1) return part;
+      const start = Math.max(0, contentStart - offset);
+      offset += part.length;
+      if (replaced || start >= part.length) return part;
+      return (
+        part.slice(0, start) +
+        part.slice(start).replace(search, () => {
+          replaced = true;
+          return replacement;
+        })
+      );
     })
     .join("");
 }
 
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
-    value = replaceVisibleText(value, text, `\u001B[1m${text}\u001B[22m`);
+    value = replaceVisibleText(
+      value,
+      text,
+      `\u001B[1m${text}\u001B[22m`,
+      line.contentStart,
+    );
   }
   for (const text of line.code ?? []) {
     value = replaceVisibleText(
       value,
       text,
       `\u001B[2m${text}\u001B[22m${line.kind === "message" ? "\u001B[1m" : ""}`,
+      line.contentStart,
     );
   }
   return value;
@@ -1156,6 +1189,7 @@ function styleInlineCode(value: string, line: DashboardActivityLine): string {
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
+  contentStart?: number,
 ): string {
   for (const { label, target } of links ?? []) {
     const safe = safeHyperlinkTarget(target);
@@ -1164,6 +1198,7 @@ function linkActivity(
         value,
         label,
         `\u001B]8;;${safe}\u0007${label}\u001B]8;;\u0007`,
+        contentStart,
       );
     }
   }
