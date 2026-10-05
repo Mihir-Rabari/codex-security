@@ -1101,8 +1101,8 @@ def test_completion_keeps_valid_findings_and_warns_about_bad_ones(tmp_path: Path
     unsafe_location = copy.deepcopy(valid)
     unsafe_location["identity"]["anchor"] = "unsafe-location"
     unsafe_location["locations"][0]["path"] = "../outside.py"
-    missing_identity = copy.deepcopy(valid)
-    missing_identity.pop("identity")
+    invalid_identity = copy.deepcopy(valid)
+    invalid_identity["identity"] = []
     invalid_evidence_id = copy.deepcopy(valid)
     invalid_evidence_id["identity"]["anchor"] = "invalid-evidence-id"
     invalid_evidence_id["codeEvidence"][0]["id"] = "src/extract.py:41"
@@ -1114,7 +1114,7 @@ def test_completion_keeps_valid_findings_and_warns_about_bad_ones(tmp_path: Path
         [
             missing_summary,
             unsafe_location,
-            missing_identity,
+            invalid_identity,
             invalid_evidence_id,
             copy.deepcopy(valid),
             None,

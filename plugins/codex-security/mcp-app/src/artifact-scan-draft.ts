@@ -506,16 +506,17 @@ function reconcileScanDraft(
       savedSources.slice(retainedIndex),
       [],
     ).input;
+  const metadata = retainedFinal?.input ?? result;
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
-  if (result.scope === undefined && retainedScope !== undefined) {
+  if (metadata.scope === undefined && retainedScope !== undefined) {
     result.scope = retainedScope;
   }
   const retainedThreatModel = sources.find(
     (source) => source.threatModel !== undefined,
   )?.threatModel;
-  if (result.threatModel === undefined && retainedThreatModel !== undefined) {
+  if (metadata.threatModel === undefined && retainedThreatModel !== undefined) {
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
