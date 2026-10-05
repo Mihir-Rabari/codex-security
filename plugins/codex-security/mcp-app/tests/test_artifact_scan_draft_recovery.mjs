@@ -39,6 +39,59 @@ const findingFor = (candidateId) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const layout of ["standard", "diff"]) {
+  for (const variant of ["one", "three", "legacy"]) {
+    for (const status of ["failed", "canceled"]) {
+      test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
+        const f = await fixture(t, layout);
+        const count = variant === "three" ? 3 : 1;
+        for (let index = 0; index < count; index += 1)
+          await f.write({
+            ...f.draft(),
+            findings: [findingFor(`review-${index + 1}`)],
+          });
+        if (variant === "legacy") {
+          const file = path.join(f.root, "findings.json");
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          saved.findings[0].identity.anchor = "synthetic-review-finding";
+          await writeFile(file, JSON.stringify(saved));
+        }
+        const { stdout } = await execFileAsync(
+          process.env.PYTHON?.trim() || "python3",
+          [
+            "-c",
+            `import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+from finalize_scan_contract import _prepare_scan_finalization, _write_prepared_scan_finalization
+root,scan_id,status=Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+manifest=json.loads((root/'scan-manifest.json').read_text())
+coverage=json.loads((root/'coverage.json').read_text())
+binding={'status':status,'allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
+warnings=[]
+documents=merge_saved_results(root,scan_id,binding,[],warnings,stopped=True,reason='Synthetic interruption')
+documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status=status,startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
+for document in documents[1:]: document['scanId']=scan_id
+prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
+published=_write_prepared_scan_finalization(prepared)
+print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings}))`,
+            fileURLToPath(new URL("../../scripts", import.meta.url)),
+            f.root,
+            f.context.scanId,
+            status,
+          ],
+        );
+        assert.deepEqual(JSON.parse(stdout), {
+          count,
+          sealed: true,
+          warnings: [],
+        });
+      });
+    }
+  }
+}
+
 for (const layout of ["standard", "diff", "worker"]) {
   for (const title of [".env review", "/admin review", "_debug review"]) {
     test(`${layout}: generated identity permits repeated writes for ${title}`, async (t) => {
@@ -1676,6 +1729,35 @@ for (const layout of ["standard", "diff", "worker"]) {
       );
     });
   }
+
+  test(`${layout}: unfinished surfaces retain later notes and receipts`, async (t) => {
+    const f = await fixture(t, layout);
+    const initial = {
+      id: "api",
+      label: "API review",
+      disposition: "needs_follow_up",
+      notes: "Initial evidence",
+      receiptRefs: ["artifacts/initial.md"],
+    };
+    await f.write(
+      f.draft({ completeness: "partial", surfaces: [initial] }, true),
+    );
+    const updated = {
+      ...initial,
+      notes: "Updated evidence",
+      receiptRefs: ["artifacts/updated.md"],
+    };
+    await f.write(f.draft({ surfaces: [updated] }));
+    assert.deepEqual(
+      (await f.read()).surfaces.find((row) => row.id === initial.id),
+      updated,
+    );
+    await f.write(f.draft({}, true));
+    assert.deepEqual(
+      (await f.read()).surfaces.find((row) => row.id === initial.id),
+      updated,
+    );
+  });
 
   test(`${layout}: new late work does not undo an already reviewed surface`, async (t) => {
     const f = await fixture(t, layout);

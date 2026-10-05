@@ -506,11 +506,13 @@ async function preserveScanDraft(
       .reverse();
     progressSources.push(input);
     const terminalSurfaceIds = new Set(
-      (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
-        [row.id, row.candidateId].filter(
-          (id): id is string => typeof id === "string",
+      (result.coverage.surfaces as JsonObject[])
+        .filter((row) => row.disposition !== "needs_follow_up")
+        .flatMap((row) =>
+          [row.id, row.candidateId].filter(
+            (id): id is string => typeof id === "string",
+          ),
         ),
-      ),
     );
     const terminalWorkIds = new Set([
       ...terminalSurfaceIds,
