@@ -823,8 +823,13 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8") == "previous.py\n"
 
 
-@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
-def test_diff_inventory_includes_type_changed_files(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize(
+    ("mode", "undo_staged_change"),
+    [("revisions", False), ("local-patch", False), ("local-patch", True)],
+)
+def test_diff_inventory_includes_type_changed_files(
+    tmp_path: Path, mode: str, undo_staged_change: bool
+) -> None:
     repository = make_repository(tmp_path)
     source = repository / "app" / "changed.py"
     try:
@@ -835,6 +840,10 @@ def test_diff_inventory_includes_type_changed_files(tmp_path: Path, mode: str) -
     git(repository, "commit", "-qm", "base")
     source.unlink()
     source.write_text("changed = True\n")
+    if undo_staged_change:
+        git(repository, "add", ".")
+        source.unlink()
+        source.symlink_to("routes.py")
     arguments = ["--diff-base", "HEAD", "--diff-mode", mode]
     if mode == "revisions":
         base = git(repository, "rev-parse", "HEAD")
@@ -844,7 +853,7 @@ def test_diff_inventory_includes_type_changed_files(tmp_path: Path, mode: str) -
     output = tmp_path / "in_scope_files.txt"
     result = run_inventory(repository, ".", output, arguments=arguments)
     assert result.returncode == 0, result.stderr
-    assert b"app/changed.py\n" in output.read_bytes()
+    assert (b"app/changed.py\n" in output.read_bytes()) is not undo_staged_change
     rank_output = tmp_path / "rank.jsonl"
     rank = subprocess.run(
         [
@@ -866,9 +875,12 @@ def test_diff_inventory_includes_type_changed_files(tmp_path: Path, mode: str) -
         text=True,
     )
     assert rank.returncode == 0, rank.stderr
-    assert any(
-        json.loads(line)["path"] == "app/changed.py"
-        for line in rank_output.read_text().splitlines()
+    assert (
+        any(
+            json.loads(line)["path"] == "app/changed.py"
+            for line in rank_output.read_text().splitlines()
+        )
+        is not undo_staged_change
     )
 
 

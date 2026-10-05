@@ -665,7 +665,11 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             for relative in untracked.stdout.split(b"\0")
             if relative
         )
-        return sorted(combined.items())
+        return sorted(
+            (path, status)
+            for path, status in combined.items()
+            if status == "D" or (not path.is_symlink() and path.is_file())
+        )
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
