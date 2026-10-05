@@ -1,6 +1,7 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { main } from "../../src/cli.js";
 import { capture, dependencies } from "../cli-fixtures.js";
 
@@ -42,9 +43,11 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
       alias,
       process.platform === "win32" ? "junction" : "dir",
     );
-    environment["GIT_DIR"] = kind.startsWith("relative")
-      ? relative(repository, join(alias, ".git"))
-      : join(alias, ".git");
+    environment["GIT_DIR"] = (
+      kind.startsWith("relative")
+        ? relative(repository, join(alias, ".git"))
+        : join(alias, ".git")
+    ).replaceAll(sep, "/");
     await writeFile(
       environment["GIT_CONFIG_GLOBAL"]!,
       '[includeIf "gitdir:**/alias/.git"]\npath = identity\n',
@@ -55,6 +58,11 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
     );
     git(["config", "--local", "--unset", "user.name"]);
     git(["config", "--local", "--unset", "user.email"]);
+    assert.ok(
+      git(["var", "GIT_AUTHOR_IDENT"]).startsWith(
+        "Synthetic Alias <alias@example.test> ",
+      ),
+    );
   } else {
     await mkdir(join(directory, "elsewhere", "target"), { recursive: true });
     await symlink(
