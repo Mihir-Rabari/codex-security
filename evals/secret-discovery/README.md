@@ -40,7 +40,7 @@ Credential values remain part of the source evidence.
 
 Install dependencies and build the TypeScript SDK using the repository's normal
 setup. The eval reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
-creating private homes. It bundles the MCP app's permission-profile preflight
+creating private homes. It bundles the SDK's permission-checked client and executable helper
 locally with esbuild and adds no dependencies.
 
 ```sh

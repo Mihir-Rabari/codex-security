@@ -1,6 +1,9 @@
 import { link, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { build } from "../../sdk/typescript/node_modules/esbuild/lib/main.js";
 
@@ -8,28 +11,99 @@ import { build } from "../../sdk/typescript/node_modules/esbuild/lib/main.js";
 const bundle = await build({
   stdin: {
     contents: [
-      'export { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID, preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";',
-      'export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";',
+      'export { createPermissionCheckedCodex } from "../../sdk/typescript/src/permission-profile.ts";',
+      'export { executablePathForSpawn } from "../../sdk/typescript/src/runtime.ts";',
       'export { inlineToml } from "../../sdk/typescript/src/config.ts";',
       'export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-environment.ts";',
     ].join("\n"),
     resolveDir: fileURLToPath(new URL(".", import.meta.url)),
   },
   bundle: true,
-  format: "esm",
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL("../../sdk/typescript/src/runtime.ts", import.meta.url).href,
+    ),
+  },
+  format: "cjs",
   platform: "node",
   write: false,
 });
+const module = { exports: {} };
+new Function("require", "module", "exports", bundle.outputFiles[0].text)(
+  createRequire(new URL("../../sdk/typescript/package.json", import.meta.url)),
+  module,
+  module.exports,
+);
+// Keep the existing managed-policy profile name while using the shared checker.
+export const EVAL_PERMISSION_PROFILE_ID = "codex_security_deep_scan_worker";
 export const {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-  preflightDeepScanWorkerPermissionProfile,
-  deepScanPermissionProfileFallbackError,
+  createPermissionCheckedCodex,
   executablePathForSpawn,
   inlineToml,
   bundledCodexSdkEnvironment,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module.exports;
+
+/** Ask native Codex about saved login state before selecting an API-key fallback. */
+export async function shouldUseOpenAiApiKey(settings, cwd, signal) {
+  signal?.throwIfAborted();
+  const child = spawn(
+    settings.codexPathOverride,
+    [
+      ...settings.configOverrides.flatMap((value) => ["--config", value]),
+      "app-server",
+      "--stdio",
+    ],
+    { cwd, env: settings.env, signal, stdio: "pipe" },
+  );
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const failed = new Promise((_, reject) => {
+    child.on("error", reject);
+    child.stdin.on("error", reject);
+    child.once("exit", () =>
+      reject(new Error("Codex account lookup ended before its response.")),
+    );
+  });
+  child.stderr.resume();
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const iterator = lines[Symbol.asyncIterator]();
+  let nextId = 0;
+  const request = async (method, params) => {
+    const id = ++nextId;
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    while (true) {
+      const line = await Promise.race([iterator.next(), failed]);
+      if (line.done)
+        throw new Error("Codex account lookup ended before its response.");
+      if (!line.value.trim()) continue;
+      const response = JSON.parse(line.value);
+      if (response.id === undefined || response.method !== undefined) continue;
+      if (response.id !== id || response.error || !response.result)
+        throw new Error(`Codex account lookup failed for ${method}.`);
+      return response.result;
+    }
+  };
+  try {
+    await request("initialize", {
+      clientInfo: { name: "codex_security_eval", version: "1" },
+      capabilities: { experimentalApi: true },
+    });
+    child.stdin.write(
+      `${JSON.stringify({ method: "initialized", params: {} })}\n`,
+    );
+    const config = await request("config/read", { cwd, includeLayers: false });
+    if (config.config?.forced_login_method === "chatgpt") return false;
+    const result = await request("account/read", { refreshToken: false });
+    return result.requiresOpenaiAuth === true && result.account === null;
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw error;
+  } finally {
+    lines.close();
+    if (!child.stdin.destroyed) child.stdin.end();
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  }
+}
 
 /** Share saved login updates without importing the caller's configuration. */
 export async function createEvalHome(createHome, ambientHome) {

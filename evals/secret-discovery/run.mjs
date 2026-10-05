@@ -1,7 +1,6 @@
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import { configuredCodexHome } from "../../sdk/typescript/dist/auth.js";
 import {
   createIsolatedHome,
@@ -13,7 +12,11 @@ import {
   prepareEval,
   runPreparedEval,
 } from "./harness.mjs";
-import { createEvalHome, withEvalState } from "./runtime.mjs";
+import {
+  createEvalHome,
+  createPermissionCheckedCodex,
+  withEvalState,
+} from "./runtime.mjs";
 
 const reports = fileURLToPath(new URL("./reports/", import.meta.url));
 await mkdir(reports, { recursive: true });
@@ -29,7 +32,7 @@ await withEvalState(
       codexSettings(home, codexPath),
       signal,
     );
-    const codex = new Codex(settings);
+    const codex = createPermissionCheckedCodex(settings);
     const { report, semanticResult } = await runPreparedEval(prepared, codex, {
       model: process.argv[2],
       signal,

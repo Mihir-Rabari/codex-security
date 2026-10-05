@@ -15,6 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { getEventListeners } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -27,16 +28,13 @@ import {
   runPreparedEval,
 } from "./harness.mjs";
 import {
-  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  EVAL_PERMISSION_PROFILE_ID,
+  createPermissionCheckedCodex,
   createEvalHome,
   withEvalState,
 } from "./runtime.mjs";
 
 const unixOnly = { skip: process.platform === "win32", timeout: 15000 };
-const sdkUrl = new URL(
-  "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js",
-  import.meta.url,
-).href;
 const tomlUrl = new URL(
   "../../sdk/typescript/node_modules/smol-toml/dist/index.js",
   import.meta.url,
@@ -282,6 +280,7 @@ async function nativeFixture(
   t,
   mode = "complete",
   accountResult = { account: null, requiresOpenaiAuth: true },
+  effectiveConfig = {},
 ) {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), "eval-runtime-test-")),
@@ -328,7 +327,13 @@ async function nativeFixture(
   };
   await writeFile(
     executable,
-    fakeNativeSource({ directory, mode, result, accountResult }),
+    fakeNativeSource({
+      directory,
+      mode,
+      result,
+      accountResult,
+      effectiveConfig,
+    }),
     { mode: 0o755 },
   );
   const settings = codexSettings(home, executable, {
@@ -351,7 +356,7 @@ import { createInterface } from "node:readline";
 import { parse } from ${JSON.stringify(tomlUrl)};
 const scenario = ${JSON.stringify(scenario)};
 const args = process.argv.slice(2);
-const kind = args.includes("app-server") ? "preflight" : "exec";
+let kind = args.includes("app-server") ? "preflight" : "exec";
 const cwd = args.includes("--cd") ? args[args.indexOf("--cd") + 1] : process.cwd();
 // Last repeated CLI keys win; parse dotted sibling keys together.
 const overrides = new Map(args.flatMap((arg, index) => {
@@ -359,7 +364,7 @@ const overrides = new Map(args.flatMap((arg, index) => {
   const value = args[index + 1];
   return [[value.slice(0, value.indexOf("=")), value]];
 }));
-const config = parse([...overrides.values()].join("\\n"));
+const config = { ...parse([...overrides.values()].join("\\n")), ...scenario.effectiveConfig };
 const record = (name, value) => writeFileSync(join(scenario.directory, name + ".json"), JSON.stringify(value));
 const bundledTool = execFileSync("rg", ["--version"], { encoding: "utf8" }).trim();
 record(kind, { args, cwd: process.cwd(), effectiveCwd: cwd, config, env: process.env, pid: process.pid, bundledTool });
@@ -378,8 +383,14 @@ if (kind === "preflight") {
     const request = JSON.parse(line);
     appendFileSync(join(scenario.directory, "rpc.jsonl"), JSON.stringify(request) + "\\n");
     if (request.method === "initialized") return;
-    if (request.method === "account/read" && scenario.mode === "account-error") {
-      send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "Synthetic account lookup failure" } });
+    if (request.method === "account/read") {
+      kind = "account";
+      record(kind, { args, cwd: process.cwd(), config, env: process.env });
+      if (scenario.mode === "account-error") {
+        send({ id: request.id, error: { code: -32603, message: "Synthetic account lookup failure" } });
+      } else {
+        send({ id: request.id, result: scenario.accountResult });
+      }
       return;
     }
     let result = {};
@@ -388,7 +399,6 @@ if (kind === "preflight") {
       data: [{ id: config.default_permissions, allowed: scenario.mode !== "managed-rejection" }], nextCursor: null,
     };
     if (request.method === "configRequirements/read") result = { requirements: null };
-    if (request.method === "account/read") result = scenario.accountResult;
     send({ jsonrpc: "2.0", id: request.id, result });
   });
 } else {
@@ -407,6 +417,7 @@ if (kind === "preflight") {
       send(scenario.mode === "fallback-item"
         ? { type: "item.completed", item: { id: "warning", type: "error", message } }
         : { type: "error", message });
+      send({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } });
       setInterval(() => {}, 1000);
     } else {
       send({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } });
@@ -433,7 +444,7 @@ test(
     );
     const { report, semanticResult } = await runPreparedEval(
       prepared,
-      new Codex(settings),
+      createPermissionCheckedCodex(settings),
     );
     assert.equal(report.passed, true);
     assert.deepEqual(semanticResult, result);
@@ -458,23 +469,21 @@ test(
     assert.equal(exec.config.approval_policy, "never");
     assert.equal(exec.config.model_reasoning_effort, "xhigh");
     assert.equal(exec.config.web_search, "disabled");
+    assert.equal(exec.config.default_permissions, EVAL_PERMISSION_PROFILE_ID);
     assert.equal(
-      exec.config.default_permissions,
-      DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-    );
-    assert.equal(
-      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network
-        .enabled,
+      exec.config.permissions[EVAL_PERMISSION_PROFILE_ID].network.enabled,
       false,
     );
     assert.deepEqual(
-      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID]
-        .filesystem[settings.env.CODEX_HOME],
+      exec.config.permissions[EVAL_PERMISSION_PROFILE_ID].filesystem[
+        settings.env.CODEX_HOME
+      ],
       { ".": "deny" },
     );
     assert.deepEqual(
-      exec.config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID]
-        .filesystem[dirname(dirname(settings.env.CODEX_CLI_PATH))],
+      exec.config.permissions[EVAL_PERMISSION_PROFILE_ID].filesystem[
+        dirname(dirname(settings.env.CODEX_CLI_PATH))
+      ],
       { ".": "read" },
     );
     assert.equal(exec.args.includes("--sandbox"), false);
@@ -488,15 +497,15 @@ test(
       assert.equal(entry.env.CODEX_SQLITE_HOME, settings.env.CODEX_HOME);
       assert.equal(entry.env.DATABASE_URL, undefined);
     }
-    assert.equal(preflight.env.CODEX_API_KEY, undefined);
+    assert.equal(preflight.env.CODEX_API_KEY, "synthetic-env-key");
+    const account = await readJson(join(directory, "account.json"));
+    assert.ok(account.args.includes("app-server"));
+    assert.equal(account.env.CODEX_API_KEY, undefined);
+    assert.equal(account.env.OPENAI_API_KEY, "synthetic-env-key");
+    assert.equal(account.env.CODEX_HOME, settings.env.CODEX_HOME);
     assert.equal(exec.env.CODEX_API_KEY, "synthetic-env-key");
     assert.equal(original.apiKey, undefined);
-    const {
-      CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
-      CODEX_API_KEY,
-      ...execEnvironment
-    } = exec.env;
-    assert.deepEqual(execEnvironment, preflight.env);
+    assert.deepEqual(exec.env, preflight.env);
     const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
       .trim()
       .split("\n")
@@ -507,13 +516,18 @@ test(
         "initialize",
         "initialized",
         "config/read",
-        "permissionProfile/list",
         "account/read",
+        "initialize",
+        "initialized",
+        "config/read",
+        "permissionProfile/list",
       ],
     );
-    for (const call of calls.slice(2, 4))
+    assert.deepEqual(calls[3].params, { refreshToken: false });
+    for (const call of calls.filter((call) =>
+      ["config/read", "permissionProfile/list"].includes(call.method),
+    ))
       assert.equal(call.params.cwd, prepared.repo);
-    assert.deepEqual(calls[4].params, { refreshToken: false });
   },
 );
 
@@ -524,6 +538,8 @@ for (const {
   codexApiKey,
   openAiApiKey = " synthetic-env-key \n ",
   expectedKey,
+  requiresOpenaiAuth = true,
+  forcedLoginMethod,
 } of [
   {
     name: "missing file login",
@@ -572,16 +588,29 @@ for (const {
     expectedKey: "synthetic-codex-key",
   },
   { name: "blank OpenAI key", account: null, openAiApiKey: " \t " },
+  {
+    name: "provider without OpenAI auth",
+    account: null,
+    requiresOpenaiAuth: false,
+  },
+  { name: "omitted auth requirement", account: null, requiresOpenaiAuth: null },
+  { name: "omitted account", account: undefined },
+  { name: "forced ChatGPT login", account: null, forcedLoginMethod: "chatgpt" },
 ]) {
   test(`native auth precedence with ${name}`, unixOnly, async (t) => {
     const {
       directory,
       prepared,
       settings: original,
-    } = await nativeFixture(t, "complete", {
-      account,
-      requiresOpenaiAuth: true,
-    });
+    } = await nativeFixture(
+      t,
+      "complete",
+      {
+        account,
+        ...(requiresOpenaiAuth === null ? {} : { requiresOpenaiAuth }),
+      },
+      forcedLoginMethod ? { forced_login_method: forcedLoginMethod } : {},
+    );
     const ambient = original.env.CODEX_HOME;
     if (authFile !== undefined)
       await writeFile(join(ambient, "auth.json"), authFile);
@@ -602,15 +631,32 @@ for (const {
           initialSettings,
           new AbortController().signal,
         );
-        const { report } = await runPreparedEval(prepared, new Codex(settings));
+        const { report } = await runPreparedEval(
+          prepared,
+          createPermissionCheckedCodex(settings),
+        );
         assert.equal(report.passed, true);
         assert.equal(initialSettings.apiKey, undefined);
         const preflight = await readJson(join(directory, "preflight.json"));
         const exec = await readJson(join(directory, "exec.json"));
-        assert.equal(preflight.env.CODEX_API_KEY, codexApiKey);
+        assert.equal(preflight.env.CODEX_API_KEY, expectedKey);
         assert.equal(exec.env.CODEX_API_KEY, expectedKey);
         assert.equal(preflight.env.CODEX_HOME, home);
         assert.equal(exec.env.CODEX_HOME, home);
+        const accountPath = join(directory, "account.json");
+        if (
+          openAiApiKey.trim() &&
+          !codexApiKey?.trim() &&
+          forcedLoginMethod !== "chatgpt"
+        ) {
+          const account = await readJson(accountPath);
+          assert.ok(account.args.includes("app-server"));
+          assert.equal(account.env.CODEX_HOME, home);
+          assert.equal(account.env.CODEX_API_KEY, codexApiKey);
+          assert.equal(account.env.OPENAI_API_KEY, openAiApiKey);
+        } else {
+          await assert.rejects(access(accountPath), { code: "ENOENT" });
+        }
         const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
           .trim()
           .split("\n")
@@ -620,7 +666,11 @@ for (const {
         );
         assert.equal(
           accountCalls.length,
-          openAiApiKey.trim() && !codexApiKey?.trim() ? 1 : 0,
+          openAiApiKey.trim() &&
+            !codexApiKey?.trim() &&
+            forcedLoginMethod !== "chatgpt"
+            ? 1
+            : 0,
         );
         if (accountCalls.length)
           assert.deepEqual(accountCalls[0].params, { refreshToken: false });
@@ -675,27 +725,27 @@ for (const codexApiKey of [undefined, "synthetic-explicit-key"]) {
       } finally {
         Object.defineProperty(process, "platform", platform);
       }
-      await runPreparedEval(prepared, new Codex(settings));
+      await runPreparedEval(prepared, createPermissionCheckedCodex(settings));
       const exec = await readJson(join(directory, "exec.json"));
       assert.equal(
         exec.env.CODEX_API_KEY,
         codexApiKey ? undefined : "synthetic-fallback-key",
       );
       assert.equal(exec.env.CodeX_Api_Key, codexApiKey);
-      const calls = (await readFile(join(directory, "rpc.jsonl"), "utf8"))
-        .trim()
-        .split("\n")
-        .map(JSON.parse);
-      assert.equal(
-        calls.filter((call) => call.method === "account/read").length,
-        codexApiKey ? 0 : 1,
-      );
+      const accountPath = join(directory, "account.json");
+      if (codexApiKey) {
+        await assert.rejects(access(accountPath), { code: "ENOENT" });
+      } else {
+        const account = await readJson(accountPath);
+        assert.ok(account.args.includes("app-server"));
+        assert.equal(account.env.OpenAI_API_Key, environment.OpenAI_API_Key);
+      }
     },
   );
 }
 
 for (const [mode, expectedError] of [
-  ["managed-rejection", /managed Codex policy rejected/],
+  ["managed-rejection", /did not accept the required/],
   ["account-error", /account\/read/],
 ]) {
   test(`${mode} prevents starting the SDK exec turn`, unixOnly, async (t) => {
@@ -706,33 +756,53 @@ for (const [mode, expectedError] of [
         settings,
         new AbortController().signal,
       );
-      await runPreparedEval(prepared, new Codex(resolved));
+      await runPreparedEval(prepared, createPermissionCheckedCodex(resolved));
     }, expectedError);
     await assert.rejects(access(join(directory, "exec.json")), {
       code: "ENOENT",
     });
-    await access(join(directory, "preflight-stopped.json"));
+    if (mode === "managed-rejection")
+      await access(join(directory, "preflight-stopped.json"));
+    else await access(join(directory, "account-stopped.json"));
   });
 }
 
 for (const mode of ["fallback-item", "fallback-error"]) {
-  test(
-    `${mode} aborts the real SDK turn and discards its response`,
-    unixOnly,
-    async (t) => {
-      const { directory, prepared, settings } = await nativeFixture(t, mode);
-      const resolved = await preflightEval(
-        prepared,
-        settings,
-        new AbortController().signal,
-      );
-      await assert.rejects(
-        runPreparedEval(prepared, new Codex(resolved)),
-        /results were discarded/,
-      );
-      await access(join(directory, "exec-stopped.json"));
-    },
-  );
+  for (const resumed of [false, true]) {
+    test(
+      `${mode} drains the real SDK child and discards later events (resumed: ${resumed})`,
+      unixOnly,
+      async (t) => {
+        const { directory, prepared, settings } = await nativeFixture(t, mode);
+        const resolved = await preflightEval(
+          prepared,
+          settings,
+          new AbortController().signal,
+        );
+        const controller = new AbortController();
+        const codex = createPermissionCheckedCodex(resolved);
+        const client = resumed
+          ? {
+              startThread: (options) =>
+                codex.resumeThread("synthetic-saved-thread", options),
+            }
+          : codex;
+        await assert.rejects(
+          runPreparedEval(prepared, client, { signal: controller.signal }),
+          /rejected the required .* permission profile/,
+        );
+        const exec = await readJson(join(directory, "exec.json"));
+        assert.equal(exec.args.includes("resume"), resumed);
+        assert.throws(() => process.kill(exec.pid, 0), { code: "ESRCH" });
+        assert.deepEqual(await readJson(join(directory, "exec-stopped.json")), {
+          sourceExists: true,
+          homeExists: true,
+        });
+        assert.equal(controller.signal.aborted, false);
+        assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+      },
+    );
+  }
 }
 
 for (const [signal, exitCode] of [
@@ -756,9 +826,8 @@ for (const [signal, exitCode] of [
         `
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Codex } from ${JSON.stringify(sdkUrl)};
 import { codexSettings, preflightEval, prepareEval, runPreparedEval } from ${JSON.stringify(harnessUrl)};
-import { createEvalHome, withEvalState } from ${JSON.stringify(runtimeUrl)};
+import { createEvalHome, createPermissionCheckedCodex, withEvalState } from ${JSON.stringify(runtimeUrl)};
 await withEvalState(() => createEvalHome(
   (base) => mkdtemp(join(base, "signal-home-")),
   ${JSON.stringify(ambient)},
@@ -767,7 +836,7 @@ await withEvalState(() => createEvalHome(
   const prepared = await prepareEval(root);
   const settings = await preflightEval(prepared,
     codexSettings(home, ${JSON.stringify(executable)}, { PATH: ${JSON.stringify(dirname(process.execPath))}, HOME: home }), signal);
-  await runPreparedEval(prepared, new Codex(settings), { signal });
+  await runPreparedEval(prepared, createPermissionCheckedCodex(settings), { signal });
 });
 `,
       );

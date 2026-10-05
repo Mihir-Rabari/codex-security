@@ -120,12 +120,15 @@ export function createPermissionCheckedCodex({
       }
       return {
         events: (async function* () {
+          let permissionFailure: ScanPermissionError | undefined;
           try {
             const { events } = await thread.runStreamed(input, {
               ...turnOptions,
               signal,
             });
             for await (const event of events) {
+              // Keep consuming after abort so the SDK observes the child's exit.
+              if (permissionFailure) continue;
               const message =
                 event.type === "error"
                   ? event.message
@@ -134,17 +137,20 @@ export function createPermissionCheckedCodex({
                     ? event.item.message
                     : undefined;
               if (isPermissionFallback(message, profileId)) {
-                const error = new ScanPermissionError(
+                permissionFailure = new ScanPermissionError(
                   `Codex rejected the required ${profileId} permission profile. The scan was stopped.`,
                 );
-                controller.abort(error);
-                throw error;
+                controller.abort(permissionFailure);
+                continue;
               }
               yield event;
             }
+          } catch (error) {
+            throw permissionFailure ?? error;
           } finally {
             detachAbort();
           }
+          if (permissionFailure) throw permissionFailure;
         })(),
       };
     },
