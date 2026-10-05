@@ -2002,7 +2002,9 @@ def merge_saved_results(
                     destinations.add(represented.get(history_key))
                 elif group["owner"] and (candidate_id := finding_candidate_id(value)):
                     candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
-                    if candidate_key in represented_candidates:
+                    if _digest(_finding_content(value)) in represented_candidate_history.get(
+                        candidate_key, set()
+                    ):
                         destinations.add(represented_candidates[candidate_key])
             if len(destinations) == 1 and None not in destinations:
                 group["parent_key"] = destinations.pop()
@@ -2104,10 +2106,13 @@ def merge_saved_results(
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
         normalized_findings = copy.deepcopy(draft["findings"])
-        _ensure_finding_identities(normalized_findings)
+        _ensure_finding_identities(
+            [finding for finding in normalized_findings if valid_finding(finding)]
+        )
         for index, (value, normalized) in enumerate(
             zip(draft["findings"], normalized_findings, strict=True)
         ):
+            _ensure_finding_identity(normalized)
             if skip_superseded_findings and not (
                 isinstance(value, dict)
                 and (candidate_id := finding_candidate_id(value)) in selected_candidates
@@ -2234,9 +2239,11 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
-                        finding["identity"].update(copy.deepcopy(retained["identity"]))
-                        if "instance" not in retained["identity"]:
-                            finding["identity"].pop("instance", None)
+                        for field in ("anchor", "instance"):
+                            if field in retained["identity"]:
+                                finding["identity"][field] = retained["identity"][field]
+                            else:
+                                finding["identity"].pop(field, None)
                         if "preservedIdentity" in retained["provenance"]:
                             finding["provenance"]["preservedIdentity"] = copy.deepcopy(
                                 retained["provenance"]["preservedIdentity"]
