@@ -1326,6 +1326,7 @@ def merge_saved_results(
     findings: list[dict[str, Any]] = []
     inferred_identities: dict[int, dict[str, Any]] = {}
     finding_positions: dict[str, int] = {}
+    candidate_owners: dict[tuple[str, str], set[str]] = {}
 
     def distinct_candidates(
         finding: dict[str, Any],
@@ -1343,6 +1344,11 @@ def merge_saved_results(
             and (
                 current_candidate != previous_candidate
                 or (current_owner and previous_owner and current_owner != previous_owner)
+                or (
+                    bool(current_owner) != bool(previous_owner)
+                    and len(candidate_owners.get((_finding_key(finding), current_candidate), set()))
+                    > 1
+                )
             )
         )
 
@@ -1402,10 +1408,16 @@ def merge_saved_results(
                     observations.setdefault(
                         saved_identity_key(retained, retained_owner), []
                     ).append((retained, retained_owner))
-                    if isinstance(retained.get("identity"), dict) and valid_finding(retained):
-                        explicit_identities.setdefault(_finding_key(retained), []).append(
-                            (retained, retained_owner)
-                        )
+                    if valid_finding(retained):
+                        key = _finding_key(retained)
+                        candidate = finding_candidate_id(retained)
+                        finding_owner = retained["provenance"].get("workerId") or retained_owner
+                        if candidate and finding_owner:
+                            candidate_owners.setdefault((key, candidate), set()).add(finding_owner)
+                        if isinstance(retained.get("identity"), dict):
+                            explicit_identities.setdefault(key, []).append(
+                                (retained, retained_owner)
+                            )
     for matches in observations.values():
         identities = {
             _encoded([finding["identity"], finding["provenance"].get("preservedIdentity")]): (

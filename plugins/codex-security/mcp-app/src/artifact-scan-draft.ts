@@ -2358,7 +2358,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   // Keep generated siblings and independent worker findings when they reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
-  const candidateKeys = findings.map((finding, index) => {
+  const candidateContentKeys = findings.map((finding, index) => {
     const candidate = findingCandidateId(finding);
     return mode !== "deep" &&
       candidate &&
@@ -2370,7 +2370,6 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       ? JSON.stringify([
           finding.ruleId,
           anchors[index],
-          (finding.provenance as JsonObject).workerId,
           candidate,
           (finding.locations as JsonObject[])
             .map((location) =>
@@ -2383,6 +2382,26 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
             .sort(),
         ])
       : undefined;
+  });
+  const candidateOwners = new Map<string, Set<string>>();
+  for (const [index, finding] of findings.entries()) {
+    const key = candidateContentKeys[index];
+    const owner = (finding.provenance as JsonObject).workerId;
+    if (key && typeof owner === "string") {
+      const owners = candidateOwners.get(key) ?? new Set<string>();
+      owners.add(owner);
+      candidateOwners.set(key, owners);
+    }
+  }
+  const candidateKeys = candidateContentKeys.map((key, index) => {
+    if (!key) return undefined;
+    const owner = (findings[index]!.provenance as JsonObject).workerId;
+    const owners = candidateOwners.get(key);
+    // Missing ownership can match a known worker only when it is unambiguous.
+    return JSON.stringify([
+      key,
+      owner ?? (owners?.size === 1 ? [...owners][0] : undefined),
+    ]);
   });
   const used = new Map<string, string | undefined>();
   if (mode !== "deep")

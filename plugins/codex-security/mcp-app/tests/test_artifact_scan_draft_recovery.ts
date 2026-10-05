@@ -1917,6 +1917,7 @@ test("worker: malformed deferred identity remains evidence without poisoning the
 
 async function recoverPublishedFindings(
   f: Awaited<ReturnType<typeof fixture>>,
+  stopped: boolean | "first" = false,
 ): Promise<
   Array<
     ReturnType<typeof findingFor> & {
@@ -1935,12 +1936,21 @@ from finalize_scan_contract import _recover_unsealed_findings
 root=Path(sys.argv[2])
 manifest=json.loads((root/"scan-manifest.json").read_text())
 findings=json.loads((root/"findings.json").read_text())
+if sys.argv[4] != "false":
+    from workbench_saved_results import merge_saved_results
+    coverage=json.loads((root/"coverage.json").read_text())
+    scan=manifest["scan"]
+    binding={"status":"interrupted","target":scan["target"],"scope":scan["scope"],"allowedTargetKinds":[scan["target"]["kind"]],"coverageMode":coverage["mode"]}
+    first=merge_saved_results(root,sys.argv[3],binding,[],[],stopped=True,reason="stopped")
+    replay=merge_saved_results(root,sys.argv[3],binding,[],[],stopped=True,reason="stopped",frozen_source_digests=first[0]["scan"]["preservedSources"])
+    manifest,findings,_=replay if sys.argv[4] == "true" else first
 manifest["scan"]["id"]=findings["scanId"]=sys.argv[3]
 _recover_unsealed_findings(manifest,findings,Path(sys.argv[1]).parent/"schemas",root,[])
 print(json.dumps(findings["findings"]))`,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       f.root,
       f.context.scanId!,
+      String(stopped),
     ],
   );
   return JSON.parse(stdout);
@@ -2196,6 +2206,104 @@ for (const layout of ["standard", "diff"] as const) {
       const recovered = await recoverPublishedFindings(f);
       assert.equal(recovered.length, 1);
       assert.deepEqual(recovered[0]!.identity, explicit.identity);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const owners of [
+    [undefined, "worker-a"],
+    ["worker-a", undefined],
+    ["worker-a", "worker-b"],
+  ]) {
+    for (const separate of owners.every((owner) => owner !== undefined)
+      ? [false]
+      : [false, true]) {
+      test(`${layout}: optional worker ownership ${owners.join("/")} retains candidate identity, separate=${separate}`, async (t) => {
+        const f = await fixture(t, layout);
+        const observations = owners.map((workerId, index) => ({
+          ...findingFor("shared-candidate"),
+          severity: { level: index === 0 ? "low" : "high" },
+          provenance: {
+            ...findingFor("shared-candidate").provenance,
+            ...(workerId === undefined ? {} : { workerId }),
+          },
+        }));
+        if (separate) {
+          for (const finding of observations)
+            await f.write({ ...f.draft({}, true), findings: [finding] });
+        } else {
+          await f.write({ ...f.draft({}, true), findings: observations });
+        }
+        for (const stopped of [false, true]) {
+          const findings = await recoverPublishedFindings(f, stopped);
+          const distinct = owners.every((owner) => owner !== undefined);
+          assert.equal(findings.length, distinct ? 2 : 1);
+          assert.equal(
+            findings.filter((finding) => finding.severity.level === "high")
+              .length,
+            1,
+          );
+        }
+      });
+    }
+  }
+}
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const owners of [
+    ["worker-a", undefined, "worker-b"],
+    ["worker-b", undefined, "worker-a"],
+    [undefined, "worker-a", "worker-b"],
+    [undefined, "worker-b", "worker-a"],
+    ["worker-a", "worker-b", undefined],
+    ["worker-b", "worker-a", undefined],
+  ]) {
+    test(`${layout}: unknown ownership does not bridge worker identities ${owners.join("/")}`, async (t) => {
+      const f = await fixture(t, layout);
+      await f.write({
+        ...f.draft({}, true),
+        findings: owners.map((workerId) => ({
+          ...findingFor("shared-candidate"),
+          provenance: {
+            ...findingFor("shared-candidate").provenance,
+            ...(workerId === undefined ? {} : { workerId }),
+          },
+        })),
+      });
+      const saved = await readJson(f.root, "findings.json");
+      const identities = new Map(
+        saved.findings.map(
+          (finding: {
+            provenance: { workerId?: string };
+            identity: { anchor: string; instance?: string };
+          }) => [finding.provenance.workerId, finding.identity],
+        ),
+      );
+      assert.notDeepEqual(
+        identities.get("worker-a"),
+        identities.get("worker-b"),
+      );
+      assert.notDeepEqual(
+        identities.get(undefined),
+        identities.get("worker-a"),
+      );
+      assert.notDeepEqual(
+        identities.get(undefined),
+        identities.get("worker-b"),
+      );
+      for (const stopped of [false, "first", true] as const) {
+        const findings = await recoverPublishedFindings(f, stopped);
+        assert.equal(findings.length, 3);
+        assert.deepEqual(
+          new Set(
+            findings.map((finding) =>
+              Reflect.get(finding.provenance, "workerId"),
+            ),
+          ),
+          new Set(owners),
+        );
+      }
     });
   }
 }
