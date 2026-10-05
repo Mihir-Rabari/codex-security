@@ -14,31 +14,21 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     source_plugin_version,
     stable_target_id,
     start_delivered_scan,
+    start_workspace_scan,
     write_checkpoint,
     write_completed_contract,
 )
 
 
 def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     return state_dir, scan_id, scan_dir
 
@@ -50,15 +40,7 @@ def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Pat
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     run_workbench(
         state_dir,
         "begin-deep-scan",
@@ -554,15 +536,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
             "--mode",
             mode,
         )
-        started = start_delivered_scan(
-            state_dir,
-            "--workspace-id",
-            workspace_id,
-            "--scan-root",
-            str(tmp_path / "scans"),
-        )
-        scan_id = str(started["results"]["scanId"])
-        scan_dir = Path(str(started["results"]["scanDir"]))
+        scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
         if mode == "deep":
             run_workbench(
                 state_dir,
@@ -603,19 +577,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
 def test_completion_populates_workbench_owned_unsealed_envelope(
     tmp_path: Path, omit_metadata: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     findings = json.loads((scan_dir / "findings.json").read_text())
@@ -1051,6 +1013,55 @@ def test_deep_completion_retries_transient_report_failure_within_one_invocation(
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["findingCount"] == 1
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("already_completed", [False, True])
+def test_completion_persists_optional_model_projection_warnings(
+    tmp_path: Path, mode: str, already_completed: bool
+) -> None:
+    start = (
+        _start_deep_scan_with_draft_findings if mode == "deep" else _start_scan_with_draft_findings
+    )
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    model = {"summary": "Queue producers and consumers cross a service boundary."}
+    manifest["scan"]["threatModel"] = model
+    manifest_path.write_text(json.dumps(manifest))
+    document = scan_dir / "threatmodel.md"
+    if already_completed:
+        completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+        assert completed["warnings"] == []
+    else:
+        document.write_text("# Provisional model\n")
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+    document.unlink()
+    document.mkdir()
+
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    assert completed["threatModelAvailable"] is True
+    assert "threatModelPath" not in completed
+    assert "threatModel" not in completed["artifacts"]
+    warnings = completed["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Automatic threat model save failed:")
+    assert json.loads(manifest_path.read_text())["scan"]["threatModel"] == model
+    if already_completed:
+        assert {name: (scan_dir / name).read_bytes() for name in before} == before
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["warnings"] == warnings
+    )
+    assert (
+        run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]["warnings"]
+        == warnings
+    )
 
 
 def test_completion_recovers_malformed_finding_identity(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
   deepMerge,
@@ -35,7 +36,8 @@ import {
   compactFinding,
   findingCatalogue,
   groupFindings,
-  type ComparisonFinding,
+  findingGroupRoots,
+  type ComparisonFinding as Finding,
 } from "./finding-catalogue.js";
 import {
   codexSecurityCredentialHome,
@@ -54,7 +56,6 @@ import {
 /** @internal */
 export { environmentEntry } from "./auth.js";
 
-type Finding = ComparisonFinding;
 type ReadOnlyCodexThreadSource = Extract<
   CodexSecurityThreadSource,
   | typeof CODEX_SECURITY_THREAD_SOURCES.scan
@@ -108,40 +109,20 @@ export interface ScanComparisonResult {
 export function unionFindingGroups(
   groups: readonly (readonly string[])[],
 ): string[][] {
-  const parents = new Map<string, string>();
-  const representative = (identity: string): string => {
-    let root = identity;
-    while (parents.get(root) !== root) root = parents.get(root)!;
-    let current = identity;
-    while (parents.get(current) !== current) {
-      const previous = parents.get(current)!;
-      parents.set(current, root);
-      current = previous;
-    }
-    return root;
-  };
+  const { parents, root: representative } = findingGroupRoots();
 
   for (const group of groups) {
     const [first, ...rest] = group.filter(
       (identity) => identity.trim().length > 0,
     );
     if (first === undefined) continue;
-    if (!parents.has(first)) parents.set(first, first);
     const firstRoot = representative(first);
     for (const identity of rest) {
-      if (!parents.has(identity)) parents.set(identity, identity);
       parents.set(representative(identity), firstRoot);
     }
   }
 
-  const united = new Map<string, string[]>();
-  for (const identity of parents.keys()) {
-    const root = representative(identity);
-    const group = united.get(root);
-    if (group === undefined) united.set(root, [identity]);
-    else group.push(identity);
-  }
-  return [...united.values()];
+  return [...Map.groupBy(parents.keys(), representative).values()];
 }
 
 /** @internal */
@@ -164,8 +145,8 @@ export interface ReadOnlyCodexOptions {
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  /** Passed through to Codex; support depends on the runtime, model, and provider. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -352,10 +333,8 @@ export async function matchScanFindingsInternal(
     outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
       target: "draft-7",
     }),
-    ...(options.cyberAccessProgram === undefined
-      ? {}
-      : { cyberAccessProgram: options.cyberAccessProgram }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    cyberAccessProgram: options.cyberAccessProgram,
+    signal: options.signal,
   };
   let prompt = comparisonPrompt(pages[0]!, 0, pages.length);
   progress("catalogue", 1);
@@ -533,10 +512,7 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    threadSource: ReadOnlyCodexThreadSource;
-  },
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
 ): Promise<ReturnType<ReadOnlyCodex["startThread"]>> {
   const config =
     options.config === undefined
@@ -546,9 +522,7 @@ async function startReadOnlyCodexThread(
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
-    options.reasoningEffort ??
-    (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
+    options.reasoningEffort ?? configuredModel?.reasoningEffort ?? "medium";
   const source = options.environment ?? process.env;
   const providerConfig =
     options.codex === undefined
@@ -578,15 +552,6 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const cyberFeatures: JsonObject = {};
-  for (const feature of [
-    "api_key_cyber_access_programs",
-    "api_key_model_discovery",
-  ]) {
-    if (effectiveFeatures?.[feature] !== undefined) {
-      cyberFeatures[feature] = effectiveFeatures[feature];
-    }
-  }
   const environment =
     options.codex === undefined
       ? await comparisonEnvironment(
@@ -626,7 +591,10 @@ async function startReadOnlyCodexThread(
           codex_security_surface: runtimeOptions.surface,
         },
         features: {
-          ...cyberFeatures,
+          api_key_cyber_access_programs:
+            effectiveFeatures?.["api_key_cyber_access_programs"],
+          api_key_model_discovery:
+            effectiveFeatures?.["api_key_model_discovery"],
           apps: false,
           code_mode: false,
           code_mode_only: false,
@@ -647,6 +615,7 @@ async function startReadOnlyCodexThread(
   return codex.startThread({
     threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
     sandboxMode: "read-only",
     approvalPolicy: "never",
@@ -669,10 +638,8 @@ export async function runReadOnlyCodex(
   const thread = await startReadOnlyCodexThread(options, runtimeOptions);
   const turn = await thread.run(prompt, {
     outputSchema,
-    ...(options.cyberAccessProgram === undefined
-      ? {}
-      : { cyberAccessProgram: options.cyberAccessProgram }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    cyberAccessProgram: options.cyberAccessProgram,
+    signal: options.signal,
   });
   return turn.finalResponse;
 }
@@ -855,21 +822,19 @@ function reconcileComparison(
       },
     ];
   });
+  const isSeparateGroup = ({
+    beforeOccurrenceId,
+    afterOccurrenceId,
+  }: ScanComparisonPair) =>
+    groupByOccurrence.get(beforeOccurrenceId) !==
+    groupByOccurrence.get(afterOccurrenceId);
   const comparison = {
     matches,
-    uncertain: response.uncertain.filter(
-      ({ beforeOccurrenceId, afterOccurrenceId }) =>
-        groupByOccurrence.get(beforeOccurrenceId) !==
-        groupByOccurrence.get(afterOccurrenceId),
-    ),
+    uncertain: response.uncertain.filter(isSeparateGroup),
     ...(response.related === undefined
       ? {}
       : {
-          related: response.related.filter(
-            ({ beforeOccurrenceId, afterOccurrenceId }) =>
-              groupByOccurrence.get(beforeOccurrenceId) !==
-              groupByOccurrence.get(afterOccurrenceId),
-          ),
+          related: response.related.filter(isSeparateGroup),
         }),
   };
   validateComparison(input, comparison, allowHistoricalUncertainty, true);
@@ -922,12 +887,7 @@ export function comparisonFindingGroups(
   comparison: ScanComparisonResult,
 ): string[][] {
   const findingIds = new Map(
-    [...input.before, ...input.after].flatMap((finding) =>
-      typeof finding["findingId"] === "string" &&
-      finding["findingId"].trim().length > 0
-        ? [[finding.occurrenceId, finding["findingId"]] as const]
-        : [],
-    ),
+    [...input.before, ...input.after].flatMap(findingIdEntry),
   );
   return comparison.matches.flatMap((match) => {
     const ids = [
@@ -1017,18 +977,11 @@ function requiredEvidenceRequest(
   omitted: Record<"before" | "after", ReadonlySet<string>>,
   requested: Record<"before" | "after", ReadonlyMap<string, EvidenceCursor>>,
 ): EvidenceRequest | undefined {
-  const required = {
-    before: new Set([
-      ...omitted.before,
-      ...matches.flatMap((match) => match.beforeOccurrenceIds),
-    ]),
-    after: new Set([
-      ...omitted.after,
-      ...matches.flatMap((match) => match.afterOccurrenceIds),
-    ]),
-  };
   for (const side of ["before", "after"] as const) {
-    for (const id of required[side]) {
+    const required = new Set(omitted[side]);
+    for (const match of matches)
+      for (const id of match[`${side}OccurrenceIds`]) required.add(id);
+    for (const id of required) {
       const cursor = requested[side].get(id);
       if (cursor !== undefined && cursor.nextOffset !== null) {
         return {
@@ -1060,8 +1013,8 @@ function requiredEvidenceRequest(
     ].join("\n"),
   );
   for (const side of ["before", "after"] as const) {
-    for (const id of required[side]) {
-      if (requested[side].has(id) || !omitted[side].has(id)) continue;
+    for (const id of omitted[side]) {
+      if (requested[side].has(id)) continue;
       const identities = missing[`${side}OccurrenceIds`];
       const length = characterCount(JSON.stringify(id));
       const separator = identities.length === 0 ? 0 : 1;
@@ -1160,12 +1113,7 @@ export async function comparisonEnvironment(
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {
-    for (const key of Object.keys(environment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete environment[key];
-      }
-    }
-    return environment;
+    return withoutOpenAiApiKeys(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
@@ -1183,13 +1131,9 @@ export async function comparisonEnvironment(
   if (existsSync(credentialHome)) {
     const canonicalCredentialHome = await prepareCredentialHome(source);
     signal?.throwIfAborted();
-    const storedEnvironment: Record<string, string> = { ...environment };
+    const storedEnvironment = withoutOpenAiApiKeys(environment);
     for (const key of Object.keys(storedEnvironment)) {
-      if (
-        ["CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"].includes(
-          key.toUpperCase(),
-        )
-      ) {
+      if (key.toUpperCase() === "CODEX_HOME") {
         delete storedEnvironment[key];
       }
     }
@@ -1206,11 +1150,7 @@ export async function comparisonEnvironment(
     ? expandHome(configuredHome, environment)
     : join(homedir(), ".codex");
   if (existsSync(join(codexHome, "auth.json"))) {
-    for (const key of Object.keys(environment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete environment[key];
-      }
-    }
+    return withoutOpenAiApiKeys(environment);
   }
   return environment;
 }
@@ -1244,12 +1184,7 @@ function validateComparison(
   );
   const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
   const findingIds = new Map(
-    [...input.before, ...input.after].flatMap((finding) =>
-      typeof finding["findingId"] === "string" &&
-      finding["findingId"].trim().length > 0
-        ? [[finding.occurrenceId, finding["findingId"]] as const]
-        : [],
-    ),
+    [...input.before, ...input.after].flatMap(findingIdEntry),
   );
   const matchedBefore = new Map<string, number>();
   const matchedAfter = new Map<string, number>();
@@ -1383,4 +1318,11 @@ function validateComparison(
     }
     relatedPairs.add(pair);
   }
+}
+
+function findingIdEntry(finding: Finding) {
+  return typeof finding["findingId"] === "string" &&
+    finding["findingId"].trim().length > 0
+    ? [[finding.occurrenceId, finding["findingId"]] as const]
+    : [];
 }

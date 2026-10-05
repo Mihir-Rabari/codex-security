@@ -28,8 +28,8 @@ defaultTest:
     - type: contains-json
       value: file://../../plugins/codex-security/schemas/triage-result.schema.json
     - type: javascript
-      value: file://./assertions/triage-io.js
+      value: file://./assertions/triage-io.mts
     - type: javascript
-      value: file://./assertions/calibration-evidence.js
+      value: file://./assertions/calibration-evidence.mts
 
 tests: file://./artifacts/calibration-smoke.yaml

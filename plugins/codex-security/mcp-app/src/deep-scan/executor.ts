@@ -53,6 +53,7 @@ export interface CodexSdkWorkerArtifactContext {
 
 interface CodexSdkWorkerRuntimeSettings {
   reasoningSummary?: string;
+  serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
     api_key_cyber_access_programs?: boolean;
@@ -120,6 +121,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
+          ...(runtimeSettings.serviceTier === undefined
+            ? {}
+            : { service_tier: runtimeSettings.serviceTier }),
           // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
           ...(this.modelSettings.reasoningEffort
             ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
@@ -162,27 +166,27 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
-          ...(runtimeSettings.cyberAccessProgram === undefined
-            ? {}
-            : { cyberAccessProgram: runtimeSettings.cyberAccessProgram }),
+          cyberAccessProgram: runtimeSettings.cyberAccessProgram,
         });
         let threadId: string | undefined;
         let turnCompleted = false;
         let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
         for await (const event of events) {
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            const fallbackError =
-              event.item.type === "error"
-                ? deepScanPermissionProfileFallbackError(event.item.message)
-                : undefined;
+          const item = event.type === "item.completed" ? event.item : event;
+          if (item.type === "error") {
+            const fallbackError = deepScanPermissionProfileFallbackError(
+              item.message,
+            );
             if (fallbackError) {
               controller.abort(fallbackError);
               throw fallbackError;
             }
+          }
+          if (event.type === "thread.started") {
+            threadId = event.thread_id;
+            await request.onThreadStarted?.(threadId);
+          } else if (event.type === "item.completed") {
             appendSafeItemDiagnostic(diagnostics, event.item);
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
@@ -191,13 +195,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           } else if (event.type === "turn.failed") {
             throw new Error(event.error.message);
           } else if (event.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(
-              event.message,
-            );
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
             // Codex exec currently emits retry-in-progress notifications as error events.
             lastStreamError = event.message;
             appendCodeModeFrameDiagnostic(diagnostics, event.message);
@@ -323,24 +320,17 @@ type TomlValue = string | number | boolean | TomlObject;
 type TomlObject = { [key: string]: TomlValue };
 
 function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
-  const filesystemEntries: Array<[string, TomlValue]> = [[":root", "read"]];
-  const seenFilesystemKeys = new Set<string>();
-
-  for (const key of sandbox.filesystemDenies) {
-    if (seenFilesystemKeys.has(key)) continue;
-    seenFilesystemKeys.add(key);
-    filesystemEntries.push([key, "deny"]);
-  }
-
-  if (sandbox.globScanMaxDepth !== undefined) {
-    filesystemEntries.push(["glob_scan_max_depth", sandbox.globScanMaxDepth]);
-  }
-
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries(filesystemEntries) as TomlObject,
+    filesystem: Object.fromEntries([
+      [":root", "read"],
+      ...Array.from(sandbox.filesystemDenies, (key) => [key, "deny"]),
+      ...(sandbox.globScanMaxDepth === undefined
+        ? []
+        : [["glob_scan_max_depth", sandbox.globScanMaxDepth]]),
+    ]),
     network: { enabled: false },
   };
 }
@@ -500,8 +490,13 @@ async function workerRuntimeSettings(
     isRecord(profile) && profile.model_reasoning_summary !== undefined
       ? profile.model_reasoning_summary
       : config.model_reasoning_summary;
+  const serviceTier =
+    isRecord(profile) && profile.service_tier !== undefined
+      ? profile.service_tier
+      : config.service_tier;
   const settings: CodexSdkWorkerRuntimeSettings = {
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
+    ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
@@ -672,10 +667,7 @@ function resolveFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = join(resolve(originalCwd, directory), executableName);
     if (isExecutableFile(candidate)) return candidate;
   }
   return undefined;
@@ -687,10 +679,7 @@ function resolveWindowsDirectFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = join(resolve(originalCwd, directory), executableName);
     if (!isWindowsAppsPath(candidate) && existsSync(candidate))
       return candidate;
   }
@@ -703,7 +692,7 @@ function resolveWindowsCodexFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const absoluteDirectory = absoluteSearchDirectory(directory, originalCwd);
+    const absoluteDirectory = resolve(originalCwd, directory);
     const directBinary = join(absoluteDirectory, "codex.exe");
     if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
       return directBinary;
@@ -771,13 +760,6 @@ function isExecutableFile(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function absoluteSearchDirectory(
-  directory: string,
-  originalCwd: string,
-): string {
-  return resolve(originalCwd, directory || ".");
 }
 
 function absoluteCodexPath(

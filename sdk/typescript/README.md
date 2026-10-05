@@ -248,11 +248,13 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 ```
 
-Use device authentication on remote or headless machines:
+On remote or headless machines, use device auth if your workspace allows it:
 
 ```bash
 npx @openai/codex-security login --device-auth
 ```
+
+If device auth is disabled, [sign in over SSH](#remote-login-with-ssh-forwarding).
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To save a key, pass it on stdin:
 
@@ -263,6 +265,28 @@ printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 Environment API keys apply to the current command; only `login --with-api-key`
 saves them. Pass Codex access tokens on stdin to `login --with-access-token`.
 Access-token environment variables are not scan API keys.
+
+### Remote login with SSH forwarding
+
+Use an SSH tunnel when device auth is disabled.
+
+On your local machine, replace `user@remote-host` with your SSH address and run:
+
+```bash
+ssh -L 1455:localhost:1455 user@remote-host
+```
+
+Run login in that SSH session:
+
+```bash
+npx @openai/codex-security login
+```
+
+Open the sign-in URL in your local browser. Keep SSH connected until login finishes.
+
+See the [authentication guide](https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh).
+
+### Native command authentication and other providers
 
 SDK callers can select native command authentication through
 `codexOverrides.model_providers.<id>.auth` and `model_provider` (including a
@@ -514,13 +538,13 @@ npx @openai/codex-security policy . --path services/api \
 
 The artifact directory contains:
 
-| File                   | Purpose                                                   |
-| ---------------------- | --------------------------------------------------------- |
-| `SECURITY.md`          | Editable policy draft.                                    |
-| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
-| `project-spec.md`      | System description and security boundaries.               |
-| `previous-SECURITY.md` | Original policy used for the diff.                        |
-| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+| File                   | Purpose                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                                                  |
+| `threatmodel.md`       | Detailed threat model with source references.                                           |
+| `project-spec.md`      | System description and security boundaries.                                             |
+| `previous-SECURITY.md` | Original policy used for the diff.                                                      |
+| `policy-draft.json`    | Target, policy hashes, revision, retained threat model, stage status, and review notes. |
 
 Keep supporting documents private until reviewed for disclosure. A generated
 threat scenario is neither owner approval nor a confirmed vulnerability.
@@ -945,15 +969,16 @@ max_concurrent_threads_per_session = 9
 sandbox = "unelevated"
 ```
 
-Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
+Use `--model MODEL` to choose a model and `--effort EFFORT`
 for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
 `policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
 `scans match`, and `scans compare`.
 
-Model IDs are passed through to Codex, including `gpt-6-astra`, `gpt-6.1-sol`,
-and `gpt-6-luna`; availability depends on your credentials and inference provider.
-For Astra and GPT-6.1 Sol, use `low`, `medium`, `high`, `xhigh`, or `max`, as
-documented in the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
+Model IDs and reasoning effort values are passed through to Codex unchanged.
+The wrapper accepts values such as `minimal`, `none`, and `high`, as
+well as future values, without requiring a wrapper update. Supported combinations
+depend on the model, inference provider, installed Codex version, and credentials.
+Codex and provider errors are reported without substituting another model or effort.
 Omitting these flags preserves each command's defaults: scans, policy generation,
 validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
 matching and severity classification use Codex's configured model and `medium` effort.
@@ -1797,13 +1822,79 @@ contain them. Press `d` during a scan for details, then `a` for all sources,
 
 ### Exports and CI
 
-`export` writes CSV, JSON, or SARIF from a completed, sealed scan, defaulting to
-the current repository's latest completed scan. It doesn't start Codex or load
-credentials. Use `--output -` for stdout and `--source-root PATH` to add SARIF
-source-line fingerprints. `export --help` lists all options.
+`export` reads saved results without starting Codex or loading credentials.
+It defaults to the current repository's latest completed scan. Select a result
+directory positionally, or use `--scan ID` with a scan ID or unique prefix;
+these source selectors cannot be combined. `--artifact findings` is the default
+and requires sealed results. Findings support `--export-format csv|json|sarif`,
+with `sarif` as the default. Use `--source-root PATH` to add SARIF source-line
+fingerprints.
+
+Standard, Deep, Diff, and policy workflows save threat models with
+their results. They also write `threatmodel.md`; if that file cannot be written,
+the saved model remains available for export. Component and bulk scans keep a
+separate model for each child run. New documents record the model and scan
+scopes and identify provisional or recovered content. Some results have no
+saved model.
+
+Use `--artifact threat-model` to export the retained model as Markdown. The
+format is `md` and the default destination is `./threatmodel.md`. Explicitly
+selected results can expose a saved model before scan completion or after a
+later failure. Policy result directories and historical saved Markdown models
+are also supported. A historical document in a sealed scan must be listed in
+the manifest with a matching digest. A missing model returns an error; export
+does not substitute an older run or generate a new model.
+
+```bash
+codex-security export --artifact threat-model
+codex-security export --scan SCAN_ID --artifact threat-model --output docs/threatmodel.md
+codex-security export /path/to/policy-results --artifact threat-model --output -
+codex-security scan . --knowledge-base docs/threatmodel.md
+```
+
+`--output -` emits only artifact content, with diagnostics on stderr. Markdown
+and CSV stdout cannot be combined with JSON command output. Exporting into a
+repository does not make the document automatic scan input; use the existing
+`--knowledge-base` option when you want to provide it as context.
+
+`ScanResult.threatModel` contains the saved structured model or Markdown.
+`threatModelPath` points to its current document, including supported historical
+filenames. Either can be null. The model remains exportable when the document
+could not be written. Scan JSON and policy results expose these fields. History
+reports model availability, provenance, and the document path without including
+the model body. Policy generation saves its model before drafting `SECURITY.md`,
+so a later drafting failure does not discard it.
+
+SDK scan methods verify model paths before returning them. A manually
+constructed `ScanResult` uses the `threatModelPath` supplied in its options, or
+`null` if omitted.
+
+The SDK offers the same offline export without an authenticated session:
+
+```ts
+import { exportArtifact } from "@openai/codex-security";
+
+const exported = await exportArtifact({
+  source: { directory: "/path/to/scan-results" }, // Or { scanId: "SCAN_ID" }.
+  artifact: "threat-model",
+  output: "/path/to/threatmodel.md",
+});
+console.log(exported.path, exported.provenance);
+```
+
+`exportArtifact` also supports findings with `format: "csv" | "json" | "sarif"`.
+For threat-model file exports, returned provenance belongs to the same saved
+snapshot as the exported document. `output: "-"` streams to stdout and returns
+null path/provenance. `pythonPath` selects the helper interpreter and `signal`
+cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+CSV escapes spreadsheet formula prefixes and literal leading apostrophes with
+an extra apostrophe; import removes that escape. Older CSV exports cannot
+distinguish some literal apostrophes from escapes. Use the JSON export when
+recovering those values from an older scan. Distinct CSV occurrence IDs are
+retained even when their finding IDs match, including when publishing CSV.
 
 For CI, save output outside the checkout and set a severity threshold:
 
@@ -2105,6 +2196,12 @@ an authenticated proxy. It does not add authentication or broaden the default
 network binding.
 
 ### API
+
+Mutation requests to `POST /v1/bulk/findings` and `POST /v1/dedupe-groups` require
+`Content-Type: application/json`; charset parameters are accepted. Other media
+types, including a missing content type, return HTTP 400 `invalid_request`
+before embedding or storage. The API remains unauthenticated and requires an
+authenticated TLS proxy before sharing access.
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
@@ -2695,8 +2792,8 @@ Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 without a state override, the service uses the same default state directory as
 the CLI. These settings also work on Windows.
 
-HTTP routing, orchestration, embedding generation, and the SQLite adapter live
-separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
+HTTP routing, embedding generation, and the SQLite adapter live
+separately under `src/server/`. `startFindingsServer` receives a `FindingEmbedder`
 whose `embed(findings)` method returns one `{ model, vector }` per finding in
 input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
@@ -2733,6 +2830,7 @@ runtime dependencies.
 ## Containerized bulk scans
 
 Create `repositories.csv` as described under [Bulk scans](#bulk-scans).
+Use device login only if your workspace allows it.
 With a published image, run from the Codex Security repository root:
 
 ```bash

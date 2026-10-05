@@ -1,9 +1,11 @@
+import { gitText } from "../../../plugins/codex-security/mcp-app/scripts/git.mjs";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
+import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
 export const notesPath = ".github/release-notes.md";
@@ -223,11 +225,7 @@ export function createReleasePlan(history, previous = null) {
 
 export function createGitRepository(directory) {
   const git = (...args) =>
-    execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -685,10 +683,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
   };
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   const directory = fileURLToPath(new URL("../../..", import.meta.url));
   const repository = process.env.GITHUB_REPOSITORY ?? "openai/codex-security";
   const token =
