@@ -196,6 +196,7 @@ def test_missing_finding_identity_is_stable_across_publication_retry(tmp_path: P
         path = scan_dir / "findings.json"
         document = json.loads(path.read_text())
         del document["findings"][0]["identity"]
+        document["findings"][0]["provenance"]["candidateId"] = "candidate-a"
         path.write_text(json.dumps(document))
         if retry:
             result = run_workbench_with_fault(
@@ -244,6 +245,35 @@ def test_legacy_checkpoint_keeps_its_published_identity(tmp_path: Path):
     findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
     assert len(findings) == 1
     assert findings[0]["identity"] == finding["identity"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("candidate", [False, True])
+def test_stopped_finding_keeps_explicit_identity_across_line_move(
+    tmp_path: Path, retry: bool, candidate: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    if candidate:
+        finding["provenance"]["candidateId"] = "candidate-a"
+    finding["identity"] = {"anchor": "stable-candidate", "instance": "reported"}
+    finding["locations"][0].update(startLine=1, endLine=1)
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[finding]))
+    finding["locations"][0].update(startLine=2, endLine=2)
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["identity"] == finding["identity"]
+    assert findings[0]["locations"] == finding["locations"]
+    assert any(
+        previous["locations"][0]["startLine"] == 1
+        for previous in findings[0]["provenance"]["previousFindings"]
+    )
 
 
 @pytest.mark.parametrize("separate_workers", [False, True])
@@ -774,6 +804,7 @@ def test_restored_identity_does_not_absorb_a_sibling_without_candidate(
         second["title"] = "Beta"
         second["severity"]["level"] = "high"
         del second["provenance"]["candidateId"]
+        second["identity"] = {"anchor": "beta"}
         if source == "worker":
             for name in ("findings.json", "scan-manifest.json", "coverage.json"):
                 (scan_dir / name).unlink()

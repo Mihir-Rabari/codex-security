@@ -610,8 +610,10 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ensure_finding_identity(finding: Any) -> None:
+def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
     if not isinstance(finding, dict) or "identity" in finding:
+        return
+    if candidate_only and not finding_candidate_id(finding):
         return
     extensions = finding.get("extensions")
     source = str(
@@ -1373,6 +1375,7 @@ def merge_saved_results(
         return key
 
     represented: dict[str, str | None] = {}
+    represented_explicit: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
@@ -1386,7 +1389,7 @@ def merge_saved_results(
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
         if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0])
+            _ensure_finding_identity(document["findings"][0], candidate_only=True)
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
@@ -1432,7 +1435,18 @@ def merge_saved_results(
                                 (recovered, retained_owner)
                             )
     restorations = []
+    # The publisher saves a checkpoint copy of the canonical document. A malformed
+    # row in either copy must not borrow an identity from another row in that document.
+    canonical_findings = {
+        id(finding)
+        for _, draft, _ in all_sources
+        if parent_is_canonical and draft == parent
+        for finding in draft["findings"]
+    }
     for matches in observations.values():
+        raw = next((item for item in matches if "identity" not in item[0]), None)
+        if raw is None:
+            continue
         identities = {
             _encoded([recovered["identity"], finding["provenance"].get("preservedIdentity")]): (
                 recovered["identity"],
@@ -1441,9 +1455,13 @@ def merge_saved_results(
             for finding, _ in matches
             if isinstance(finding.get("identity"), dict)
             and (recovered := recovered_finding(finding))
+            and not (
+                id(raw[0]) in canonical_findings
+                and not finding_candidate_id(raw[0])
+                and id(finding) in canonical_findings
+            )
         }
-        raw = next((item for item in matches if "identity" not in item[0]), None)
-        if len(identities) != 1 or raw is None:
+        if len(identities) != 1:
             for finding, owner in matches:
                 if "identity" not in finding and (normalized := recovered_finding(finding)):
                     explicit_identities.setdefault(_finding_key(normalized), []).append(
@@ -1646,12 +1664,37 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
+
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
+    def explicit_finding_key(finding: dict[str, Any], owner: str | None = None) -> str | None:
+        identity = finding.get("identity")
+        if not isinstance(identity, dict) or id(finding) in inferred_identities:
+            return None
+        recovered = recovered_finding(finding)
+        if recovered is None:
+            return None
+        provenance = finding.get("provenance", {})
+        return _digest(
+            [
+                provenance.get("workerId") or owner,
+                finding_candidate_id(finding),
+                recovered["ruleId"],
+                recovered["identity"],
+            ]
+        )
+
     if parent:
         for finding in parent["findings"]:
             if recovered_finding(finding):
                 canonical_key = _finding_key(finding)
+                identity_key = explicit_finding_key(finding)
+                if identity_key is not None:
+                    if identity_key not in represented_explicit:
+                        represented_explicit[identity_key] = canonical_key
+                    elif represented_explicit[identity_key] != canonical_key:
+                        # Reused identities at distinct canonical locations are ambiguous.
+                        represented_explicit[identity_key] = None
                 for retained, _ in _retained_findings(finding):
                     retained_key = _finding_key(retained)
                     if retained is not finding:
@@ -1900,7 +1943,7 @@ def merge_saved_results(
                     "identity" not in value or id(value) in inferred_identities
                 ):
                     inferred_identities[id(finding)] = finding
-                _ensure_finding_identity(finding)
+                _ensure_finding_identity(finding, candidate_only=True)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -1976,6 +2019,12 @@ def merge_saved_results(
                 if key in represented:
                     mapped_key = represented[key]
                     historical_contents = represented_history.get(key, set())
+                elif (
+                    identity_key := explicit_finding_key(value, worker_id)
+                ) in represented_explicit:
+                    mapped_key = represented_explicit[identity_key]
+                    historical_contents = set()
+                    represented_by_parent = source_order["parent"] >= source_order[relative]
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     if candidate_key not in represented_candidates:
@@ -1987,7 +2036,9 @@ def merge_saved_results(
                     historical_contents = set()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
+                    represented_by_parent = represented_by_parent or (
+                        _digest(_finding_content(value)) in historical_contents
+                    )
             canonical_candidate = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
                 if worker_id and candidate_id

@@ -292,25 +292,40 @@ describe("plugin runtime preparation", () => {
       ),
     );
     const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const source =
-      /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
+    const sources = [
+      "buildFindings",
+      "scanFindingIdentity",
+      "findingCandidateId",
+      "semanticIdentifier",
+      "isRecord",
+    ].map((name) => {
+      const source = new RegExp(`function ${name}\\([^]*?\\n\\}`, "u").exec(
         runtime,
       )?.[0];
-    expect(source).toBeDefined();
+      expect(source).toBeDefined();
+      return source;
+    });
     const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string, fallback: string) => value || fallback) as (
+      `${sources.join("\n")}\nreturn buildFindings;`,
+    )() as (
       findings: Array<{
+        ruleId: string;
         title: string;
+        provenance: { source: string };
+        locations: Array<{ path: string; startLine: number }>;
         extensions: { candidateId: string };
       }>,
     ) => Array<{ identity: { anchor: string } }>;
 
-    const findings = buildFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
-    ]);
+    const findings = buildFindings(
+      ["candidate-a", "candidate-b"].map((candidateId) => ({
+        ruleId: "synthetic-rule",
+        title: "Same finding",
+        provenance: { source: "local_plugin" },
+        locations: [{ path: "app.py", startLine: 1 }],
+        extensions: { candidateId },
+      })),
+    );
 
     expect(findings.map((finding) => finding.identity.anchor)).toEqual([
       "candidate-a",
