@@ -5238,7 +5238,8 @@ export async function main(
             );
           }
           const directory = dependencies.currentDirectory();
-          const repository =
+          const repository = directory;
+          const gitRepository =
             options.assessPatchRisk || options.createPr
               ? await patchRepositoryRoot(directory, dependencies)
               : directory;
@@ -5263,14 +5264,14 @@ export async function main(
               : withoutLinearCredentials(dependencies.environment);
           const patchGitBase =
             options.assessPatchRisk || options.createPr
-              ? await snapshotPatchTree(repository, dependencies)
+              ? await snapshotPatchTree(gitRepository, dependencies)
               : undefined;
           const patchBase =
             patchGitBase ??
             (await snapshotPatchState(repository, dependencies));
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
-              repository,
+              gitRepository,
               patchGitBase!,
               dependencies,
             );
@@ -5278,7 +5279,7 @@ export async function main(
           const identifier = directPatchIdentifier(positionals, imports);
           const publication = options.createPr
             ? await preparePatchPublication(
-                repository,
+                gitRepository,
                 identifier ?? directPatchDigest(positionals, imports),
                 dependencies,
               )
@@ -5300,7 +5301,7 @@ export async function main(
           );
           if (!jsonOutput) output.write(report.text());
           const files = await changedPatchFiles(
-            repository,
+            gitRepository,
             patchBase,
             dependencies,
           );
@@ -5326,7 +5327,7 @@ export async function main(
           const patchRisk = options.assessPatchRisk
             ? await runPatchRiskAssessment(
                 {
-                  repository,
+                  repository: gitRepository,
                   environment,
                   base: patchGitBase!,
                   files,
@@ -5339,7 +5340,7 @@ export async function main(
             : undefined;
           if (publication) {
             await createPatchPullRequest(
-              repository,
+              gitRepository,
               publication,
               files,
               errorOutput,
@@ -6701,6 +6702,8 @@ function directPatchDigest(
 interface PatchPublication {
   branch: string;
   dirtyFiles: Set<string>;
+  tree: string;
+  root: string;
 }
 
 async function patchPublicationDestination(
@@ -6838,7 +6841,7 @@ async function preparePatchPublication(
     if (/[RC]/u.test(entry.slice(0, 2)))
       dirtyFiles.add(relative(repository, resolve(root, paths[++index]!)));
   }
-  return { branch, dirtyFiles };
+  return { branch, dirtyFiles, tree, root };
 }
 
 async function publishPatchBranch(
@@ -6992,8 +6995,34 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, dirtyFiles } = publication;
-  const dirty = files.filter((file) => dirtyFiles.has(file));
+  const { branch, dirtyFiles, tree, root } = publication;
+  const deleted =
+    dirtyFiles.size === 0
+      ? ""
+      : await dependencies.runRepositoryCommand(
+          "git",
+          [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=D",
+            "-z",
+            tree,
+            await snapshotPatchTree(repository, dependencies),
+          ],
+          root,
+          { trim: false, maxBuffer: Infinity },
+        );
+  // A deleted dirty source may have been moved into a reported clean path.
+  const dirty = [
+    ...new Set([
+      ...files,
+      ...deleted
+        .split("\0")
+        .filter(Boolean)
+        .map((file) => relative(repository, resolve(root, file))),
+    ]),
+  ].filter((file) => dirtyFiles.has(file));
   if (dirty.length > 0) {
     throw new CodexSecurityError(
       `Cannot publish files with uncommitted changes before patching: ${dirty.join(", ")}. Local edits and patches were kept; review and publish them separately.`,

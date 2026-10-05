@@ -729,6 +729,7 @@ describe("scan and patch workflow", () => {
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
+            if (args.includes("--cached")) return "";
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
             }
@@ -1994,6 +1995,7 @@ describe("scan and patch workflow", () => {
       {
         result: resultWithFindings(["high"]),
         onRepositoryCommand: (command, args) => {
+          if (args.includes("--cached")) return "";
           published ||= command === "gh" && args[1] === "create";
           return command === "gh" && args[1] === "create"
             ? url
@@ -2344,6 +2346,143 @@ describe("scan and patch workflow", () => {
 
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories();
+  test("preserves direct patch scope when optional assessment or publication is enabled", async () => {
+    const observations = [];
+    for (const flag of [undefined, "--assess-patch-risk", "--create-pr"]) {
+      const root = await fixtures.create("patch-direct-scope-");
+      const directory = join(root, "package");
+      await mkdir(directory);
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "app.ts"), "unsafe\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const remote = await fixtures.create("patch-direct-scope-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json", ...(flag ? [flag] : [])],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? ""
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            expect(output?.appServer?.directory).toBe(directory);
+            await writeFile(join(directory, "app.ts"), "fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+        {
+          configure: (current) => {
+            current.assessPatchRisk = async (request) => {
+              expect(request.repository).toBe(root);
+              expect(request.files).toEqual(["package/app.ts"]);
+              return patchRiskAssessment();
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      const result = JSON.parse(outcome.stdout);
+      observations.push({
+        flag,
+        repository: relative(directory, result.repository),
+        files: result.files,
+      });
+    }
+    expect(observations).toEqual([
+      { flag: undefined, repository: "", files: ["package/app.ts"] },
+      {
+        flag: "--assess-patch-risk",
+        repository: "",
+        files: ["package/app.ts"],
+      },
+      { flag: "--create-pr", repository: "", files: ["package/app.ts"] },
+    ]);
+  });
+
+  test.each([
+    "staged",
+    "unstaged",
+    "assume-unchanged",
+    "clean",
+    "deleted-before",
+  ])("handles a renamed file with %s pre-patch state", async (dirty) => {
+    const directory = await fixtures.create("patch-renamed-local-edits-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(directory, "old.ts"), "unsafe\noriginal\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const hasLocalEdits = dirty !== "clean" && dirty !== "deleted-before";
+    const content = hasLocalEdits ? "synthetic local edit" : "original";
+    if (hasLocalEdits)
+      await writeFile(join(directory, "old.ts"), `unsafe\n${content}\n`);
+    if (dirty === "deleted-before") await rm(join(directory, "old.ts"));
+    if (dirty === "staged") git("add", ".");
+    if (dirty === "assume-unchanged")
+      git("update-index", "--assume-unchanged", "old.ts");
+    const head = git("rev-parse", "HEAD");
+    const index = git("write-tree");
+    const remote = await fixtures.create("patch-renamed-local-remote-");
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    const result = resultWithFindings(["high"]);
+    result.findings.findings[0]!.locations[0]!.path = "old.ts";
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? ""
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          await rm(join(directory, "old.ts"), { force: true });
+          await writeFile(join(directory, "new.ts"), `fixed\n${content}\n`);
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["new.ts"],
+                  verification: "Synthetic regression passed.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(hasLocalEdits ? 2 : 0);
+    if (hasLocalEdits) {
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(git("write-tree")).toBe(index);
+      expect(git("ls-remote", "origin")).toBe("");
+    } else {
+      expect(git("show", "HEAD:new.ts")).toBe(`fixed\n${content}`);
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    }
+    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+      `fixed\n${content}\n`,
+    );
+  });
+
   afterEach(fixtures.cleanup);
   test.each(["commit", "commit result", "checkpoint"])(
     "preserves local work when patch %s fails",
