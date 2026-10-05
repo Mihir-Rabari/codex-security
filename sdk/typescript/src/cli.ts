@@ -5261,9 +5261,13 @@ export async function main(
             filesChanged: 0,
             files: [],
           };
+          const gitRepository =
+            options.assessPatchRisk || options.createPr
+              ? await patchRepositoryRoot(repository, dependencies)
+              : repository;
           const validationPrompt = await resolvePatchValidationPrompt(
             options.validationPromptFile,
-            repository,
+            gitRepository,
             repository,
           );
           const imports = linear
@@ -5280,10 +5284,6 @@ export async function main(
             imports.length === 0
               ? undefined
               : withoutLinearCredentials(dependencies.environment);
-          const gitRepository =
-            options.assessPatchRisk || options.createPr
-              ? await patchRepositoryRoot(repository, dependencies)
-              : repository;
           let commandDirectory = repository;
           let commandEnvironment: NodeJS.ProcessEnv | undefined;
           const gitDependencies: CliDependencies =
@@ -5405,7 +5405,12 @@ export async function main(
                       ? environment
                       : {
                           ...(environment ?? dependencies.environment),
-                          ...commandEnvironment,
+                          ...Object.fromEntries(
+                            Object.entries(commandEnvironment).filter(
+                              ([name]) =>
+                                dependencies.environment[name] !== undefined,
+                            ),
+                          ),
                         },
                   base: patchGitBase!,
                   files,

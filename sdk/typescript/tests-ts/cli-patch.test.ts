@@ -426,7 +426,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     env: environment,
                     encoding: "utf8",
                   }).replace(/\n$/u, ""),
-                ).toBe(repository);
+                ).toBe(
+                  kind === "nested Git metadata after patch"
+                    ? subdirectory
+                    : repository,
+                );
                 const artifact = JSON.parse(
                   output.appServer.prompt
                     .split("\n")
@@ -2988,6 +2992,143 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     }
   });
 });
+
+test.each(["linked", "explicit"])(
+  "preserves the selected worktree boundary for an external %s validation prompt",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-external-validation-");
+    const repository = join(root, "repository");
+    const invocation = join(root, "invocation");
+    const outside = join(root, "outside");
+    const gitEnvironment = {
+      GIT_DIR: join(repository, ".git"),
+      GIT_WORK_TREE: repository,
+    };
+    let started = false;
+    try {
+      for (const directory of [repository, invocation, outside])
+        await mkdir(directory);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic initial commit");
+      await writeFile(
+        join(outside, "validation.md"),
+        "Run the synthetic regression test.",
+      );
+      await symlink(
+        outside,
+        join(repository, "validation"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--assess-patch-risk",
+          "--validation-prompt-file",
+          join(
+            kind === "linked" ? join(repository, "validation") : outside,
+            "validation.md",
+          ),
+          "--json",
+        ],
+        {
+          currentDirectory: invocation,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, directory, options) =>
+            runGitRepositoryCommand(command, args, directory, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: (_args, output) => {
+            started = true;
+            expect(output?.appServer?.prompt).toContain(
+              "Run the synthetic regression test.",
+            );
+            return 1;
+          },
+        },
+      );
+      expect(started, outcome.stderr).toBe(kind === "explicit");
+      if (kind === "linked")
+        expect(outcome.stderr).toContain("directory links outside");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  "ordinary",
+  "removed component",
+  "explicit Git environment",
+  "removed component with explicit Git environment",
+])(
+  "preserves disposable assessment worktrees and explicit Git settings: %s",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-disposable-assessment-");
+    const repository = join(root, "repository");
+    const component = join(repository, "sub");
+    const disposable = join(root, "disposable");
+    const gitEnvironment = kind.includes("explicit Git environment")
+      ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
+      : {};
+    try {
+      await mkdir(component, { recursive: true });
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(component, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic initial commit");
+      git("worktree", "add", "--detach", disposable, "HEAD");
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: component,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, directory, options) =>
+            runGitRepositoryCommand(command, args, directory, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output, environment) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const selected = gitText(
+                ["-C", disposable, "rev-parse", "--show-toplevel"],
+                { cwd: output.appServer.directory, env: environment },
+              ).trim();
+              expect(selected).toBe(
+                kind.includes("explicit Git environment")
+                  ? repository
+                  : disposable,
+              );
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              if (kind.startsWith("removed component"))
+                await rm(component, { recursive: true });
+              else await writeFile(join(component, "app.ts"), "fixed\n");
+              output?.stdout.write("Patch complete.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories();
