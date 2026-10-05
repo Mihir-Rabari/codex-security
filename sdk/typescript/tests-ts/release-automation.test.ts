@@ -4181,7 +4181,7 @@ describe("GitHub release workflow safeguards", () => {
     ].map(
       (path) =>
         [
-          "test-consumed Markdown",
+          `test-consumed Markdown (${path})`,
           "pull_request",
           false,
           [path],
