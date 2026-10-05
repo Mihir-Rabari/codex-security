@@ -5,12 +5,16 @@ prompts:
   - file://./prompts/triage-request.txt
 
 providers:
-  - id: openai:codex-sdk:gpt-5.5
+  - id: file://./scripts/triage-provider.js
     label: "Codex SDK triage-finding"
     config:
-      working_dir: "{{env.TRIAGE_RUNTIME_ROOT}}"
       skip_git_repo_check: true
       approval_policy: never
+      cli_env:
+        HTTP_PROXY: "{{env.HTTP_PROXY}}"
+        HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
+        ALL_PROXY: "{{env.ALL_PROXY}}"
+        NO_PROXY: "{{env.NO_PROXY}}"
       cli_config:
         default_permissions: triage_runtime_only
         permissions:

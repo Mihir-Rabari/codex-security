@@ -3,7 +3,7 @@
   "private": true,
   "description": "Promptfoo evals for the Codex Security triage-finding skill",
   "scripts": {
-    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3",
+    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3 && pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile && node ../../plugins/codex-security/mcp-app/scripts/build_native.mjs",
     "calibration:generate": "node scripts/generate-calibration-tests.js",
     "calibration:hydrate": "node scripts/hydrate-calibration-repos.js",
     "sastbench:install": "node sastbench/scripts/install-sastbench.js",
@@ -14,7 +14,7 @@
     "test:calibration-generate": "node scripts/test-generate-calibration-tests.js",
     "test:calibration-hydrate": "node scripts/test-hydrate-calibration-repos.js",
     "test:dataset": "node scripts/test-calibration-dataset.js",
-    "test:deterministic": "node scripts/test-app-surface-instructions.js && node scripts/test-triage-io.js && node scripts/test-calibration-dataset.js && node scripts/test-generate-calibration-tests.js && node scripts/test-calibration-evidence.js && node scripts/test-hydrate-calibration-repos.js && node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js && node scripts/test-intake-graders.js && node --test scripts/test-promptfoo-runner.js",
+    "test:deterministic": "node scripts/test-app-surface-instructions.js && node scripts/test-triage-io.js && node scripts/test-calibration-dataset.js && node scripts/test-generate-calibration-tests.js && node scripts/test-calibration-evidence.js && node scripts/test-hydrate-calibration-repos.js && node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js && node scripts/test-intake-graders.js && node --test scripts/test-promptfoo-runner.js scripts/test-triage-provider.js",
     "test:instructions": "node scripts/test-app-surface-instructions.js",
     "test:sastbench": "node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js",
     "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node scripts/run-promptfoo.js validate config -c ./promptfooconfig.yaml",

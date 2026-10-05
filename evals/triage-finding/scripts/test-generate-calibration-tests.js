@@ -77,3 +77,12 @@ const selected = variants.find(({ testCase, variant }) => testCase.case_id === "
 assert.ok(smokeYaml.includes(`case_id: ${variantCaseId(selected.testCase, selected.variant)}`));
 
 console.log("calibration test generation matches tracked YAML and supports filtered smoke output");
+
+const relativeOutput = path.join(tmpDir, "relative.yaml");
+execFileSync(process.execPath, [generator, "--output", relativeOutput, "--repo-root", "./scratch-repos"], { cwd: tmpDir });
+const explicitRoot = path.join(tmpDir, "scratch-repos");
+const relativeYaml = fs.readFileSync(relativeOutput, "utf8");
+assert.ok(relativeYaml.includes(`target_repo_root: ${JSON.stringify(explicitRoot)}`));
+for (const job of plannedJobs(JSON.parse(fs.readFileSync(dataset, "utf8")), { repoRoot: explicitRoot })) {
+  assert.ok(relativeYaml.includes(`target_repo: ${JSON.stringify(job.targetDir)}`));
+}

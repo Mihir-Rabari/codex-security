@@ -10,7 +10,7 @@ Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the re
 
 The eval directory has its own `pnpm-workspace.yaml` so pnpm treats it as a small standalone workspace, independent of the SDK and MCP app packages.
 
-Install the local eval runner:
+Install the local eval runner and build the host native helpers with the pinned Rust toolchain from [the native build guide](../../plugins/codex-security/native/README.md). Rerun setup after changing native source or its toolchain:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
@@ -40,7 +40,7 @@ Run one case while iterating:
 pnpm --dir evals/triage-finding run eval --filter-metadata case_id=sarif-redirects
 ```
 
-The runner stages this checkout’s triage skill, shared references, schemas, and synthetic fixtures in a temporary directory. Codex reads the staged skill explicitly; installed plugins and memories are disabled. The read-only permission profile allows the staged runtime and, for calibration, only the selected repository checkout. Dataset labels and sibling checkouts remain outside those roots. The runner removes its temporary directory after normal completion or an interrupt.
+The runner stages this checkout’s triage skill, shared references, schemas, and synthetic fixtures in a temporary directory, and builds the current MCP helper source into that runtime so the skill can resolve SECURITY.md policies. Codex reads the staged skill explicitly; installed plugins and memories are disabled. The read-only permission profile allows the staged runtime and, for calibration, only the selected repository checkout. Dataset labels and sibling checkouts remain outside those roots. The runner removes its temporary directory after normal completion or an interrupt. The provider binds to the current runtime when called, so Promptfoo resume and retry operations use a fresh runtime instead of a deleted directory from the saved configuration.
 
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
 

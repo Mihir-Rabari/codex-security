@@ -32,48 +32,67 @@ for (const [signal, exitCode] of [
   ["SIGINT", 130],
   ["SIGTERM", 143],
 ]) {
-  test(
-    `runner forwards ${signal} and removes its runtime after the child exits`,
-    { skip: process.platform === "win32", timeout: 15000 },
-    async (t) => {
-      const driver = `
+  for (const delivery of ["pid", "group"]) {
+    test(
+      `runner forwards ${signal} once (${delivery}) and removes its runtime after the child exits`,
+      { skip: process.platform === "win32", timeout: 15000 },
+      async (t) => {
+        const target = `
+        let received = 0;
+        process.on(${JSON.stringify(signal)}, () => {
+          received++;
+          if (received > 1) process.exit(99);
+          setTimeout(() => { console.log("graceful:" + received); process.exit(0); }, 150);
+        });
+        console.log(JSON.stringify({ root: process.env.TRIAGE_RUNTIME_ROOT }));
+        setInterval(() => {}, 1000);
+      `;
+        const driver = `
       const cp = require('node:child_process');
       const spawn = cp.spawn;
-      cp.spawn = (_command, _args, options) => spawn(process.execPath, ['--eval', ${JSON.stringify("console.log(JSON.stringify({ root: process.env.TRIAGE_RUNTIME_ROOT })); setInterval(() => {}, 1000);")}], options);
+      cp.spawn = (command, args, options) => spawn(process.execPath, ['--eval', command === process.execPath ? "" : ${JSON.stringify(target)}], options);
       require(${JSON.stringify(require.resolve("./run-promptfoo"))}).runPromptfoo([]).then(code => { process.exitCode = code; });
     `;
-      const child = spawn(process.execPath, ["--eval", driver], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      t.after(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
-      });
-      let stderr = "";
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk;
-      });
-      const exited = new Promise((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      });
-      const ready = new Promise((resolve) => {
-        let text = "";
-        child.stdout.on("data", (chunk) => {
-          text += chunk;
-          if (text.includes("\n")) resolve(JSON.parse(text.split("\n")[0]));
+        const child = spawn(process.execPath, ["--eval", driver], {
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: true,
         });
-      });
-      const { root } = await Promise.race([
-        ready,
-        exited.then(() => {
-          throw new Error(`runner exited early: ${stderr}`);
-        }),
-      ]);
-      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-      assert.ok(fs.existsSync(root));
-      child.kill(signal);
-      assert.deepEqual(await exited, { code: exitCode, signal: null }, stderr);
-      assert.equal(fs.existsSync(root), false);
-    },
-  );
+        t.after(() => {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        const exited = new Promise((resolve, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code, signal) => resolve({ code, signal }));
+        });
+        let text = "";
+        const ready = new Promise((resolve) => {
+          child.stdout.on("data", (chunk) => {
+            text += chunk;
+            if (text.includes("\n")) resolve(JSON.parse(text.split("\n")[0]));
+          });
+        });
+        const { root } = await Promise.race([
+          ready,
+          exited.then(() => {
+            throw new Error(`runner exited early: ${stderr}`);
+          }),
+        ]);
+        t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+        assert.ok(fs.existsSync(root));
+        if (delivery === "group") process.kill(-child.pid, signal);
+        else child.kill(signal);
+        assert.deepEqual(
+          await exited,
+          { code: exitCode, signal: null },
+          stderr,
+        );
+        assert.match(text, /graceful:1/);
+        assert.equal(fs.existsSync(root), false);
+      },
+    );
+  }
 }

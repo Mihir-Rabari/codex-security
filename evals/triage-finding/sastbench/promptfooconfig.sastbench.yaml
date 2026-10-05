@@ -7,12 +7,10 @@ prompts:
   - file://./prompts/sastbench-triage-request.txt
 
 providers:
-  - id: openai:codex-sdk:gpt-5.5
+  - id: file://../scripts/triage-provider.js
     label: "Codex SDK triage-finding SastBench (gpt-5.5)"
     config:
-      # The runner stages only the skill runtime here. The label-bearing
-      # dataset and Promptfoo harness stay outside this tree.
-      working_dir: "{{env.SASTBENCH_RUNTIME_ROOT}}"
+      # The provider binds working_dir to the current staged skill runtime.
       # Target worktrees and their label-free Git cache are the only
       # additional readable workspace roots.
       additional_directories:

@@ -25,7 +25,7 @@ function parseArgs(argv) {
     } else if (arg === "--output") {
       args.output = argv[++index];
     } else if (arg === "--repo-root") {
-      args.repoRoot = argv[++index];
+      args.repoRoot = path.resolve(argv[++index]);
     } else if (arg === "--case") {
       args.caseId = argv[++index];
     } else if (arg === "--variant") {

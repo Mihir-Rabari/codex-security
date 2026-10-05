@@ -14,7 +14,7 @@ const sampleConfig = fs.readFileSync(
 );
 const packageJson = JSON.parse(fs.readFileSync(path.join(evalRoot, "package.json"), "utf8"));
 
-assert.match(config, /working_dir:\s+"\{\{env\.SASTBENCH_RUNTIME_ROOT\}\}"/);
+assert.doesNotMatch(config, /working_dir:/);
 assert.match(config, /skip_git_repo_check:\s+true/);
 assert.doesNotMatch(config, /working_dir:\s+\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\./);
 assert.match(
@@ -28,7 +28,7 @@ assert.match(config, /sastbench_runtime_only:\n\s+filesystem:/);
 assert.match(config, /":minimal":\s+read/);
 assert.match(config, /":workspace_roots":\s+read/);
 assert.match(config, /network:\n\s+enabled:\s+false/);
-assert.match(config, /id:\s+openai:codex-sdk:gpt-5\.5/);
+assert.match(config, /id:\s+file:\/\/\.\.\/scripts\/triage-provider\.js/);
 assert.match(config, /label:\s+"Codex SDK triage-finding SastBench \(gpt-5\.5\)"/);
 assert.doesNotMatch(config, /gpt-5\.6/);
 assert.match(
