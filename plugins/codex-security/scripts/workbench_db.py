@@ -3169,7 +3169,8 @@ def patch_artifact_preview(
                         hunk_lines = 0
                     elif match := re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", chunk):
                         hunk_lines = sum(
-                            int(count) if count is not None else 1 for count in match.groups()
+                            int(count.lstrip(b"0") or b"0") if count is not None else 1
+                            for count in match.groups()
                         )
                     elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
@@ -3184,7 +3185,7 @@ def patch_artifact_preview(
                     elif chunk.startswith((b" ", b"\n")):
                         hunk_lines = max(0, hunk_lines - 2)
                 at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
+    except (SystemExit, ValueError):
         return None, None
     if f"sha256:{digest.hexdigest()}" != expected_digest:
         return None, None

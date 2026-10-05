@@ -5,13 +5,30 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { Writable } from "node:stream";
 import { promisify, stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import {
@@ -3111,6 +3128,85 @@ describe("patch publication integrity", () => {
     },
   );
 
+  test.each(["committed", "uncommitted"])(
+    "preserves supplied-issue submodule publication with %s changes",
+    async (state) => {
+      const directory = await fixtures.create("patch-submodule-publication-");
+      const checkout = join(directory, "checkout");
+      const nested = join(checkout, "dependency");
+      await mkdir(nested, { recursive: true });
+      const git = repositoryGit(checkout);
+      const inner = repositoryGit(nested);
+      for (const run of [git, inner]) {
+        run("init", "--initial-branch=main");
+        run("config", "user.name", "Synthetic User");
+        run("config", "user.email", "synthetic@example.test");
+        run("config", "commit.gpgsign", "false");
+      }
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      const original = inner("rev-parse", "HEAD");
+      await writeFile(join(nested, "app.ts"), "fixed\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested fix");
+      const fixed = inner("rev-parse", "HEAD");
+      inner("checkout", original);
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      const head = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const remote = join(directory, "remote.git");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      let published = false;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: checkout,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, options);
+            if (args[1] === "list") return "";
+            published = true;
+            return "https://github.example.test/example/repository/pull/1";
+          },
+          onCodex: async () => {
+            if (state === "committed") inner("checkout", fixed);
+            else await writeFile(join(nested, "app.ts"), "fixed\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        state === "committed" ? 0 : 2,
+      );
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files:
+          state === "committed"
+            ? ["dependency", "dependency/app.ts"]
+            : ["dependency/app.ts"],
+      });
+      expect(published).toBe(state === "committed");
+      if (state === "committed") {
+        expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+          "dependency",
+        );
+        expect(git("rev-parse", "HEAD:dependency")).toBe(fixed);
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      } else {
+        expect(outcome.stderr).toContain("submodule");
+        expect(git("branch", "--show-current")).toBe("main");
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(git("write-tree")).toBe(index);
+        expect(git("branch", "--format=%(refname)")).toBe("refs/heads/main");
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+      }
+    },
+  );
+
   test("keeps the original branch when a verified file belongs to a nested repository", async () => {
     const directory = await fixtures.create("patch-nested-publication-");
     const git = repositoryGit(directory);
@@ -3248,8 +3344,259 @@ describe("patch publication integrity", () => {
     });
   });
 
-  test.each(["unborn", "nested"])(
-    "detects local patches in %s Git repositories",
+  test.each([
+    "unborn",
+    "nested",
+    "nested environment",
+    "nested objects",
+    "nested common",
+  ])("detects local patches in %s Git repositories", async (kind) => {
+    const directory = await fixtures.create("patch-git-state-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(directory, "app.ts"), "unsafe\n");
+    let path = "app.ts";
+    if (kind.startsWith("nested")) {
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const nested = join(directory, "nested");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "unsafe\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      path = "nested/app.ts";
+    }
+    const gitEnvironment =
+      kind === "nested environment"
+        ? { GIT_DIR: ".git", GIT_WORK_TREE: directory }
+        : kind === "nested objects"
+          ? { GIT_OBJECT_DIRECTORY: join(directory, ".git", "objects") }
+          : kind === "nested common"
+            ? { GIT_COMMON_DIR: join(directory, ".git") }
+            : {};
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: directory,
+      onRepositoryCommand: (command, args, cwd, options) =>
+        runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...gitEnvironment, ...options?.environment },
+        }),
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, path), "fixed\n");
+        output?.stdout.write("Fixed and checked.");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: true,
+      files: [path],
+    });
+  });
+  test("keeps the outer executable boundary for nested patch snapshots", async () => {
+    const repository = await fixtures.create("patch-nested-executable-");
+    const nested = join(repository, "dependency");
+    await mkdir(nested);
+    const git = repositoryGit(repository);
+    const inner = repositoryGit(nested);
+    for (const run of [git, inner]) {
+      run("init", "--initial-branch=main");
+      run("config", "user.name", "Synthetic User");
+      run("config", "user.email", "synthetic@example.test");
+    }
+    await writeFile(join(nested, "app.ts"), "original\n");
+    inner("add", ".");
+    inner("commit", "-m", "Synthetic nested baseline");
+    git("add", ".");
+    git("commit", "-m", "Synthetic parent baseline");
+    const trusted = await resolveTrustedExecutable(
+      "git",
+      process.env,
+      repository,
+    );
+    expect(trusted).not.toBeNull();
+    const bin = join(repository, "bin");
+    await mkdir(bin);
+    const repositoryGitPath = join(bin, basename(trusted!.executable));
+    await copyFile(trusted!.executable, repositoryGitPath);
+    await chmod(repositoryGitPath, 0o755);
+    const environment = {
+      ...process.env,
+      PATH: [bin, process.env["PATH"]].join(delimiter),
+    };
+    let nestedCommands = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      onRepositoryCommand: async (command, args, cwd, options) => {
+        // Exercise the same resolver used by the default command dependency.
+        const selected = await resolveTrustedExecutable(
+          command,
+          environment,
+          cwd,
+        );
+        expect(selected?.executable).not.toBe(repositoryGitPath);
+        if (cwd === nested || args.includes(nested)) nestedCommands++;
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        await writeFile(join(nested, "app.ts"), "fixed\n");
+        output?.stdout.write("Fixed and checked.");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(nestedCommands).toBeGreaterThan(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: true,
+      files: ["dependency/app.ts"],
+    });
+  });
+
+  test("refuses a sparse gitlink redirected outside the patch checkout", async () => {
+    const directory = await fixtures.create("patch-sparse-gitlink-");
+    const repository = join(directory, "repository");
+    const nested = join(repository, "dependency");
+    const external = join(directory, "external");
+    await mkdir(nested, { recursive: true });
+    await mkdir(external);
+    const git = repositoryGit(repository);
+    const inner = repositoryGit(nested);
+    const outside = repositoryGit(external);
+    for (const run of [git, inner, outside]) {
+      run("init", "--initial-branch=main");
+      run("config", "user.name", "Synthetic User");
+      run("config", "user.email", "synthetic@example.test");
+    }
+    for (const [path, run] of [
+      [nested, inner],
+      [external, outside],
+    ] as const) {
+      await writeFile(join(path, "app.ts"), "original\n");
+      run("add", ".");
+      run("commit", "-m", "Synthetic baseline");
+    }
+    git("add", ".");
+    git("commit", "-m", "Synthetic parent baseline");
+    git("config", "core.sparseCheckout", "true");
+    await writeFile(
+      join(repository, ".git", "info", "sparse-checkout"),
+      "/*\n!/dependency\n",
+    );
+    git("update-index", "--skip-worktree", "dependency");
+    await rm(nested, { recursive: true });
+    await symlink(
+      external,
+      nested,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const outsideFile = join(external, "uncommitted.txt");
+    await writeFile(
+      outsideFile,
+      "Synthetic bytes outside the selected checkout\n",
+    );
+    const blob = outside("hash-object", outsideFile);
+    const index = outside("write-tree");
+    expect(() => outside("cat-file", "-e", blob)).toThrow();
+    let modelCalls = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async () => {
+        modelCalls++;
+        return 0;
+      },
+    });
+    expect(() => outside("cat-file", "-e", blob)).toThrow();
+    expect(outside("write-tree")).toBe(index);
+    expect(modelCalls).toBe(0);
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("outside");
+    expect(await readFile(outsideFile, "utf8")).toBe(
+      "Synthetic bytes outside the selected checkout\n",
+    );
+  });
+
+  test.each(["worktree", "metadata"])(
+    "refuses a nested checkout rebound to external %s before writing objects",
+    async (binding) => {
+      const directory = await fixtures.create("patch-nested-binding-");
+      const checkout = join(directory, "checkout");
+      const nested = join(checkout, "dependency");
+      const external = join(directory, "external");
+      await mkdir(nested, { recursive: true });
+      await mkdir(external);
+      const git = repositoryGit(checkout);
+      const inner = repositoryGit(nested);
+      for (const run of [git, inner]) {
+        run("init", "--initial-branch=main");
+        run("config", "user.name", "Synthetic User");
+        run("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      const outsideFile = join(external, "outside.txt");
+      await writeFile(
+        outsideFile,
+        "Synthetic bytes outside the selected checkout\n",
+      );
+      const blob = git("hash-object", outsideFile);
+      expect(() => inner("cat-file", "-e", blob)).toThrow();
+      let objects = inner;
+      if (binding === "worktree") {
+        inner("config", "core.worktree", external);
+      } else {
+        const outside = repositoryGit(external);
+        outside("init", "--initial-branch=main");
+        outside("config", "user.name", "Synthetic User");
+        outside("config", "user.email", "synthetic@example.test");
+        outside("add", ".");
+        outside("commit", "-m", "Synthetic external baseline");
+        await rm(join(nested, ".git"), { recursive: true });
+        await writeFile(
+          join(nested, ".git"),
+          `gitdir: ${join(external, ".git")}\n`,
+        );
+        await writeFile(
+          join(nested, "app.ts"),
+          "Synthetic unpublished target bytes\n",
+        );
+        objects = outside;
+      }
+      const snapshotBlob = git("hash-object", join(nested, "app.ts"));
+      if (binding === "metadata")
+        expect(() => objects("cat-file", "-e", snapshotBlob)).toThrow();
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: checkout,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async () => {
+            modelCalls++;
+            return 0;
+          },
+        },
+      );
+      if (binding === "worktree")
+        expect(() => inner("cat-file", "-e", blob)).toThrow();
+      else expect(() => objects("cat-file", "-e", snapshotBlob)).toThrow();
+      expect(modelCalls).toBe(0);
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toMatch(/worktree|metadata/u);
+    },
+  );
+
+  test.each(["nested"])(
+    "retains changed files when %s Git patch assessment cannot produce an outer patch",
     async (kind) => {
       const directory = await fixtures.create("patch-git-state-");
       const git = repositoryGit(directory);
@@ -3273,7 +3620,7 @@ describe("patch publication integrity", () => {
         path = "nested/app.ts";
       }
       const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
         {
           currentDirectory: directory,
           onRepositoryCommand: runGitRepositoryCommand,
@@ -3284,7 +3631,8 @@ describe("patch publication integrity", () => {
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("No completed patch changes to assess.");
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         applied: true,
         files: [path],
