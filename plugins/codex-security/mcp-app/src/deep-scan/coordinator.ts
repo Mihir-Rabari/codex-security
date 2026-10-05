@@ -327,8 +327,9 @@ export class DeepScanCoordinator {
         this.publicationAbortController.signal,
       );
       if (this.canceled || this.externallyFailed) return;
-      this.state = await this.finishWithReplay(schedulerResult);
+      const completed = await this.finishWithReplay(schedulerResult);
       if (this.canceled || this.externallyFailed) return;
+      this.state = completed;
       this.log({
         event: "coordinator_terminal",
         scanId: this.state.scanId,
@@ -760,7 +761,7 @@ export class DeepScanCoordinator {
       if (result.status === "rejected") return result.reason;
       const outcome = result.value;
       if ("status" in outcome) return outcome.error;
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       return undefined;
     };
 
@@ -923,7 +924,7 @@ export class DeepScanCoordinator {
         throw thresholdError;
       }
       reducerFailures = 0;
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
       if (

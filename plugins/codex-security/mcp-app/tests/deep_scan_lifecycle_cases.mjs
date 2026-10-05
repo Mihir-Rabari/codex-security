@@ -20,6 +20,7 @@ export async function testDeepScanLifecycle({
   const errors = [];
   for (const test of [
     canceledPublicationWaitsForHeartbeat,
+    delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
     shutdownStopsReplacementObservation,
     failedCancellationStillPreservesResults,
@@ -66,6 +67,38 @@ export async function testDeepScanLifecycle({
     } finally {
       release.resolve();
       await coordinator.settled();
+    }
+  }
+
+  async function delayedReducerDoesNotReplaceStoppedState() {
+    for (const status of ["canceled", "failed"]) {
+      const fixture = await fixtureRun(config);
+      fixture.run.coordinatorGeneration = 1;
+      const store = new FakeStore(fixture.run);
+      const committed = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const commit = store.commitDedup.bind(store);
+      store.commitDedup = async (input) => {
+        const response = await commit(input);
+        committed.resolve();
+        await release.promise;
+        return response;
+      };
+      const coordinator = createCoordinator(
+        fixture,
+        store,
+        new FakeExecutor(),
+        {
+          threadId: "fixture-owner",
+          heartbeatIntervalMs: 60_000,
+        },
+      );
+      coordinator.start();
+      await committed.promise;
+      store.run.status = status;
+      await coordinator.renewHeartbeat();
+      release.resolve();
+      assert.equal((await coordinator.settled()).status, status);
     }
   }
 

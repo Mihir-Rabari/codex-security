@@ -1274,9 +1274,12 @@ export function createCodexSecurityServer(): McpServer {
         workspace = await runWorkbench(args);
       },
     );
-    if (!canceledLocally) workspace = await runWorkbench(args);
     if (workspace === undefined) {
-      throw new Error(`Canceling scan ${scanId} did not return its workspace.`);
+      workspace = canceledLocally
+        ? ((await runWorkbench(["get-scan", "--scan-id", scanId]))[
+            "workspace"
+          ] as JsonObject)
+        : await runWorkbench(args);
     }
     return workspaceResult(workspace as unknown as WorkspaceState);
   };

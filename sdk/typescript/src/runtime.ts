@@ -1564,8 +1564,31 @@ export async function runWorkbench(
     return result.stdout;
   };
   let stdout: string;
+  let legacyArchive: { scanDir: string; archiveDir: string } | undefined;
   try {
     const arguments_ = [...args];
+    if (
+      arguments_[0] === "register-cli-scan" &&
+      arguments_.includes("--archive-existing") &&
+      !arguments_.includes("--archived-scan-dir")
+    ) {
+      const help = await run(["register-cli-scan", "--help"]);
+      if (
+        !help
+          .replace(/\s+/gu, " ")
+          .includes("Archive output in the registration transaction.")
+      ) {
+        const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
+        const archiveDir = await planOutputArchive(scanDir);
+        if (archiveDir !== null) {
+          await rename(scanDir, archiveDir);
+          legacyArchive = { scanDir, archiveDir };
+          await mkdir(scanDir, { mode: 0o700 });
+          if ((process.umask() & 0o700) !== 0) await chmod(scanDir, 0o700);
+          arguments_.push("--archived-scan-dir", archiveDir);
+        }
+      }
+    }
     const matchesStdinIndex = arguments_.indexOf("--matches-json-stdin");
     if (
       arguments_[0] === "save-scan-comparison" &&
@@ -1597,6 +1620,22 @@ export async function runWorkbench(
     }
     stdout = await run(arguments_, input);
   } catch (error) {
+    if (legacyArchive !== undefined) {
+      try {
+        await rmdir(legacyArchive.scanDir).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          },
+        );
+        await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Scan registration failed and previous output could not be restored from ${legacyArchive.archiveDir}.`,
+          { cause: error },
+        );
+      }
+    }
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
     const databaseFailure =
@@ -1629,6 +1668,8 @@ export async function runWorkbench(
       "The Codex Security workbench returned an invalid response.",
     );
   }
+  if (legacyArchive !== undefined)
+    result["archivedScanDir"] = legacyArchive.archiveDir;
   return result as JsonObject;
 }
 

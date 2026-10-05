@@ -157,7 +157,11 @@ def parse_args(description: str) -> argparse.Namespace:
     recipe.add_argument("--recipe-json-stdin", action="store_true")
     recipe.add_argument("--registration-json-stdin", action="store_true")
     register_cli_scan.add_argument("--parent-scan-id")
-    register_cli_scan.add_argument("--archive-existing", action="store_true")
+    register_cli_scan.add_argument(
+        "--archive-existing",
+        action="store_true",
+        help="Archive output in the registration transaction.",
+    )
     register_cli_scan.add_argument("--archived-scan-dir")
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
