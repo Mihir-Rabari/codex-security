@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from argparse import Namespace
 
@@ -163,9 +164,12 @@ def test_recovery_honors_rejection_committed_before_result_replacement(
     }
     checkpoint = write_checkpoint(result_path.parent / "checkpoints", rejected)
     if has_head:
-        (result_path.parent / "checkpoint-head.json").write_text(
-            json.dumps({"checkpoint": checkpoint.name})
-        )
+        head = result_path.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        # Model a committed replacement after the older result, even when the
+        # filesystem assigns the same timestamp to these consecutive writes.
+        observed = max(result_path.stat().st_mtime_ns, checkpoint.stat().st_mtime_ns) + 1
+        os.utime(head, ns=(observed, observed))
     saved_bytes = {path: path.read_bytes() for path in (result_path, old_checkpoint, checkpoint)}
 
     stopped = workbench_api["fail_scan"](
@@ -207,7 +211,17 @@ def save_disposition(scan, directory, disposition):
         },
     }
     checkpoint = write_checkpoint(directory / "checkpoints", draft)
-    (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = directory / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    result = directory / "result.json"
+    observed = (
+        max(
+            checkpoint.stat().st_mtime_ns,
+            result.stat().st_mtime_ns if result.exists() else 0,
+        )
+        + 1
+    )
+    os.utime(head, ns=(observed, observed))
     return draft
 
 
@@ -219,6 +233,10 @@ def test_newer_checkpoint_disposition_precedes_older_archived_head(
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan, status="canceled")
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = 3 WHERE scan_id = ?", (scan.scan_id,)
+        )
     old = result.parent / "attempts" / "attempt-2"
     save_disposition(scan, old, "rejected" if disposition == "reported" else "reported")
     current = result.parent / "attempts" / "attempt-10" if archived else result.parent
@@ -304,7 +322,8 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     else:
         head.write_text(json.dumps({"checkpoint": "a" * 64 + ".json"}))
 
-    replayed = workbench_api["preserve_scan_results"](
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
@@ -389,7 +408,8 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
         )
     save_disposition(scan, result.parent, "rejected")
 
-    replayed = workbench_api["preserve_scan_results"](
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None

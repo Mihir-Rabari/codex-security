@@ -1,8 +1,8 @@
 import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { formatUsd } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { formatScanCost } from "./cost-model.js";
+import { errorMessage } from "./errors.js";
 import {
   formatSecurityPolicyText as display,
   type SecurityPolicyOptions,
@@ -132,7 +132,7 @@ export async function runPolicyCommand(
       },
       onStage: (stage) => write(STAGES[stage]),
       onWarning: (warning) =>
-        write(`codex-security: ${display(safeErrorMessage(warning))}`),
+        write(`codex-security: ${display(errorMessage(warning))}`),
       ...(interactive
         ? {
             answerQuestions: async (
@@ -171,7 +171,7 @@ export async function runPolicyCommand(
         controller.signal.throwIfAborted();
         diff = "Preview unavailable. Review the saved draft.";
         write(
-          `codex-security: Could not preview the policy: ${display(safeErrorMessage(error))}`,
+          `codex-security: Could not preview the policy: ${display(errorMessage(error))}`,
         );
       }
       const preview = [
@@ -191,7 +191,8 @@ export async function runPolicyCommand(
     if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Architecture: ${display(draft.specificationPath)}`);
-      write(`Threat model: ${display(draft.threatModelPath)}`);
+      if (draft.threatModelPath !== null)
+        write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
         write(
           "No repository files changed. Review the saved SECURITY.md before copying it into the repository.",
@@ -199,7 +200,7 @@ export async function runPolicyCommand(
     }
     const seconds = Math.max(0, (dependencies.now() - started) / 1000);
     write(
-      `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (${formatUsd(cost.estimatedUsd)} estimated)`}.`,
+      `Policy generation finished in ${seconds.toFixed(1)}s${cost === null ? "" : ` (estimated cost: ${formatScanCost(cost)})`}.`,
     );
     return {
       exitCode: 0,
@@ -213,6 +214,7 @@ export async function runPolicyCommand(
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
         threatModelPath: draft.threatModelPath,
+        threatModel: draft.threatModel,
         customPlugin: draft.customPlugin,
         reviewNotes: draft.reviewNotes,
         cost,
@@ -230,7 +232,7 @@ export async function runPolicyCommand(
         ? "Policy generation canceled by Ctrl-C."
         : signal === "SIGTERM"
           ? "Policy generation terminated by SIGTERM."
-          : display(safeErrorMessage(error));
+          : display(errorMessage(error));
     write(`codex-security: ${message}`);
     if (outputDir !== undefined)
       write(`Saved artifacts: ${display(outputDir)}`);
@@ -244,7 +246,7 @@ export async function runPolicyCommand(
       await security?.close();
     } catch (error) {
       write(
-        `codex-security: Could not clean up the policy runtime: ${display(safeErrorMessage(error))}`,
+        `codex-security: Could not clean up the policy runtime: ${display(errorMessage(error))}`,
       );
     }
   }
