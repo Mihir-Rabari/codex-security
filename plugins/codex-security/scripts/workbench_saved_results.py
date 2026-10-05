@@ -563,26 +563,22 @@ def _finding_key(finding: dict[str, Any]) -> str:
         normalized.pop("identity", None)
         _ensure_finding_identity(normalized)
         identity = normalized["identity"]
+    return _digest([finding.get("ruleId"), identity, _finding_locations(finding)])
+
+
+def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
     locations = finding.get("locations", [])
-    if not isinstance(locations, list):
-        locations = []
-    return _digest(
-        [
-            finding.get("ruleId"),
-            identity,
-            sorted(
-                (
-                    (
-                        location.get("path"),
-                        location.get("startLine"),
-                        location.get("endLine", location.get("startLine")),
-                    )
-                    for location in locations
-                    if isinstance(location, dict)
-                ),
-                key=_encoded,
-            ),
-        ]
+    return sorted(
+        (
+            (
+                location.get("path"),
+                location.get("startLine"),
+                location.get("endLine", location.get("startLine")),
+            )
+            for location in (locations if isinstance(locations, list) else [])
+            if isinstance(location, dict)
+        ),
+        key=_encoded,
     )
 
 
@@ -1329,12 +1325,28 @@ def merge_saved_results(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
+    # A damaged canonical row must not replace a checkpoint's established identity.
+    legacy_identities: dict[str, dict[str, Any] | None] = {}
+
+    def restore_legacy_identity(finding: Any) -> None:
+        if (
+            isinstance(finding, dict)
+            and "identity" not in finding
+            and not finding_candidate_id(finding)
+        ):
+            provenance = finding.get("provenance")
+            owner = provenance.get("workerId") if isinstance(provenance, dict) else None
+            identity = legacy_identities.get(_digest([owner, _finding_content(finding)]))
+            if identity is not None:
+                finding["identity"] = copy.deepcopy(identity)
+        _ensure_finding_identity(finding)
+
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
         if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0])
+            restore_legacy_identity(document["findings"][0])
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
@@ -1343,6 +1355,28 @@ def merge_saved_results(
             [],
         )
         return bool(document["findings"])
+
+    for _, draft, owner in all_sources:
+        for value in draft["findings"]:
+            if not isinstance(value, dict):
+                continue
+            for saved in _retained_findings(value):
+                identity = saved.get("identity")
+                if (
+                    not isinstance(identity, dict)
+                    or finding_candidate_id(saved)
+                    or not valid_finding(saved)
+                ):
+                    continue
+                provenance = saved.get("provenance")
+                saved_owner = (
+                    provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
+                )
+                key = _digest([saved_owner, _finding_content(saved)])
+                if key not in legacy_identities:
+                    legacy_identities[key] = identity
+                elif legacy_identities[key] != identity:
+                    legacy_identities[key] = None
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
@@ -1528,15 +1562,15 @@ def merge_saved_results(
                 provenance.get("workerId", owner),
                 finding_candidate_id(finding),
                 finding.get("ruleId"),
-                finding.get("locations"),
+                _finding_locations(finding),
+                extensions.get("reportId"),
+                extensions.get("ledgerRowId"),
             ]
         )
         sibling = _digest(
             [
                 candidate,
                 finding.get("title"),
-                extensions.get("reportId"),
-                extensions.get("ledgerRowId"),
             ]
         )
         return sibling, candidate
@@ -1801,7 +1835,7 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
-                _ensure_finding_identity(finding)
+                restore_legacy_identity(finding)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None

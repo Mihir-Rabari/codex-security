@@ -49,6 +49,11 @@ for (const layout of ["standard", "diff", "deep"]) {
     "preserved",
     "new-sibling",
     "new-worker-sibling",
+    "range-refinement",
+    "report-id",
+    "ledger-id",
+    "worker-report-id",
+    "worker-ledger-id",
   ]) {
     for (const status of ["failed", "canceled"]) {
       test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
@@ -63,22 +68,45 @@ for (const layout of ["standard", "diff", "deep"]) {
                   "new-worker-sibling",
                 ].includes(variant)
               ? 2
-              : 1;
+              : variant.endsWith("-id")
+                ? 2
+                : 1;
         const findings = Array.from({ length: count }, (_, index) => {
           const finding = findingFor(
-            variant.includes("sibling")
+            variant.includes("sibling") || variant.endsWith("-id")
               ? "shared-review"
               : `review-${index + 1}`,
           );
-          if (["owner", "new-worker-sibling"].includes(variant))
+          if (
+            ["owner", "new-worker-sibling"].includes(variant) ||
+            variant.startsWith("worker-")
+          )
             finding.provenance.workerId = "worker-1";
           if (variant.includes("sibling"))
             finding.title = `Synthetic sibling ${index + 1}`;
+          if (variant.endsWith("-id"))
+            finding.extensions = {
+              [variant.includes("report") ? "reportId" : "ledgerRowId"]:
+                `synthetic-report-${index + 1}`,
+            };
           if (variant === "preserved")
             finding.locations[0].startLine = index + 1;
           return finding;
         });
-        await f.write({ ...f.draft(), findings });
+        await f.write({
+          ...f.draft(),
+          findings: variant.endsWith("-id") ? findings.slice(0, 1) : findings,
+        });
+        if (variant.endsWith("-id"))
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: findings.slice(1) },
+            false,
+          );
+        if (variant === "range-refinement") {
+          findings[0].locations[0].endLine = 1;
+          await f.write({ ...f.draft(), findings });
+        }
         if (variant.startsWith("new-")) {
           const file = path.join(f.root, "findings.json");
           const saved = JSON.parse(await readFile(file, "utf8"));

@@ -111,6 +111,61 @@ def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, s
     assert first[1]["findings"][0]["identity"] == replay[1]["findings"][0]["identity"]
 
 
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("saved_anchor", ["stable-anchor", 42])
+def test_missing_parent_identity_reuses_established_checkpoint(
+    tmp_path: Path, saved_results, stopped, saved_anchor
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+    from workbench_test_support import saved_binding
+
+    finding = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review finding",
+        "summary": "Retain the saved result.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    checkpoint = write_checkpoint(
+        tmp_path / "checkpoints",
+        saved_draft(
+            "identity-scan",
+            complete=True,
+            findings=[{**finding, "identity": {"anchor": saved_anchor}}],
+        ),
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    write_saved_parent(
+        tmp_path, saved_draft("identity-scan", complete=True, findings=[finding]), 200
+    )
+    binding = saved_binding()
+    binding["target"] = {
+        "kind": "git_revision",
+        "targetId": "synthetic",
+        "displayName": "test",
+        "revision": "head",
+    }
+    warnings = []
+    documents = saved_results.merge_saved_results(
+        tmp_path, "identity-scan", binding, [], warnings, stopped=stopped, reason="interrupted"
+    )
+    documents[0]["scan"].update(id="identity-scan", target=binding["target"])
+    documents[1]["scanId"] = "identity-scan"
+    _recover_unsealed_findings(
+        documents[0],
+        documents[1],
+        Path(__file__).resolve().parents[1] / "schemas",
+        tmp_path,
+        warnings,
+    )
+    expected = saved_anchor if isinstance(saved_anchor, str) else "synthetic-review-finding"
+    assert [row["identity"] for row in documents[1]["findings"]] == [{"anchor": expected}], warnings
+
+
 @pytest.mark.parametrize("artifacts", ["omitted", None, []])
 @pytest.mark.parametrize("outcome", ["failed", "canceled"])
 def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, artifacts, outcome):
