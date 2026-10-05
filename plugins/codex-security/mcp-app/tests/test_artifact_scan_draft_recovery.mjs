@@ -39,17 +39,45 @@ const findingFor = (candidateId) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
-for (const layout of ["standard", "diff"]) {
-  for (const variant of ["one", "three", "legacy"]) {
+for (const layout of ["standard", "diff", "deep"]) {
+  for (const variant of [
+    "one",
+    "three",
+    "legacy",
+    "owner",
+    "siblings",
+    "preserved",
+  ]) {
     for (const status of ["failed", "canceled"]) {
       test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
         const f = await fixture(t, layout);
-        const count = variant === "three" ? 3 : 1;
-        for (let index = 0; index < count; index += 1)
-          await f.write({
-            ...f.draft(),
-            findings: [findingFor(`review-${index + 1}`)],
-          });
+        const count =
+          variant === "three"
+            ? 3
+            : ["siblings", "preserved"].includes(variant)
+              ? 2
+              : 1;
+        const findings = Array.from({ length: count }, (_, index) => {
+          const finding = findingFor(
+            variant === "siblings" ? "shared-review" : `review-${index + 1}`,
+          );
+          if (variant === "owner") finding.provenance.workerId = "worker-1";
+          if (variant === "siblings")
+            finding.title = `Synthetic sibling ${index + 1}`;
+          if (variant === "preserved")
+            finding.locations[0].startLine = index + 1;
+          return finding;
+        });
+        await f.write({ ...f.draft(), findings });
+        if (variant === "preserved") {
+          const file = path.join(f.root, "findings.json");
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          saved.findings[1].provenance.preservedIdentity = structuredClone(
+            saved.findings[1].identity,
+          );
+          saved.findings[1].identity.instance = "saved-distinct-location";
+          await writeFile(file, JSON.stringify(saved));
+        }
         if (variant === "legacy") {
           const file = path.join(f.root, "findings.json");
           const saved = JSON.parse(await readFile(file, "utf8"));

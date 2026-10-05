@@ -1514,12 +1514,30 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
-    checkpoint_identities: dict[str, dict[str, Any] | None] = {}
+    checkpoint_identities: dict[str, tuple[dict[str, Any], Any] | None] = {}
 
-    def checkpoint_identity_key(finding: dict[str, Any], owner: str | None) -> str:
-        return _digest(
-            [owner, finding_candidate_id(finding), finding.get("ruleId"), finding.get("locations")]
+    def checkpoint_identity_keys(finding: dict[str, Any]) -> tuple[str, str]:
+        provenance = finding.get("provenance", {})
+        extensions = finding.get("extensions")
+        if not isinstance(extensions, dict):
+            extensions = {}
+        candidate = _digest(
+            [
+                provenance.get("workerId"),
+                finding_candidate_id(finding),
+                finding.get("ruleId"),
+                finding.get("locations"),
+            ]
         )
+        sibling = _digest(
+            [
+                candidate,
+                finding.get("title"),
+                extensions.get("reportId"),
+                extensions.get("ledgerRowId"),
+            ]
+        )
+        return sibling, candidate
 
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
@@ -1528,13 +1546,12 @@ def merge_saved_results(
             if valid_finding(finding):
                 identity = finding.get("identity")
                 if isinstance(identity, dict) and finding_candidate_id(finding):
-                    source_key = checkpoint_identity_key(
-                        finding, finding["provenance"].get("workerId")
-                    )
-                    if source_key not in checkpoint_identities:
-                        checkpoint_identities[source_key] = identity
-                    elif checkpoint_identities[source_key] != identity:
-                        checkpoint_identities[source_key] = None
+                    saved_identity = (identity, finding["provenance"].get("preservedIdentity"))
+                    for source_key in checkpoint_identity_keys(finding):
+                        if source_key not in checkpoint_identities:
+                            checkpoint_identities[source_key] = saved_identity
+                        elif checkpoint_identities[source_key] != saved_identity:
+                            checkpoint_identities[source_key] = None
                 canonical_key = _finding_key(finding)
                 for retained in _retained_findings(finding):
                     retained_key = _finding_key(retained)
@@ -1839,18 +1856,17 @@ def merge_saved_results(
                 continue
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
-            # Older checkpoints omit identities already assigned by the parent.
-            # Reuse the unambiguous identity for this candidate and source location.
-            if (
-                "identity" not in finding
-                and (
-                    identity := checkpoint_identities.get(
-                        checkpoint_identity_key(finding, worker_id)
-                    )
-                )
-                is not None
-            ):
-                finding["identity"] = copy.deepcopy(identity)
+            # Reuse generated identities from the canonical parent, including the
+            # original identity retained when distinct source locations collided.
+            if "identity" not in finding:
+                for source_key in checkpoint_identity_keys(finding):
+                    saved_identity = checkpoint_identities.get(source_key)
+                    if saved_identity is not None:
+                        identity, preserved_identity = copy.deepcopy(saved_identity)
+                        finding["identity"] = identity
+                        if preserved_identity is not None:
+                            provenance["preservedIdentity"] = preserved_identity
+                        break
             _ensure_finding_identity(finding)
             if not valid_finding(finding):
                 findings.append(finding)
