@@ -1131,3 +1131,149 @@ for (const order of ["earlier-first", "later-first"]) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "deep"]) {
+  for (const [field, value] of Object.entries({
+    description: "Synthetic annotation",
+    source: "authored",
+    version: 1,
+  })) {
+    for (const authoredFirst of [true, false]) {
+      test(`${layout}: semantic identity reserves ${field} metadata (authored first=${authoredFirst})`, async (t) => {
+        const normal = await fixture(t, layout),
+          recovered = await fixture(t, layout);
+        const authored = finding("First review", {
+          identity: {
+            anchor: "candidate-1",
+            instance: "second-review",
+            [field]: value,
+          },
+          extensions: { candidateId: "candidate-1" },
+        });
+        const generated = finding("Second review", {
+          locations: [{ path: "src/example.py", startLine: 2 }],
+          extensions: { candidateId: "candidate-1" },
+        });
+        const reserved = finding("Reserved review", {
+          identity: {
+            anchor: "candidate-1",
+            instance: "second-review-2",
+            [field]: value,
+          },
+          locations: [{ path: "src/example.py", startLine: 3 }],
+          extensions: { candidateId: "candidate-1" },
+        });
+        const findings = authoredFirst
+          ? [authored, generated, reserved]
+          : [generated, reserved, authored];
+        await normal.write({ ...normal.draft(), findings });
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          { ...recovered.draft(), findings },
+          false,
+        );
+        const result = await recoverAndFinalize(normal, recovered, [], true);
+        assert.equal(result.normal.length, 3);
+        assert.equal(result.recovered.length, 3);
+        assert.deepEqual(result.warnings, []);
+        assert.deepEqual(result.recovered, result.normal);
+        assert.deepEqual(
+          result.recovered.find((row) => row.title === "First review").identity,
+          authored.identity,
+        );
+        assert.equal(
+          result.recovered.find((row) => row.title === "Second review").identity
+            .instance,
+          "second-review-3",
+        );
+      });
+    }
+  }
+}
+
+for (const sameTitle of [false, true]) {
+  test(`bound owner overrides shared metadata sameTitle=${sameTitle}`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    const workers = [],
+      findings = [];
+    for (const [index, id] of ["worker-a", "worker-b"].entries()) {
+      const workerRoot = path.join(recovered.root, id);
+      await mkdir(workerRoot);
+      const worker = draftFixture(workerRoot, "worker");
+      const value = finding(
+        sameTitle
+          ? "Synthetic shared review"
+          : `${index === 0 ? "First" : "Second"} review`,
+        {
+          provenance: {
+            source: "local_plugin",
+            candidateId: "candidate-1",
+            workerId: "discovery",
+          },
+        },
+      );
+      await worker.write({ ...worker.draft(), findings: [value] });
+      const saved = JSON.parse(
+        await readFile(path.join(workerRoot, "result.json"), "utf8"),
+      );
+      findings.push(...saved.findings);
+      workers.push({
+        id,
+        kind: "discovery",
+        artifact_dir: workerRoot,
+        result_manifest_path: null,
+        attempt: 1,
+      });
+    }
+    await normal.write({ ...normal.draft(), findings });
+    const result = await recoverAndFinalize(normal, recovered, workers);
+    assert.equal(result.normal.length, 2);
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
+}
+for (const authored of [false, true]) {
+  test(`bound owner keeps same worker metadata revision authored=${authored}`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    const workerRoot = path.join(recovered.root, "worker-a"),
+      normalWorkerRoot = path.join(normal.root, "worker-a");
+    await mkdir(workerRoot);
+    await mkdir(normalWorkerRoot);
+    const worker = draftFixture(workerRoot, "worker"),
+      normalWorker = draftFixture(normalWorkerRoot, "worker");
+    for (const alias of ["discovery", "refined"]) {
+      const value = finding("Synthetic shared review", {
+        provenance: {
+          source: "local_plugin",
+          candidateId: "candidate-1",
+          workerId: alias,
+        },
+        ...(authored ? { identity: { anchor: "authored-review" } } : {}),
+      });
+      await normalWorker.write({ ...normalWorker.draft(), findings: [value] });
+      await draftApi.saveScanDraftCheckpoint(
+        worker.context,
+        { ...worker.draft(), findings: [value] },
+        false,
+      );
+    }
+    const saved = JSON.parse(
+      await readFile(path.join(normalWorkerRoot, "result.json"), "utf8"),
+    );
+    await normal.write({ ...normal.draft(), findings: saved.findings });
+    const result = await recoverAndFinalize(normal, recovered, [
+      {
+        id: "worker-a",
+        kind: "discovery",
+        artifact_dir: workerRoot,
+        result_manifest_path: null,
+        attempt: 1,
+      },
+    ]);
+    assert.equal(result.normal.length, 1);
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
+}

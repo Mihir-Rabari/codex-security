@@ -658,7 +658,10 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
     )
 
     def identity_key(finding: dict[str, Any]) -> bytes:
-        return _encoded([finding.get("ruleId"), finding.get("identity")])
+        identity = finding.get("identity")
+        if isinstance(identity, dict):
+            identity = {key: identity.get(key) for key in ("anchor", "instance")}
+        return _encoded([finding.get("ruleId"), identity])
 
     used = {
         identity_key(finding)
@@ -1806,6 +1809,8 @@ def merge_saved_results(
         )
 
     def raw_owner(value: dict[str, Any], source_owner: str | None) -> str | None:
+        if source_owner is not None:
+            return source_owner
         provenance = value.get("provenance", {})
         owner = provenance.get("workerId")
         return owner if isinstance(owner, str) else source_owner
