@@ -319,10 +319,20 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     assert trusted_git_executable(repository) == str(expected)
 
 
-def test_git_context_retains_scoped_directory_spelling(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "component with spaces",
+        pytest.param(
+            "component with spaces ",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows strips trailing spaces"),
+        ),
+    ],
+)
+def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
-    scoped = target / "component with spaces "
+    scoped = target / name
     scoped.mkdir()
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](scoped)
     assert repository.samefile(target)

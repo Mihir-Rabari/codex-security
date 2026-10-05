@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   stat,
   rm,
   symlink,
@@ -39,7 +40,7 @@ describe("offline artifact export", () => {
         { scanDir, output: currentDirectory, format: "json" },
         currentDirectory,
       );
-      expect(result.output).toBe(currentDirectory);
+      expect(result.output).toBe(await realpath(currentDirectory));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -58,7 +59,7 @@ describe("offline artifact export", () => {
             root,
           )
         ).output,
-      ).toBe(output);
+      ).toBe(join(await realpath(scanDir), "exports", "findings.json"));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -101,7 +102,7 @@ describe("offline artifact export", () => {
         output: join(reports, "result.json"),
       };
       expect((await resolveArtifactExportOutput(options, root)).output).toBe(
-        options.output,
+        join(await realpath(reports), "result.json"),
       );
       await expect(
         resolveArtifactExportOutput(

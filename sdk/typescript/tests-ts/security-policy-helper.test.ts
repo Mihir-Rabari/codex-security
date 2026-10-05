@@ -66,6 +66,41 @@ function expectGuidance(text: string, policies: [string, string][]): void {
 afterEach(cleanup);
 
 describe("built SECURITY.md helper", () => {
+  test.skipIf(process.platform === "win32")(
+    "reads a known policy when listing returns native Windows access denied",
+    () => {
+      const { root } = fixture();
+      write(root, "SECURITY.md", "Synthetic inherited policy\n");
+      write(root, "component/example.txt", "synthetic scope");
+      const preload = join(dirname(root), "deny-listing.cjs");
+      writeFileSync(
+        preload,
+        `
+const fs = require("node:fs");
+const original = fs.readdirSync;
+const deniedDirectory = fs.realpathSync.native(${JSON.stringify(root)});
+fs.readdirSync = function (path, ...args) {
+  if (String(path) === deniedDirectory)
+    throw Object.assign(new Error("Synthetic native Windows listing error"), { winerror: 5 });
+  return original.call(this, path, ...args);
+};
+require("node:module").syncBuiltinESMExports();
+`,
+      );
+      const result = run(
+        ["--repo", root, "--scope", "component", "--out", "-"],
+        {
+          ...process.env,
+          NODE_OPTIONS: `--require ${JSON.stringify(preload)}`,
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expectGuidance(result.stdout, [
+        ["SECURITY.md", "Synthetic inherited policy\n"],
+      ]);
+    },
+  );
+
   test.skipIf(process.platform === "win32" || userInfo().uid === 0)(
     "reads known policies through a search-only ancestor",
     () => {
