@@ -1161,7 +1161,7 @@ test("native API-key preparation creates a missing default Codex home", async ()
 });
 
 test(
-  "native missing absolute homes reach fresh and resumed SDK children",
+  "native missing symlink homes select matching config for fresh and resumed children",
   {
     skip:
       process.platform === "win32"
@@ -1221,7 +1221,22 @@ if (process.argv.includes("app-server")) {
       ])
         delete process.env[key];
       for (const resumed of [false, true]) {
-        const home = join(root, resumed ? "resumed-home" : "fresh-home");
+        const base = join(root, resumed ? "resumed" : "fresh", "base");
+        const target = join(root, resumed ? "resumed" : "fresh", "target");
+        const decoy = join(base, "missing", "home");
+        await mkdir(join(target, "nested"), { recursive: true });
+        await mkdir(join(decoy, "codex-security"), { recursive: true });
+        await symlink(join(target, "nested"), join(base, "link"), "dir");
+        const home = `${base}${sep}link${sep}..${sep}missing${sep}home`;
+        const expectedHome = join(target, "missing", "home");
+        await writeFile(
+          join(decoy, "config.toml"),
+          'model = "synthetic-wrong"\n',
+        );
+        await writeFile(
+          join(decoy, "codex-security", "config.toml"),
+          "[deep_scan]\nworkers = 7\nsubagents = 5\n",
+        );
         process.env.CODEX_HOME = home;
         await assert.rejects(stat(home), { code: "ENOENT" });
         const prepared = await prepareNativeScan({
@@ -1232,12 +1247,24 @@ if (process.argv.includes("app-server")) {
             ...(resumed
               ? {
                   config: { model: "synthetic-saved" },
-                  deepScan: { workers: 3 },
+                  deepScan: { workers: 3, subagents: 2 },
                 }
               : {}),
           },
         });
         await assert.rejects(stat(home), { code: "ENOENT" });
+        const defaults = await resolveDeepScanConfig(
+          {},
+          join(expectedHome, "codex-security", "config.toml"),
+        );
+        assert.equal(
+          prepared.options.workers,
+          resumed ? 3 : defaults.settings.workers,
+        );
+        assert.equal(
+          prepared.client.config.codexOverrides.model,
+          resumed ? "synthetic-saved" : undefined,
+        );
         const runtime = await prepareAmbientRuntime(
           prepared.client.dependencies.ambientExecution,
         );
@@ -1268,7 +1295,20 @@ if (process.argv.includes("app-server")) {
             );
             assert.equal(events.at(-1).type, "turn.completed");
             const observed = JSON.parse(await readFile(capture, "utf8"));
+            assert.equal(observed.home, expectedHome);
             assert.equal(observed.home, await realpath(home));
+            assert.equal(
+              observed.argv.includes('model="synthetic-wrong"'),
+              false,
+            );
+            if (resumed)
+              assert.ok(observed.argv.includes('model="synthetic-saved"'));
+            assert.equal(
+              parseToml(
+                observed.argv.find((arg) => arg.startsWith("features=")),
+              ).features.multi_agent_v2.max_concurrent_threads_per_session,
+              (resumed ? 2 : defaults.settings.subagents) + 1,
+            );
             assert.equal(
               observed.argv[observed.argv.indexOf("--cd") + 1],
               workerDirectory,

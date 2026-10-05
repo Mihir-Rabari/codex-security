@@ -347,12 +347,44 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
         resolvedHome: expectedHome,
       });
     }
-    const missingHome = path.join(root, "missing", "home");
-    process.env.CODEX_HOME = missingHome;
-    const environment = await snapshotNativeEnvironment();
-    assert.equal(environment.CODEX_HOME, missingHome);
-    assert.equal(process.env.CODEX_HOME, missingHome);
-    await assert.rejects(realpath(missingHome), { code: "ENOENT" });
+    const canonicalRoot = await realpath(root);
+    for (const [home, expectedHome] of [
+      [
+        path.join(root, "missing", "home"),
+        path.join(canonicalRoot, "missing", "home"),
+      ],
+      [
+        `${root}${path.sep}link${path.sep}..${path.sep}missing${path.sep}home`,
+        path.join(canonicalRoot, "target", "missing", "home"),
+      ],
+      [
+        `${root}${path.sep}missing${path.sep}..${path.sep}link${path.sep}..${path.sep}new-home`,
+        path.join(canonicalRoot, "target", "new-home"),
+      ],
+    ]) {
+      process.env.CODEX_HOME = home;
+      const environment = await snapshotNativeEnvironment();
+      assert.equal(environment.CODEX_HOME, expectedHome);
+      assert.equal(process.env.CODEX_HOME, home);
+      await assert.rejects(realpath(expectedHome), { code: "ENOENT" });
+    }
+    const dangling = path.join(root, "dangling");
+    await symlink(
+      path.join(root, "target", "missing-child"),
+      dangling,
+      "junction",
+    );
+    for (const home of [
+      `${dangling}${path.sep}..${path.sep}new-home`,
+      `${dangling}${path.sep}`,
+      path.relative(process.cwd(), path.join(root, "missing", "home")),
+      ...(process.platform === "win32"
+        ? [`\\${path.relative(path.parse(root).root, root)}\\missing\\home`]
+        : []),
+    ]) {
+      process.env.CODEX_HOME = home;
+      await assert.rejects(snapshotNativeEnvironment(), { code: "ENOENT" });
+    }
   } finally {
     restoreEnv("CODEX_HOME", previousCodexHome);
     restoreEnv("HOME", previousHome);

@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { ScanResult } from "../src/result.js";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
+
+import { createCliTest } from "./support/cli-run.js";
 
 const cappedState: JsonObject = {
   terminalReason: "capped",
@@ -20,14 +22,12 @@ async function summary(
   options: Parameters<typeof dependencies>[0],
   args = ["--mode", "deep"],
 ) {
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
+
   const result = options?.result ?? fakeResult(["high"], "partial");
   expect(
-    await main(
+    await runCli(
       ["scan", ...args, "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({ ...options, result }),
     ),
   ).toBe(result.coverage.completeness === "complete" ? 0 : 2);

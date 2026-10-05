@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { readSealedScanTurn } from "../src/scan-publication.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
@@ -647,9 +648,9 @@ test.each(["chatgpt", "api-key"] as const)(
         args,
         input,
       );
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       [
         "scan",
         repository,
@@ -666,8 +667,6 @@ test.each(["chatgpt", "api-key"] as const)(
         promptFile,
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({ environment, currentDirectory: root }),
         runWorkbench: command,
@@ -747,14 +746,12 @@ test.each([
     await mkdir(join(ambientHome, "codex-security"), { recursive: true });
     await writeFile(ambientDeepConfig, "invalid ambient TOML [");
     const prompts: string[] = [];
-    const stdout = capture();
-    const stderr = capture();
-    const code = await main(
+    const { stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      stdout.stream,
-      stderr.stream,
       {
         ...dependencies({
           environment: f.environment,
@@ -831,20 +828,15 @@ test.each([
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
   await rm(f.sessionPath);
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(
-    ["scans", "resume", f.scanId],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-      runWorkbench: f.command,
-      createSecurity: resumeClient(f, () =>
-        fail("Must not invoke Codex without the original session"),
-      ),
-    },
-  );
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume", f.scanId], {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: resumeClient(f, () =>
+      fail("Must not invoke Codex without the original session"),
+    ),
+  });
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("original Codex session");
   expect(
@@ -1333,18 +1325,16 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
       await rm(f.repository, { recursive: true });
     if (scenario === "missing-session") await rm(f.sessionPath);
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     const deps = dependencies({
       environment: f.environment,
       currentDirectory: f.root,
     });
     let attempts = 0;
     expect(
-      await main(
+      await runCli(
         ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
-        stdout.stream,
-        stderr.stream,
         {
           ...deps,
           runWorkbench: f.command,
@@ -1414,9 +1404,9 @@ test("the public resume command remains limited to Deep scans", async () => {
 });
 
 test("resume requires an explicit scan ID", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const code = await main(["scans", "resume"], stdout.stream, stderr.stream, {
+  const { stderr, runCli } = createCliTest(main);
+
+  const code = await runCli(["scans", "resume"], {
     ...dependencies(),
     runWorkbench: async () => fail("Must select a scan explicitly"),
   });
