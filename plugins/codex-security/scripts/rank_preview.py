@@ -456,7 +456,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                     start -= 1
                 control_parentheses.append(
                     keyword in {"if", "while", "for", "with", "switch", "catch"}
-                    and (start == 0 or masked[start - 1] != ".")
+                    and (start == 0 or masked[start - 1] not in ".#")
                 )
                 after_control_condition = False
             elif char == ")":

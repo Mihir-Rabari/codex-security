@@ -787,11 +787,13 @@ def test_unterminated_regex_does_not_rescan_a_long_line() -> None:
         "helpers.with(x) / 2",
         "ops . /*member*/ if() / 2",
         "ops?.if() / 2",
+        "this.#if() / 2",
     ],
 )
 def test_javascript_division_after_parentheses_keeps_following_methods(expression: str) -> None:
     source = (
-        f"class Fixture {{\n first() {{ return {expression}; }} // division\n later() {{}}\n}}\n"
+        "class Fixture {\n #if() { return 2; }\n"
+        f" first() {{ return {expression}; }} // division\n later() {{}}\n}}\n"
     )
     preview, binary = preview_for_bytes(Path("fixture.js"), source.encode(), DEFAULT_PREVIEW_BYTES)
     assert not binary
