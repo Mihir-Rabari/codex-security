@@ -2536,6 +2536,58 @@ test.each([
   },
 );
 
+testPosix(
+  "bulk SHA-1 checkout works without Git object-format options",
+  async () => {
+    if (
+      runTestInSubprocess(
+        fileURLToPath(import.meta.url),
+        "bulk SHA-1 checkout works without Git object-format options",
+      )
+    )
+      return;
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${source.path},${source.revision}\n`,
+    );
+    const command = await resolveTrustedExecutable(
+      "git",
+      process.env,
+      process.cwd(),
+    );
+    expect(command).not.toBeNull();
+    const bin = await temporaryDirectory();
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh
+for argument do
+  case "$argument" in
+    --object-format=*) echo 'error: unknown option object-format' >&2; exit 129 ;;
+  esac
+done
+exec '${command!.executable.replaceAll("'", "'\\''")}' "$@"
+`,
+      { mode: 0o700 },
+    );
+    const previousPath = process.env["PATH"];
+    process.env["PATH"] = `${bin}:${previousPath ?? ""}`;
+    try {
+      const run = mock(async (checkout: string, scanOptions = {}) => {
+        expect(git(checkout, "rev-parse", "HEAD")).toBe(source.revision);
+        return completeRun(checkout, scanOptions);
+      });
+      const result = await runMultiscan(options(paths, client(run)));
+      expect(result.failed).toBe(0);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previousPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previousPath;
+    }
+  },
+);
+
 test.each([
   "GIT_DIR",
   "GIT_COMMON_DIR",
