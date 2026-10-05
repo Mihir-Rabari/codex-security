@@ -7396,6 +7396,7 @@ async function nestedPatchGitDependencies(
               [...GIT_REPOSITORY_ENVIRONMENT]
                 .filter(
                   (name) =>
+                    name !== "GIT_ALTERNATE_OBJECT_DIRECTORIES" &&
                     name !== "GIT_NO_REPLACE_OBJECTS" &&
                     name !== "GIT_REPLACE_REF_BASE",
                 )

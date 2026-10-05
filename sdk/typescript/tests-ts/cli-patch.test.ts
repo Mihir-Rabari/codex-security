@@ -11,6 +11,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -3847,6 +3848,7 @@ describe("patch publication integrity", () => {
     "nested",
     "nested environment",
     "nested objects",
+    "nested alternate objects",
     "nested common",
     "nested replacements",
     "nested replacement namespace",
@@ -3858,6 +3860,7 @@ describe("patch publication integrity", () => {
     git("config", "user.email", "synthetic@example.test");
     await writeFile(join(directory, "app.ts"), "unsafe\n");
     let path = "app.ts";
+    let alternateObjects: string | undefined;
     if (kind.startsWith("nested")) {
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
@@ -3870,6 +3873,14 @@ describe("patch publication integrity", () => {
       await writeFile(join(nested, "app.ts"), "unsafe\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic nested baseline");
+      if (kind === "nested alternate objects") {
+        alternateObjects = join(
+          await fixtures.create("patch-alternate-objects-"),
+          "objects",
+        );
+        await rename(join(nested, ".git", "objects"), alternateObjects);
+        await mkdir(join(nested, ".git", "objects"));
+      }
       if (kind.startsWith("nested replacement")) {
         const original = inner("rev-parse", "HEAD^{tree}");
         await writeFile(join(nested, "app.ts"), "fixed\n");
@@ -3891,7 +3902,9 @@ describe("patch publication integrity", () => {
               ? { GIT_NO_REPLACE_OBJECTS: "1" }
               : kind === "nested replacement namespace"
                 ? { GIT_REPLACE_REF_BASE: "refs/synthetic-replacements/" }
-                : {};
+                : kind === "nested alternate objects"
+                  ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }
+                  : {};
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: directory,
       onRepositoryCommand: (command, args, cwd, options) =>
