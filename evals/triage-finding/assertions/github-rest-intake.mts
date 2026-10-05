@@ -153,13 +153,14 @@ const checks = {
 
   connector_selected: (text: string) => {
     const fallbackInstructions = text.replace(
-      /\b(?:never|do not|don't)\s+(?:switch to|fall back to|use)\s+REST\s+without\s+(?:approval|permission)\b/gi,
+      /\b(?:never|not|cannot|[a-z]+n['’]t)\s+(?:\w+\s+)*(?:switch to|fall back to|use)\s+REST\s+without\s+(?:approval|permission)\b/gi,
       "",
     );
     return [
-      ...(/(?:do not|don't)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:without (?:approval|permission)|(?:do not|don't)\s+(?:ask|seek|request))/i.test(
-        fallbackInstructions,
-      )
+      ...(/(?:do not|don't)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:do not|don't)\s+(?:ask|seek|request)/i.test(
+        text,
+      ) ||
+      /REST[^.\n]*without (?:approval|permission)/i.test(fallbackInstructions)
         ? ["must ask before switching to REST"]
         : []),
       ...(!/GitHub Connector|connector/i.test(text) || !/read.only/i.test(text)

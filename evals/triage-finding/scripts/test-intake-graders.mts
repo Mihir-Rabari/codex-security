@@ -79,11 +79,16 @@ for (const response of [
   "Use the GitHub Connector read-only tools. It has no limitation. Do not ask before switching to REST.",
   "Use the GitHub Connector read-only tools. If its capability is unavailable, do not ask before switching to REST.",
   "Use the GitHub Connector read-only tools. If its capability is unavailable, switch to REST without permission.",
+  "Use the GitHub Connector read-only tools. If its capability is unavailable, I will silently switch to REST without approval.",
 ])
   assert.equal(github(response, connectorContext).pass, false);
 
 for (const prohibition of [
   "Never switch to REST without permission.",
+  "I won't switch to REST without permission.",
+  "Never silently switch to REST without approval.",
+  "I will not automatically fall back to REST without approval.",
+  "I won’t use REST without permission.",
   "Do not fall back to REST without approval.",
   "Don't use REST without permission.",
 ]) {
