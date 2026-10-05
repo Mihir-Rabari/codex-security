@@ -19,6 +19,50 @@ import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
 
 describe("CLI diagnostics", () => {
+  test.skipIf(process.platform === "win32")(
+    "escapes terminal controls from public export errors",
+    async () => {
+      const directory = await temporaryDirectory("codex-security-export-cli-");
+      try {
+        const home = join(directory, "home");
+        await mkdir(home, { mode: 0o700 });
+        const scan = join(
+          directory,
+          "missing-\u001b[2J\u009b2J-token=SYNTHETIC_VALUE",
+        );
+        const result = await runCommand(
+          process.execPath,
+          [
+            join(import.meta.dir, "..", "src", "cli.ts"),
+            "export",
+            scan,
+            "--output",
+            join(directory, "results.sarif"),
+          ],
+          {
+            env: {
+              ...process.env,
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+            },
+            cwd: directory,
+            timeout: 30_000,
+          },
+        );
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain(
+          "expected an existing non-symlink directory",
+        );
+        expect(result.stderr).toContain("No such file or directory");
+        expect(result.stderr).toContain("token=SYNTHETIC_VALUE");
+        expect(result.stderr).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("escapes malformed configuration source from automatic component planning", async () => {
     const directory = await temporaryDirectory(
       "codex-security-component-config-",
