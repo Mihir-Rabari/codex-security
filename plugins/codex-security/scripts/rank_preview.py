@@ -451,8 +451,12 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 start = end
                 while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$"):
                     start -= 1
+                keyword = "".join(masked[start:end])
+                while start > 0 and masked[start - 1].isspace():
+                    start -= 1
                 control_parentheses.append(
-                    "".join(masked[start:end]) in {"if", "while", "for", "with", "switch", "catch"}
+                    keyword in {"if", "while", "for", "with", "switch", "catch"}
+                    and (start == 0 or masked[start - 1] != ".")
                 )
                 after_control_condition = False
             elif char == ")":

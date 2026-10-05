@@ -778,9 +778,21 @@ def test_unterminated_regex_does_not_rescan_a_long_line() -> None:
     assert source.reads < len(source) * 20
 
 
-@pytest.mark.parametrize("expression", ["call() / 2", "(value + 1) / 2"])
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "call() / 2",
+        "(value + 1) / 2",
+        "ops.if() / 2",
+        "helpers.with(x) / 2",
+        "ops . /*member*/ if() / 2",
+        "ops?.if() / 2",
+    ],
+)
 def test_javascript_division_after_parentheses_keeps_following_methods(expression: str) -> None:
-    source = f"class Fixture {{\n first() {{ return {expression}; }}\n later() {{}}\n}}\n"
+    source = (
+        f"class Fixture {{\n first() {{ return {expression}; }} // division\n later() {{}}\n}}\n"
+    )
     preview, binary = preview_for_bytes(Path("fixture.js"), source.encode(), DEFAULT_PREVIEW_BYTES)
     assert not binary
     assert "method Fixture.later" in preview
