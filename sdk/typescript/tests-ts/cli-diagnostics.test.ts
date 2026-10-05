@@ -16,8 +16,57 @@ import { throwing } from "./support/errors.js";
 
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 describe("CLI diagnostics", () => {
+  test("escapes malformed configuration source from automatic component planning", async () => {
+    const directory = await temporaryDirectory(
+      "codex-security-component-config-",
+    );
+    try {
+      const home = join(directory, "home");
+      const repository = join(directory, "repository");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "synthetic.ts"),
+        "export const value = 1;\n",
+      );
+      await writeFile(
+        join(home, "config.toml"),
+        'synthetic = "\u001b[2J\u009b2J-token=SYNTHETIC_VALUE',
+      );
+      const result = await runCommand(
+        process.execPath,
+        [
+          join(import.meta.dir, "..", "src", "cli.ts"),
+          "scan-components",
+          repository,
+          "--auto",
+          "--plan-only",
+          "--headless",
+          "--output-dir",
+          join(directory, "output"),
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          },
+          cwd: directory,
+          timeout: 30_000,
+        },
+      );
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("Could not read Codex configuration");
+      expect(result.stderr).toContain("token=SYNTHETIC_VALUE");
+      expect(result.stderr).not.toMatch(/[\u001b\u009b]/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     {
       label: "matching",

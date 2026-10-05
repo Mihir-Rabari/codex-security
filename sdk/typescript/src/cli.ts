@@ -4367,7 +4367,7 @@ export async function main(
         } catch (error) {
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
