@@ -461,6 +461,108 @@ def test_canonical_worker_update_keeps_independent_alias_sibling(
     }
 
 
+@pytest.mark.parametrize("renamed", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_canonical_worker_slot_survives_a_stronger_replacement(
+    tmp_path: Path, renamed: bool, retry: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding_path = scan_dir / "findings.json"
+    parent = json.loads(finding_path.read_text())
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    original = parent["findings"][0]
+    original.update(identity={"anchor": "finding"}, title="Finding")
+    original["severity"]["level"] = "low"
+    original["provenance"].update(candidateId="worker-candidate", workerId=worker_id)
+    historical = json.loads(json.dumps(original))
+    if renamed:
+        original["provenance"]["candidateId"] = "canonical-candidate"
+    original["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+    finding_path.write_text(json.dumps(parent))
+    worker = json.loads(result_path.read_text())
+    write_checkpoint(
+        result_path.parent / "checkpoints",
+        {**worker, "complete": False, "findings": [historical]},
+    )
+    current = json.loads(json.dumps(historical))
+    current["severity"]["level"] = "high"
+    current["summary"] = "Stronger current worker observation."
+    current["locations"][0].update(startLine=2, endLine=2)
+    worker["findings"] = [current]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 1
+    assert findings[0]["summary"] == current["summary"]
+    assert findings[0]["locations"][0]["startLine"] == 2
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["foreign-owner", "split-owners", "explicit-priority", "raw-stronger", "explicit-stronger"],
+)
+def test_frozen_recovery_preserves_worker_ownership_and_explicit_identity_priority(
+    tmp_path: Path, case: str
+):
+    snapshots = []
+    for retry in (False, True):
+        directory = tmp_path / str(retry)
+        directory.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(directory)
+        finding_path = scan_dir / "findings.json"
+        document = json.loads(finding_path.read_text())
+        original = document["findings"][0]
+        original.update(identity={"anchor": "finding"}, title="Finding")
+        if case == "foreign-owner":
+            observations = [
+                ("B", "worker-a", "low"),
+                ("A", "worker-a", "high"),
+                (None, "worker-b", "high"),
+            ]
+        elif case == "split-owners":
+            observations = [
+                ("A", "worker-a", "low"),
+                (None, "worker-a", "high"),
+                ("B", "worker-b", "low"),
+            ]
+        else:
+            observations = [
+                ("A", None, "high" if case == "raw-stronger" else "low"),
+                ("A", None, "high" if case == "explicit-stronger" else "low"),
+                ("B", None, "low"),
+            ]
+        findings = []
+        for index, (candidate, owner, level) in enumerate(observations):
+            finding = json.loads(json.dumps(original))
+            finding["severity"]["level"] = level
+            finding["provenance"].pop("candidateId", None)
+            if candidate:
+                finding["provenance"]["candidateId"] = candidate
+            if owner:
+                finding["provenance"]["workerId"] = owner
+            elif index == 0:
+                finding.pop("identity")
+            findings.append(finding)
+        document["findings"] = findings
+        finding_path.write_text(json.dumps(document))
+        stop_draft(directory, state, home, scan_id, retry=retry)
+        recovered = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        expected = 3 if case == "foreign-owner" else 2
+        assert len(recovered) == expected
+        snapshots.append(
+            {
+                (
+                    finding["provenance"].get("workerId"),
+                    finding["provenance"].get("candidateId"),
+                ): finding["identity"]
+                for finding in recovered
+            }
+        )
+    assert snapshots[0] == snapshots[1]
+
+
 def test_recovered_identity_does_not_depend_on_worker_assignment(tmp_path: Path):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]

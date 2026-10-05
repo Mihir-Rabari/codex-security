@@ -1338,10 +1338,13 @@ def merge_saved_results(
         previous_candidate = finding_candidate_id(previous)
         current_owner = finding.get("provenance", {}).get("workerId") or current_owner
         previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
+        current_owner = current_owner if isinstance(current_owner, str) else None
+        previous_owner = previous_owner if isinstance(previous_owner, str) else None
         key = _finding_key(recovered_finding(finding) or finding)
         if bool(current_candidate) != bool(previous_candidate):
+            if current_owner and previous_owner and current_owner != previous_owner:
+                return True
             owner = previous_owner if current_candidate else current_owner
-            owner = owner if isinstance(owner, str) else None
             return (
                 sum(
                     (1 if owner else len(owners) or 1)
@@ -1998,15 +2001,18 @@ def merge_saved_results(
                 canonical_candidate in canonical_candidates
                 and represented_candidates[canonical_candidate] is not None
             ):
-                key = candidate_position_key(
-                    canonical_candidates[canonical_candidate],
-                    represented_candidates[canonical_candidate],
-                )
+                key = represented_candidates[canonical_candidate]
             elif not represented_by_parent:
                 key = candidate_position_key(finding, key)
             if key in finding_positions:
                 position = finding_positions[key]
                 retained = findings[position]
+                if (
+                    id(finding) not in inferred_identities
+                    or id(retained) not in inferred_identities
+                ):
+                    inferred_identities.pop(id(finding), None)
+                    inferred_identities.pop(id(retained), None)
                 if finding != retained:
                     if not represented_by_parent and _finding_strength(finding) > _finding_strength(
                         retained
@@ -2050,6 +2056,12 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
+        if relative == "parent":
+            for candidate, canonical in canonical_candidates.items():
+                if represented_candidates[candidate] is not None:
+                    represented_candidates[candidate] = candidate_position_key(
+                        canonical, represented_candidates[candidate]
+                    )
         if superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
