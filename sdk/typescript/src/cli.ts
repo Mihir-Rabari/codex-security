@@ -1936,7 +1936,7 @@ export async function main(
           : interrupted === "SIGTERM"
             ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
             : errorMessage(error);
-      errorOutput.write(`codex-security: ${message}\n`);
+      errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
       throw error;
     } finally {
       removeListeners();
@@ -5900,7 +5900,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticValue(incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { readCodexHomeConfig } from "../src/auth.js";
+import { matchScanFindings } from "../src/scan-comparison.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
   warningResult,
@@ -17,6 +18,51 @@ import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 describe("CLI diagnostics", () => {
+  test.each([
+    {
+      label: "matching",
+      args: ["scans", "match", "synthetic-before", "synthetic-after"],
+    },
+    { label: "feedback", args: ["feedback", "--reason", "Synthetic feedback"] },
+  ])(
+    "escapes malformed configuration source in $label diagnostics",
+    async ({ args }) => {
+      const directory = await temporaryDirectory(
+        "codex-security-config-source-",
+      );
+      try {
+        const home = join(directory, "home");
+        await mkdir(home, { mode: 0o700 });
+        await writeFile(
+          join(home, "config.toml"),
+          'synthetic = "\u001b[2J\u009b2J-token=SYNTHETIC_VALUE',
+        );
+        const { stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          currentDirectory: directory,
+          environment: {
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          },
+          onMatch: matchScanFindings,
+          onWorkbench: () => ({
+            scans: [],
+            matchingInputs: {
+              before: [{ occurrenceId: "synthetic-before" }],
+              after: [{ occurrenceId: "synthetic-after" }],
+            },
+          }),
+        });
+        expect(await runCli(args, deps)).toBe(2);
+        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain("token=SYNTHETIC_VALUE");
+        expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "escapes controls in expanded validation configuration diagnostics",
     async () => {
