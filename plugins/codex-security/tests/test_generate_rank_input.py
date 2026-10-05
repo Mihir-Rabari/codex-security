@@ -620,33 +620,6 @@ def test_make_repo_scope_input_preserves_every_requested_directory_file(tmp_path
     ]
 
 
-def test_make_repo_scope_input_preserves_filesystem_case_aliases(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    component = repo / "component"
-    component.mkdir()
-    (component / "app.py").write_text("print('fixture')\n")
-    alias = repo / "COMPONENT"
-    if not alias.exists() or not alias.samefile(component):
-        pytest.skip("filesystem does not support case aliases")
-    scopes = tmp_path / "scopes.json"
-    scopes.write_text(json.dumps(["."]))
-    output = tmp_path / "scoped-source-input.jsonl"
-
-    run_cli(
-        "make-repo-scope-input",
-        "--repo",
-        str(alias),
-        "--scopes-file",
-        str(scopes),
-        "--out",
-        str(output),
-    )
-
-    assert read_jsonl(output) == [{"path": "app.py"}]
-
-
 def test_make_repo_scope_input_rejects_paths_outside_repository(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

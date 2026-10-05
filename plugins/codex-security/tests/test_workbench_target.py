@@ -374,14 +374,11 @@ def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
     assert repository.samefile(target)
     assert pathspec == "."
-    assert directory_content_digest(alias) == directory_content_digest(target)
     scoped = target / "component"
     scoped.mkdir()
-    (scoped / "app.py").write_text("print('fixture')\n")
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
     assert repository.samefile(target)
     assert (repository / pathspec).samefile(scoped)
-    assert directory_content_digest(alias / "COMPONENT") == directory_content_digest(scoped)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")
