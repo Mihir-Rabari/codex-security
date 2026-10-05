@@ -252,7 +252,9 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     "absolute symlink Git environment",
     "relative symlink Git environment",
     "relative provider configuration",
+    "nested Git metadata after patch",
     "removed component",
+    "removed component replaced by a file",
     "removed component with relative Git environment",
     "removed component with relative index",
     "removed component with relative common directory",
@@ -263,7 +265,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     "removed component with removed provider configuration",
     ...(process.platform === "win32"
       ? []
-      : ["trailing space", "carriage return"]),
+      : [
+          "removed component replaced by a directory link",
+          "trailing space",
+          "carriage return",
+        ]),
   ])(
     "assesses and publishes root-relative patch files from a subdirectory: %s",
     async (kind) => {
@@ -280,8 +286,14 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       );
       const subdirectory = join(repository, "sub");
       const removesComponent = kind.startsWith("removed component");
+      const replacesComponent = kind.includes("replaced by");
       const changedFiles = removesComponent
-        ? ["shared.ts", "sub/.codex/config.toml", "sub/app.ts"]
+        ? [
+            "shared.ts",
+            ...(replacesComponent ? ["sub"] : []),
+            "sub/.codex/config.toml",
+            "sub/app.ts",
+          ]
         : ["shared.ts", "sub/app.ts"];
       const alias = join(directory, "alias");
       const linkedGitRoot = `${kind.includes("relative symlink Git environment") ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
@@ -385,7 +397,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
               ...gitEnvironment,
               ...providerEnvironment,
             },
-            onCodex: async (_args, output) => {
+            onCodex: async (_args, output, environment) => {
               const assessing = output?.appServer?.prompt.includes(
                 "$codex-security:assess-patch-risk",
               );
@@ -408,6 +420,13 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   "$codex-security:assess-patch-risk",
                 )
               ) {
+                expect(
+                  execFileSync("git", ["rev-parse", "--show-toplevel"], {
+                    cwd: output.appServer.directory,
+                    env: environment,
+                    encoding: "utf8",
+                  }).replace(/\n$/u, ""),
+                ).toBe(repository);
                 const artifact = JSON.parse(
                   output.appServer.prompt
                     .split("\n")
@@ -419,9 +438,37 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 expect(patch).toContain("a/shared.ts");
                 output.stdout.write(patchRiskAssessment().report);
               } else {
-                if (removesComponent)
+                if (removesComponent) {
                   await rm(subdirectory, { recursive: true });
-                else await writeFile(join(subdirectory, "app.ts"), "fixed\n");
+                  if (kind.includes("replaced by a file"))
+                    await writeFile(subdirectory, "replacement file\n");
+                  if (kind.includes("replaced by a directory link")) {
+                    const outside = join(directory, "other-checkout");
+                    await mkdir(outside);
+                    await writeFile(join(outside, "app.ts"), "original\n");
+                    const other = repositoryGit(outside);
+                    other("init", "--initial-branch=main");
+                    other("config", "user.name", "Synthetic User");
+                    other("config", "user.email", "synthetic@example.test");
+                    other("add", ".");
+                    other("commit", "-m", "Synthetic other checkout");
+                    await symlink(
+                      outside,
+                      subdirectory,
+                      process.platform === "win32" ? "junction" : "dir",
+                    );
+                  }
+                } else {
+                  await writeFile(join(subdirectory, "app.ts"), "fixed\n");
+                  if (kind === "nested Git metadata after patch") {
+                    const nested = repositoryGit(subdirectory);
+                    nested("init", "--initial-branch=main");
+                    nested("config", "user.name", "Synthetic User");
+                    nested("config", "user.email", "synthetic@example.test");
+                    nested("add", ".");
+                    nested("commit", "-m", "Synthetic nested checkout");
+                  }
+                }
                 await writeFile(join(repository, "shared.ts"), "fixed\n");
                 output?.stdout.write("Patch complete.");
               }
@@ -477,8 +524,9 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         const missingConfiguration = kind.includes(
           "removed provider configuration",
         );
+        const linkedComponent = kind.includes("replaced by a directory link");
         expect(outcome.exitCode, outcome.stderr).toBe(
-          missingConfiguration ? 2 : 0,
+          missingConfiguration || linkedComponent ? 2 : 0,
         );
         const result = JSON.parse(outcome.stdout);
         expect(result.repository).toBe(subdirectory);
@@ -491,17 +539,26 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         expect(
           result.files.map((file: string) => resolve(result.repository, file)),
         ).toEqual(changedFiles.map((file) => join(repository, file)));
-        expect(git("show", "--format=", "--name-only", "HEAD", "--")).toBe(
-          changedFiles.join("\n"),
-        );
+        if (!linkedComponent)
+          expect(git("show", "--format=", "--name-only", "HEAD", "--")).toBe(
+            changedFiles.join("\n"),
+          );
         if (missingConfiguration) {
           expect(outcome.stderr).toContain("ENOENT");
           expect(outcome.stderr).toContain(providerConfiguration);
+        } else if (linkedComponent) {
+          expect(outcome.stderr).toContain("beyond a symbolic link");
+          expect(git("branch", "--show-current")).toBe("main");
+          expect(git("diff", "--cached", "--name-only")).toBe("");
         } else
           expect(git("rev-parse", "HEAD")).toBe(
             git("rev-parse", "@{upstream}"),
           );
-        if (removesComponent)
+        if (linkedComponent)
+          expect(await readFile(join(subdirectory, "app.ts"), "utf8")).toBe(
+            "original\n",
+          );
+        else if (removesComponent)
           await expect(
             readFile(join(subdirectory, "app.ts")),
           ).rejects.toThrow();
@@ -518,7 +575,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
               },
             }),
           ).toBe("");
-        } else expect(git("status", "--porcelain")).toBe("");
+        } else if (!linkedComponent)
+          expect(git("status", "--porcelain")).toBe("");
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
