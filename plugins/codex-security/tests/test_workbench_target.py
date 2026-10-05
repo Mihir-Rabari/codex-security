@@ -322,6 +322,76 @@ def test_reverse_patch_cannot_write_through_junction(
     assert (outside / "keep.txt").read_text() == "outside contents\n"
 
 
+def test_reverse_patch_cannot_redirect_junction_restoration(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    (source / "dep").mkdir(parents=True)
+    original_target = tmp_path / "original"
+    original_target.mkdir()
+    (original_target / "keep.txt").write_text("original contents\n")
+    junction = source / "dep" / "linked"
+    junction_factory(junction, original_target)
+    os.chmod(junction, stat.S_IREAD | stat.S_IEXEC)
+    outside = tmp_path / "outside"
+    external = outside / "linked"
+    external.mkdir(parents=True)
+    original_mode = external.stat().st_mode
+    config = tmp_path / "gitconfig"
+    config.write_text("[core]\n\tsymlinks = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = f"""diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-before
++after
+diff --git a/dep b/dep
+deleted file mode 120000
+--- a/dep
++++ /dev/null
+@@ -1 +0,0 @@
+-{outside.as_posix()}
+\\ No newline at end of file
+diff --git a/dep/linked b/dep/linked
+new file mode 160000
+index {"0" * 40}..{"1" * 40}
+--- /dev/null
++++ b/dep/linked
+@@ -0,0 +1 @@
++Subproject commit {"1" * 40}
+""".encode()
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    (source / "app.txt").write_text("before\n")
+    remediation = {
+        "base_revision": "unversioned",
+        "base_content_digest": workbench_db.directory_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    try:
+        with pytest.raises(SystemExit, match="checkout path was replaced"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+        assert external.lstat().st_mode == original_mode
+        assert not getattr(external.lstat(), "st_reparse_tag", 0)
+        assert list(external.iterdir()) == []
+        assert (original_target / "keep.txt").read_text() == "original contents\n"
+    finally:
+        os.chmod(junction, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+
+
 def initialize_unborn_git_repository(target: Path) -> None:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)

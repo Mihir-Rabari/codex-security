@@ -717,9 +717,11 @@ def copy_directory_excluding(
 
 def restore_directory_junctions(source: Path, destination: Path, junctions: list[Path]) -> None:
     # Recreate links only after patch application can no longer write through them.
+    destination = destination.resolve()
     for path in junctions:
-        os.chmod(destination / path, stat.S_IMODE((source / path).lstat().st_mode))
-        copy_directory_junction(source / path, destination / path)
+        placeholder = require_remediation_target(str(destination / path))
+        os.chmod(placeholder, stat.S_IMODE((source / path).lstat().st_mode))
+        copy_directory_junction(source / path, placeholder)
 
 
 def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
