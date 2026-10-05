@@ -1516,6 +1516,69 @@ for (const malformed of [false, true]) {
 }
 
 for (const layout of ["standard", "diff", "worker"]) {
+  for (const added of [false, true]) {
+    test(`${layout}: ignored progress reconciles an interrupted raw terminal checkpoint, added=${added}`, async (t) => {
+      const f = await fixture(t, layout);
+      const existing = findingFor("candidate-a");
+      const pending = { id: "pending-review", ...generic };
+      await f.write({
+        ...f.draft({ deferred: [pending] }),
+        findings: [existing],
+      });
+      const later = {
+        ...findingFor("candidate-b"),
+        title: "Later finding",
+        locations: [{ path: "src/example.py", startLine: 2 }],
+      };
+      // A raw checkpoint is durable before its reconciled checkpoint and result are written.
+      await saveScanDraftCheckpoint(
+        f.context,
+        { ...f.draft({}, true), findings: added ? [later] : [] },
+        false,
+      );
+      const result = await f.write(f.draft());
+      assert.equal(result.findingCount, added ? 2 : 1);
+      assert.equal(result.coverage.completeness, "partial");
+      assert.deepEqual(result.coverage.deferred, [pending]);
+      assert.deepEqual((await f.read()).deferred, [pending]);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "worker"]) {
+  test(`${layout}: late progress can explicitly reopen a closed ID by candidate alias`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write(f.draft({ deferred: [{ id: "review", ...generic }] }));
+    await f.write(f.draft({ resolvedDeferred: [close("review")] }, true));
+    const reopened = { id: "follow-up", candidateId: "review", ...generic };
+    const result = await f.write(f.draft({ deferred: [reopened] }));
+    assert.equal(result.coverage.completeness, "partial");
+    assert.ok(
+      result.coverage.deferred.some((row) => row.candidateId === "review"),
+    );
+    assert.deepEqual(result.coverage.resolvedDeferred ?? [], []);
+  });
+
+  test(`${layout}: interrupted reopening survives later empty progress`, async (t) => {
+    const f = await fixture(t, layout);
+    const task = { id: "review", ...generic };
+    await f.write(f.draft({ deferred: [task] }));
+    await f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true));
+    await interruptDraftWrite(
+      path.join(f.root, layout === "worker" ? "result.json" : "findings.json"),
+      () => f.write(f.draft({ deferred: [task] })),
+    );
+    await f.write(f.draft());
+    for (const coverage of [
+      await f.read(),
+      (await f.write(f.draft({}, true))).coverage,
+    ]) {
+      assert.equal(coverage.completeness, "partial");
+      assert.deepEqual(coverage.deferred, [task]);
+      assert.deepEqual(coverage.resolvedDeferred ?? [], []);
+    }
+  });
+
   for (const reopened of [false, true]) {
     test(`${layout}: accepted progress remains incomplete after a terminal draft, reopened=${reopened}`, async (t) => {
       const f = await fixture(t, layout);
@@ -1571,8 +1634,40 @@ for (const layout of ["standard", "diff", "worker"]) {
 
   test(`${layout}: ignored late progress keeps an accepted terminal marker`, async (t) => {
     const f = await fixture(t, layout);
-    await f.write(f.draft({}, true));
-    await f.write(f.draft({ deferred: [{ id: "late", ...generic }] }));
+    const terminal = {
+      ...f.draft({}, true),
+      findings: [findingFor("accepted")],
+    };
+    await f.write(terminal);
+    const checkpoints = await readdir(path.join(f.root, "checkpoints"));
+    await f.write({
+      ...f.draft({ deferred: [{ id: "late", ...generic }] }),
+      findings: [findingFor("late-finding")],
+    });
+    assert.deepEqual(
+      await readdir(path.join(f.root, "checkpoints")),
+      checkpoints,
+    );
+    if (layout !== "worker") {
+      await recordCodexSecurityScanDraftViaWorkbench(
+        f.context,
+        f.draft({ deferred: [{ id: "late", ...generic }] }),
+        async (args) => {
+          const checkpoint = JSON.parse(
+            await readFile(args[args.indexOf("--checkpoint-path") + 1], "utf8"),
+          );
+          assert.deepEqual(checkpoint.coverage.deferred, []);
+          assert.deepEqual(
+            checkpoint.findings.map((row) => row.provenance.candidateId),
+            ["accepted"],
+          );
+          return { status: "draft_written" };
+        },
+      );
+    }
+    const replay = await f.write(terminal);
+    assert.equal(replay.findingCount, 1);
+    assert.equal(replay.coverage.completeness, "complete");
     const published = JSON.parse(
       await readFile(
         path.join(
@@ -1625,6 +1720,44 @@ for (const layout of ["standard", "diff", "worker"]) {
         ),
       );
       assert.deepEqual((await f.read()).deferred, []);
+    });
+  }
+
+  for (const together of [false, true]) {
+    test(`${layout}: distinct candidate IDs retain separate findings at the same location, together=${together}`, async (t) => {
+      const f = await fixture(t, layout);
+      if (!together)
+        await f.write({ ...f.draft(), findings: [findingFor("candidate-a")] });
+      const terminal = {
+        ...f.draft({}, true),
+        findings: [
+          ...(together ? [findingFor("candidate-a")] : []),
+          findingFor("candidate-b"),
+        ],
+      };
+      for (let retry = 0; retry < 2; retry++) {
+        const result = await f.write(terminal);
+        assert.equal(result.findingCount, 2);
+        const saved = JSON.parse(
+          await readFile(
+            path.join(
+              f.root,
+              layout === "worker" ? "result.json" : "findings.json",
+            ),
+            "utf8",
+          ),
+        );
+        assert.deepEqual(
+          new Set(saved.findings.map((row) => row.provenance.candidateId)),
+          new Set(["candidate-a", "candidate-b"]),
+        );
+        if (layout !== "worker")
+          assert.equal(
+            new Set(saved.findings.map((row) => JSON.stringify(row.identity)))
+              .size,
+            2,
+          );
+      }
     });
   }
 
@@ -1717,4 +1850,109 @@ for (const layout of ["standard", "diff", "worker"]) {
       });
     }
   }
+}
+
+for (const title of [
+  ".env exposes state",
+  "/admin access check",
+  "_debug leaks state",
+]) {
+  test(`standard: generated identities remain readable for ${title}`, async (t) => {
+    const f = await fixture(t, "standard");
+    const finding = findingFor("unused");
+    delete finding.provenance.candidateId;
+    finding.title = title;
+    const draft = { ...f.draft({}, true), findings: [finding] };
+    await f.write(draft);
+    const saved = JSON.parse(
+      await readFile(path.join(f.root, "findings.json"), "utf8"),
+    );
+    assert.match(saved.findings[0].identity.anchor, /^[a-z0-9][a-z0-9._/-]*$/);
+    assert.equal((await f.write(draft)).findingCount, 1);
+  });
+}
+
+test("worker: malformed deferred identity remains evidence without poisoning the accepted finding", async (t) => {
+  const f = await fixture(t, "worker");
+  const previous = {
+    ...findingFor("candidate-a"),
+    identity: { anchor: ".invalid" },
+  };
+  await f.write(
+    f.draft({
+      deferred: [{ candidateId: "candidate-a", ...generic, finding: previous }],
+    }),
+  );
+  await f.write({
+    ...f.draft({}, true),
+    findings: [findingFor("candidate-a")],
+  });
+  const saved = JSON.parse(
+    await readFile(path.join(f.root, "result.json"), "utf8"),
+  );
+  assert.equal(draftApi.scanDraftInputSchema.safeParse(saved).success, true);
+  assert.deepEqual(saved.findings[0].provenance.previousFindings, [previous]);
+  assert.equal(
+    (
+      await f.write({
+        ...f.draft({}, true),
+        findings: [findingFor("candidate-a")],
+      })
+    ).findingCount,
+    1,
+  );
+});
+
+async function recoverPublishedFindings(f) {
+  const { stdout } = await execFileAsync(
+    process.env.PYTHON?.trim() || "python3",
+    [
+      "-c",
+      `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from finalize_scan_contract import _recover_unsealed_findings
+root=Path(sys.argv[2])
+manifest=json.loads((root/"scan-manifest.json").read_text())
+findings=json.loads((root/"findings.json").read_text())
+manifest["scan"]["id"]=findings["scanId"]=sys.argv[3]
+_recover_unsealed_findings(manifest,findings,Path(sys.argv[1]).parent/"schemas",root,[])
+print(json.dumps(findings["findings"]))`,
+      fileURLToPath(new URL("../../scripts", import.meta.url)),
+      f.root,
+      f.context.scanId,
+    ],
+  );
+  return JSON.parse(stdout);
+}
+
+for (const layout of ["standard", "diff"]) {
+  test(`${layout}: repeated observations of one candidate retain the strongest finding`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        findingFor("candidate-a"),
+        { ...findingFor("candidate-a"), severity: { level: "high" } },
+      ],
+    });
+    const findings = await recoverPublishedFindings(f);
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0].severity.level, "high");
+  });
+  test(`${layout}: sequential candidates cannot reuse retained sibling identities`, async (t) => {
+    const f = await fixture(t, layout);
+    const candidates = ["candidate-a", "candidate-b", "candidate-c"];
+    for (const candidate of candidates)
+      await f.write({
+        ...f.draft({}, true),
+        findings: [findingFor(candidate)],
+      });
+    const findings = await recoverPublishedFindings(f);
+    assert.equal(findings.length, 3);
+    assert.deepEqual(
+      new Set(findings.map((row) => row.provenance.candidateId)),
+      new Set(candidates),
+    );
+  });
 }

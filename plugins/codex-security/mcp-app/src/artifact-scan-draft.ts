@@ -78,6 +78,12 @@ export const scanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
+const findingIdentitySchema = loadArtifactZodSchema(
+  schemaDocuments,
+  scanDraftDocument.$id,
+  "identity",
+);
+
 export const completedScanInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   scanDraftDocument.$id,
@@ -156,7 +162,7 @@ export async function recordCodexSecurityScanDraft(
         documentWarnings = await publishDraft(
           draft,
           preserved.previousDigest,
-          finalDeepDraft ? reconciled : parsed,
+          preserved.checkpoint ?? (finalDeepDraft ? reconciled : parsed),
         );
       } else {
         const destinations = await Promise.all([
@@ -361,26 +367,34 @@ async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
   saveCheckpoint = true,
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  checkpoint?: ScanDraftInput;
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
-  if (saveCheckpoint && !requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
-  let result = structuredClone(input);
-  const previousState = await readPreviousScanDraft(context);
+  const preserveInputOnError = async (error: unknown): Promise<never> => {
+    if (saveCheckpoint && !requiresClosureValidation)
+      await saveScanDraftCheckpoint(context, input, false);
+    throw error;
+  };
+  const previousState =
+    await readPreviousScanDraft(context).catch(preserveInputOnError);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
+  let result = structuredClone(input);
   const current: SavedScanDraft[] = await readSavedCheckpoints(
     context,
     "current",
     currentCheckpointName,
-  );
+  ).catch(preserveInputOnError);
   const archived =
     context.layout === "worker"
-      ? await readArchivedWorkerCheckpoints(context)
+      ? await readArchivedWorkerCheckpoints(context).catch(preserveInputOnError)
       : [];
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
@@ -475,6 +489,7 @@ async function preserveScanDraft(
   }
 
   const reopenedSurfaces = new Set<JsonObject>();
+  let acceptProgress = true;
   if (retainedFinal) {
     const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
     for (const surface of result.coverage.surfaces as JsonObject[]) {
@@ -499,7 +514,7 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
-    let acceptProgress = coverageHasOutstandingWork(result.coverage);
+    acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const reopenedIds = new Set(
@@ -543,6 +558,8 @@ async function preserveScanDraft(
       sources.unshift(progress);
     }
   }
+  if (acceptProgress && saveCheckpoint && !requiresClosureValidation)
+    await saveScanDraftCheckpoint(context, input, false);
   const currentCandidateIds = completedCandidateIds(result);
   const resolvedCandidateIds = completedCandidateIds(result, sources);
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
@@ -555,7 +572,7 @@ async function preserveScanDraft(
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (saveCheckpoint && requiresClosureValidation)
+  if (acceptProgress && saveCheckpoint && requiresClosureValidation)
     await saveScanDraftCheckpoint(context, input, false);
 
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
@@ -712,8 +729,13 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
-  if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  if (saveCheckpoint && acceptProgress)
+    await saveScanDraftCheckpoint(context, result);
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    checkpoint: acceptProgress ? undefined : result,
+  };
 }
 
 function completedCandidateIds(
@@ -1293,7 +1315,11 @@ async function readPreviousScanDocuments(context: ArtifactContext) {
 async function preserveDeepThreatModel(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest?: string;
+  checkpoint?: ScanDraftInput;
+}> {
   if (input.threatModel !== undefined) return { input };
   const { contents, digest } = await readPreviousScanDocuments(context);
   const previous =
@@ -1508,7 +1534,8 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   if (left.identity && right.identity)
     return scanFindingIdentity(left) === scanFindingIdentity(right);
   const leftCandidate = findingCandidateId(left);
-  if (leftCandidate && leftCandidate === findingCandidateId(right)) return true;
+  const rightCandidate = findingCandidateId(right);
+  if (leftCandidate && rightCandidate) return leftCandidate === rightCandidate;
   return (
     scanFindingIdentity({ ...left, identity: undefined }) ===
     scanFindingIdentity({ ...right, identity: undefined })
@@ -1526,7 +1553,10 @@ export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
 ): void {
-  if (current.identity === undefined && previous.identity !== undefined) {
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  ) {
     current.identity = structuredClone(previous.identity);
   }
   const provenance = requireObject(
@@ -1566,7 +1596,11 @@ function containsSavedFinding(
   previous: JsonObject,
 ): boolean {
   const original = withoutPreviousFindings(previous);
-  if (current.identity === undefined) delete original.identity;
+  if (
+    current.identity === undefined &&
+    findingIdentitySchema.safeParse(previous.identity).success
+  )
+    delete original.identity;
   return containsSavedValue(current, original);
 }
 
@@ -2301,16 +2335,44 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       identity,
     };
   });
-  if (mode !== "deep") return identified;
-
-  // Keep both findings when workers reuse an ID.
+  // Keep generated siblings and independent worker findings when they reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
-  const used = new Set<string>();
-  return identified.map((finding) => {
+  const used = new Set(
+    mode === "deep"
+      ? []
+      : findings
+          .filter((finding) => finding.identity !== undefined)
+          .map(scanFindingIdentity),
+  );
+  const candidateIdentities = new Map<string, JsonObject>();
+  return identified.map((finding, index) => {
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
+    const original = findings[index]!;
+    const candidate = findingCandidateId(original);
+    const candidateKey =
+      mode !== "deep" &&
+      original.identity === undefined &&
+      candidate &&
+      !["candidateId", "reportId", "ledgerRowId"].some(
+        (key) =>
+          typeof (original.extensions as JsonObject | undefined)?.[key] ===
+          "string",
+      )
+        ? JSON.stringify([
+            key,
+            (original.provenance as JsonObject).workerId,
+            candidate,
+          ])
+        : undefined;
+    const previous = candidateKey
+      ? candidateIdentities.get(candidateKey)
+      : undefined;
+    if (previous) return { ...finding, identity: { ...previous } };
+    if (!used.has(key) || (mode !== "deep" && !candidateKey)) {
       used.add(key);
+      if (candidateKey)
+        candidateIdentities.set(candidateKey, finding.identity as JsonObject);
       return finding;
     }
     const identity = finding.identity as JsonObject;
@@ -2334,6 +2396,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         provenance.preservedIdentity ?? structuredClone(identity),
     };
     used.add(scanFindingIdentity(distinct));
+    if (candidateKey) candidateIdentities.set(candidateKey, distinct.identity);
     return distinct;
   });
 }
@@ -2628,6 +2691,6 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[\u0300-\u036f]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
+    .replace(/^[._/-]+|-+$/gu, "");
   return identifier || fallback;
 }

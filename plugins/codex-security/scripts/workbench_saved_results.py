@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _finding_strength,
+    _is_sealed_scan,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
@@ -478,9 +479,7 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
         manifest_scan = manifest.get("scan")
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
-        if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        ):
+        if scan["seal_manifest_digest"] is not None or _is_sealed_scan(manifest_scan):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"],
@@ -615,10 +614,8 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
+def _ensure_finding_identity(finding: Any) -> None:
     if not isinstance(finding, dict) or "identity" in finding:
-        return
-    if candidate_only and not finding_candidate_id(finding):
         return
     extensions = finding.get("extensions")
     source = str(
@@ -861,7 +858,7 @@ def _generic_surface_updates(
                 id(row)
                 for _, row in matches
                 if reopening
-                or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+                or row.get("disposition") in ("needs_follow_up", surface.get("disposition"))
             )
             if update not in updates:
                 updates.append(update)
@@ -1323,6 +1320,27 @@ def merge_saved_results(
     )
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
+    candidate_siblings: set[int] = set()
+
+    def candidate_position_key(finding: dict[str, Any], key: str) -> str:
+        if key not in finding_positions:
+            return key
+        previous = findings[finding_positions[key]]
+        current_candidate = finding_candidate_id(finding)
+        previous_candidate = finding_candidate_id(previous)
+        current_owner = finding.get("provenance", {}).get("workerId")
+        previous_owner = previous.get("provenance", {}).get("workerId")
+        if (
+            current_candidate
+            and previous_candidate
+            and (
+                current_candidate != previous_candidate
+                or (current_owner and previous_owner and current_owner != previous_owner)
+            )
+        ):
+            return _digest([key, current_owner, current_candidate])
+        return key
+
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
@@ -1337,7 +1355,7 @@ def merge_saved_results(
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
         if isinstance(document["findings"][0], dict):
-            _ensure_finding_identity(document["findings"][0], candidate_only=True)
+            _ensure_finding_identity(document["findings"][0])
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
@@ -1491,7 +1509,7 @@ def merge_saved_results(
                 if (
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and item.get("disposition") in ("rejected", "not_applicable")
                 ):
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
@@ -1557,6 +1575,7 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
+    canonical_candidates = set(represented_candidates)
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -1710,7 +1729,7 @@ def merge_saved_results(
                 draft.get("complete") is False
                 or draft["coverage"].get("completeness") != "complete"
             )
-            and coverage.get("completeness") in {"complete", "unknown"}
+            and coverage.get("completeness") in ("complete", "unknown")
         ):
             coverage["completeness"] = "partial"
         skip_superseded_findings = (
@@ -1764,7 +1783,7 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
-                _ensure_finding_identity(finding, candidate_only=True)
+                _ensure_finding_identity(finding)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -1777,7 +1796,9 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
-                    finding_positions.setdefault(_finding_key(finding), len(findings))
+                    finding_positions.setdefault(
+                        candidate_position_key(finding, _finding_key(finding)), len(findings)
+                    )
                 findings.append(finding)
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
@@ -1848,6 +1869,23 @@ def merge_saved_results(
                 if mapped_key is not None:
                     key = mapped_key
                     represented_by_parent = _digest(_finding_content(value)) in historical_contents
+            canonical_candidate = (
+                _worker_candidate_key(worker_id, candidate_id, finding)
+                if worker_id and candidate_id
+                else None
+            )
+            if (
+                "identity" not in value
+                and not represented_by_parent
+                and not (
+                    canonical_candidate in canonical_candidates
+                    and represented_candidates[canonical_candidate] is not None
+                )
+            ):
+                candidate_key = candidate_position_key(finding, key)
+                if candidate_key != key:
+                    candidate_siblings.add(id(finding))
+                key = candidate_key
             if key in finding_positions:
                 retained = findings[finding_positions[key]]
                 if finding != retained:
@@ -1948,7 +1986,7 @@ def merge_saved_results(
                 if (
                     field == "surfaces"
                     and isinstance(item, dict)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and item.get("disposition") in ("rejected", "not_applicable")
                     and isinstance(item.get("candidateId"), str)
                     and (history_findings := rejected_history.get((worker_id, item["candidateId"])))
                 ):
@@ -1991,6 +2029,11 @@ def merge_saved_results(
                     output.append(copy.deepcopy(item))
 
     identities: dict[str, str] = {}
+    reserved_identities = {
+        _encoded([finding.get("ruleId"), finding.get("identity")]).decode()
+        for finding in findings
+        if isinstance(finding, dict)
+    }
     for finding in findings:
         if not valid_finding(finding):
             continue
@@ -1999,9 +2042,20 @@ def merge_saved_results(
             continue
         key = _encoded([finding.get("ruleId"), identity]).decode()
         variant = _finding_key(finding)
-        if key in identities and identities[key] != variant:
+        if key in identities and (identities[key] != variant or id(finding) in candidate_siblings):
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
-            identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
+            base_instance = identity.get("instance", "saved")
+            prefix = (
+                f"{base_instance}-{variant[:16]}" if identities[key] != variant else base_instance
+            )
+            suffix = 1 if identities[key] != variant else 2
+            while True:
+                identity["instance"] = prefix if suffix == 1 else f"{prefix}-{suffix}"
+                instance_key = _encoded([finding.get("ruleId"), identity]).decode()
+                if instance_key not in reserved_identities:
+                    reserved_identities.add(instance_key)
+                    break
+                suffix += 1
         identities[key] = variant
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
@@ -2177,10 +2231,7 @@ def preserve_scan_results_locked(
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
     existing = None
     if scan["seal_manifest_digest"] is not None or (
-        isinstance(existing_scan, dict)
-        and (
-            existing_scan.get("sealedAt") is not None or existing_scan.get("artifacts") is not None
-        )
+        isinstance(existing_scan, dict) and _is_sealed_scan(existing_scan)
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
         existing, existing_findings, _ = finalize_scan(
@@ -2370,7 +2421,7 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
         if manifest_path is not None:
             manifest = db.read_json_object(manifest_path).get("scan", {})
-            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+            if _is_sealed_scan(manifest):
                 raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
         output = args.artifact_path
         key = output.lower()
