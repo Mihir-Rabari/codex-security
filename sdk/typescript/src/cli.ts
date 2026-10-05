@@ -37,6 +37,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -1144,6 +1145,7 @@ interface SelectedFindings {
 interface PatchRiskRequest {
   readonly auth?: ScanAuthMode;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly directory?: string;
   repository: string;
   base: string;
   files?: readonly string[];
@@ -5143,6 +5145,12 @@ export async function main(
               options.severity,
               dependencies,
             );
+            patchResult = {
+              ...patchResult,
+              scanId: selected.scanId,
+              repository: selected.repository,
+              patches: [],
+            };
             const validationPrompt = await resolvePatchValidationPrompt(
               options.validationPromptFile,
               selected.repository,
@@ -5245,15 +5253,17 @@ export async function main(
               "--severity requires a saved finding identifier or --scan.",
             );
           }
-          const directory = dependencies.currentDirectory();
-          const repository =
-            options.assessPatchRisk || options.createPr
-              ? await patchRepositoryRoot(directory, dependencies)
-              : directory;
+          const repository = dependencies.currentDirectory();
+          patchResult = {
+            repository,
+            applied: false,
+            filesChanged: 0,
+            files: [],
+          };
           const validationPrompt = await resolvePatchValidationPrompt(
             options.validationPromptFile,
             repository,
-            directory,
+            repository,
           );
           const imports = linear
             ? await importLinearIssues({
@@ -5269,26 +5279,43 @@ export async function main(
             imports.length === 0
               ? undefined
               : withoutLinearCredentials(dependencies.environment);
+          const gitRepository =
+            options.assessPatchRisk || options.createPr
+              ? await patchRepositoryRoot(repository, dependencies)
+              : repository;
+          const gitDependencies: CliDependencies =
+            options.assessPatchRisk || options.createPr
+              ? {
+                  ...dependencies,
+                  runRepositoryCommand: (command, args, _directory, options) =>
+                    dependencies.runRepositoryCommand(
+                      command,
+                      args,
+                      repository,
+                      options,
+                    ),
+                }
+              : dependencies;
           const patchGitBase =
             options.assessPatchRisk || options.createPr
-              ? await snapshotPatchTree(repository, dependencies)
+              ? await snapshotPatchTree(gitRepository, gitDependencies)
               : undefined;
           const patchBase =
             patchGitBase ??
             (await snapshotPatchState(repository, dependencies));
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
-              repository,
+              gitRepository,
               patchGitBase!,
-              dependencies,
+              gitDependencies,
             );
           }
           const identifier = directPatchIdentifier(positionals, imports);
           const publication = options.createPr
             ? await preparePatchPublication(
-                repository,
+                gitRepository,
                 identifier ?? directPatchDigest(positionals, imports),
-                dependencies,
+                gitDependencies,
               )
             : undefined;
           const report = captureOutput();
@@ -5308,15 +5335,23 @@ export async function main(
           );
           if (!jsonOutput) output.write(report.text());
           const files = await changedPatchFiles(
-            repository,
+            gitRepository,
             patchBase,
-            dependencies,
+            gitDependencies,
+            options.assessPatchRisk || options.createPr,
           );
           patchResult = {
             repository,
             applied: files.length > 0,
             filesChanged: files.length,
-            files,
+            files:
+              options.assessPatchRisk || options.createPr
+                ? files.map((file) =>
+                    relative(repository, resolve(gitRepository, file))
+                      .split(sep)
+                      .join("/"),
+                  )
+                : files,
           };
           if (exitCode !== 0) {
             throw new PatchCommandError(
@@ -5334,7 +5369,8 @@ export async function main(
           const patchRisk = options.assessPatchRisk
             ? await runPatchRiskAssessment(
                 {
-                  repository,
+                  repository: gitRepository,
+                  directory: repository,
                   environment,
                   base: patchGitBase!,
                   files,
@@ -5342,16 +5378,16 @@ export async function main(
                   auth: options.auth,
                 },
                 errorOutput,
-                dependencies,
+                gitDependencies,
               )
             : undefined;
           if (publication) {
             await createPatchPullRequest(
-              repository,
+              gitRepository,
               publication,
               files,
               errorOutput,
-              dependencies,
+              gitDependencies,
               patchRisk?.summary,
               identifier === undefined
                 ? "Applies a security fix generated from supplied issue data."
@@ -6723,7 +6759,7 @@ async function patchPublicationDestination(
           "--output",
           "json",
           "--jq",
-          ".[0] | select(. != null) | {url: .web_url, head: .sha}",
+          ".[0] | select(. != null) | {url: .web_url, head: .sha, state}",
           "--repo",
           remote,
         ]
@@ -6735,9 +6771,9 @@ async function patchPublicationDestination(
           "--state",
           "all",
           "--json",
-          "url,headRefOid",
+          "url,state,headRefOid",
           "--jq",
-          ".[0] | select(. != null) | {url, head: .headRefOid}",
+          ".[0] | select(. != null) | {url, head: .headRefOid, state} | tojson",
         ],
   );
   return {
@@ -6745,7 +6781,7 @@ async function patchPublicationDestination(
     gitlab,
     command,
     existing: existing
-      ? (JSON.parse(existing) as { url: string; head: string })
+      ? (JSON.parse(existing) as { url: string; head: string; state: string })
       : undefined,
   };
 }
@@ -6811,6 +6847,7 @@ async function publishPatchBranch(
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
+  let retryable = true;
   try {
     const { remote, gitlab, command, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
@@ -6821,10 +6858,15 @@ async function publishPatchBranch(
         "--verify",
         `refs/heads/${branch}`,
       ]);
-      if (existing.head !== commit)
+      if (
+        existing.head !== commit ||
+        !["open", "opened"].includes(existing.state.toLowerCase())
+      ) {
+        retryable = false;
         throw new CodexSecurityError(
-          "The existing pull request does not contain the saved patch commit. Review it before publishing.",
+          "The existing pull request does not match the saved patch commit or is no longer open. Review it before publishing.",
         );
+      }
     }
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
@@ -6865,9 +6907,10 @@ async function publishPatchBranch(
     );
     return { branch, url };
   } catch (error) {
-    stderr.write(
-      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
-    );
+    if (retryable)
+      stderr.write(
+        `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
+      );
     throw error;
   }
 }
@@ -6961,9 +7004,10 @@ async function createPatchPullRequest(
     );
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
+  const pathspec = files.map((file) => resolve(repository, file));
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...files]);
+  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...pathspec]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
@@ -6974,7 +7018,7 @@ async function createPatchPullRequest(
   try {
     await run(["switch", "-c", branch]);
     switched = true;
-    await run(["--literal-pathspecs", "add", "--", ...files]);
+    await run(["--literal-pathspecs", "add", "--", ...pathspec]);
     await run([
       "--literal-pathspecs",
       "commit",
@@ -6982,7 +7026,7 @@ async function createPatchPullRequest(
       "-m",
       PATCH_PR_TITLE,
       "--",
-      ...files,
+      ...pathspec,
     ]);
     committed = true;
     const commit = await run(["rev-parse", "HEAD"]);
@@ -6999,7 +7043,7 @@ async function createPatchPullRequest(
             "--staged",
             "--source=HEAD",
             "--",
-            ...files,
+            ...pathspec,
           ]);
           await run(
             previousBranch === "HEAD"
@@ -7050,6 +7094,7 @@ async function changedPatchFiles(
   repository: string,
   base: string | GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
+  rootRelative = false,
 ): Promise<string[]> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
@@ -7068,7 +7113,15 @@ async function changedPatchFiles(
     if (head === undefined) continue;
     const output = await dependencies.runRepositoryCommand(
       "git",
-      ["--literal-pathspecs", "diff", "--name-only", "-z", tree, head],
+      [
+        "--literal-pathspecs",
+        "diff",
+        ...(rootRelative ? ["--no-relative"] : []),
+        "--name-only",
+        "-z",
+        tree,
+        head,
+      ],
       join(repository, directory),
       { trim: false },
     );
@@ -7231,7 +7284,10 @@ async function assessPatchRisk(
   const pathspec =
     request.files === undefined
       ? []
-      : ["--", ...request.files.map((file) => file)];
+      : [
+          "--",
+          ...request.files.map((file) => resolve(request.repository, file)),
+        ];
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
   const patchPath = join(root, "patch.diff");
   try {
@@ -7241,6 +7297,7 @@ async function assessPatchRisk(
       run([
         "--literal-pathspecs",
         "diff",
+        ...(request.directory === undefined ? [] : ["--no-relative"]),
         "--binary",
         "--full-index",
         `--output=${patchPath}`,
@@ -7252,6 +7309,7 @@ async function assessPatchRisk(
         [
           "--literal-pathspecs",
           "diff",
+          ...(request.directory === undefined ? [] : ["--no-relative"]),
           "--name-only",
           "-z",
           request.base,
@@ -7279,7 +7337,7 @@ async function assessPatchRisk(
       stderr,
       dependencies,
       {
-        directory: request.repository,
+        directory: request.directory ?? request.repository,
         auth: request.auth,
         environment: request.environment,
         patchArtifact: {
