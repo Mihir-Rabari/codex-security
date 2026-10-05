@@ -239,7 +239,10 @@ import {
 import {
   abortable,
   DiffTarget,
+  enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
+  GIT_REPOSITORY_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -5159,9 +5162,10 @@ export async function main(
             const patchRiskBase = options.assessPatchRisk
               ? await snapshotPatchTree(selected.repository, dependencies)
               : undefined;
-            const patchBase =
-              patchRiskBase ??
-              (await snapshotPatchState(selected.repository, dependencies));
+            const patchBase = await snapshotPatchState(
+              selected.repository,
+              dependencies,
+            );
             const patchRun = await runFindingPatches(
               selected,
               options,
@@ -5273,9 +5277,7 @@ export async function main(
             options.assessPatchRisk || options.createPr
               ? await snapshotPatchTree(repository, dependencies)
               : undefined;
-          const patchBase =
-            patchGitBase ??
-            (await snapshotPatchState(repository, dependencies));
+          const patchBase = await snapshotPatchState(repository, dependencies);
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
               repository,
@@ -7048,7 +7050,7 @@ interface GitPatchState {
 
 async function changedPatchFiles(
   repository: string,
-  base: string | GitPatchState | Map<string, string>,
+  base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
 ): Promise<string[]> {
   if (base instanceof Map) {
@@ -7057,16 +7059,15 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
-  const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
-  const heads =
-    typeof base === "string"
-      ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
-      : (await snapshotGitPatchState(repository, dependencies)).trees;
+  const heads = (await snapshotGitPatchState(repository, dependencies)).trees;
   const files = new Set<string>();
-  for (const [directory, tree] of bases) {
+  for (const [directory, tree] of base.trees) {
     const head = heads.get(directory);
     if (head === undefined) continue;
-    const output = await dependencies.runRepositoryCommand(
+    const gitDependencies = directory
+      ? await nestedPatchGitDependencies(repository, dependencies)
+      : dependencies;
+    const output = await gitDependencies.runRepositoryCommand(
       "git",
       ["--literal-pathspecs", "diff", "--name-only", "-z", tree, head],
       join(repository, directory),
@@ -7108,9 +7109,26 @@ async function snapshotGitPatchState(
   const trees = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
     const checkout = join(repository, directory);
-    const tree = await snapshotPatchTree(checkout, dependencies);
+    if (directory) {
+      if (
+        isOutsidePath(
+          relative(await realpath(repository), await realpath(checkout)),
+        )
+      ) {
+        throw new CodexSecurityError(
+          "Nested Git checkout is outside the selected repository.",
+        );
+      }
+      await enclosingGitWorktreeRoot(checkout, undefined, {
+        requireIfPresent: true,
+      });
+    }
+    const gitDependencies = directory
+      ? await nestedPatchGitDependencies(repository, dependencies)
+      : dependencies;
+    const tree = await snapshotPatchTree(checkout, gitDependencies);
     trees.set(directory, tree);
-    const entries = await dependencies.runRepositoryCommand(
+    const entries = await gitDependencies.runRepositoryCommand(
       "git",
       ["ls-tree", "-r", "-z", tree],
       checkout,
@@ -7125,6 +7143,32 @@ async function snapshotGitPatchState(
   };
   await visit("");
   return { trees };
+}
+
+async function nestedPatchGitDependencies(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<CliDependencies> {
+  const root =
+    (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
+  return {
+    ...dependencies,
+    runRepositoryCommand: (command, args, checkout, options) =>
+      dependencies.runRepositoryCommand(
+        command,
+        ["-C", checkout, ...args],
+        root,
+        {
+          ...options,
+          environment: {
+            ...Object.fromEntries(
+              [...GIT_REPOSITORY_ENVIRONMENT].map((name) => [name, undefined]),
+            ),
+            ...options?.environment,
+          },
+        },
+      ),
+  };
 }
 
 // Literal patch inputs also work in directories without Git metadata.
