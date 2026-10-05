@@ -382,6 +382,10 @@ jobs:
           path: dist
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
+      - name: Enable user namespaces for Codex sandbox tests
+        if: runner.os == 'Linux'
+        # Codex's sandbox needs user namespaces on the ephemeral Ubuntu runner.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test MCP app
         run: pnpm --dir plugins/codex-security/mcp-app run test:mcp
       - name: Upload MCP test reports
@@ -428,6 +432,10 @@ jobs:
         run: node --test plugins/codex-security/mcp-app/scripts/test_host_build.mjs
       - name: Test native executable discovery
         run: node --test plugins/codex-security/mcp-app/tests/test_native_executable.mjs
+      - name: Enable user namespaces for Codex sandbox tests
+        if: runner.os == 'Linux'
+        # Codex's sandbox needs user namespaces on the ephemeral Ubuntu runner.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test native scans and permissions
         run: node --test plugins/codex-security/mcp-app/tests/test_native_scan.mjs plugins/codex-security/mcp-app/tests/test_native_permissions.mjs
 
