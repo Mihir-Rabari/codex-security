@@ -215,7 +215,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         {
           reason:
             scenario === "policy-reported-error"
-              ? "Request refused due to cybersecurity policy violation."
+              ? "Request refused by cybersecurity policy."
               : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
