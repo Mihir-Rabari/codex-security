@@ -5334,10 +5334,10 @@ export async function main(
                 gitDependencies,
               )
             : undefined;
-          const relocatedEnvironment =
+          const commandContext =
             (options.assessPatchRisk || options.createPr) &&
             existsSync(repository)
-              ? await patchCommandEnvironment(
+              ? await patchCommandContext(
                   repository,
                   gitRepository,
                   gitDependencies,
@@ -5359,9 +5359,15 @@ export async function main(
             },
           );
           if (!jsonOutput) output.write(report.text());
-          if (relocatedEnvironment !== undefined && !existsSync(repository)) {
-            commandDirectory = gitRepository;
-            commandEnvironment = relocatedEnvironment;
+          if (commandContext !== undefined) {
+            commandEnvironment = commandContext.environment;
+            const directory = await realpath(repository)
+              .then(async (path) =>
+                (await lstat(path)).isDirectory() ? path : undefined,
+              )
+              .catch(() => undefined);
+            if (directory !== commandContext.directory)
+              commandDirectory = gitRepository;
           }
           const files = await changedPatchFiles(
             gitRepository,
@@ -5400,7 +5406,13 @@ export async function main(
                 {
                   repository: gitRepository,
                   directory: commandDirectory,
-                  environment,
+                  environment:
+                    commandEnvironment === undefined
+                      ? environment
+                      : {
+                          ...(environment ?? dependencies.environment),
+                          ...commandEnvironment,
+                        },
                   base: patchGitBase!,
                   files,
                   configuration: options,
@@ -6834,11 +6846,11 @@ async function patchRepositoryRoot(
   return resolve(output.replace(/\n$/u, ""));
 }
 
-async function patchCommandEnvironment(
+async function patchCommandContext(
   directory: string,
   repository: string,
   dependencies: CliDependencies,
-): Promise<NodeJS.ProcessEnv> {
+): Promise<{ directory: string; environment: NodeJS.ProcessEnv }> {
   const gitPath = async (args: string[]) =>
     (
       await dependencies.runRepositoryCommand(
@@ -6874,7 +6886,7 @@ async function patchCommandEnvironment(
               .catch(() => path),
           );
   }
-  return environment;
+  return { directory: await realpath(directory), environment };
 }
 
 async function preparePatchPublication(
