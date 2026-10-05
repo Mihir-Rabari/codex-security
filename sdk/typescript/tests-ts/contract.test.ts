@@ -524,6 +524,28 @@ describe("canonical scan contract", () => {
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 
+  test.each(["directory_snapshot", "git_worktree", "git_diff"])(
+    "both readers accept an empty unused revision for %s",
+    async (kind) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"]["target"]["kind"] = kind;
+      manifest["scan"]["target"]["revision"] = "";
+      await writeJson(manifestPath, manifest);
+      const result = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    },
+  );
+
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");

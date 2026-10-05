@@ -232,10 +232,10 @@ try {
       "utf8",
     ),
   );
-  assert.notEqual(
+  assert.equal(
     acceptedHeadDraft.complete,
     false,
-    "a rejected incomplete write must not become the authoritative checkpoint head",
+    "new late work must remain incomplete in the authoritative checkpoint",
   );
   assert.deepEqual(acceptedHeadDraft.findings, [finding]);
   const acceptedResult = JSON.parse(
@@ -245,8 +245,8 @@ try {
     acceptedResult.coverage.deferred.some(
       (item) => item.candidateId === "late-incomplete-review",
     ),
-    false,
-    "a rejected incomplete write must not change the completed result",
+    true,
+    "new late work must survive alongside the completed candidate",
   );
 
   const deferredDoesNotRejectRoot = path.join(

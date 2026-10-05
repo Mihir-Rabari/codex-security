@@ -505,6 +505,24 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
+    const terminalSurfaceIds = new Set(
+      (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
+        [row.id, row.candidateId].filter(
+          (id): id is string => typeof id === "string",
+        ),
+      ),
+    );
+    const terminalWorkIds = new Set([
+      ...terminalSurfaceIds,
+      ...closedIds,
+      ...terminalOutcomeIds,
+      ...(result.coverage.deferred as JsonObject[]).flatMap((row) =>
+        [row.id, row.candidateId].filter(
+          (id): id is string => typeof id === "string",
+        ),
+      ),
+    ]);
+    let acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const reopenedIds = new Set(
@@ -514,6 +532,16 @@ async function preserveScanDraft(
           ),
         ),
       );
+      const newWork = [
+        ...(progress.coverage.deferred as JsonObject[]),
+        ...(progress.coverage.surfaces as JsonObject[]).filter(
+          (row) => row.disposition === "needs_follow_up",
+        ),
+      ].some(
+        (row) => !terminalWorkIds.has((row.candidateId ?? row.id) as string),
+      );
+      if (reopenedIds.size > 0 || newWork) acceptProgress = true;
+      if (!acceptProgress) continue;
       result.complete = false;
       const resolved = reconcileDeferredSurfaces(
         progress.coverage,
@@ -534,9 +562,14 @@ async function preserveScanDraft(
           ),
           surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
             (surface) =>
-              keepsGenericWork(surface) ||
-              (!terminalOutcomeIds.has(surface.id as string) &&
-                !terminalOutcomeIds.has(surface.candidateId as string)),
+              (keepsGenericWork(surface) ||
+                (!terminalOutcomeIds.has(surface.id as string) &&
+                  !terminalOutcomeIds.has(surface.candidateId as string))) &&
+              (surface.disposition !== "needs_follow_up" ||
+                !terminalSurfaceIds.has(
+                  (surface.candidateId ?? surface.id) as string,
+                ) ||
+                reopenedIds.has((surface.candidateId ?? surface.id) as string)),
           ),
         },
         [result.coverage],
@@ -2268,8 +2301,9 @@ function buildScope(
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
-    const candidateId = (finding.extensions as JsonObject | undefined)
-      ?.candidateId;
+    const candidateId =
+      (finding.extensions as JsonObject | undefined)?.candidateId ??
+      findingCandidateId(finding);
     const identitySource =
       typeof candidateId === "string" && candidateId.trim()
         ? candidateId

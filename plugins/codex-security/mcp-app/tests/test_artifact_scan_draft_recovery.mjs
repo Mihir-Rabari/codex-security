@@ -45,7 +45,13 @@ for (const layout of ["standard", "diff", "worker"]) {
       const f = await fixture(t, layout);
       const submitted = {
         ...f.draft(),
-        findings: [{ ...findingFor("review"), title }],
+        findings: [
+          {
+            ...findingFor("review"),
+            title,
+            provenance: { source: "local_plugin" },
+          },
+        ],
       };
       await f.write(submitted);
       await f.write(submitted);
@@ -64,7 +70,7 @@ for (const layout of ["standard", "diff", "worker"]) {
   }
   test(`${layout}: distinct candidates at one location survive draft merging`, async (t) => {
     const f = await fixture(t, layout);
-    for (const candidate of ["first", "second"])
+    for (const candidate of ["first", "second", "third"])
       await f.write({ ...f.draft(), findings: [findingFor(candidate)] });
     await f.write(f.draft({}, true));
     const saved = JSON.parse(
@@ -76,10 +82,43 @@ for (const layout of ["standard", "diff", "worker"]) {
         "utf8",
       ),
     );
-    assert.equal(saved.findings.length, 2);
+    assert.equal(saved.findings.length, 3);
+    if (layout !== "worker") {
+      assert.equal(
+        new Set(saved.findings.map(draftApi.scanFindingIdentity)).size,
+        3,
+      );
+      const manifestPath = path.join(f.root, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      Object.assign(manifest.scan, {
+        id: f.context.scanId,
+        producer: { name: "codex-security-plugin", version: "0.1.0" },
+        status: "completed",
+        startedAt: "2026-05-31T18:00:00Z",
+        completedAt: "2026-05-31T18:09:00Z",
+      });
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      for (const file of ["findings.json", "coverage.json"]) {
+        const filePath = path.join(f.root, file);
+        const document = JSON.parse(await readFile(filePath, "utf8"));
+        document.scanId = f.context.scanId;
+        await writeFile(filePath, JSON.stringify(document));
+      }
+      await execFileAsync(process.env.PYTHON?.trim() || "python3", [
+        fileURLToPath(
+          new URL("../../scripts/finalize_scan_contract.py", import.meta.url),
+        ),
+        "--scan-dir",
+        f.root,
+      ]);
+      const completed = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      );
+      assert.equal(completed.findings.length, 3);
+    }
     assert.deepEqual(
       new Set(saved.findings.map((finding) => finding.provenance.candidateId)),
-      new Set(["first", "second"]),
+      new Set(["first", "second", "third"]),
     );
   });
   test(`${layout}: malformed deferred identity cannot poison subsequent writes`, async (t) => {
@@ -1637,6 +1676,28 @@ for (const layout of ["standard", "diff", "worker"]) {
       );
     });
   }
+
+  test(`${layout}: new late work does not undo an already reviewed surface`, async (t) => {
+    const f = await fixture(t, layout);
+    const reviewed = {
+      id: "existing",
+      label: "Existing review",
+      disposition: "no_issue_found",
+    };
+    await f.write(f.draft({ surfaces: [reviewed] }, true));
+    await f.write(
+      f.draft({
+        surfaces: [{ ...reviewed, disposition: "needs_follow_up" }],
+        deferred: [{ id: "new-review", ...generic }],
+      }),
+    );
+    const coverage = await f.read();
+    assert.equal(
+      coverage.surfaces.find((row) => row.id === reviewed.id).disposition,
+      "no_issue_found",
+    );
+    assert.deepEqual(coverage.deferred, [{ id: "new-review", ...generic }]);
+  });
 
   test(`${layout}: late progress survives an identical terminal retry`, async (t) => {
     const f = await fixture(t, layout);

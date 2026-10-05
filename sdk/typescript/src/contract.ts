@@ -392,8 +392,14 @@ function validateCanonicalContract(
     "manifest.scan.id": manifest.scan.id,
     "scan.target.targetId": manifest.scan.target.targetId,
     "scan.target.displayName": manifest.scan.target.displayName,
-    "scan.target.revision": manifest.scan.target.revision,
-    "scan.target.snapshotDigest": manifest.scan.target.snapshotDigest,
+    "scan.target.revision":
+      manifest.scan.target.kind === "git_revision"
+        ? manifest.scan.target.revision
+        : undefined,
+    "scan.target.snapshotDigest":
+      manifest.scan.target.kind !== "git_revision"
+        ? manifest.scan.target.snapshotDigest
+        : undefined,
     "manifest.scan.producer.name": manifest.scan.producer.name,
     "manifest.scan.producer.version": manifest.scan.producer.version,
     "coverage.inventoryStrategy": coverage.inventoryStrategy,
