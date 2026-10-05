@@ -3926,3 +3926,82 @@ const runGitRepositoryCommand: NonNullable<
   });
   return options?.trim === false ? result : result.trim();
 };
+
+test.each(["untracked", "tracked"])(
+  "keeps unrelated %s edits made during assessment out of publication",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-assessment-publication-");
+    const repository = join(root, "repository");
+    const remote = join(root, "remote.git");
+    const git = repositoryGit(repository);
+    try {
+      await mkdir(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "commit.gpgsign", "false");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      if (kind === "tracked")
+        await writeFile(join(repository, "user-notes.txt"), "original notes\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic initial commit");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          currentDirectory: repository,
+          onRepositoryCommand: (command, args, directory, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, directory, options)
+              : args[1] === "create"
+                ? "https://github.example.test/example/repository/pull/17"
+                : "",
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              );
+              expect(artifact.changedFiles).toEqual(["app.ts"]);
+              await writeFile(
+                join(repository, "user-notes.txt"),
+                "unrelated notes from concurrent work\n",
+              );
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              output?.stdout.write("Patch complete.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      expect(git("show", "--format=", "--name-only", "HEAD", "--")).toBe(
+        "app.ts",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "@{upstream}"));
+      expect(git("status", "--porcelain")).toBe(
+        `${kind === "tracked" ? "M" : "??"} user-notes.txt`,
+      );
+      expect(await readFile(join(repository, "user-notes.txt"), "utf8")).toBe(
+        "unrelated notes from concurrent work\n",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

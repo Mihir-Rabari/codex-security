@@ -5401,6 +5401,14 @@ export async function main(
             );
           }
           errorOutput.write(`Patch applied. Files changed: ${files.length}.\n`);
+          const publicationFiles = publication
+            ? await changedPatchFiles(
+                gitRepository,
+                patchGitBase!,
+                gitDependencies,
+                true,
+              )
+            : [];
           const patchRisk = options.assessPatchRisk
             ? await runPatchRiskAssessment(
                 {
@@ -5423,12 +5431,6 @@ export async function main(
               )
             : undefined;
           if (publication) {
-            const publicationFiles = await changedPatchFiles(
-              gitRepository,
-              patchGitBase!,
-              gitDependencies,
-              true,
-            );
             await createPatchPullRequest(
               gitRepository,
               publication,
