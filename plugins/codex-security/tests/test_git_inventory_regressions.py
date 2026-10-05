@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import subprocess
+from pathlib import Path
+
+import pytest
+from workbench_test_support import initialize_git_repository, load_script
+
+
+def git(target: Path, *args: str, input: bytes | None = None) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(target), *args], input=input, capture_output=True, check=True
+    ).stdout.strip()
+
+
+def test_root_commit_message_does_not_supply_diff_parent(tmp_path: Path, workbench_api) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    previous = git(target, "rev-parse", "HEAD").decode()
+    git(target, "commit", "--amend", "-qm", f"Synthetic root\n\nparent {previous}")
+    head = git(target, "rev-parse", "HEAD").decode()
+    diff = workbench_api["require_diff_target"](target, "commit", None, head, None)
+    assert diff["baseRevision"] == workbench_api["EMPTY_GIT_TREE"]
+
+
+def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    source = target / "line\nbreak.py"
+    source.write_bytes(b"print('fixture')\n\0payload\n")
+    git(target, "add", "--", source.name)
+    git(target, "commit", "-qm", "Add unusual fixture")
+    reader = load_script("workbench_target").git_blob_bytes
+    assert reader(
+        target,
+        ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
+    ) == [
+        None,
+        None,
+        source.read_bytes(),
+        None,
+        b"fixture\n",
+    ]
+
+
+def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "sources"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    nested = target / "nested"
+    initialize_git_repository(nested)
+    api = load_script("workbench_target")
+    before = api.directory_content_digest(target)
+    assert api.directory_snapshot_regular_file_count(target) == 2
+    (nested / ".git" / "runtime-cache").write_text("bookkeeping\n")
+    assert api.directory_content_digest(target) == before
+    (nested / "README.md").write_text("changed source\n")
+    assert api.directory_content_digest(target) != before
+
+
+def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    (target / "app.py").write_text("root version\n")
+    nested = target / "package"
+    nested.mkdir()
+    (nested / "app.py").write_text("package version\n")
+    git(target, "add", ".")
+    git(target, "commit", "-qm", "Add package")
+    scan = {
+        "target_revision": git(target, "rev-parse", "HEAD").decode(),
+        "target_snapshot_digest": None,
+        "diff_target_kind": "commit",
+    }
+    assert (
+        load_script("workbench_source_excerpt").scanned_source_text(scan, nested, "app.py")
+        == "package version\n"
+    )
+
+
+def test_working_tree_excerpt_declines_uncommitted_line_content(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    revision = git(target, "rev-parse", "HEAD").decode()
+    (target / "README.md").write_text("uncommitted finding line\n")
+    scan = {
+        "target_revision": revision,
+        "target_snapshot_digest": None,
+        "diff_target_kind": "working_tree",
+        "diff_content_digest": load_script("workbench_target").worktree_content_digest(target),
+    }
+    assert (
+        load_script("workbench_source_excerpt").scanned_source_text(scan, target, "README.md")
+        is None
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
+def test_non_utf8_git_subject_and_refs_remain_inspectable(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    tree = git(target, "rev-parse", "HEAD^{tree}")
+    commit = (
+        b"tree "
+        + tree
+        + b"\nauthor Fixture <fixture@example.invalid> 1700000000 +0000\ncommitter Fixture <fixture@example.invalid> 1700000000 +0000\n\ncaf\xe9\n"
+    )
+    oid = git(target, "hash-object", "-t", "commit", "-w", "--stdin", input=commit).decode()
+    git(target, "update-ref", "HEAD", oid)
+    metadata = load_script("workbench_target").git_target_metadata(target)
+    assert metadata["commitSubject"].startswith("caf")
+    api = load_script("workbench_finding_workflows")
+    connection = sqlite3.connect(":memory:")
+    try:
+        payload = {"id": "fixture", "action": "source", "repository": str(target)}
+        before = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
+        git(target, "update-ref", os.fsdecode(b"refs/heads/caf\xe9"), oid)
+        after = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
+        assert after["refsDigest"] != before["refsDigest"]
+    finally:
+        connection.close()
+
+
+def test_dirty_submodule_warning_preserves_the_changed_target_detail(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    target = tmp_path / "target"
+    initialize_git_repository(origin)
+    initialize_git_repository(target)
+    git(target, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), "child")
+    git(target, "commit", "-qam", "Add child")
+    api = load_script("workbench_target")
+    scan = {
+        "target_path": str(target),
+        "target_inode": target.stat().st_ino,
+        "target_revision": git(target, "rev-parse", "HEAD").decode(),
+        "target_snapshot_digest": api.worktree_content_digest(target),
+        "diff_target_kind": None,
+        "scan_dir": str(tmp_path / "artifacts"),
+    }
+    (target / "child" / "README.md").write_text("changed child source\n")
+    warning = api.scan_target_warning(scan)
+    assert "Dirty Git submodules" in warning
+    assert "child" in warning
+    assert "results were saved" in warning

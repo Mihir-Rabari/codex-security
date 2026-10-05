@@ -330,7 +330,11 @@ def require_diff_target(
         if commit is None:
             raise SystemExit(f"Commit is not available in the local checkout: {head}")
         parent_line = next(
-            (line for line in commit.splitlines() if line.startswith(b"parent ")),
+            (
+                line
+                for line in commit.split(b"\n\n", 1)[0].splitlines()
+                if line.startswith(b"parent ")
+            ),
             None,
         )
         if parent_line is None:

@@ -13,7 +13,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError, abortReason } from "./errors.js";
+import { InvalidTargetError, abortReason, errorMessage } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
@@ -187,7 +187,7 @@ export async function enclosingGitWorktreeRoot(
     if (strict && error instanceof InvalidTargetError) throw error;
     if (markerRoot !== null) {
       throw new InvalidTargetError(
-        "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",
+        `Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
         { cause: error },
       );
     }
@@ -258,12 +258,24 @@ export async function isGitMetadataDirectory(
           "core.repositoryformatversion",
         ],
         signal,
+        { LC_ALL: "C" },
       );
       return /^\d+$/u.test(version);
     } catch (error) {
       throwIfAborted(signal);
-      // git config uses status 1 when the requested key is absent.
-      if (error instanceof Error && "code" in error && error.code === 1)
+      // Application folders can share these filenames without using Git's
+      // config format. Missing or invalid declarations do not identify metadata.
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === 1 ||
+          (error.code === 128 &&
+            "stderr" in error &&
+            typeof error.stderr === "string" &&
+            /fatal: bad (?:config line|numeric config value)/u.test(
+              error.stderr,
+            )))
+      )
         return false;
       throw error;
     }
@@ -685,7 +697,7 @@ async function requireGitRepository(
   } catch (error) {
     throwIfAborted(signal);
     throw new InvalidTargetError(
-      `Diff targets require a Git repository: ${repository}`,
+      `Diff targets require a Git repository: ${repository}. ${errorMessage(error)}`,
       {
         cause: error,
       },
@@ -712,11 +724,14 @@ async function resolveGitRef(
     );
   } catch (error) {
     throwIfAborted(signal);
-    throw new InvalidTargetError(`unknown Git ref: ${ref}`, { cause: error });
+    throw new InvalidTargetError(
+      `unknown Git ref: ${ref}. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
 }
 
-async function gitOutput(
+export async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,

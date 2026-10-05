@@ -4,6 +4,7 @@ import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
+  chmod,
   readFile,
   readdir,
   realpath,
@@ -12,7 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, sep } from "node:path";
+import { delimiter, dirname, join, relative, sep } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
 import { writeThreatModel } from "../src/artifact-export.js";
@@ -48,6 +49,7 @@ import {
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
 
 const { temporaryDirectory, cleanup } =
@@ -930,6 +932,48 @@ test("rejects escaped component paths and output inside the enclosing worktree",
   ).rejects.toThrow();
 });
 
+test("component inventory uses the shared Git runner without fsmonitor callbacks", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  const marker = join(paths.root, "fsmonitor-called");
+  const hook = join(paths.root, "fsmonitor-hook");
+  await writeFile(
+    hook,
+    `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nprintf '\\0'\n`,
+  );
+  await chmod(hook, 0o700);
+  execFileSync("git", [
+    "-C",
+    paths.repository,
+    "config",
+    "core.fsmonitor",
+    hook,
+  ]);
+  const plan = await planComponents(paths.repository, {
+    codex: fakeCodex(() => ({
+      components: [{ name: "Source", paths: ["."] }],
+    })),
+  });
+  expect(plan.components).toHaveLength(1);
+  expect(await stat(marker).catch(() => null)).toBeNull();
+});
+
+test("component inventory reports broken Git configuration without walking ignored files", async () => {
+  const paths = await fixture();
+  execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+  await writeFile(join(paths.repository, ".git", "config"), "[broken config\n");
+  let planned = false;
+  await expect(
+    planComponents(paths.repository, {
+      codex: fakeCodex(() => {
+        planned = true;
+        return { components: [{ name: "Source", paths: ["."] }] };
+      }),
+    }),
+  ).rejects.toThrow("bad config line");
+  expect(planned).toBe(false);
+});
+
 test("plans from a Git inventory without tools or ignored files", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
@@ -1565,3 +1609,41 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+(process.platform === "win32" ? test.skip : test)(
+  "component inventory excludes checkout-local Git when planning a subdirectory",
+  async () => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/component-scan.test.ts",
+        "component inventory excludes checkout-local Git when planning a subdirectory",
+      )
+    )
+      return;
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const actualGit = Bun.which("git")!;
+    const bin = join(paths.repository, "bin");
+    const marker = join(paths.root, "local-git-called");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf called > '${marker.replaceAll("'", `'"'"'`)}'\nexec '${actualGit.replaceAll("'", `'"'"'`)}' "$@"\n`,
+      { mode: 0o700 },
+    );
+    const previous = process.env["PATH"];
+    process.env["PATH"] = bin + delimiter + previous;
+    try {
+      const plan = await planComponents(join(paths.repository, "apps", "api"), {
+        codex: fakeCodex(() => ({
+          components: [{ name: "Source", paths: ["."] }],
+        })),
+      });
+      expect(plan.components).toHaveLength(1);
+      expect(await stat(marker).catch(() => null)).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previous;
+    }
+  },
+);

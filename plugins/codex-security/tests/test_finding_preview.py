@@ -260,3 +260,29 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
+
+
+def test_verbose_evidence_preserves_finding_classification_and_identity() -> None:
+    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+    finding = {
+        key: {f"detail-{index}": "detail" * 1000 for index in range(8)}
+        for key in ("rootCause", "validation", "attackPath")
+    }
+    finding["codeEvidence"] = [
+        {"id": f"evidence-{index}", "path": "nested/" * 50 + "app.py", "code": "code" * 1000}
+        for index in range(4)
+    ]
+    fields = {
+        "severity": "high",
+        "confidence": "high",
+        "ruleId": "synthetic.rule",
+        "status": "validated",
+        "identity": {"id": "fixture"},
+    }
+    finding.update(fields)
+    bounded = preview["bounded_finding_details"](finding)
+    assert {key: bounded.get(key) for key in fields} == fields
+    assert (
+        len(json.dumps(bounded, separators=(",", ":")).encode())
+        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+    )

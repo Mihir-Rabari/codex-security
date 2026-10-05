@@ -2003,3 +2003,34 @@ def test_merge_rank_outputs_rejects_missing_and_duplicate_results(tmp_path: Path
         check=False,
     )
     assert "duplicate paths" in result.stderr
+
+
+def test_revision_preview_uses_the_same_read_window_as_local_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialize_repo(repo)
+    source = repo / "example.py"
+    source.write_text("def first():\n    pass\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    source.write_text(
+        "def first():\n    pass\n#" + "x" * 80_000 + "\ndef outside_window():\n    pass\n"
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "long source")
+    output = tmp_path / "preview.jsonl"
+    run_cli(
+        "make-diff-rank-input",
+        "--repo",
+        str(repo),
+        "--base",
+        base,
+        "--head",
+        "HEAD",
+        "--out",
+        str(output),
+    )
+    rows = read_jsonl(output)
+    assert "first" in rows[0]["preview"]
+    assert "outside_window" not in rows[0]["preview"]

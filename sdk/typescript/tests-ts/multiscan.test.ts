@@ -70,6 +70,7 @@ function git(repository: string, ...args: string[]): string {
 async function repository(
   root: string,
   name: string,
+  objectFormat = "sha1",
 ): Promise<{ path: string; revision: string }> {
   const path = join(root, name);
   await mkdir(join(path, "src"), { recursive: true });
@@ -77,7 +78,7 @@ async function repository(
     join(path, "src", "app.ts"),
     `export const name = "${name}";\n`,
   );
-  git(path, "init", "-q");
+  git(path, "init", "-q", `--object-format=${objectFormat}`);
   git(path, "add", ".");
   git(
     path,
@@ -2545,3 +2546,49 @@ describe("multiscan", () => {
     ]);
   });
 });
+
+test("bulk checkout preserves SHA-256 repository object format", async () => {
+  const paths = await fixture();
+  const repo = await repository(paths.root, "source", "sha256");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+  );
+  const run = mock(async (checkout: string, scanOptions = {}) => {
+    expect(git(checkout, "rev-parse", "--show-object-format")).toBe("sha256");
+    return completeRun(checkout, scanOptions);
+  });
+  const result = await runMultiscan(options(paths, client(run)));
+  expect(result.failed).toBe(0);
+  expect(run).toHaveBeenCalledTimes(1);
+});
+
+test.each(["GIT_DIR", "GIT_COMMON_DIR"])(
+  "bulk scan rejects %s before creating checkouts",
+  async (name) => {
+    if (
+      runTestInSubprocess(
+        "./tests-ts/multiscan.test.ts",
+        `bulk scan rejects ${name} before creating checkouts`,
+      )
+    )
+      return;
+    const paths = await fixture();
+    const repo = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+    );
+    const previous = process.env[name];
+    process.env[name] = join(repo.path, ".git");
+    try {
+      await expect(
+        runMultiscan(options(paths, client(completeRun))),
+      ).rejects.toThrow(`${name} is not supported`);
+      expect(await lstat(paths.output).catch(() => null)).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  },
+);

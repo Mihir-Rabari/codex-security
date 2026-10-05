@@ -31,7 +31,11 @@ import {
 import type { CoverageDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
-import { DiffTarget, type ScanMode } from "./targets.js";
+import {
+  DiffTarget,
+  validatedGitEnvironment,
+  type ScanMode,
+} from "./targets.js";
 import {
   meetsSeverity,
   type ScanPromptSettings,
@@ -120,6 +124,7 @@ export async function runMultiscan(
   options: MultiscanOptions,
 ): Promise<MultiscanResult> {
   options.signal?.throwIfAborted();
+  validatedGitEnvironment();
   if (!Number.isSafeInteger(options.workers) || options.workers < 1) {
     throw new Error("Multiscan workers must be a positive integer.");
   }
@@ -1055,6 +1060,8 @@ async function checkoutRevision(
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_REPLACE_REF_BASE",
   ]);
   for (const name of Object.keys(environment)) {
     if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
@@ -1086,7 +1093,11 @@ async function checkoutRevision(
     );
     return result.stdout.trim();
   };
-  await git("init", "--quiet");
+  await git(
+    "init",
+    "--quiet",
+    ...(task.revision.length === 64 ? ["--object-format=sha256"] : []),
+  );
   await git(
     "fetch",
     "--quiet",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -820,3 +821,69 @@ def test_diff_inventory_rejects_a_narrower_scope(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "diff scans must use the repository root" in result.stderr
     assert output.read_text(encoding="utf-8") == "previous.py\n"
+
+
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_type_changed_files(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    source = repository / "app" / "changed.py"
+    try:
+        source.symlink_to("routes.py")
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    source.unlink()
+    source.write_text("changed = True\n")
+    arguments = ["--diff-base", "HEAD", "--diff-mode", mode]
+    if mode == "revisions":
+        base = git(repository, "rev-parse", "HEAD")
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "replace symlink")
+        arguments = ["--diff-base", base, "--diff-head", "HEAD", "--diff-mode", mode]
+    output = tmp_path / "in_scope_files.txt"
+    result = run_inventory(repository, ".", output, arguments=arguments)
+    assert result.returncode == 0, result.stderr
+    assert b"app/changed.py\n" in output.read_bytes()
+    rank_output = tmp_path / "rank.jsonl"
+    rank = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT.with_name("generate_rank_input.py")),
+            "make-diff-rank-input",
+            "--repo",
+            str(repository),
+            "--base",
+            arguments[1],
+            "--head",
+            "HEAD",
+            "--mode",
+            mode,
+            "--out",
+            str(rank_output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rank.returncode == 0, rank.stderr
+    assert any(
+        json.loads(line)["path"] == "app/changed.py"
+        for line in rank_output.read_text().splitlines()
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
+def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, os.fsdecode(b"app/caf\xe9.py"), b"changed = True\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "Add byte path")
+    output = tmp_path / "in_scope_files.txt"
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", "HEAD"]
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b"app/caf\xe9.py\n"
