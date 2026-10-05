@@ -202,6 +202,19 @@ if os.name == "nt":
     ]
     _WriteFile.restype = wintypes.BOOL
 
+    _DeviceIoControl = _kernel32.DeviceIoControl
+    _DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _DeviceIoControl.restype = wintypes.BOOL
+
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _FlushFileBuffers.restype = wintypes.BOOL
@@ -307,6 +320,34 @@ def _create_file(
             return None
         _raise_last_error("CreateFileW", path)
     return _OwnedHandle(int(handle))
+
+
+def copy_directory_junction(source: Path, destination: Path) -> None:
+    """Copy raw junction data to an empty directory without opening the link target."""
+    # MAXIMUM_REPARSE_DATA_BUFFER_SIZE, including the reparse data header.
+    data = ctypes.create_string_buffer(16 * 1024)
+    size = wintypes.DWORD()
+    for path, write in ((source, False), (destination, True)):
+        handle = _create_file(
+            path,
+            access=_GENERIC_WRITE if write else _FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        assert handle is not None
+        with handle:
+            if not _DeviceIoControl(
+                handle.value,
+                0x000900A4 if write else 0x000900A8,  # FSCTL_SET/GET_REPARSE_POINT.
+                data if write else None,
+                size.value if write else 0,
+                None if write else data,
+                0 if write else len(data),
+                ctypes.byref(size),
+                None,
+            ):
+                _raise_last_error("Copy directory junction", path)
 
 
 def _attributes(handle: int) -> _FileAttributeTagInfo:

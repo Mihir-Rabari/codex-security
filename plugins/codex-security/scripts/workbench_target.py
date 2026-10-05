@@ -17,6 +17,7 @@ from typing import Any, BinaryIO
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
@@ -600,7 +601,6 @@ def directory_content_digest(
     *,
     excluded: tuple[Path, ...] = (),
     include_ignored: bool = False,
-    copied_junctions: dict[Path, tuple[int, str]] | None = None,
 ) -> str:
     excluded_relative = []
     for path in excluded:
@@ -615,8 +615,6 @@ def directory_content_digest(
     )
     if paths is None:
         paths = source_directory_snapshot_paths(target)
-    if copied_junctions:
-        paths = sorted([*paths, *(target / path for path in copied_junctions)])
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
@@ -626,20 +624,16 @@ def directory_content_digest(
             for excluded_path in excluded_relative
         ):
             continue
-        junction = copied_junctions.get(relative_path) if copied_junctions else None
-        if junction is not None:
-            mode, link_target = junction
-        else:
-            try:
-                metadata = path.lstat()
-            except OSError as exc:
-                raise SystemExit(f"Could not read local file: {relative_path}") from exc
-            mode = metadata.st_mode
-            link_target = (
-                os.readlink(path)
-                if stat.S_ISLNK(mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-                else None
-            )
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise SystemExit(f"Could not read local file: {relative_path}") from exc
+        mode = metadata.st_mode
+        link_target = (
+            os.readlink(path)
+            if stat.S_ISLNK(mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            else None
+        )
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
         update_digest_field(digest, b"mode", str(stat.S_IMODE(mode)).encode())
@@ -683,7 +677,7 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
 
 def copy_directory_excluding(
     source: Path, destination: Path, excluded: tuple[Path, ...]
-) -> dict[Path, tuple[int, str]]:
+) -> list[Path]:
     excluded_relative = []
     for path in excluded:
         try:
@@ -691,11 +685,7 @@ def copy_directory_excluding(
         except ValueError:
             continue
 
-    paths = git_directory_snapshot_paths(source)
-    if paths is None:
-        paths = source_directory_snapshot_paths(source)
-    selected_paths = set(paths)
-    copied_junctions: dict[Path, tuple[int, str]] = {}
+    junctions: list[Path] = []
 
     def ignored(directory: str, names: list[str]) -> list[str]:
         relative = Path(directory).relative_to(source)
@@ -713,15 +703,22 @@ def copy_directory_excluding(
                 stat.S_ISDIR(metadata.st_mode)
                 and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
             ):
-                # Preserve snapshot leaf identity without recreating or traversing a junction.
-                if path in selected_paths:
-                    copied_junctions[relative / name] = (metadata.st_mode, os.readlink(path))
+                junctions.append(relative / name)
                 skipped.append(name)
         return skipped
 
     shutil.copytree(source, destination, symlinks=True, ignore=ignored)
 
-    return copied_junctions
+    # Empty placeholders retain parent directories while a patch is reversed.
+    for path in junctions:
+        (destination / path).mkdir()
+    return junctions
+
+
+def restore_directory_junctions(source: Path, destination: Path, junctions: list[Path]) -> None:
+    # Recreate links only after patch application can no longer write through them.
+    for path in junctions:
+        copy_directory_junction(source / path, destination / path)
 
 
 def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:

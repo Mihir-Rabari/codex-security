@@ -1114,6 +1114,7 @@ type FindingVerification = z.infer<typeof findingVerificationSchema>;
 interface SkillRunOptions {
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
+  serviceTier?: JsonValue;
   safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
@@ -5366,6 +5367,16 @@ export async function main(
     })
     .command("login", {
       description: "Sign in with ChatGPT or store credentials.",
+      hint:
+        "For remote login, use --device-auth if your workspace allows it.\n" +
+        "If device auth is disabled, sign in over SSH:\n" +
+        "  On your local machine (replace user@remote):\n" +
+        "    ssh -L 1455:localhost:1455 user@remote\n" +
+        "  In that SSH session:\n" +
+        "    codex-security login\n" +
+        "  Open the sign-in URL in your local browser.\n" +
+        "  Keep SSH connected until login finishes.\n" +
+        "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -5378,7 +5389,7 @@ export async function main(
         deviceAuth: z
           .boolean()
           .default(false)
-          .describe("Use device-code authentication."),
+          .describe("Use device auth if your workspace allows it."),
         withApiKey: z
           .boolean()
           .default(false)
@@ -7312,6 +7323,8 @@ async function runSkill(
       "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, and analytics.enabled overrides.",
     );
   }
+  if (options.serviceTier !== undefined)
+    overrides["service_tier"] = options.serviceTier;
   const { model, reasoningEffort } = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
@@ -7497,6 +7510,9 @@ async function runSkill(
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...(options.serviceTier === undefined
+        ? []
+        : ["--config", `service_tier=${JSON.stringify(options.serviceTier)}`]),
       ...codex
         .filter(
           (value) =>
@@ -8146,6 +8162,7 @@ async function executeScan(
   let providerOptions: SkillRunOptions = { provider: "openai" };
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
+  let patchServiceTier: JsonValue | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
   let failed = false;
@@ -8171,6 +8188,8 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
+    patchServiceTier =
+      resolveCodexProfile(effectiveConfiguration)["service_tier"] ?? "default";
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
@@ -8812,6 +8831,7 @@ async function executeScan(
         dependencies,
         {
           ...providerOptions,
+          serviceTier: patchServiceTier,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
