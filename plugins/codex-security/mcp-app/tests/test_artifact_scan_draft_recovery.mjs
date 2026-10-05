@@ -56,6 +56,8 @@ for (const layout of ["standard", "diff", "deep"]) {
     "ledger-id",
     "worker-report-id",
     "worker-ledger-id",
+    "cross-field-id",
+    "severity-revision",
   ]) {
     for (const status of ["failed", "canceled"]) {
       test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
@@ -88,13 +90,25 @@ for (const layout of ["standard", "diff", "deep"]) {
             finding.title = `Synthetic sibling ${index + 1}`;
           if (variant.endsWith("-id"))
             finding.extensions = {
-              [variant.includes("report") ? "reportId" : "ledgerRowId"]:
-                `synthetic-report-${index + 1}`,
+              [variant.includes("report") ||
+              (variant === "cross-field-id" && index === 0)
+                ? "reportId"
+                : "ledgerRowId"]: `synthetic-report-${index + 1}`,
             };
           if (variant === "preserved")
             finding.locations[0].startLine = index + 1;
           return finding;
         });
+        if (variant === "severity-revision") {
+          const initial = structuredClone(findings[0]);
+          initial.severity.level = "high";
+          initial.summary = "Initial assessment before reviewing the control.";
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: [initial] },
+            false,
+          );
+        }
         await f.write({
           ...f.draft(),
           findings: variant.endsWith("-id") ? findings.slice(0, 1) : findings,
@@ -156,7 +170,7 @@ documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin',
 for document in documents[1:]: document['scanId']=scan_id
 prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
 published=_write_prepared_scan_finalization(prepared)
-print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings}))`,
+print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'levels':[row['severity']['level'] for row in published[1]['findings']]}))`,
             fileURLToPath(new URL("../../scripts", import.meta.url)),
             f.root,
             f.context.scanId,
@@ -167,6 +181,7 @@ print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[
           count,
           sealed: true,
           warnings: [],
+          levels: Array(count).fill("low"),
         });
       });
     }

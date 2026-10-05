@@ -1328,6 +1328,21 @@ def merge_saved_results(
     # A damaged canonical row must not replace a checkpoint's established identity.
     legacy_identities: dict[str, dict[str, Any] | None] = {}
 
+    def legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
+        content = _finding_content(finding)
+        locations = content.get("locations")
+        if isinstance(locations, list):
+            content["locations"] = sorted(
+                [
+                    {**row, "endLine": row.get("endLine", row.get("startLine"))}
+                    if isinstance(row, dict)
+                    else row
+                    for row in locations
+                ],
+                key=_encoded,
+            )
+        return _digest([owner, content])
+
     def restore_legacy_identity(finding: Any) -> None:
         if (
             isinstance(finding, dict)
@@ -1336,7 +1351,7 @@ def merge_saved_results(
         ):
             provenance = finding.get("provenance")
             owner = provenance.get("workerId") if isinstance(provenance, dict) else None
-            identity = legacy_identities.get(_digest([owner, _finding_content(finding)]))
+            identity = legacy_identities.get(legacy_identity_key(finding, owner))
             if identity is not None:
                 finding["identity"] = copy.deepcopy(identity)
         _ensure_finding_identity(finding)
@@ -1372,7 +1387,7 @@ def merge_saved_results(
                 saved_owner = (
                     provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
                 )
-                key = _digest([saved_owner, _finding_content(saved)])
+                key = legacy_identity_key(saved, saved_owner)
                 if key not in legacy_identities:
                     legacy_identities[key] = identity
                 elif legacy_identities[key] != identity:
@@ -1906,12 +1921,18 @@ def merge_saved_results(
                 for source_key in source_keys:
                     saved_identity = checkpoint_identities.get(source_key)
                     if saved_identity is not None:
-                        # Missing report metadata may be enriched; conflicting IDs name siblings.
-                        if any(
-                            current is not None and saved is not None and current != saved
-                            for current, saved in zip(identifiers, saved_identity[2], strict=True)
-                        ):
-                            continue
+                        # Missing metadata may be enriched; disjoint or conflicting IDs name siblings.
+                        saved_ids = saved_identity[2]
+                        if identifiers != (None, None) and saved_ids != (None, None):
+                            pairs = list(zip(identifiers, saved_ids, strict=True))
+                            if not any(
+                                current is not None and saved is not None
+                                for current, saved in pairs
+                            ) or any(
+                                current is not None and saved is not None and current != saved
+                                for current, saved in pairs
+                            ):
+                                continue
                         identity, preserved_identity, _ = copy.deepcopy(saved_identity)
                         finding["identity"] = identity
                         if preserved_identity is not None:
@@ -1924,9 +1945,12 @@ def merge_saved_results(
             key = _finding_key(finding)
             represented_by_parent = False
             if relative != "parent":
-                if key in represented:
-                    mapped_key = represented[key]
-                    historical_contents = represented_history.get(key, set())
+                history_key = _finding_key(value)
+                if history_key not in represented:
+                    history_key = key
+                if history_key in represented:
+                    mapped_key = represented[history_key]
+                    historical_contents = represented_history.get(history_key, set())
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     if candidate_key not in represented_candidates:

@@ -113,8 +113,9 @@ def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, s
 
 @pytest.mark.parametrize("stopped", [False, True])
 @pytest.mark.parametrize("saved_anchor", ["stable-anchor", 42])
+@pytest.mark.parametrize("explicit_end_line", [False, True])
 def test_missing_parent_identity_reuses_established_checkpoint(
-    tmp_path: Path, saved_results, stopped, saved_anchor
+    tmp_path: Path, saved_results, stopped, saved_anchor, explicit_end_line
 ):
     from finalize_scan_contract import _recover_unsealed_findings
     from workbench_test_support import saved_binding
@@ -139,6 +140,8 @@ def test_missing_parent_identity_reuses_established_checkpoint(
         ),
     )
     os.utime(checkpoint, ns=(100, 100))
+    if explicit_end_line:
+        finding["locations"][0]["endLine"] = 1
     write_saved_parent(
         tmp_path, saved_draft("identity-scan", complete=True, findings=[finding]), 200
     )
