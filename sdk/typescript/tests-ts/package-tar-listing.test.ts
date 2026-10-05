@@ -40,6 +40,8 @@ function packageTar(
   const paths = [
     "package/package.json",
     "package/README.md",
+    "package/docs/dedupe-records.md",
+    "package/schemas/project-config.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,

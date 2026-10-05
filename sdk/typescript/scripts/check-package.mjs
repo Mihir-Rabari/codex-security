@@ -18,6 +18,7 @@ import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { plainTarEntries } from "./package-tar-entries.mjs";
 import { regularTarListingLines } from "./package-tar-listing.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -86,11 +87,13 @@ if (
 const required = [
   "package/package.json",
   "package/README.md",
+  "package/docs/dedupe-records.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
+  "package/schemas/project-config.schema.json",
   "package/_bundled_plugin/.codex-plugin/plugin.json",
 ];
 
@@ -99,32 +102,13 @@ for (const file of required) {
 }
 
 const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-const { externalOwnedExact, shippedExact } = contract;
-if (
-  !Array.isArray(externalOwnedExact) ||
-  !externalOwnedExact.every((path) => typeof path === "string") ||
-  !Array.isArray(shippedExact) ||
-  !shippedExact.every((path) => typeof path === "string")
-) {
-  throw new Error("Plugin projection contract contains invalid paths.");
-}
-const publicManifest = ".codex-plugin/plugin.json";
-if (!externalOwnedExact.includes(publicManifest)) {
-  throw new Error(
-    "Plugin projection contract must declare the public manifest as externally owned.",
-  );
-}
-const pluginPaths = [
-  publicManifest,
-  ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-];
-const pluginFiles = new Set(pluginPaths);
-if (pluginFiles.size !== pluginPaths.length) {
+const pluginPaths = pluginContractFiles(contract);
+if (new Set(pluginPaths).size !== pluginPaths.length) {
   throw new Error("Plugin projection contract contains duplicate paths.");
 }
 
 const pluginEntries = new Set();
-for (const file of pluginFiles) {
+for (const file of pluginPaths) {
   const pluginArchivePath = `package/_bundled_plugin/${file}`;
   pluginEntries.add(pluginArchivePath);
   if (!files.has(pluginArchivePath)) {
@@ -137,6 +121,8 @@ const allowedRoot = new Set([
   "package/README.md",
   "package/LICENSE",
   "package/bin/codex-security.mjs",
+  "package/docs/dedupe-records.md",
+  "package/schemas/project-config.schema.json",
 ]);
 const distFiles = new Set(packageDistFiles);
 for (const file of distFiles) {
