@@ -1188,6 +1188,9 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+    if parent is not None:
+        # Publisher-created copies retain the canonical coverage envelope on replay.
+        parent_is_canonical |= parent["coverage"].get("documentType") == "codex-security.coverage"
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.

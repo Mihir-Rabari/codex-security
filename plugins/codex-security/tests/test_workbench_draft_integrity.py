@@ -222,6 +222,33 @@ def test_missing_finding_identity_is_stable_across_publication_retry(tmp_path: P
     assert identities[0] == identities[1]
 
 
+def test_canonical_missing_identity_remains_malformed_on_publication_retry(tmp_path: Path):
+    observed = []
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    for retry in (False, True):
+        if retry:
+            scan_id, scan_dir = start_saved_scan(state, tmp_path / "target", tmp_path / "scans")
+            write_completed_contract(scan_dir, scan_id, tmp_path / "target", relative_path="app.py")
+        path = scan_dir / "findings.json"
+        document = json.loads(path.read_text())
+        malformed = json.loads(json.dumps(document["findings"][0]))
+        malformed.pop("identity")
+        malformed["title"] = "Malformed missing identity"
+        document["findings"].append(malformed)
+        path.write_text(json.dumps(document))
+
+        stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+        scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 1
+        assert not scan["resultsRecoveryNeeded"]
+        assert any("identity" in warning for warning in scan["warnings"])
+        saved = json.loads(path.read_text())["findings"]
+        assert len(saved) == 1
+        observed.append((saved[0]["findingId"], saved[0]["identity"], scan["warnings"]))
+    assert observed[0] == observed[1]
+
+
 def test_legacy_checkpoint_keeps_its_published_identity(tmp_path: Path):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"
