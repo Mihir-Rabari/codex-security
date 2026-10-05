@@ -23,8 +23,11 @@ update_digest_field = cast(
 
 
 @pytest.mark.parametrize("native_junction", [False, True])
-def test_reviewed_patch_accepts_unchanged_junction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_junction: bool
+@pytest.mark.parametrize(
+    "change", ["unchanged", "unrelated_file", "junction_target", "target_contents"]
+)
+def test_reviewed_patch_preserves_junction_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_junction: bool, change: str
 ) -> None:
     import workbench_db
 
@@ -33,13 +36,13 @@ def test_reviewed_patch_accepts_unchanged_junction(
     source = tmp_path / "source"
     source.mkdir()
     junction = source / "linked_directory"
-    if native_junction:
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True)
-    else:
-        junction.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "source.txt").write_text("original contents\n")
+    junction_target = outside
+    if not native_junction:
         real_lstat = Path.lstat
+        real_readlink = os.readlink
 
         def metadata(path: Path, *args: Any, **kwargs: Any) -> Any:
             result = real_lstat(path, *args, **kwargs)
@@ -47,8 +50,22 @@ def test_reviewed_patch_accepts_unchanged_junction(
                 return SimpleNamespace(st_mode=result.st_mode, st_reparse_tag=0xA0000003)
             return result
 
+        def readlink(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if Path(path) == junction:
+                return str(junction_target)
+            return real_readlink(path, *args, **kwargs)
+
         monkeypatch.setattr(Path, "lstat", metadata)
-    (junction / "unchanged.txt").write_text("fixture\n")
+        monkeypatch.setattr(os, "readlink", readlink)
+
+    def link_to(target: Path) -> None:
+        if native_junction:
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target)], check=True)
+        else:
+            junction.mkdir(exist_ok=True)
+            (junction / "source.txt").write_text((target / "source.txt").read_text())
+
+    link_to(outside)
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
@@ -66,10 +83,22 @@ def test_reviewed_patch_accepts_unchanged_junction(
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
     (source / "app.txt").write_text("after\n")
-    assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
-    (source / "unrelated.txt").write_text("outside the reviewed patch\n")
-    with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
-        workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    if change == "junction_target":
+        junction_target = tmp_path / "other"
+        junction_target.mkdir()
+        (junction_target / "source.txt").write_text("different target contents\n")
+        if native_junction:
+            junction.rmdir()
+        link_to(junction_target)
+    elif change == "target_contents":
+        (junction / "source.txt").write_text("changed outside the snapshot boundary\n")
+    elif change == "unrelated_file":
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+    if change in {"junction_target", "unrelated_file"}:
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
 
 
 def initialize_unborn_git_repository(target: Path) -> None:

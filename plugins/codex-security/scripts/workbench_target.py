@@ -584,7 +584,11 @@ def source_directory_snapshot_paths(target: Path) -> list[Path]:
 
 
 def directory_content_digest(
-    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    include_ignored: bool = False,
+    copied_junctions: dict[Path, tuple[int, str]] | None = None,
 ) -> str:
     excluded_relative = []
     for path in excluded:
@@ -599,6 +603,8 @@ def directory_content_digest(
     )
     if paths is None:
         paths = source_directory_snapshot_paths(target)
+    if copied_junctions:
+        paths = sorted([*paths, *(target / path for path in copied_junctions)])
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-directory/v1")
     for path in paths:
@@ -608,21 +614,29 @@ def directory_content_digest(
             for excluded_path in excluded_relative
         ):
             continue
-        try:
-            metadata = path.lstat()
-        except OSError as exc:
-            raise SystemExit(f"Could not read local file: {relative_path}") from exc
+        junction = copied_junctions.get(relative_path) if copied_junctions else None
+        if junction is not None:
+            mode, link_target = junction
+        else:
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise SystemExit(f"Could not read local file: {relative_path}") from exc
+            mode = metadata.st_mode
+            link_target = (
+                os.readlink(path)
+                if stat.S_ISLNK(mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+                else None
+            )
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
-        update_digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode())
-        if stat.S_ISLNK(metadata.st_mode) or (
-            include_ignored and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-        ):
+        update_digest_field(digest, b"mode", str(stat.S_IMODE(mode)).encode())
+        if link_target is not None:
             update_digest_field(digest, b"kind", b"symlink")
-            update_digest_field(digest, b"content", os.fsencode(os.readlink(path)))
-        elif stat.S_ISDIR(metadata.st_mode):
+            update_digest_field(digest, b"content", os.fsencode(link_target))
+        elif stat.S_ISDIR(mode):
             update_digest_field(digest, b"kind", b"directory")
-        elif stat.S_ISREG(metadata.st_mode):
+        elif stat.S_ISREG(mode):
             content_digest = hashlib.sha256()
             content_size = 0
             try:
@@ -655,7 +669,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
     return count
 
 
-def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Path, ...]) -> None:
+def copy_directory_excluding(
+    source: Path, destination: Path, excluded: tuple[Path, ...]
+) -> dict[Path, tuple[int, str]]:
     excluded_relative = []
     for path in excluded:
         try:
@@ -663,17 +679,35 @@ def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Pa
         except ValueError:
             continue
 
+    copied_junctions: dict[Path, tuple[int, str]] = {}
+
     def ignored(directory: str, names: list[str]) -> list[str]:
-        if getattr(Path(directory).lstat(), "st_reparse_tag", 0) & 0x20000000:
-            return names
         relative = Path(directory).relative_to(source)
-        return [
+        skipped = [
             path.name
             for path in excluded_relative
             if path.parent == relative and path.name in names
         ]
+        for name in names:
+            if name in skipped:
+                continue
+            if name == ".git":
+                skipped.append(name)
+                continue
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
+                # Preserve snapshot leaf identity without recreating or traversing a junction.
+                copied_junctions[relative / name] = (metadata.st_mode, os.readlink(path))
+                skipped.append(name)
+        return skipped
 
     shutil.copytree(source, destination, symlinks=True, ignore=ignored)
+
+    return copied_junctions
 
 
 def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:

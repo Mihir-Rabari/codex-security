@@ -2420,7 +2420,7 @@ def require_reviewed_patch_applied(
         checkout_root = Path(temporary) / "checkout"
         if unversioned:
             checkout = checkout_root
-            copy_directory_excluding(target, checkout, excluded)
+            copied_junctions = copy_directory_excluding(target, checkout, excluded)
         else:
             copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
@@ -2441,7 +2441,7 @@ def require_reviewed_patch_applied(
                 "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
             )
         reverted_digest = (
-            directory_content_digest(checkout)
+            directory_content_digest(checkout, copied_junctions=copied_junctions)
             if unversioned
             else worktree_content_digest_for_context(
                 checkout_root,
@@ -2452,12 +2452,14 @@ def require_reviewed_patch_applied(
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
             checkout = Path(temporary) / "checkout-lf"
-            copy_directory_excluding(target, checkout, excluded)
+            copied_junctions = copy_directory_excluding(target, checkout, excluded)
             applied_without_conversion = git_command(
                 checkout, "-c", "core.autocrlf=input", *arguments, text=True
             )
             if applied_without_conversion.returncode == 0:
-                reverted_digest = directory_content_digest(checkout)
+                reverted_digest = directory_content_digest(
+                    checkout, copied_junctions=copied_junctions
+                )
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
                 "The selected checkout contains changes outside the reviewed patch. Remove them before recording the patch as applied."
