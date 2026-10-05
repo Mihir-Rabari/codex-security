@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { discoverScaInputs, normalizeOsvOutput } from "../src/sca-osv.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import {
   compareScaResults,
   createScaUpdateHandoff,

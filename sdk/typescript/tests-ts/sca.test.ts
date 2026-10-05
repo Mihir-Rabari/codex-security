@@ -36,10 +36,8 @@ import {
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
