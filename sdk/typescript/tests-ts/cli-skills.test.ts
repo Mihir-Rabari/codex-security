@@ -1277,6 +1277,7 @@ process.stdout.write(JSON.stringify({
 
   test.each([
     "Failed after 1401 bytes",
+    "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     "permission denied opening cache",
     "line 1429 could not be parsed",
   ])("does not misclassify an operational skill failure: %s", (detail) => {

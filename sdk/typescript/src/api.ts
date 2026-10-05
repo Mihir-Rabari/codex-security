@@ -4454,7 +4454,7 @@ export function classifyConnectionFailure(
   | "timeout"
   | "unknown" {
   const message = error instanceof Error ? error.message : String(error);
-  if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
+  if (/\b(?:sqlite3?|database|workbench|toml)\b/iu.test(message)) {
     return "unknown";
   }
   if (
