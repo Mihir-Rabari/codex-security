@@ -485,6 +485,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   args[0] === "remote"
                 )
                   return "https://gitlab.com/example/repository.git";
+                if (
+                  args[0] === "ls-remote" &&
+                  args[2] === "https://gitlab.com/example/repository.git"
+                )
+                  args = [...args.slice(0, 2), remote, ...args.slice(3)];
                 return runGitRepositoryCommand(command, args, directory, {
                   ...options,
                   environment: {
