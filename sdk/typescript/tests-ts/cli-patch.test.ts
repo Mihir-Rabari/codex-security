@@ -3848,6 +3848,8 @@ describe("patch publication integrity", () => {
     "nested environment",
     "nested objects",
     "nested common",
+    "nested replacements",
+    "nested replacement namespace",
   ])("detects local patches in %s Git repositories", async (kind) => {
     const directory = await fixtures.create("patch-git-state-");
     const git = repositoryGit(directory);
@@ -3868,6 +3870,14 @@ describe("patch publication integrity", () => {
       await writeFile(join(nested, "app.ts"), "unsafe\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic nested baseline");
+      if (kind.startsWith("nested replacement")) {
+        const original = inner("rev-parse", "HEAD^{tree}");
+        await writeFile(join(nested, "app.ts"), "fixed\n");
+        inner("add", ".");
+        const replacement = inner("write-tree");
+        inner("reset", "--hard", "HEAD");
+        inner("replace", original, replacement);
+      }
       path = "nested/app.ts";
     }
     const gitEnvironment =
@@ -3877,7 +3887,11 @@ describe("patch publication integrity", () => {
           ? { GIT_OBJECT_DIRECTORY: join(directory, ".git", "objects") }
           : kind === "nested common"
             ? { GIT_COMMON_DIR: join(directory, ".git") }
-            : {};
+            : kind === "nested replacements"
+              ? { GIT_NO_REPLACE_OBJECTS: "1" }
+              : kind === "nested replacement namespace"
+                ? { GIT_REPLACE_REF_BASE: "refs/synthetic-replacements/" }
+                : {};
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: directory,
       onRepositoryCommand: (command, args, cwd, options) =>

@@ -4267,7 +4267,7 @@ def test_saved_scan_remains_readable_with_large_hunk_counts(tmp_path: Path, padd
     remediation = saved["findings"][0]["remediationState"]
     assert remediation["state"] == "generated"
     if padded:
-        assert remediation["patch"] == patch
+        assert remediation["patch"] == patch_path.read_bytes().decode()
         assert remediation["patchStats"]["additions"] == 1
         assert remediation["patchStats"]["deletions"] == 1
     else:

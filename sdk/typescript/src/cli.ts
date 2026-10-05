@@ -7384,7 +7384,13 @@ async function nestedPatchGitDependencies(
           ...options,
           environment: {
             ...Object.fromEntries(
-              [...GIT_REPOSITORY_ENVIRONMENT].map((name) => [name, undefined]),
+              [...GIT_REPOSITORY_ENVIRONMENT]
+                .filter(
+                  (name) =>
+                    name !== "GIT_NO_REPLACE_OBJECTS" &&
+                    name !== "GIT_REPLACE_REF_BASE",
+                )
+                .map((name) => [name, undefined]),
             ),
             ...options?.environment,
           },
