@@ -9211,9 +9211,8 @@ function componentScanEventLine(
       ? null
       : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
   }
-  if (event.type !== "cost") return null;
-  const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatScanCost(cost)}` : ""}\n`;
+  if (event.type !== "cost" || !showCost) return null;
+  return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
 }
 
 function protectedRootErrorMessage(
