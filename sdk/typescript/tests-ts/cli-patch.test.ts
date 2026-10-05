@@ -332,6 +332,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       );
       const subdirectory = join(repository, "sub");
       const removesComponent = kind.startsWith("removed component");
+      const assessmentAtRoot =
+        removesComponent || kind === "nested Git metadata after patch";
       const replacesComponent = kind.includes("replaced by");
       const changedFiles = removesComponent
         ? [
@@ -452,9 +454,9 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 "$codex-security:assess-patch-risk",
               );
               expect(output?.appServer?.directory).toBe(
-                removesComponent && assessing ? repository : subdirectory,
+                assessmentAtRoot && assessing ? repository : subdirectory,
               );
-              if (!(removesComponent && assessing))
+              if (!(assessmentAtRoot && assessing))
                 expect(
                   await readFile(
                     join(
@@ -478,17 +480,20 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                       encoding: "utf8",
                     }).replace(/\n$/u, ""),
                   ),
-                ).toBe(
-                  kind === "nested Git metadata after patch"
-                    ? subdirectory
-                    : repository,
-                );
+                ).toBe(repository);
                 const artifact = JSON.parse(
                   output.appServer.prompt
                     .split("\n")
                     .find((line) => line.startsWith('{"path":'))!,
                 );
                 expect(artifact.changedFiles).toEqual(changedFiles);
+                expect(
+                  execFileSync("git", ["cat-file", "-e", artifact.base], {
+                    cwd: output.appServer.directory,
+                    env: environment,
+                    encoding: "utf8",
+                  }),
+                ).toBe("");
                 const patch = await readFile(artifact.path, "utf8");
                 expect(patch).toContain("a/sub/app.ts");
                 expect(patch).toContain("a/shared.ts");

@@ -5354,14 +5354,21 @@ export async function main(
           );
           if (!jsonOutput) output.write(report.text());
           if (commandContext !== undefined) {
-            commandEnvironment = commandContext.environment;
             const directory = await realpath(repository)
               .then(async (path) =>
                 (await lstat(path)).isDirectory() ? path : undefined,
               )
               .catch(() => undefined);
-            if (directory !== commandContext.directory)
+            if (
+              directory !== commandContext.directory ||
+              (options.assessPatchRisk &&
+                (await patchRepositoryRoot(
+                  gitRepository,
+                  gitDependencies,
+                ).catch(() => undefined)) !== gitRepository)
+            )
               commandDirectory = gitRepository;
+            commandEnvironment = commandContext.environment;
           }
           const files = await changedPatchFiles(
             gitRepository,
