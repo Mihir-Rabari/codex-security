@@ -402,7 +402,7 @@ def inspect_setup_values(
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or Path(repository_root).resolve() != target:
+    if repository_root is None or not Path(repository_root).samefile(target):
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )
@@ -3039,15 +3039,15 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
 
 
 def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
-    if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
-        return False
     try:
+        if len(relative_path.encode("utf-8")) > FINDING_LOCATION_PATH_BYTES:
+            return False
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
             relative_path,
             f"finding artifact {relative_path}",
         )
-    except (ContractError, OSError):
+    except (ContractError, OSError, UnicodeEncodeError):
         return False
     try:
         return stat.S_ISREG(os.fstat(descriptor).st_mode)

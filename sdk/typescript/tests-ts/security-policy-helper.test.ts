@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -65,6 +66,22 @@ function expectGuidance(text: string, policies: [string, string][]): void {
 afterEach(cleanup);
 
 describe("built SECURITY.md helper", () => {
+  test("policy listing and scoped resolution agree on exact filename case", () => {
+    const { root } = fixture();
+    write(root, "component/example.txt", "synthetic scope");
+    write(root, "security.md", "Synthetic lowercase policy\n");
+    expect(JSON.parse(inventory(root).stdout)).toEqual([]);
+    const lowercase = resolve(root, "component");
+    expect(lowercase.status, lowercase.stderr).toBe(0);
+    expect(lowercase.stdout).toBe("");
+    renameSync(join(root, "security.md"), join(root, "temporary.md"));
+    renameSync(join(root, "temporary.md"), join(root, "SECURITY.md"));
+    expect(JSON.parse(inventory(root).stdout)).toEqual(["SECURITY.md"]);
+    const uppercase = resolve(root, "component");
+    expect(uppercase.status, uppercase.stderr).toBe(0);
+    expect(uppercase.stdout).toContain("Synthetic lowercase policy");
+  });
+
   test("accepts dash-prefixed paths with equals syntax", () => {
     const { root } = fixture();
     for (const [repo, scope, output] of [

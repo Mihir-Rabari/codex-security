@@ -583,9 +583,12 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
         raise
 
 
-def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
+def open_scan_local_file_descriptor(
+    scan_dir: Path, relative_path: str, context: str, *, portable: bool = True
+) -> int:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_portable_relative_path(relative_path, context)
+    validate_path = _require_portable_relative_path if portable else _require_safe_relative_path
+    relative_path = validate_path(relative_path, context)
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
@@ -2243,7 +2246,7 @@ def _open_source_file(source_root: Path, relative_path: str) -> TextIO | None:
     file_fd: int | None = None
     try:
         file_fd = open_scan_local_file_descriptor(
-            source_root, relative_path, f"source file {relative_path}"
+            source_root, relative_path, f"source file {relative_path}", portable=False
         )
         handle = os.fdopen(file_fd, "r", encoding="utf-8", errors="replace")
         file_fd = None
@@ -3081,6 +3084,7 @@ def main() -> int:
     parser.add_argument("--write-threat-model", action="store_true")
     args = parser.parse_args()
     try:
+        args.scan_dir = args.scan_dir.resolve()
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))

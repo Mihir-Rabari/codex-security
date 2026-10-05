@@ -427,11 +427,10 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
-    try:
-        relative = target.resolve().relative_to(repository)
-    except ValueError as exc:
-        raise SystemExit("Scan target must stay inside its Git working tree.") from exc
-    return repository, relative.as_posix() or "."
+    prefix = git_bytes(target, "rev-parse", "--show-prefix")
+    if prefix is None:
+        raise SystemExit("Could not inspect the selected Git working tree.")
+    return repository, os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
 
 
 def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
@@ -755,7 +754,7 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
         and is_worktree
         and revision is not None
         and repository_root is not None
-        and Path(repository_root).resolve() == target
+        and Path(repository_root).samefile(target)
     )
     metadata: dict[str, Any] = {
         "hasHead": revision is not None,

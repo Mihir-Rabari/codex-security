@@ -317,3 +317,30 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     if os.name != "nt":
         assert expected == host_git
     assert trusted_git_executable(repository) == str(expected)
+
+
+def test_git_context_retains_scoped_directory_spelling(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    scoped = target / "component with spaces "
+    scoped.mkdir()
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](scoped)
+    assert repository.samefile(target)
+    assert pathspec == scoped.name
+
+
+def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    alias = tmp_path / "TARGET"
+    if not alias.exists():
+        pytest.skip("filesystem does not support case aliases")
+    assert WORKBENCH_TARGET["git_target_metadata"](alias)["reviewChangesSupported"]
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
+    assert repository.samefile(target)
+    assert pathspec == "."
+    scoped = target / "component"
+    scoped.mkdir()
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
+    assert repository.samefile(target)
+    assert (repository / pathspec).samefile(scoped)

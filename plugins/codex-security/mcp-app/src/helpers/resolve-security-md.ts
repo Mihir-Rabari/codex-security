@@ -231,13 +231,17 @@ function asciiJson(value: string): string {
   );
 }
 
+function directoryEntries(directory: Buffer) {
+  return windows
+    ? windowsFiles().entriesWithTypes(directory)
+    : readdirSync(directory, { encoding: "buffer", withFileTypes: true });
+}
+
 function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
   const root = resolveRoot(repo, posixHome);
   const policies: string[] = [];
   function walk(directory: Buffer, prefix: string): void {
-    const entries = windows
-      ? windowsFiles().entriesWithTypes(directory)
-      : readdirSync(directory, { encoding: "buffer", withFileTypes: true });
+    const entries = directoryEntries(directory);
     for (const listedEntry of entries) {
       const bytes = listedEntry.name;
       const name = decodePath(bytes);
@@ -359,6 +363,12 @@ function resolveSecurityMd(
 
   const sections: string[] = [];
   for (const directory of directories) {
+    if (
+      !directoryEntries(directory).some(
+        (entry) => decodePath(entry.name) === "SECURITY.md",
+      )
+    )
+      continue;
     const policy = appendPath(directory, encodePath("SECURITY.md"));
     if (!fileStat(policy)?.isFile()) continue;
     const resolvedPolicy = resolvedPath(policy);

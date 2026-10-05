@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  stat,
   rm,
   symlink,
   writeFile,
@@ -11,13 +12,91 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
 import {
+  resolveArtifactExportOutput,
   readThreatModelPath,
   writeThreatModel,
 } from "../src/artifact-export.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { PYTHON } from "./support/security-policy.js";
 
+const caseProbe = await mkdtemp(join(tmpdir(), "codex-security-case-probe-"));
+await mkdir(join(caseProbe, "reports"));
+const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
+  () => true,
+  () => false,
+);
+await rm(caseProbe, { recursive: true, force: true });
+
 describe("offline artifact export", () => {
+  test("resolves a scan-local export before its exports directory exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-new-export-"));
+    try {
+      const scanDir = join(root, "scan");
+      await mkdir(scanDir);
+      const output = join(scanDir, "exports", "findings.json");
+      expect(
+        (
+          await resolveArtifactExportOutput(
+            { scanDir, output, format: "json" },
+            root,
+          )
+        ).output,
+      ).toBe(output);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!caseInsensitiveVolume)(
+    "accepts an export parent accessed through a case alias",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-case-output-"));
+      await mkdir(join(root, "reports"));
+      try {
+        const result = await resolveArtifactExportOutput(
+          {
+            scanDir: join(root, "scan"),
+            format: "json",
+            output: join(root, "REPORTS", "result.json"),
+          },
+          root,
+        );
+        await writeFile(result.output, "synthetic export");
+        expect(
+          await readFile(join(root, "reports", "result.json"), "utf8"),
+        ).toBe("synthetic export");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("resolves real export directories while refusing linked repository parents", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-output-path-"));
+    const reports = join(root, "reports");
+    await mkdir(reports);
+    const link = join(root, "linked");
+    await symlink(reports, link, "junction");
+    try {
+      const options = {
+        scanDir: join(root, "scan"),
+        format: "json" as const,
+        output: join(reports, "result.json"),
+      };
+      expect((await resolveArtifactExportOutput(options, root)).output).toBe(
+        options.output,
+      );
+      await expect(
+        resolveArtifactExportOutput(
+          { ...options, output: join(link, "result.json") },
+          root,
+        ),
+      ).rejects.toThrow("cannot traverse a repository symlink");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("only exposes a document matching the current canonical model", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-current-model-"));
     const modelPath = join(root, "threatmodel.md");

@@ -2064,9 +2064,12 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolveCliPath(
+      const requestedRepository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
+      );
+      const repository = await realpath(requestedRepository).catch(
+        () => requestedRepository,
       );
       return presentHistory(
         await history(
@@ -3143,7 +3146,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });

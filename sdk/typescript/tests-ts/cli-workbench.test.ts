@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
@@ -24,6 +24,41 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test("findings list resolves a repository directory alias", async () => {
+    const root = await temporaryDirectory("finding-repository-alias-");
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "alias");
+      await mkdir(repository);
+      await symlink(
+        repository,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const canonical = await realpath(repository);
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(
+          ["findings", "list", alias, "--json"],
+          dependencies({
+            onWorkbench: (args): JsonObject =>
+              args[0] === "list-repositories"
+                ? {
+                    repositories: [
+                      { targetId: "selected", targetPath: canonical },
+                    ],
+                  }
+                : { findings: [{ title: "Saved finding" }], nextOffset: null },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text()).findings).toEqual([
+        { title: "Saved finding" },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = captureCli(main, "stdout");
