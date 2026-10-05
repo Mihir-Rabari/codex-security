@@ -1954,3 +1954,178 @@ for (const layout of ["standard", "diff", "deep"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const reversed of [false, true]) {
+    test(`${layout}: ambiguous unmatched sibling survives exact batch assignment (reversed=${reversed})`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const first = finding("First review"),
+        second = finding("Second review"),
+        added = finding("Added review");
+      for (const f of [normal, recovered]) {
+        await f.write({ ...f.draft(), findings: [first, second] });
+        await dateDraftFiles(f.root, 100);
+      }
+      const rows = reversed ? [added, second] : [second, added];
+      await normal.write({ ...normal.draft(), findings: rows });
+      const update = { ...recovered.draft(), findings: rows };
+      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
+      const { handoffClaimToken: _claim, ...checkpoint } = update;
+      await utimes(
+        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+        200,
+        200,
+      );
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 3);
+      assert.equal(result.recovered.length, 3);
+      const ordered = (rows: RecoveredFinding[]) =>
+        [...rows].sort((a, b) => a.title.localeCompare(b.title));
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+  for (const field of ["reportId", "ledgerRowId"]) {
+    test(`${layout}: compatible ${field} enrichment identifies its existing sibling`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const first = finding("First review"),
+        second = finding("Second review");
+      for (const f of [normal, recovered]) {
+        await f.write({ ...f.draft(), findings: [first, second] });
+        await dateDraftFiles(f.root, 100);
+      }
+      const refined = { ...first, extensions: { [field]: "report-1" } };
+      await normal.write({ ...normal.draft(), findings: [refined] });
+      const update = { ...recovered.draft(), findings: [refined] };
+      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
+      const { handoffClaimToken: _claim, ...checkpoint } = update;
+      await utimes(
+        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+        200,
+        200,
+      );
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, 2);
+      const ordered = (rows: RecoveredFinding[]) =>
+        [...rows].sort((a, b) => a.title.localeCompare(b.title));
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+for (const field of ["description", "source", "version"]) {
+  for (const candidate of [false, true]) {
+    test(`worker identity ${field} annotation revision keeps one report (candidate=${candidate})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const workerRoot = path.join(recovered.root, "reviewer");
+      await mkdir(workerRoot);
+      const worker = draftFixture(workerRoot, "worker");
+      const first = finding("Synthetic review", {
+        identity: {
+          anchor: "authored",
+          instance: "report-1",
+          [field]: "initial",
+        },
+        provenance: {
+          source: "local_plugin",
+          workerId: "reviewer",
+          ...(candidate ? { candidateId: "candidate-1" } : {}),
+        },
+      });
+      await worker.write({ ...worker.draft(), findings: [first] });
+      await dateDraftFiles(workerRoot, 100);
+      const revised = {
+        ...first,
+        identity: { ...first.identity, [field]: "revised" },
+      };
+      await worker.write({ ...worker.draft(), findings: [revised] });
+      const saved = JSON.parse(
+        await readFile(path.join(workerRoot, "result.json"), "utf8"),
+      );
+      await normal.write({ ...normal.draft(), findings: saved.findings });
+      const workers = [
+        {
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: workerRoot,
+          result_manifest_path: null,
+          attempt: 1,
+        },
+      ];
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        workers,
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 1);
+      assert.equal(result.recovered.length, 1);
+      assert.deepEqual(result.recovered, result.normal);
+      assert.equal(result.recovered[0]!.identity[field], "revised");
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+for (const metadata of ["extensions", "provenance"] as const) {
+  for (const malformedFirst of [false, true]) {
+    test(`discarded ${metadata} sibling cannot change a valid identity (malformed first=${malformedFirst})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const workerRoot = path.join(recovered.root, "reviewer");
+      await mkdir(workerRoot);
+      const worker = draftFixture(workerRoot, "worker");
+      const row = finding("Synthetic review");
+      row[metadata] = { ...row[metadata], candidateId: "candidate-1" };
+      row.provenance = { ...row.provenance, workerId: "reviewer" };
+      await worker.write({ ...worker.draft(), findings: [row] });
+      await dateDraftFiles(workerRoot, 100);
+      await normal.write({ ...normal.draft(), findings: [row] });
+      const { summary: _summary, ...malformed } = {
+        ...structuredClone(row),
+        locations: [{ path: "src/example.py", startLine: 2 }],
+      };
+      const resultFile = path.join(workerRoot, "result.json");
+      const saved = JSON.parse(await readFile(resultFile, "utf8"));
+      saved.findings = malformedFirst ? [malformed, row] : [row, malformed];
+      await writeFile(resultFile, JSON.stringify(saved));
+      await utimes(resultFile, 200, 200);
+      const workers = [
+        {
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: workerRoot,
+          result_manifest_path: null,
+          attempt: 1,
+        },
+      ];
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        workers,
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 1);
+      assert.equal(result.recovered.length, 1);
+      assert.deepEqual(result.recovered, result.normal);
+      assert.ok(result.warnings.length > 0);
+    });
+  }
+}

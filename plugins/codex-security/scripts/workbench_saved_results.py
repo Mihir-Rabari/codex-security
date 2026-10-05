@@ -639,8 +639,8 @@ def _semantic_identifier(value: str, fallback: str) -> str:
     return re.sub(r"^[^a-z0-9]+|-+$", "", identifier) or fallback
 
 
-def _semantic_identity_key(finding: dict[str, Any]) -> bytes:
-    identity = finding.get("identity")
+def _semantic_identity_key(finding: dict[str, Any], identity: Any = None) -> bytes:
+    identity = finding.get("identity") if identity is None else identity
     if isinstance(identity, dict):
         identity = {key: identity.get(key) for key in ("anchor", "instance")}
     return _encoded([finding.get("ruleId"), identity])
@@ -1826,7 +1826,9 @@ def merge_saved_results(
 
     def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
-            return _finding_identity(left) == _finding_identity(right)
+            return _semantic_identity_key(left, _finding_identity(left)) == _semantic_identity_key(
+                right, _finding_identity(right)
+            )
         candidates = (_identity_candidate(left), _identity_candidate(right))
         if all(candidates) and candidates[0] != candidates[1]:
             return False
@@ -1845,7 +1847,7 @@ def merge_saved_results(
                 result["extensions"] = {
                     key: value
                     for key, value in result["extensions"].items()
-                    if key != "candidateId"
+                    if key not in {"candidateId", "reportId", "ledgerRowId"}
                 }
                 if not result["extensions"]:
                     result.pop("extensions")
@@ -1888,16 +1890,19 @@ def merge_saved_results(
                     (relative == "parent" and parent_is_canonical)
                     or group["identity"] is None
                     or "identity" not in value
-                    or group["identity"] == _finding_identity(value)
+                    or _semantic_identity_key(value, group["identity"])
+                    == _semantic_identity_key(value, _finding_identity(value))
                 )
                 and all(same_raw_finding(value, previous) for previous in group["rows"])
             ]
             ranked = []
             for group in matches:
                 latest = group["latest"]
-                if same_raw_content(value, latest) and _identity_candidate(
-                    value
-                ) == _identity_candidate(latest):
+                if (
+                    same_raw_content(value, latest)
+                    and _identity_candidate(value) == _identity_candidate(latest)
+                    and identifiers(value) == identifiers(latest)
+                ):
                     rank = 3
                 elif any(same_raw_content(value, previous) for previous in group["rows"]):
                     rank = 2
@@ -1915,11 +1920,7 @@ def merge_saved_results(
         claimed = set()
         for rank in (3, 2, 1, 0):
             options = {
-                index: [
-                    group
-                    for group, score in matches
-                    if score >= rank and group["key"] not in claimed
-                ]
+                index: [group for group, score in matches if score >= rank]
                 for index, _, _, _, matches in pending
                 if index not in assigned
             }
@@ -1930,7 +1931,9 @@ def merge_saved_results(
             chosen = {
                 index: groups[0]
                 for index, groups in options.items()
-                if len(groups) == 1 and counts[groups[0]["key"]] == 1
+                if len(groups) == 1
+                and groups[0]["key"] not in claimed
+                and counts[groups[0]["key"]] == 1
             }
             assigned.update(chosen)
             claimed.update(group["key"] for group in chosen.values())
@@ -2397,13 +2400,12 @@ def merge_saved_results(
             positions, sorted(positions, key=publication_order, reverse=True), strict=True
         ):
             identity_order[position] = findings[published_position]
+    identity_order = [finding for finding in identity_order if valid_finding(finding)]
     _ensure_finding_identities(identity_order)
 
     identities: dict[bytes, str] = {}
     identity_owners: dict[bytes, Any] = {}
-    reserved_identities = {
-        _semantic_identity_key(finding) for finding in findings if isinstance(finding, dict)
-    }
+    reserved_identities = {_semantic_identity_key(finding) for finding in identity_order}
     for finding in findings:
         if not valid_finding(finding):
             continue
