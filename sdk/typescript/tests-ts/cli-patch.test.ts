@@ -3848,8 +3848,8 @@ describe("patch publication integrity", () => {
     "nested",
     "nested environment",
     "nested objects",
+    "nested alternate objects",
     "nested common",
-    "nested alternates",
     "nested relative alternates",
     "nested component relative alternates",
     "nested quoted relative alternates",
@@ -3888,7 +3888,7 @@ describe("patch publication integrity", () => {
       await writeFile(join(nested, "app.ts"), "unsafe\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic nested baseline");
-      if (kind.includes("alternates")) {
+      if ((kind.includes("alternates") || kind === "nested alternate objects")) {
         const pool = await fixtures.create(
           kind.includes("quoted")
             ? `patch-shared${delimiter}objects-`
@@ -3921,7 +3921,7 @@ describe("patch publication integrity", () => {
           ? { GIT_OBJECT_DIRECTORY: join(directory, ".git", "objects") }
           : kind === "nested common"
             ? { GIT_COMMON_DIR: join(directory, ".git") }
-            : kind.includes("alternates")
+            : (kind.includes("alternates") || kind === "nested alternate objects")
               ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }
               : kind === "nested replacements"
                 ? { GIT_NO_REPLACE_OBJECTS: "1" }
