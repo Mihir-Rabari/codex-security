@@ -384,6 +384,49 @@ require("node:module").syncBuiltinESMExports();
   );
 
   test.skipIf(process.platform === "win32")(
+    "reads policies when filesystem directory entry types are unknown",
+    () => {
+      const { root } = fixture();
+      write(root, "SECURITY.md", "root policy\n");
+      write(root, "nested/SECURITY.md", "nested policy\n");
+      const preload = join(dirname(root), "unknown-entry-types.cjs");
+      writeFileSync(
+        preload,
+        `
+const binding = process.binding("fs");
+const original = binding.readdir;
+binding.readdir = function (...args) {
+  const result = original.apply(this, args);
+  if (args[2] === true && result?.[1]) result[1].fill(0);
+  return result;
+};
+`,
+      );
+      for (const args of [["--list"], ["--scope", "."]]) {
+        const result = spawnSync(
+          "node",
+          [
+            "--require",
+            preload,
+            helper,
+            "resolve-security-md",
+            "--repo",
+            root,
+            ...args,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        if (args[0] === "--list") {
+          expect(result.stdout).toBe('["SECURITY.md", "nested/SECURITY.md"]\n');
+        } else {
+          expectGuidance(result.stdout, [["SECURITY.md", "root policy"]]);
+        }
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "escapes newlines and terminal controls in inventory paths",
     () => {
       const { root } = fixture();

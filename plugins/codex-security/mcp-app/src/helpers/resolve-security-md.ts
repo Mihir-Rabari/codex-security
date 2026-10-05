@@ -234,12 +234,18 @@ function asciiJson(value: string): string {
 function directoryEntries(directory: Buffer) {
   return windows
     ? windowsFiles().entriesWithTypes(directory)
-    : readdirSync(directory, { encoding: "latin1", withFileTypes: true }).map(
-        (entry) => ({
-          name: Buffer.from(entry.name, "latin1"),
-          isDirectory: () => entry.isDirectory(),
-          isSymbolicLink: () => entry.isSymbolicLink(),
-        }),
+    : readdirSync(directory, { encoding: "buffer", withFileTypes: true }).map(
+        (entry) => {
+          // Some Node-compatible runtimes return names without their types.
+          if (!(entry instanceof Uint8Array)) return entry;
+          const name = Buffer.from(entry);
+          const metadata = lstatSync(appendPath(directory, name));
+          return {
+            name,
+            isDirectory: () => metadata.isDirectory(),
+            isSymbolicLink: () => metadata.isSymbolicLink(),
+          };
+        },
       );
 }
 
