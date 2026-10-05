@@ -83,9 +83,11 @@ import {
   completedEvents,
   completedCodex,
   preparedRuntime,
+  scanRuntimeDependencies,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
@@ -211,10 +213,7 @@ test.each([
         {},
         {
           environment,
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (options, args, input): Promise<JsonObject> => {
             if (args[0] === "finding-workflow") {
               const payload = JSON.parse(input!);
@@ -523,40 +522,6 @@ function nodeCodex(script: string): {
     command: nodeCommand(),
     environment: { NODE_OPTIONS: `--import=${pathToFileURL(script).href}` },
   };
-}
-
-async function writeUsageSession(
-  codexHome: string,
-  threadId: string,
-  usage: Record<string, number>,
-  parentThreadId?: string,
-): Promise<string> {
-  const directory = join(codexHome, "sessions", "2026", "07", "26");
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, `rollout-${threadId}.jsonl`);
-  await writeFile(
-    path,
-    [
-      JSON.stringify({
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(parentThreadId === undefined
-            ? {}
-            : { parent_thread_id: parentThreadId }),
-        },
-      }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
-      "",
-    ].join("\n"),
-  );
-  return path;
 }
 
 async function appendUsage(path: string, inputTokens: number): Promise<void> {
@@ -1387,7 +1352,6 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         { codexOverrides },
         {
-          environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
@@ -1506,7 +1470,7 @@ describe("CodexSecurity orchestration", () => {
     });
     const invalidConfig = new TestClient(
       { codexOverrides: { plugins: { unexpected: true } } },
-      { environment: {} },
+      {},
     );
     await expect(invalidConfig.preflight(repository)).rejects.toThrow(
       "Codex Security owns plugin loading configuration",
@@ -1563,7 +1527,6 @@ describe("CodexSecurity orchestration", () => {
         },
       },
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -1587,7 +1550,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -1605,7 +1567,6 @@ describe("CodexSecurity orchestration", () => {
       const configured = new TestClient(
         { codexOverrides: { model } },
         {
-          environment: {},
           prepareRuntime,
         },
       );
@@ -1622,7 +1583,7 @@ describe("CodexSecurity orchestration", () => {
 
     const unpriced = new TestClient(
       { codexOverrides: { model: "unknown-model" } },
-      { environment: {} },
+      {},
     );
     await expect(
       unpriced.preflight(repository, { maxCostUsd: 5 }),
@@ -1640,7 +1601,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -1767,7 +1727,7 @@ describe("CodexSecurity orchestration", () => {
       { model_reasoning_effort: false },
     ];
     for (const codexOverrides of invalidSettings) {
-      const client = new TestClient({ codexOverrides }, { environment: {} });
+      const client = new TestClient({ codexOverrides }, {});
       await expect(client.preflight(repository)).rejects.toThrow(
         /model|reasoning effort/u,
       );
@@ -2501,7 +2461,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => null,
@@ -2572,7 +2531,6 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
@@ -2615,7 +2573,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -2664,7 +2621,6 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
@@ -2877,7 +2833,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -2922,7 +2877,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -2977,7 +2931,6 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
           prepareRuntime,
         },
       );
@@ -3008,7 +2961,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime,
       },
     );
@@ -3041,7 +2993,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => "deadbeef",
@@ -3174,7 +3125,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => {
           process.chdir(elsewhere);
           return preparedRuntime(codexHome);
@@ -3453,11 +3403,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3674,10 +3620,7 @@ describe("CodexSecurity orchestration", () => {
         {},
         {
           environment: { CODEX_HOME: ambientHome },
-          prepareRuntime: async () => preparedRuntime(runtimeHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(runtimeHome, scanDir),
           runWorkbench: stopBeforeDeepDiscovery("settings preserved"),
           createCodex: () => ({
             startThread: () => ({
@@ -3710,11 +3653,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3743,11 +3682,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3788,11 +3723,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3835,11 +3766,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -3877,11 +3804,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3953,11 +3876,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -3973,12 +3892,10 @@ describe("CodexSecurity orchestration", () => {
               await copyCompletedScan(root);
               await Promise.all([
                 writeUsageSession(codexHome, "thread-1", usage),
-                writeUsageSession(
-                  codexHome,
-                  "worker-thread",
-                  usage,
-                  "thread-1",
-                ),
+                writeUsageSession(codexHome, "worker-thread", usage, {
+                  parent: "thread-1",
+                  parentField: "parent_thread_id",
+                }),
                 writeUsageSession(codexHome, "unrelated-thread", usage),
               ]);
               const marker = (
@@ -4089,11 +4006,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
@@ -4190,7 +4103,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => ({
           ...runtime,
           plugin: {
@@ -4241,11 +4153,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -4341,11 +4249,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -4549,11 +4453,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
@@ -4612,11 +4512,7 @@ describe("CodexSecurity orchestration", () => {
         },
       },
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
         createCodex: completedCodex(root, copyCompletedScan),
       },
@@ -4663,11 +4559,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           ...(setupFails
             ? {
                 prepareScanArtifactRestorer: async () => fail(failureMessage),
@@ -4745,11 +4637,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           createCodex: () => ({
             startThread: () => ({
               id: "thread-1",
@@ -4833,10 +4721,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           createCodex: () => ({
             startThread: (options) => ({
               id: "thread-1",
@@ -4918,7 +4803,7 @@ describe("CodexSecurity orchestration", () => {
               codexHome,
               "worker-thread",
               { input_tokens: 100, output_tokens: 0 },
-              "scan-thread",
+              { parent: "scan-thread", parentField: "parent_thread_id" },
             );
             await firstApproval;
             await appendUsage(path, 1_700);
@@ -4943,11 +4828,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
         createCodex: () => ({
           startThread,
@@ -5017,11 +4898,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (_options, args, input) => {
             commands.push(args);
             if (scenario === "save-failed" && args[0] === "set-scan-cost-limit")
@@ -5149,7 +5026,7 @@ describe("CodexSecurity orchestration", () => {
                 cached_input_tokens: 100,
                 output_tokens: 20,
               },
-              "scan-thread",
+              { parent: "scan-thread", parentField: "parent_thread_id" },
             ),
           ]);
           await (options.signal.aborted
@@ -5168,11 +5045,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
         createCodex: codexFactory(runStreamed),
       },
@@ -5232,11 +5105,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
         createCodex: (options: CodexOptions) => ({
           startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
@@ -5343,10 +5212,7 @@ describe("CodexSecurity orchestration", () => {
             ),
             GIT_SSH_COMMAND: "synthetic-ssh --fixture",
           },
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
+          ...scanRuntimeDependencies(codexHome, scanDir),
           runWorkbench: async (
             workbenchOptions: WorkbenchCommandOptions,
             args: readonly string[],
@@ -5427,11 +5293,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         createCodex: (options: CodexOptions) => {
           knowledgeDirectory =
             options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ?? "";
@@ -5690,7 +5552,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
         createCodex: codexMustNotStart,
       },
@@ -5992,7 +5853,6 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: runtimePreparer(codexHome, () => ({
           plugin: {
             ...preparedRuntime(codexHome).plugin,
@@ -6433,11 +6293,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         createCodex: (options: CodexOptions) => ({
           startThread: () => ({
             id: null,
@@ -6488,11 +6344,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         createCodex: codexFactory(runStreamed),
       },
     );
@@ -6574,7 +6426,7 @@ describe("CodexSecurity orchestration", () => {
     );
     git("checkout", "-q", "main");
 
-    const client = new TestClient({}, { environment: {} });
+    const client = new TestClient({}, {});
     await expect(
       client.run(repository, {
         target: DiffTarget.refs({ base: "main", head: "feature" }),
@@ -7215,7 +7067,6 @@ process.exit(0);
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => {
           if (attempts++ === 0) throw preparationFailure;
           started.resolve();
@@ -7244,7 +7095,6 @@ process.exit(0);
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => {
           started.resolve();
           return await prepared.promise;
@@ -7280,7 +7130,6 @@ process.exit(0);
     const client = new TestClient(
       {},
       {
-        environment: {},
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
@@ -7308,11 +7157,7 @@ process.exit(0);
     const client = new TestClient(
       {},
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
+        ...scanRuntimeDependencies(codexHome, scanDir),
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -7390,7 +7235,6 @@ process.exit(0);
       const client = new TestClient(
         {},
         {
-          environment: {},
           prepareRuntime: async () => ({
             ...preparedRuntime(codexHome),
             environment: { CODEX_HOME: codexHome },
