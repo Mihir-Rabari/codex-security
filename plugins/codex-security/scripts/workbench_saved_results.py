@@ -1327,11 +1327,16 @@ def merge_saved_results(
     inferred_identities: dict[int, dict[str, Any]] = {}
     finding_positions: dict[str, int] = {}
 
-    def distinct_candidates(finding: dict[str, Any], previous: dict[str, Any]) -> bool:
+    def distinct_candidates(
+        finding: dict[str, Any],
+        previous: dict[str, Any],
+        current_owner: str | None = None,
+        previous_owner: str | None = None,
+    ) -> bool:
         current_candidate = finding_candidate_id(finding)
         previous_candidate = finding_candidate_id(previous)
-        current_owner = finding.get("provenance", {}).get("workerId")
-        previous_owner = previous.get("provenance", {}).get("workerId")
+        current_owner = finding.get("provenance", {}).get("workerId") or current_owner
+        previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
         return bool(
             current_candidate
             and previous_candidate
@@ -1386,7 +1391,8 @@ def merge_saved_results(
         )
 
     # Normalize each saved observation and its retained history before indexing it.
-    observations: dict[str, list[dict[str, Any]]] = {}
+    observations: dict[str, list[tuple[dict[str, Any], str | None]]] = {}
+    explicit_identities: dict[str, list[tuple[dict[str, Any], str | None]]] = {}
     for _, draft, owner in all_sources:
         for finding in draft["findings"]:
             if not isinstance(finding, dict):
@@ -1395,26 +1401,33 @@ def merge_saved_results(
                 if isinstance(retained.get("provenance"), dict):
                     observations.setdefault(
                         saved_identity_key(retained, retained_owner), []
-                    ).append(retained)
+                    ).append((retained, retained_owner))
+                    if isinstance(retained.get("identity"), dict) and valid_finding(retained):
+                        explicit_identities.setdefault(_finding_key(retained), []).append(
+                            (retained, retained_owner)
+                        )
     for matches in observations.values():
         identities = {
             _encoded([finding["identity"], finding["provenance"].get("preservedIdentity")]): (
                 finding["identity"],
                 finding["provenance"].get("preservedIdentity"),
             )
-            for finding in matches
+            for finding, _ in matches
             if isinstance(finding.get("identity"), dict) and valid_finding(finding)
         }
-        raw = next((finding for finding in matches if "identity" not in finding), None)
+        raw = next((item for item in matches if "identity" not in item[0]), None)
         if len(identities) != 1 or raw is None:
             continue
         identity, preserved = next(iter(identities.values()))
         if preserved is None:
-            normalized = dict(raw)
+            normalized = dict(raw[0])
             _ensure_finding_identity(normalized)
-            if normalized["identity"] != identity:
+            if normalized["identity"] != identity and all(
+                distinct_candidates(normalized, finding, raw[1], owner)
+                for finding, owner in explicit_identities.get(_finding_key(normalized), [])
+            ):
                 preserved = normalized["identity"]
-        for finding in matches:
+        for finding, _ in matches:
             if "identity" not in finding:
                 inferred_identities[id(finding)] = finding
                 finding["identity"] = copy.deepcopy(identity)

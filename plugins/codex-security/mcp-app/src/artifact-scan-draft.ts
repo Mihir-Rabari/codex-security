@@ -2372,6 +2372,15 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
           anchors[index],
           (finding.provenance as JsonObject).workerId,
           candidate,
+          (finding.locations as JsonObject[])
+            .map((location) =>
+              JSON.stringify([
+                location.path,
+                location.startLine,
+                location.endLine ?? location.startLine,
+              ]),
+            )
+            .sort(),
         ])
       : undefined;
   });

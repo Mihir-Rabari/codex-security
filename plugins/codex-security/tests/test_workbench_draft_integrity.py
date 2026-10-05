@@ -942,3 +942,93 @@ def test_saved_identity_collision_across_workers_preserves_explicit_sibling(
             if finding["provenance"]["candidateId"] == "candidate-b"
         )
         assert explicit["identity"] == {"anchor": "beta"}
+
+
+@pytest.mark.parametrize("discriminator", ["anchor", "instance", "anchor without candidate"])
+@pytest.mark.parametrize("retry", [False, True])
+def test_raw_checkpoint_preserves_explicit_sibling_identity(
+    tmp_path: Path, discriminator: str, retry: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    first.update(title="Shared title", summary="First independent report")
+    first["severity"]["level"] = "low"
+    first["identity"] = {"anchor": "saved-original"}
+    first["provenance"]["candidateId"] = "shared-candidate"
+    second = json.loads(json.dumps(first))
+    second.update(summary="Stronger independent report", identity={"anchor": "shared-title"})
+    second["severity"]["level"] = "high"
+    if discriminator == "instance":
+        first["identity"] = {"anchor": "shared-title", "instance": "sibling-a"}
+    elif discriminator == "anchor without candidate":
+        del first["provenance"]["candidateId"]
+        del second["provenance"]["candidateId"]
+    raw = json.loads(json.dumps(first))
+    del raw["identity"]
+    expected = {finding["summary"]: finding["identity"] for finding in (first, second)}
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    document = json.loads(result_path.read_text())
+    document["findings"] = [first, second]
+    write_checkpoint(result_path.parent / "checkpoints", saved_draft(scan_id, findings=[raw]))
+    result_path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    published_ids = None
+    for replay in (False, True):
+        if replay:
+            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert {finding["summary"]: finding["identity"] for finding in findings} == expected
+        identities = {finding["summary"]: finding["findingId"] for finding in findings}
+        if published_ids is not None:
+            assert identities == published_ids
+        published_ids = identities
+
+
+@pytest.mark.parametrize("different_worker", [False, True])
+def test_restored_identity_does_not_reserve_another_candidates_alias(
+    tmp_path: Path, different_worker: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    del first["identity"]
+    first["title"] = "Alpha"
+    first["provenance"]["candidateId"] = "candidate-a"
+    second = json.loads(json.dumps(first))
+    second["title"] = "Beta"
+    second["severity"]["level"] = "high"
+    del second["provenance"]["candidateId"]
+    independent = json.loads(json.dumps(first))
+    independent.update(title="Independent finding", identity={"anchor": "alpha"})
+    if not different_worker:
+        independent["provenance"]["candidateId"] = "candidate-b"
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    document = json.loads(path.read_text())
+    write_checkpoint(
+        path.parent / "checkpoints",
+        saved_draft(scan_id, findings=[{**first, "identity": {"anchor": "beta"}}]),
+    )
+    document["findings"] = [first, second]
+    if different_worker:
+        _, other_path = accepted_standard_worker(
+            state, home, scan_dir, scan_id, name="other-worker"
+        )
+        other = json.loads(other_path.read_text())
+        other["findings"] = [independent]
+        other_path.write_text(json.dumps(other))
+    else:
+        document["findings"].append(independent)
+    path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=True)
+    for replay in (False, True):
+        if replay:
+            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert {finding["title"] for finding in findings} == {
+            "Alpha",
+            "Beta",
+            "Independent finding",
+        }

@@ -2134,3 +2134,68 @@ for (const layout of ["standard", "diff"] as const) {
     assert.equal(findings[0].severity.level, "high");
   });
 }
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const explicitFirst of [false, true]) {
+    test(`${layout}: candidate identity reuse distinguishes locations, explicit first=${explicitFirst}`, async (t) => {
+      const f = await fixture(t, layout);
+      const generated = findingFor("shared-candidate");
+      const explicit = {
+        ...findingFor("shared-candidate"),
+        identity: { anchor: "synthetic-review-finding", instance: "original" },
+        locations: [{ path: "src/independent.py", startLine: 2 }],
+      };
+      await f.write({
+        ...f.draft({}, true),
+        findings: explicitFirst ? [explicit, generated] : [generated, explicit],
+      });
+      const saved = await readJson(f.root, "findings.json");
+      for (const findings of [
+        saved.findings,
+        await recoverPublishedFindings(f),
+      ]) {
+        assert.equal(findings.length, 2);
+        assert.deepEqual(
+          findings.find(
+            (finding: typeof explicit) =>
+              finding.locations[0]!.path === "src/independent.py",
+          ).identity,
+          explicit.identity,
+        );
+        assert.notDeepEqual(
+          findings.find(
+            (finding: typeof generated) =>
+              finding.locations[0]!.path === "src/example.py",
+          ).identity,
+          explicit.identity,
+        );
+      }
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const equivalent of ["end line", "location order"]) {
+    test(`${layout}: candidate identity reuse preserves equivalent ${equivalent}`, async (t) => {
+      const f = await fixture(t, layout);
+      const generated = findingFor("shared-candidate");
+      if (equivalent === "location order")
+        generated.locations.push({ path: "src/second.py", startLine: 2 });
+      const explicit = {
+        ...structuredClone(generated),
+        identity: { anchor: "synthetic-review-finding", instance: "original" },
+        locations:
+          equivalent === "end line"
+            ? [{ path: "src/example.py", startLine: 1, endLine: 1 }]
+            : [...generated.locations].reverse(),
+      };
+      await f.write({ ...f.draft({}, true), findings: [generated, explicit] });
+      const saved = await readJson(f.root, "findings.json");
+      for (const finding of saved.findings)
+        assert.deepEqual(finding.identity, explicit.identity);
+      const recovered = await recoverPublishedFindings(f);
+      assert.equal(recovered.length, 1);
+      assert.deepEqual(recovered[0]!.identity, explicit.identity);
+    });
+  }
+}
