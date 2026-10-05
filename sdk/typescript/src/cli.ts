@@ -8972,7 +8972,12 @@ const LOCAL_SYSCALL_CODES = new Set([
   "EXDEV",
 ]);
 
-function isLocalScanFailure(error: unknown): boolean {
+function isLocalScanFailure(
+  error: unknown,
+  seen = new Set<unknown>(),
+): boolean {
+  if (seen.has(error)) return false;
+  seen.add(error);
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
@@ -8982,11 +8987,12 @@ function isLocalScanFailure(error: unknown): boolean {
     return true;
   }
   return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof (error as { code: unknown }).code === "string" &&
-    LOCAL_SYSCALL_CODES.has((error as { code: string }).code)
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof (error as { code: unknown }).code === "string" &&
+      LOCAL_SYSCALL_CODES.has((error as { code: string }).code)) ||
+    (error instanceof Error && isLocalScanFailure(error.cause, seen))
   );
 }
 

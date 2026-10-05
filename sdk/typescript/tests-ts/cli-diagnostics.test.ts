@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
@@ -13,6 +14,32 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
 describe("CLI diagnostics", () => {
+  test("retains local filesystem errors through artifact failure wrappers", async () => {
+    // Reading a directory produces a real local errno on the supported platforms.
+    const cause = await readFile(import.meta.dir).then(
+      () => {
+        throw new Error("Expected a filesystem failure");
+      },
+      (error: unknown) => error,
+    );
+    const wrapped = new CodexSecurityError(
+      "Could not read artifact: permission denied",
+      {
+        cause: new Error("Required artifact could not be read", { cause }),
+      },
+    );
+    const deps = dependencies();
+    deps.createSecurity = () =>
+      fakeSecurity(async () => {
+        throw wrapped;
+      });
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
+    expect(JSON.parse(stdout.text()).message).toBe(wrapped.message);
+    expect(stderr.text()).toContain(wrapped.message);
+    expect(stderr.text()).not.toContain("model access");
+  });
+
   test.each([
     {
       command: "policy",
