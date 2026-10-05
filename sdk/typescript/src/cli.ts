@@ -5348,10 +5348,15 @@ export async function main(
               )
             : undefined;
           if (publication) {
+            const publicationFiles = await changedPatchFiles(
+              repository,
+              patchGitBase!,
+              dependencies,
+            );
             await createPatchPullRequest(
               repository,
               publication,
-              files,
+              publicationFiles.length > 0 ? publicationFiles : files,
               errorOutput,
               dependencies,
               patchRisk?.summary,
@@ -7050,7 +7055,7 @@ interface GitPatchState {
 
 async function changedPatchFiles(
   repository: string,
-  base: GitPatchState | Map<string, string>,
+  base: string | GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
 ): Promise<string[]> {
   if (base instanceof Map) {
@@ -7059,9 +7064,13 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
-  const heads = (await snapshotGitPatchState(repository, dependencies)).trees;
+  const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
+  const heads =
+    typeof base === "string"
+      ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
+      : (await snapshotGitPatchState(repository, dependencies)).trees;
   const files = new Set<string>();
-  for (const [directory, tree] of base.trees) {
+  for (const [directory, tree] of bases) {
     const head = heads.get(directory);
     if (head === undefined) continue;
     const gitDependencies = directory

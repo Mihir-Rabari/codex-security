@@ -2730,6 +2730,85 @@ describe("patch publication integrity", () => {
     },
   );
 
+  test.each(["committed", "uncommitted"])(
+    "preserves supplied-issue submodule publication with %s changes",
+    async (state) => {
+      const directory = await fixtures.create("patch-submodule-publication-");
+      const checkout = join(directory, "checkout");
+      const nested = join(checkout, "dependency");
+      await mkdir(nested, { recursive: true });
+      const git = repositoryGit(checkout);
+      const inner = repositoryGit(nested);
+      for (const run of [git, inner]) {
+        run("init", "--initial-branch=main");
+        run("config", "user.name", "Synthetic User");
+        run("config", "user.email", "synthetic@example.test");
+        run("config", "commit.gpgsign", "false");
+      }
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      const original = inner("rev-parse", "HEAD");
+      await writeFile(join(nested, "app.ts"), "fixed\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested fix");
+      const fixed = inner("rev-parse", "HEAD");
+      inner("checkout", original);
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      const head = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const remote = join(directory, "remote.git");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      let published = false;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: checkout,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, options);
+            if (args[1] === "list") return "";
+            published = true;
+            return "https://github.example.test/example/repository/pull/1";
+          },
+          onCodex: async () => {
+            if (state === "committed") inner("checkout", fixed);
+            else await writeFile(join(nested, "app.ts"), "fixed\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        state === "committed" ? 0 : 2,
+      );
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files:
+          state === "committed"
+            ? ["dependency", "dependency/app.ts"]
+            : ["dependency/app.ts"],
+      });
+      expect(published).toBe(state === "committed");
+      if (state === "committed") {
+        expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+          "dependency",
+        );
+        expect(git("rev-parse", "HEAD:dependency")).toBe(fixed);
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      } else {
+        expect(outcome.stderr).toContain("submodule");
+        expect(git("branch", "--show-current")).toBe("main");
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(git("write-tree")).toBe(index);
+        expect(git("branch", "--format=%(refname)")).toBe("refs/heads/main");
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+      }
+    },
+  );
+
   test("keeps the original branch when a verified file belongs to a nested repository", async () => {
     const directory = await fixtures.create("patch-nested-publication-");
     const git = repositoryGit(directory);
