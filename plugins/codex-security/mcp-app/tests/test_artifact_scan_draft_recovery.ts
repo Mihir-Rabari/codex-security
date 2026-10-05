@@ -1455,31 +1455,53 @@ for (const payload of ["generic", "candidate"] as const) {
 }
 
 for (const complete of [false, true]) {
-  test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading a malformed result`, async (t) => {
-    const f = await fixture(t, "worker");
-    const destination = path.join(f.root, "result.json");
-    await writeFile(destination, "{broken");
-    const submitted = f.draft(
-      { deferred: [{ id: "pending", ...generic }] },
-      complete,
-    );
-    await assert.rejects(f.write(submitted), /stored JSON is malformed/);
-    const files = await readdir(path.join(f.root, "checkpoints"));
-    assert.equal(files.length, 1);
-    assert.deepEqual(
-      await readJson(f.root, "checkpoints", files[0]),
-      submitted,
-    );
-    await rm(destination);
-    await f.write(f.draft({}, true));
-    assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
-  });
+  for (const malformed of [false, true]) {
+    test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading an invalid result, malformed=${malformed}`, async (t) => {
+      const f = await fixture(t, "worker");
+      const destination = path.join(f.root, "result.json");
+      await writeFile(
+        destination,
+        malformed
+          ? "{broken"
+          : JSON.stringify({
+              ...f.draft(),
+              scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f50",
+            }),
+      );
+      const submitted = f.draft(
+        { deferred: [{ id: "pending", ...generic }] },
+        complete,
+      );
+      await assert.rejects(
+        f.write(submitted),
+        malformed ? /stored JSON is malformed/ : /belongs to a different scan/,
+      );
+      const files = await readdir(path.join(f.root, "checkpoints"));
+      assert.equal(files.length, 1);
+      assert.deepEqual(
+        await readJson(f.root, "checkpoints", files[0]),
+        submitted,
+      );
+      await rm(destination);
+      await f.write(f.draft({}, true));
+      assert.deepEqual((await f.read()).deferred, submitted.coverage.deferred);
+    });
+  }
 }
 
-for (const malformed of [false, true]) {
-  test(`worker: reject an unknown closure without a checkpoint, malformed result=${malformed}`, async (t) => {
+for (const saved of ["missing", "malformed", "different scan"]) {
+  test(`worker: reject an unknown closure without a checkpoint, saved result=${saved}`, async (t) => {
     const f = await fixture(t, "worker");
-    if (malformed) await writeFile(path.join(f.root, "result.json"), "{broken");
+    if (saved !== "missing")
+      await writeFile(
+        path.join(f.root, "result.json"),
+        saved === "malformed"
+          ? "{broken"
+          : JSON.stringify({
+              ...f.draft(),
+              scanId: "7b95abf2-dc04-47a9-9950-53b5c2057f50",
+            }),
+      );
     await assert.rejects(
       f.write(
         f.draft(
@@ -1491,11 +1513,16 @@ for (const malformed of [false, true]) {
           true,
         ),
       ),
-      malformed
+      saved === "malformed"
         ? /stored JSON is malformed/
-        : /names no saved generic deferral/,
+        : saved === "different scan"
+          ? /belongs to a different scan/
+          : /names no saved generic deferral/,
     );
-    assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
+    assert.deepEqual(
+      await readdir(f.root),
+      saved === "missing" ? [] : ["result.json"],
+    );
   });
 }
 
