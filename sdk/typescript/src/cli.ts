@@ -6893,11 +6893,23 @@ async function preparePatchPublication(
     ["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`],
     repository,
   );
-  if (
-    local ||
-    (await patchPublicationDestination(repository, branch, dependencies))
-      .existing
-  ) {
+  let existing = Boolean(local);
+  if (!existing) {
+    const destination = await patchPublicationDestination(
+      repository,
+      branch,
+      dependencies,
+    );
+    existing = Boolean(
+      destination.existing ||
+      (await dependencies.runRepositoryCommand(
+        "git",
+        ["ls-remote", "--heads", destination.remote, `refs/heads/${branch}`],
+        repository,
+      )),
+    );
+  }
+  if (existing) {
     throw new CodexSecurityError(
       `Patch branch or pull request already exists for ${branch}. Resume its saved commit with 'codex-security patch --resume-pr ${branch}', or review and publish further changes separately.`,
     );
@@ -6909,8 +6921,21 @@ async function preparePatchPublication(
     repository,
     { trim: false, maxBuffer: Infinity },
   );
+  // A fresh index reads worktree edits hidden by assume-unchanged flags.
+  const tree = await snapshotPatchTree(repository, dependencies);
+  const worktreeChanges = await dependencies.runRepositoryCommand(
+    "git",
+    ["diff", "--cached", "--name-only", "--no-renames", "-z", tree, "--"],
+    root,
+    { trim: false, maxBuffer: Infinity },
+  );
   const paths = status.split("\0");
-  const dirtyFiles = new Set<string>();
+  const dirtyFiles = new Set(
+    worktreeChanges
+      .split("\0")
+      .filter(Boolean)
+      .map((path) => relative(repository, resolve(root, path))),
+  );
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;

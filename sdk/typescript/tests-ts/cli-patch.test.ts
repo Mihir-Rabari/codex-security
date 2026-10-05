@@ -2184,6 +2184,12 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
                 return origin;
               }
+              if (gitlab && args[0] === "ls-remote") {
+                expect(args[2]).toBe(origin);
+                return git(
+                  ...args.map((value) => (value === origin ? remote : value)),
+                );
+              }
               if (args[0] === "push") {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
@@ -2759,6 +2765,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           onRepositoryCommand: (command, args, target) => {
             expect(target).toBe(SAVED_REPOSITORY);
             if (command === "git") {
+              if (args.includes("--show-toplevel")) return SAVED_REPOSITORY;
+              if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
                 return origin;
@@ -3152,12 +3160,9 @@ describe("patch publication integrity", () => {
       await writeFile(join(directory, "other.ts"), "original\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
-      git(
-        "remote",
-        "add",
-        "origin",
-        "https://github.example.test/example/repository.git",
-      );
+      const remote = await fixtures.create("patch-creation-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
       await writeFile(join(directory, "other.ts"), "staged work\n");
       git("add", "other.ts");
       const base = git("rev-parse", "HEAD");
@@ -3253,7 +3258,7 @@ describe("patch publication integrity", () => {
     },
   );
 
-  test.each(["staged", "unstaged"])(
+  test.each(["staged", "unstaged", "assume-unchanged"])(
     "keeps %s same-file edits out of saved patch publication",
     async (dirty) => {
       for (const command of ["patch", "scan"]) {
@@ -3276,6 +3281,8 @@ describe("patch publication integrity", () => {
           "unsafe\nlocal edit\n",
         );
         if (dirty === "staged") git("add", ".");
+        if (dirty === "assume-unchanged")
+          git("update-index", "--assume-unchanged", "src/finding-1.ts");
         const originalIndex = git("write-tree");
         const remote = await fixtures.create("patch-publication-remote-");
         git("init", "--bare", remote);
@@ -3316,7 +3323,7 @@ describe("patch publication integrity", () => {
     },
   );
 
-  test.each(["local", "OPEN", "CLOSED", "MERGED"])(
+  test.each(["local", "remote", "push remote", "OPEN", "CLOSED", "MERGED"])(
     "checks an existing %s patch publication before starting the model",
     async (existing) => {
       const directory = await fixtures.create("patch-repeat-");
@@ -3327,13 +3334,17 @@ describe("patch publication integrity", () => {
       await writeFile(join(directory, "app.ts"), "original\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
-      git(
-        "remote",
-        "add",
-        "origin",
-        "https://github.example.test/example/repository.git",
-      );
+      const remote = await fixtures.create("patch-repeat-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
       if (existing === "local") git("branch", "codex-security/patch-scan-1");
+      if (existing === "push remote") {
+        const pushRemote = await fixtures.create("patch-repeat-push-remote-");
+        git("init", "--bare", pushRemote);
+        git("remote", "set-url", "--push", "origin", pushRemote);
+      }
+      if (existing === "remote" || existing === "push remote")
+        git("push", "origin", "HEAD:refs/heads/codex-security/patch-scan-1");
       const result = resultWithFindings(["high"]);
       const onCodex = mock(() => 0);
       const outcome = await runWorkflow(
@@ -3345,11 +3356,13 @@ describe("patch publication integrity", () => {
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
-              : JSON.stringify({
-                  url: "https://github.example.test/example/repository/pull/1",
-                  head: git("rev-parse", "HEAD"),
-                  state: existing,
-                }),
+              : existing === "remote" || existing === "push remote"
+                ? ""
+                : JSON.stringify({
+                    url: "https://github.example.test/example/repository/pull/1",
+                    head: git("rev-parse", "HEAD"),
+                    state: existing,
+                  }),
         },
       );
       expect(outcome.exitCode).toBe(2);
