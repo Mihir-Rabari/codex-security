@@ -1844,3 +1844,113 @@ for (const layout of ["standard", "diff", "deep"] as const) {
     });
   }
 }
+
+for (const [field, value] of Object.entries({
+  description: "Synthetic annotation",
+  source: "authored",
+  version: 1,
+})) {
+  for (const reservedFirst of [false, true]) {
+    test(`worker collision reserves semantic ${field} identity (reserved first=${reservedFirst})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const workers = [],
+        findings = [];
+      for (const index of reservedFirst ? [2, 0, 1] : [0, 1, 2]) {
+        const id = `worker-${index}`;
+        const workerRoot = path.join(recovered.root, id);
+        await mkdir(workerRoot);
+        const worker = draftFixture(workerRoot, "worker");
+        const row = finding(`Review ${index}`, {
+          identity: {
+            anchor: "shared",
+            ...(index === 2 ? { instance: "saved-2", [field]: value } : {}),
+          },
+          locations: [{ path: "src/example.py", startLine: index + 1 }],
+          provenance: {
+            source: "local_plugin",
+            candidateId: "candidate-1",
+            workerId: id,
+          },
+        });
+        await worker.write({ ...worker.draft(), findings: [row] });
+        findings.push(row);
+        workers.push({
+          id,
+          kind: "discovery",
+          artifact_dir: workerRoot,
+          result_manifest_path: null,
+          attempt: 1,
+        });
+      }
+      await normal.write({ ...normal.draft(), findings });
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        workers,
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 3);
+      assert.equal(result.recovered.length, 3);
+      const ordered = (rows: RecoveredFinding[]) =>
+        [...rows].sort((a, b) => a.title.localeCompare(b.title));
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(
+        result.recovered.find((row) => row.title === "Review 2")!.identity,
+        { anchor: "shared", instance: "saved-2", [field]: value },
+      );
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const metadata of ["extensions", "provenance"] as const) {
+    for (const reversed of [false, true]) {
+      test(`${layout}: unchanged report precedes ${metadata} enrichment matching (reversed=${reversed})`, async (t) => {
+        const normal = await fixture(t, layout),
+          recovered = await fixture(t, layout);
+        const first = finding("Synthetic review");
+        const sibling = {
+          ...structuredClone(first),
+          [metadata]: { ...first[metadata], candidateId: "candidate-1" },
+        };
+        await normal.write({ ...normal.draft(), findings: [first] });
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          { ...recovered.draft(), findings: [first] },
+          false,
+        );
+        await dateDraftFiles(recovered.root, 100);
+        const rows = reversed ? [sibling, first] : [first, sibling];
+        await normal.write({ ...normal.draft(), findings: rows });
+        const update = { ...recovered.draft(), findings: rows };
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          update,
+          false,
+        );
+        const { handoffClaimToken: _claim, ...checkpoint } = update;
+        await utimes(
+          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+          200,
+          200,
+        );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 2);
+        assert.equal(result.recovered.length, 2);
+        const ordered = (rows: RecoveredFinding[]) =>
+          [...rows].sort((a, b) => a.findingId.localeCompare(b.findingId));
+        assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}

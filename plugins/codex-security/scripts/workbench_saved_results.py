@@ -639,6 +639,13 @@ def _semantic_identifier(value: str, fallback: str) -> str:
     return re.sub(r"^[^a-z0-9]+|-+$", "", identifier) or fallback
 
 
+def _semantic_identity_key(finding: dict[str, Any]) -> bytes:
+    identity = finding.get("identity")
+    if isinstance(identity, dict):
+        identity = {key: identity.get(key) for key in ("anchor", "instance")}
+    return _encoded([finding.get("ruleId"), identity])
+
+
 def _ensure_finding_identities(findings: list[Any]) -> None:
     """Use the same candidate, anchor and sibling rules as draft publication."""
     anchors: dict[int, Any] = {}
@@ -657,14 +664,8 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
         _digest([findings[index].get("ruleId"), anchor]) for index, anchor in anchors.items()
     )
 
-    def identity_key(finding: dict[str, Any]) -> bytes:
-        identity = finding.get("identity")
-        if isinstance(identity, dict):
-            identity = {key: identity.get(key) for key in ("anchor", "instance")}
-        return _encoded([finding.get("ruleId"), identity])
-
     used = {
-        identity_key(finding)
+        _semantic_identity_key(finding)
         for finding in findings
         if isinstance(finding, dict) and "identity" in finding
     }
@@ -692,16 +693,18 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
         finding["identity"] = identity
         generated.append(finding)
 
-    reserved = {identity_key(finding) for finding in findings if isinstance(finding, dict)}
+    reserved = {
+        _semantic_identity_key(finding) for finding in findings if isinstance(finding, dict)
+    }
     for finding in generated:
-        key = identity_key(finding)
+        key = _semantic_identity_key(finding)
         if key in used:
             identity = finding["identity"]
             base_instance = identity.get("instance", "saved")
             suffix = 2
             while True:
                 identity["instance"] = f"{base_instance}-{suffix}"
-                key = identity_key(finding)
+                key = _semantic_identity_key(finding)
                 if key not in reserved:
                     reserved.add(key)
                     break
@@ -1892,7 +1895,9 @@ def merge_saved_results(
             ranked = []
             for group in matches:
                 latest = group["latest"]
-                if same_raw_content(value, latest):
+                if same_raw_content(value, latest) and _identity_candidate(
+                    value
+                ) == _identity_candidate(latest):
                     rank = 3
                 elif any(same_raw_content(value, previous) for previous in group["rows"]):
                     rank = 2
@@ -1909,29 +1914,26 @@ def merge_saved_results(
         assigned = {}
         claimed = set()
         for rank in (3, 2, 1, 0):
-            while True:
-                options = {
-                    index: [
-                        group
-                        for group, score in matches
-                        if score >= rank and group["key"] not in claimed
-                    ]
-                    for index, _, _, _, matches in pending
-                    if index not in assigned
-                }
-                counts = {}
-                for groups in options.values():
-                    for group in groups:
-                        counts[group["key"]] = counts.get(group["key"], 0) + 1
-                chosen = {
-                    index: groups[0]
-                    for index, groups in options.items()
-                    if len(groups) == 1 and counts[groups[0]["key"]] == 1
-                }
-                if not chosen:
-                    break
-                assigned.update(chosen)
-                claimed.update(group["key"] for group in chosen.values())
+            options = {
+                index: [
+                    group
+                    for group, score in matches
+                    if score >= rank and group["key"] not in claimed
+                ]
+                for index, _, _, _, matches in pending
+                if index not in assigned
+            }
+            counts = {}
+            for groups in options.values():
+                for group in groups:
+                    counts[group["key"]] = counts.get(group["key"], 0) + 1
+            chosen = {
+                index: groups[0]
+                for index, groups in options.items()
+                if len(groups) == 1 and counts[groups[0]["key"]] == 1
+            }
+            assigned.update(chosen)
+            claimed.update(group["key"] for group in chosen.values())
         current_groups: list[tuple[int, dict[str, Any]]] = []
         for index, value, owner, scopes, _ in pending:
             match = assigned.get(index)
@@ -2397,12 +2399,10 @@ def merge_saved_results(
             identity_order[position] = findings[published_position]
     _ensure_finding_identities(identity_order)
 
-    identities: dict[str, str] = {}
-    identity_owners: dict[str, Any] = {}
+    identities: dict[bytes, str] = {}
+    identity_owners: dict[bytes, Any] = {}
     reserved_identities = {
-        _encoded([finding.get("ruleId"), finding.get("identity")]).decode()
-        for finding in findings
-        if isinstance(finding, dict)
+        _semantic_identity_key(finding) for finding in findings if isinstance(finding, dict)
     }
     for finding in findings:
         if not valid_finding(finding):
@@ -2410,7 +2410,7 @@ def merge_saved_results(
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue
-        key = _encoded([finding.get("ruleId"), identity]).decode()
+        key = _semantic_identity_key(finding)
         variant = _finding_key(finding)
         if key in identities and identities[key] != variant:
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
@@ -2421,7 +2421,7 @@ def merge_saved_results(
                 suffix = 2
                 while True:
                     identity["instance"] = f"{base_instance}-{suffix}"
-                    distinct = _encoded([finding.get("ruleId"), identity]).decode()
+                    distinct = _semantic_identity_key(finding)
                     if distinct not in reserved_identities:
                         reserved_identities.add(distinct)
                         break
