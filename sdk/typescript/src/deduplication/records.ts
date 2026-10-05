@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { z } from "incur";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
@@ -34,17 +34,15 @@ export function recordsReviewAttribution(
       return observationId;
     }),
   );
-  const beneficiaryObservationIds = [...participants]
-    .filter((id) => anchors.has(id))
-    .sort();
+  const beneficiaryObservationIds = [
+    ...participants.intersection(anchors),
+  ].sort();
   if (beneficiaryObservationIds.length === 0)
     throw new Error("Records review has no incoming observation participants.");
   return {
     version: 1,
     beneficiaryObservationIds,
-    contextObservationIds: [...participants]
-      .filter((id) => !anchors.has(id))
-      .sort(),
+    contextObservationIds: [...participants.difference(anchors)].sort(),
   };
 }
 
@@ -111,10 +109,7 @@ export async function deduplicateRecords(
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
-    const findingId = `csf_${createHash("sha256")
-      .update(entry.id)
-      .digest("hex")
-      .slice(0, 24)}`;
+    const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }

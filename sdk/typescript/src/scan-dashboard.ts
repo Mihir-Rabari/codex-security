@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
 import type {
@@ -599,7 +600,7 @@ export class ScanDashboard {
       scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
 
-    const lines = [
+    return this.#formatFrame([
       `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
@@ -623,9 +624,7 @@ export class ScanDashboard {
                 ]),
           ]),
       `  TIME     ${time}  ·  ${this.#budget === null ? scrollStatus : "Enter to apply · Ctrl+C to exit"}`,
-    ];
-
-    return this.#formatFrame(lines);
+    ]);
   }
 
   #formatFrame(lines: (string | DashboardActivityLine)[]): string {
@@ -1055,9 +1054,7 @@ function detailsDescription(
   const itemType = typeof payload["type"] === "string" ? payload["type"] : type;
   if (itemType === "token_count") return undefined;
   if (itemType === "message" || itemType === "agent_message") {
-    const role =
-      typeof payload["role"] === "string" ? payload["role"] : "assistant";
-    return `${role}: ${detailsText(payload["content"] ?? payload["message"])}`;
+    return `${typeof payload["role"] === "string" ? payload["role"] : "assistant"}: ${detailsText(payload["content"] ?? payload["message"])}`;
   }
   if (itemType === "reasoning" || itemType.startsWith("agent_reasoning")) {
     const text = detailsText(
@@ -1091,10 +1088,6 @@ function detailsText(value: unknown): string {
       isRecord(item) && typeof item["text"] === "string" ? [item["text"]] : [],
     )
     .join("\n");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
@@ -1272,11 +1265,7 @@ function styleLine(
     if (kind === "status" || kind === "warning") {
       return `${prefix}\u001B[${style}m${marker}${separator}${description}\u001B[0m`;
     }
-    const workerLabel =
-      worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`;
-    const prose =
-      kind === "message" ? `\u001B[1m${description}\u001B[22m` : description;
-    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${workerLabel}${prose}`;
+    return `${prefix}\u001B[${style}m${marker}\u001B[39m${separator}${worker === undefined ? "" : `\u001B[36m${worker}\u001B[39m`}${kind === "message" ? `\u001B[1m${description}\u001B[22m` : description}`;
   }
   return `\u001B[${style}m${value}\u001B[0m`;
 }
