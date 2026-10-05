@@ -109,6 +109,7 @@ import {
 } from "./cloud-publish.js";
 import {
   createBulkScanDiscoveryDependencies,
+  createTerminalPrompt,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
   type BulkScanPrompt,
@@ -306,7 +307,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 
-const DISPLAY_SEVERITIES: readonly SeverityLevel[] = SCAN_SEVERITIES;
 const MODEL_REASONING_EFFORTS = [
   "minimal",
   "low",
@@ -338,6 +338,22 @@ const PLUGIN_PATH_DESCRIPTION =
   "Codex Security plugin directory or ZIP (default: bundled plugin).";
 const PYTHON_PATH_DESCRIPTION =
   "Python interpreter (default: PYTHON or automatic discovery).";
+const RUNTIME_OPTION_SCHEMAS = {
+  pluginPath: optionValue("--plugin-path")
+    .optional()
+    .describe(PLUGIN_PATH_DESCRIPTION),
+  python: optionValue("--python").optional().describe(PYTHON_PATH_DESCRIPTION),
+  codex: z
+    .array(optionValue("--codex"))
+    .default([])
+    .describe(CODEX_OVERRIDE_DESCRIPTION),
+};
+const SKILL_AUTH_OPTION = z
+  .enum(SCAN_AUTH_MODES)
+  .default("auto")
+  .describe(
+    "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+  );
 const PROJECT_CONFIG_OPTION = optionValue("--config")
   .optional()
   .describe(
@@ -2775,12 +2791,7 @@ export async function main(
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
           const prompt =
-            dependencies.publishPrompt ??
-            createBulkScanDiscoveryDependencies({
-              output: errorOutput,
-              now: dependencies.now,
-              currentDirectory: dependencies.currentDirectory,
-            }).prompt;
+            dependencies.publishPrompt ?? createTerminalPrompt(errorOutput);
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
@@ -3292,16 +3303,7 @@ export async function main(
           .describe(
             "Stop when estimated total USD cost across all three stages exceeds AMOUNT.",
           ),
-        pluginPath: optionValue("--plugin-path")
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: optionValue("--python")
-          .optional()
-          .describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(optionValue("--codex"))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
+        ...RUNTIME_OPTION_SCHEMAS,
       }),
       examples: [
         { args: { repository: "." } },
@@ -3387,11 +3389,7 @@ export async function main(
                   ),
                 prompt:
                   dependencies.policyPrompt ??
-                  createBulkScanDiscoveryDependencies({
-                    output: errorOutput,
-                    now: dependencies.now,
-                    currentDirectory: dependencies.currentDirectory,
-                  }).prompt,
+                  createTerminalPrompt(errorOutput),
                 environment: dependencies.environment,
                 errorOutput,
                 now: dependencies.now,
@@ -3526,16 +3524,7 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
+          ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
           ),
@@ -4137,16 +4126,7 @@ export async function main(
               "Stop each component scan if estimated USD cost exceeds AMOUNT.",
             ),
           showCost: SHOW_COST_OPTION,
-          pluginPath: optionValue("--plugin-path")
-            .optional()
-            .describe(PLUGIN_PATH_DESCRIPTION),
-          python: optionValue("--python")
-            .optional()
-            .describe(PYTHON_PATH_DESCRIPTION),
-          codex: z
-            .array(optionValue("--codex"))
-            .default([])
-            .describe(CODEX_OVERRIDE_DESCRIPTION),
+          ...RUNTIME_OPTION_SCHEMAS,
         })
         .refine(
           (options) =>
@@ -4781,12 +4761,7 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+        auth: SKILL_AUTH_OPTION,
         ...SKILL_CONFIG_OPTIONS.shape,
       }),
       async run({ options }) {
@@ -4819,12 +4794,7 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+        auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         scan: optionValue("--scan")
           .optional()
@@ -5035,12 +5005,7 @@ export async function main(
           .describe("Issue text, a file, or a saved finding identifier."),
       }),
       options: z.object({
-        auth: z
-          .enum(SCAN_AUTH_MODES)
-          .default("auto")
-          .describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+        auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         externalSandbox: z
           .boolean()
@@ -8006,12 +7971,7 @@ async function chooseInteractiveAuthentication(
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
-    dependencies.scanAuthenticationPrompt ??
-    createBulkScanDiscoveryDependencies({
-      output: errorOutput,
-      now: dependencies.now,
-      currentDirectory: dependencies.currentDirectory,
-    }).prompt;
+    dependencies.scanAuthenticationPrompt ?? createTerminalPrompt(errorOutput);
   const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
   if (
     !prompt.isInteractive() ||
@@ -8802,11 +8762,7 @@ async function executeScan(
       arguments_.patch ||
       (await (
         dependencies.confirmPatchReview ??
-        createBulkScanDiscoveryDependencies({
-          output: errorOutput,
-          now: dependencies.now,
-          currentDirectory: dependencies.currentDirectory,
-        }).prompt.confirm
+        createTerminalPrompt(errorOutput).confirm
       )("Review and patch these findings?"));
     if (confirmed) {
       const selectPatches =
@@ -9135,10 +9091,8 @@ async function readDeepScanStop(
   if (state?.terminalReason !== "capped") return undefined;
   const { maxDiscoveryRuns, maxTimeHours } = state.config;
   if (state.dispatchedCount >= maxDiscoveryRuns) {
-    const stillFindingIssues =
-      state.completionSequence > 0 && state.noNewStreak === 0;
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.completionSequence > 0 && state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -9177,12 +9131,9 @@ function printScanSummary(
       (severities.get(finding.severity.level) ?? 0) + 1,
     );
   }
-  const severitySummary = DISPLAY_SEVERITIES.map((severity) => {
-    const count = severities.get(severity);
-    return count === undefined ? null : `${count} ${severity}`;
-  })
-    .filter((value): value is string => value !== null)
-    .join(", ");
+  const severitySummary = SCAN_SEVERITIES.flatMap((severity) =>
+    severities.has(severity) ? `${severities.get(severity)} ${severity}` : [],
+  ).join(", ");
 
   const started = Date.parse(result.manifest.scan.startedAt);
   const completed = Date.parse(result.manifest.scan.completedAt);
@@ -9643,9 +9594,7 @@ export class Progress {
 
   #line(message: string): string {
     const elapsedSeconds = this.elapsedSeconds;
-    const minutes = Math.floor(elapsedSeconds / 60);
-    const seconds = elapsedSeconds % 60;
-    return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${message}`;
+    return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
   }
 
   #observeStreamErrors(): void {

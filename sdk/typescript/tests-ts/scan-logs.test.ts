@@ -1,3 +1,4 @@
+import { writeJsonLines } from "./support/json.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -21,31 +22,26 @@ async function writeSession(
 ): Promise<void> {
   const directory = join(home, "sessions", "2026", "08", "11");
   await mkdir(directory, { recursive: true });
-  await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
-    [
-      {
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(startedAt === undefined ? {} : { timestamp: startedAt }),
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(parentThreadId === undefined
-            ? {}
-            : {
-                source: {
-                  subagent: {
-                    thread_spawn: { parent_thread_id: parentThreadId },
-                  },
+  await writeJsonLines(join(directory, `rollout-${threadId}.jsonl`), [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        ...(startedAt === undefined ? {} : { timestamp: startedAt }),
+        ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+        ...(parentThreadId === undefined
+          ? {}
+          : {
+              source: {
+                subagent: {
+                  thread_spawn: { parent_thread_id: parentThreadId },
                 },
-              }),
-        },
+              },
+            }),
       },
-      ...events,
-    ]
-      .map((event) => JSON.stringify(event))
-      .join("\n"),
-  );
+    },
+    ...events,
+  ]);
 }
 
 function commandEvent(command: string, id: string, timestamp?: string) {
