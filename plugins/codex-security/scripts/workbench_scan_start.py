@@ -163,6 +163,15 @@ def archive_scan(
         yield archived_scan_dir
     except BaseException:
         if moved:
+            if not connection.in_transaction:
+                current_owner = connection.execute(
+                    "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+                ).fetchone()
+                if current_owner is not None and (
+                    previous_scan is None or current_owner["id"] != previous_scan["id"]
+                ):
+                    # A post-commit interrupt must not undo the saved archive location.
+                    raise
             try:
                 scan_dir.rmdir()
             except FileNotFoundError:

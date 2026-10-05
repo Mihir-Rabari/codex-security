@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import runpy
+import signal
 import sqlite3
 import subprocess
 import uuid
@@ -177,3 +178,46 @@ def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
     assert list(tmp_path.glob("output.previous-*")) == []
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monkeypatch, committed):
+    state, target, output, scan_id = previous_scan
+    mark_stopped(state, scan_id)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    module = runpy.run_path(str(SCRIPT))
+    connection = module["connect"]()
+
+    class InterruptedCommit:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+        def commit(self):
+            if committed:
+                connection.commit()
+            else:
+                # SQLite can end a failed transaction itself before reporting its error.
+                connection.rollback()
+            signal.raise_signal(signal.SIGINT)
+
+    args = argparse.Namespace(
+        repository=str(target),
+        scan_dir=str(output),
+        archive_existing=True,
+        archived_scan_dir=None,
+        recipe_json=recipe(target),
+        recipe_json_stdin=False,
+        registration_json_stdin=False,
+        parent_scan_id=None,
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            module["register_cli_scan"](InterruptedCommit(), args)
+    finally:
+        connection.close()
+    saved_directory, saved_report = stored_paths(state, scan_id)
+    assert Path(saved_report).read_text() == "previous scan\n"
+    assert (Path(saved_directory) / "report.md").read_text() == "previous scan\n"
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1 + committed
+    assert list(output.iterdir()) == ([] if committed else [output / "report.md"])
