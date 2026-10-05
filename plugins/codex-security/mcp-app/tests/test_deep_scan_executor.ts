@@ -986,6 +986,7 @@ async function testOpenAiCredentialsReachWorker() {
       "CODEX_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_HOME",
+      "CODEX_SECURITY_CONFIG_PATH",
     ].map((name) => [name, process.env[name]] as const);
     const originalSpawn = childProcess.spawn;
     try {
@@ -993,6 +994,7 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
       const configuration =
         entry.configuration ?? 'model_provider = "openai"\n';
       await writeFile(path.join(fixture.root, "config.toml"), configuration);
@@ -1034,7 +1036,9 @@ async function testOpenAiCredentialsReachWorker() {
             configuration,
           );
           assert.equal(
-            invocation.argv.some((arg) => arg.startsWith("model_provider=")),
+            invocation.argv.some((arg: string) =>
+              arg.startsWith("model_provider="),
+            ),
             false,
           );
           assert.equal(
@@ -2217,7 +2221,7 @@ if (process.argv.includes('app-server')) {
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
-const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY, configuration: readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') } : undefined;
+const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY, configuration: readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH ?? join(process.env.CODEX_HOME, 'config.toml'), 'utf8') } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
 writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));

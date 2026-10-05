@@ -3686,7 +3686,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -4238,7 +4238,7 @@ export async function main(
               ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -4569,7 +4569,7 @@ export async function main(
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
-                parseCodexOverrides(
+                parseScanCodexOverrides(
                   options.codex,
                   options.model,
                   options.effort,
@@ -8002,9 +8002,21 @@ function jsonOutputFormat(
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--json") format = "json";
-    else if (argument === "--format") format = argv[++index];
-    else if (argument.startsWith("--format="))
-      format = argument.slice("--format=".length);
+    else {
+      const value =
+        argument === "--format"
+          ? argv[index + 1]
+          : argument.startsWith("--format=")
+            ? argument.slice("--format=".length)
+            : undefined;
+      if (
+        value !== undefined &&
+        ["toon", "json", "yaml", "md", "jsonl"].includes(value)
+      ) {
+        format = value;
+        if (argument === "--format") index += 1;
+      }
+    }
   }
   return format === "json" || format === "jsonl" ? format : undefined;
 }
@@ -9609,10 +9621,32 @@ export function parseCodexOverrides(
       );
     }
   }
+  requireExternalProviderModel(
+    mergeCodexOverrides(defaults ?? {}, result),
+    provider,
+  );
+  return result;
+}
+
+function parseScanCodexOverrides(
+  values: readonly string[],
+  model?: string,
+  effort?: ModelCliOptions["effort"],
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  defaults?: JsonObject,
+): JsonObject {
+  const result = parseCodexOverrides(values, model, effort, provider, defaults);
+  const effective = mergeCodexOverrides(defaults ?? {}, result);
+  requireExternalProviderModel(effective, scanModelProvider(effective));
+  return result;
+}
+
+function requireExternalProviderModel(
+  config: JsonObject,
+  provider: unknown,
+): void {
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const selectedModel = scanModel(config);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined
@@ -9621,7 +9655,6 @@ export function parseCodexOverrides(
       );
     }
   }
-  return result;
 }
 
 function workerStatusMessage(status: ScanWorkerStatus): string {

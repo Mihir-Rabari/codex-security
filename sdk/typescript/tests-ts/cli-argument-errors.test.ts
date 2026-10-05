@@ -53,6 +53,45 @@ describe("scan argument errors", () => {
     }
   });
 
+  test.each([
+    { args: ["--format", "--json"] },
+    { args: ["--json", "--format"] },
+    { args: ["--format", "--format=jsonl"] },
+    { args: ["--format=jsonl", "--format"] },
+    { args: ["--format=", "--json"] },
+    { args: ["--json", "--format="] },
+    { args: ["--format", "bogus", "--json"] },
+    { args: ["--json", "--format", "bogus"] },
+  ])(
+    "preserves structured errors around malformed format arguments: $args",
+    async ({ args }) => {
+      for (const fullOutput of [false, true]) {
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            ["scan", ...args, ...(fullOutput ? ["--full-output"] : [])],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              onConfig: () => {
+                throw new Error(
+                  "Argument errors must not initialize the scanner.",
+                );
+              },
+            }),
+          ),
+        ).toBe(2);
+        const value = JSON.parse(stdout.text());
+        expect(fullOutput ? value.ok : value.status).toBe(
+          fullOutput ? false : "failed",
+        );
+        expect((fullOutput ? value.error : value).code).toBe("SCAN_FAILED");
+        expect(stderr.text()).toContain("format");
+      }
+    },
+  );
+
   test("prints concise flag names and accepted values for validation errors", async () => {
     for (const [args, flag, detail] of [
       [["--mode", "bogus"], "--mode", "standard"],
