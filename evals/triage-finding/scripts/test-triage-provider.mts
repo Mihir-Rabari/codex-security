@@ -14,6 +14,9 @@ interface Capture {
   cwd: string;
   policy: string;
   proxies: Record<string, string>;
+  nodePath: string;
+  directories: string[];
+  overrides: string[];
 }
 
 const proxies = {
@@ -70,7 +73,9 @@ const launcher = path.join(cwd, 'plugins/codex-security/scripts/launch_codex_sec
 const fixture = path.join(cwd, 'evals/triage-finding/fixtures/repo');
 fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
 const policy = cp.execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy, proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
+const directories = process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []);
+const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH, proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
 console.log(JSON.stringify({type:'thread.started', thread_id:'synthetic-thread'}));
 if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.failed',error:{message:'synthetic retryable failure'}}));
@@ -172,6 +177,8 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
       assert.equal(fs.existsSync(row.cwd), false);
+      assert.equal(row.nodePath, fs.realpathSync(process.execPath));
+      assert.deepEqual(row.directories, [path.dirname(row.nodePath)]);
     }
 
     const calibration = parse(
@@ -182,12 +189,39 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     ).providers[0];
     calibration.id = provider.id;
     calibration.config.codex_path_override = fakeCodex;
+    const customNode = path.join(root, "custom-node", "bin", "node");
+    fs.mkdirSync(path.dirname(customNode), { recursive: true });
+    fs.copyFileSync(
+      process.execPath,
+      customNode,
+      fs.constants.COPYFILE_FICLONE,
+    );
+    calibration.config.cli_env.CODEX_MCP_NODE_PATH = customNode;
+    const nodeAlias = path.join(root, "node-alias");
+    fs.symlinkSync(customNode, nodeAlias);
+    const nodeChoices = [
+      customNode,
+      path.relative(path.join(os.tmpdir(), "runtime-placeholder"), customNode),
+      "node",
+      nodeAlias,
+    ];
     const calibrationConfig = path.join(root, "calibration.json");
     fs.mkdirSync(path.join(root, "case"));
     fs.writeFileSync(
       calibrationConfig,
       JSON.stringify({
-        providers: [calibration],
+        providers: nodeChoices.map((nodePath, index) => ({
+          ...calibration,
+          label: `custom-runtime-${index}`,
+          config: {
+            ...calibration.config,
+            cli_env: {
+              ...calibration.config.cli_env,
+              CODEX_MCP_NODE_PATH: nodePath,
+              PATH: `${path.dirname(customNode)}${path.delimiter}${process.env.PATH}`,
+            },
+          },
+        })),
         prompts: ["hello"],
         tests: [
           {
@@ -222,12 +256,23 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 5);
+    assert.equal(rows.length, 8);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 5);
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
       assert.match(row.policy, /Synthetic policy/);
       assert.equal(fs.existsSync(row.cwd), false);
+      assert.match(
+        row.overrides.join("\n"),
+        /permissions\.triage_runtime_only\.filesystem\.:workspace_roots="read"/,
+      );
+      assert.deepEqual(
+        row.directories,
+        row.nodePath === customNode
+          ? [path.join(root, "case"), path.dirname(customNode)]
+          : [path.dirname(fs.realpathSync(process.execPath))],
+      );
     }
+    assert.equal(rows.filter((row) => row.nodePath === customNode).length, 4);
   },
 );
