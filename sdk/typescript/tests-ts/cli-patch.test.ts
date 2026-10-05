@@ -2727,36 +2727,44 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
   });
 
   test("creates a draft pull request when selected in the interactive review", async () => {
-    let published = false;
-    const url = "https://github.example.test/example/repository/pull/13";
-    const outcome = await runWorkflow(
-      ["scan"],
-      {
-        result: resultWithFindings(["high"]),
-        onRepositoryCommand: (command, args) => {
-          published ||= command === "gh" && args[1] === "create";
-          return command === "gh" && args[1] === "create"
-            ? url
-            : args.includes("--name-only")
-              ? "src/finding-1.ts\0"
-              : "";
-        },
-      },
-      {
-        interactive: true,
-        configure: (value) => {
-          value.patchEditor = async () => ({
-            severity: "high",
-            occurrenceIds: ["occ_1"],
-            createPullRequest: true,
-          });
-        },
-      },
+    const directory = await temporaryDirectory(
+      "patch-interactive-publication-",
     );
+    try {
+      let published = false;
+      const url = "https://github.example.test/example/repository/pull/13";
+      const outcome = await runWorkflow(
+        ["scan"],
+        {
+          currentDirectory: directory,
+          result: resultWithFindings(["high"]),
+          onRepositoryCommand: (command, args) => {
+            published ||= command === "gh" && args[1] === "create";
+            return command === "gh" && args[1] === "create"
+              ? url
+              : args.includes("--name-only")
+                ? "src/finding-1.ts\0"
+                : "";
+          },
+        },
+        {
+          interactive: true,
+          configure: (value) => {
+            value.patchEditor = async () => ({
+              severity: "high",
+              occurrenceIds: ["occ_1"],
+              createPullRequest: true,
+            });
+          },
+        },
+      );
 
-    expect(outcome.exitCode).toBe(0);
-    expect(published).toBe(true);
-    expect(outcome.stderr).toContain(`Pull request: ${url}`);
+      expect(outcome.exitCode).toBe(0);
+      expect(published).toBe(true);
+      expect(outcome.stderr).toContain(`Pull request: ${url}`);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("patches a saved scan by severity and supports structured output", async () => {
@@ -3222,6 +3230,99 @@ test.each([
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories();
   afterEach(fixtures.cleanup);
+  for (const [command, fileLink, dirty] of [
+    ["inline", false, false],
+    ["saved", false, false],
+    ["inline", true, false],
+    ["saved", true, false],
+    ["inline", false, true],
+    ["saved", false, true],
+  ] as const) {
+    test.skipIf(fileLink && process.platform === "win32")(
+      `publishes ${command} patches through an existing directory alias; file symlink=${fileLink}; local edit=${dirty}`,
+      async () => {
+        const directory = await fixtures.create("patch-directory-alias-");
+        const git = repositoryGit(directory);
+        const alias = join(directory, "link");
+        const result = resultWithFindings(["high"]);
+        await mkdir(join(directory, "src"));
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(directory, "src/finding-1.ts"), "unsafe\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const originalHead = git("rev-parse", "HEAD");
+        await symlink(
+          directory,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        const remote = await fixtures.create("patch-directory-alias-remote-");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        if (dirty)
+          await writeFile(join(directory, "src/finding-1.ts"), "local edit\n");
+        const outcome = await runWorkflow(
+          command === "inline"
+            ? ["scan", alias, "--patch", "--create-pr", "--json"]
+            : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: directory,
+            result,
+            onWorkbench: () => savedScan(result, "scan-1", alias),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (args, output) => {
+              await writeFile(join(alias, "src/finding-1.ts"), "fixed\n");
+              if (fileLink) {
+                await symlink("src/finding-1.ts", join(alias, "new-link.ts"));
+                output?.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: "occ_1",
+                        status: "verified",
+                        files: ["src/finding-1.ts", "new-link.ts"],
+                        verification: "The focused regression passed.",
+                      },
+                    ],
+                  }),
+                );
+              } else completePatches(args, output);
+              return 0;
+            },
+          },
+        );
+        if (dirty) {
+          expect(outcome.exitCode).toBe(2);
+          expect(outcome.stderr).toContain(
+            "Cannot publish files with uncommitted changes before patching",
+          );
+          expect(git("rev-parse", "HEAD")).toBe(originalHead);
+          expect(git("ls-remote", "origin")).toBe("");
+          return;
+        }
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(JSON.parse(outcome.stdout).pullRequest.url).toContain("/pull/1");
+        expect(
+          git("diff", "--name-only", originalHead, "HEAD").split("\n"),
+        ).toEqual(
+          fileLink ? ["new-link.ts", "src/finding-1.ts"] : ["src/finding-1.ts"],
+        );
+        if (fileLink)
+          expect(git("ls-files", "--stage", "new-link.ts")).toStartWith(
+            "120000 ",
+          );
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      },
+    );
+  }
+
   test.each(["commit", "commit result", "checkpoint"])(
     "preserves local work when patch %s fails",
     async (failure) => {
