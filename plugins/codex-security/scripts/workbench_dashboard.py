@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_findings import list_dedupe_groups
 
 FINDING_RECORDS = """
-SELECT findings.id, json_extract(details_json, '$.title') AS title,
+SELECT findings.id, display_title(details_json) AS title,
     COALESCE(repositories.ids, '[]') AS repositoryIds,
     json_extract(details_json, '$.severity.level') AS severity,
     findings.created_at AS createdAt, findings.updated_at AS updatedAt
@@ -91,6 +91,18 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
     """One snapshot, no artifact reads, model calls, or writes."""
     view = query["view"]
     records = RECORDS[view]
+    # SQLite JSON extraction emits invalid UTF-8 for escaped lone surrogates.
+    # Decode the original JSON and replace only those unrenderable code points.
+    connection.create_function(
+        "display_title",
+        1,
+        lambda details: (
+            json.loads(details)["title"]
+            .encode("utf-16", "surrogatepass")
+            .decode("utf-16", "replace")
+        ),
+        deterministic=True,
+    )
     connection.create_function("casefold", 1, str.casefold, deterministic=True)
     connection.create_function(
         "repository_label", 1, lambda value: ", ".join(repository_ids(value)), deterministic=True

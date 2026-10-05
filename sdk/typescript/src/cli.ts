@@ -2758,10 +2758,8 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to !== "linear") {
-          signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-          observingSignals = true;
-        }
+        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
+        observingSignals = true;
         if (csvPath !== undefined) {
           const result = await (
             dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
@@ -2878,7 +2876,10 @@ export async function main(
               .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
               .replace(/\s+/gu, " ")
               .slice(-6)}`;
-            repositories.set(directory, repository);
+            repositories.set(
+              resolveCliPath(currentDirectory, directory),
+              repository,
+            );
             scansById.set(scanId, {
               scanId,
               scanDir: resolveCliPath(currentDirectory, directory),
@@ -2889,7 +2890,7 @@ export async function main(
                 findings,
                 age: publicationScanAge(timestamp, now),
                 scanId: shortScanId,
-                value: options.to === "cloud" ? scanId : directory,
+                value: scanId,
               },
             ];
           });
@@ -2953,12 +2954,16 @@ export async function main(
             );
             scanDir = selectedScans[0]!.scanDir;
           } else {
-            scanDir = await prompt.select(
+            controller.signal.throwIfAborted();
+            const selectedId = await prompt.select(
               "Which completed scan would you like to publish?",
               choices,
               { header },
+              controller.signal,
             );
-            selectedScans.push({ scanDir });
+            controller.signal.throwIfAborted();
+            selectedScans.push(scansById.get(selectedId)!);
+            scanDir = selectedScans[0]!.scanDir;
           }
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);
@@ -3064,8 +3069,6 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        signalHandlers(dependencies, "add", onInterrupt, onTerminate);
-        observingSignals = true;
         if (!options.dryRun) {
           progress.start();
         }
@@ -3095,7 +3098,6 @@ export async function main(
         } finally {
           progress.stop();
         }
-        controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {

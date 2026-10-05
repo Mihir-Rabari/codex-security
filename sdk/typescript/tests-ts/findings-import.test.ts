@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { resolvePluginPython } from "../src/runtime.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -145,4 +147,52 @@ describe("findings import formats", () => {
       ),
     ).rejects.toThrow("duplicate occurrenceId");
   });
+});
+
+test("CSV imports retain separate occurrences of the same finding", async () => {
+  const second = CSV_SOURCE.split("\r\n")[1]!.replace(
+    "occ_000000000000000000000001",
+    "occ_000000000000000000000002",
+  );
+  const parsed = await parseImportedFindings(
+    `${CSV_SOURCE}${second}\r\n`,
+    "csv",
+    PLUGIN_ROOT,
+  );
+  expect(parsed).toHaveLength(2);
+  expect(parsed[0]!.findingId).toBe(parsed[1]!.findingId);
+  const bound = bindImportedFindings(parsed, "csv", "scan_import", "dataset");
+  expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+  expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+});
+
+test("CSV exports round-trip literal apostrophes and spreadsheet formulas", async () => {
+  const titles = [
+    "'--no-verify' skips hooks",
+    "'=1+1",
+    "'ordinary",
+    "=1+1",
+    "''-x",
+  ];
+  const exported = spawnSync(
+    await resolvePluginPython({}),
+    [
+      "-c",
+      "import json,sys; sys.path.insert(0,sys.argv[1]); from finalize_scan_contract import csv_cell; print(json.dumps([csv_cell(value) for value in json.loads(sys.argv[2])]))",
+      join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(titles),
+    ],
+    { encoding: "utf8" },
+  );
+  expect(exported.status, exported.stderr).toBe(0);
+  for (const [index, title] of (
+    JSON.parse(exported.stdout) as string[]
+  ).entries()) {
+    const parsed = await parseImportedFindings(
+      CSV_SOURCE.replace("Reported CSV import issue", title),
+      "csv",
+      PLUGIN_ROOT,
+    );
+    expect(parsed[0]!.title).toBe(titles[index]!);
+  }
 });

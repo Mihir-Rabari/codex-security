@@ -27,6 +27,83 @@ const { temporaryDirectory: publicationDirectory, cleanup } =
 
 afterEach(cleanup);
 
+test.each(["linear", "custom"] as const)(
+  "interactive %s selection preserves scan identity and cancellation",
+  async (destination) => {
+    const [scanDir] = await publicationScanDirectories(1);
+    for (const cancel of [false, true]) {
+      const signals = new FakeSignals();
+      const deps = dependencies({
+        signals,
+        onWorkbench: () => ({
+          scans: [
+            {
+              scanId: "selected-scan",
+              scanDir: scanDir!,
+              targetSummary: "repository",
+              progress: { status: "complete" },
+            },
+          ],
+        }),
+      });
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async (_message, choices, _presentation, signal) => {
+          expect(signal).toBeInstanceOf(AbortSignal);
+          if (cancel) {
+            signals.emit("SIGINT");
+            signal!.throwIfAborted();
+          }
+          return choices[0]!.value;
+        },
+      };
+      let published = false;
+      deps.publishScan = async (_directory, options) => {
+        published = true;
+        expect(options.expectedScanId).toBe("selected-scan");
+        return publicationResult();
+      };
+      deps.publishScanToCustom = async (_directory, options) => {
+        published = true;
+        expect(options.expectedScanId).toBe("selected-scan");
+        return {
+          scanId: "selected-scan",
+          repositoryId: "repository",
+          findingIds: [],
+          findingCount: 0,
+        };
+      };
+      const args =
+        destination === "linear"
+          ? [...DESTINATION_OPTIONS]
+          : ["--to", "custom", "--findings-url", "http://localhost:3000"];
+      const { runCli } = createCliTest(main);
+      expect(await runCli(["publish", "scan", ...args, "--json"], deps)).toBe(
+        cancel ? 130 : 0,
+      );
+      expect(published).toBe(!cancel);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    }
+  },
+);
+
+test("prints completed publication when an interrupt arrives with its result", async () => {
+  const signals = new FakeSignals();
+  const deps = dependencies({ signals });
+  deps.publishScan = async () => {
+    signals.emit("SIGINT");
+    return publicationResult();
+  };
+  const { runCli, stdout } = createCliTest(main);
+  expect(
+    await runCli(
+      ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+      deps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+});
+
 async function publicationScanDirectories(count: number): Promise<string[]> {
   const root = await publicationDirectory("codex-security-publish-picker-");
   return Promise.all(
@@ -2022,8 +2099,8 @@ describe("publish scan", () => {
       await runCli(["publish", "scan", ...DESTINATION_OPTIONS, "--json"], deps),
     ).toBe(0);
     expect(offered.map(({ value }) => value)).toEqual([
-      firstDirectory,
-      "selected-completed-scan",
+      "first-scan",
+      "selected-scan",
     ]);
     expect(offered.map(({ label }) => label)).toEqual([
       expect.stringContaining("first-scan"),

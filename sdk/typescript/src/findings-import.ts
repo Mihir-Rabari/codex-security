@@ -10,7 +10,7 @@ import type { Finding, FindingsDocument } from "./models.js";
 export const CSV_TARGET_ID = "codex-security-csv-import";
 export type FindingsImportFormat = "csv" | "json";
 
-const EXPORTED_CSV_ESCAPE = /^'(?:[\t\r\n]|\s*[=+\-@＝＋－＠])/u;
+const EXPORTED_CSV_ESCAPE = /^'(?:['\t\r\n]|\s*[=+\-@＝＋－＠])/u;
 const csvFindingRowSchema = z
   .object({
     occurrence_id: z.string().regex(/^occ_[a-f0-9]{24}$/u, {
@@ -254,7 +254,6 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
     );
   }
 
-  const findingIds = new Set<string>();
   const occurrenceIds = new Set<string>();
   return rows.map((record, index) => {
     const rowNumber = index + 2;
@@ -263,13 +262,9 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
       throw csvRowError(rowNumber, parsed.error.issues[0]!.message);
     }
     const row = parsed.data;
-    if (findingIds.has(row.finding_id)) {
-      throw csvRowError(rowNumber, "has a duplicate finding_id");
-    }
     if (occurrenceIds.has(row.occurrence_id)) {
       throw csvRowError(rowNumber, "has a duplicate occurrence_id");
     }
-    findingIds.add(row.finding_id);
     occurrenceIds.add(row.occurrence_id);
     return row;
   });

@@ -561,7 +561,6 @@ export async function publishScanInternal(
       `Could not save the publication receipt: ${errorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
-  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -949,8 +948,18 @@ async function collectPublicationHandoffEvidence(
   let content: string;
   try {
     content = await readFile(file, "utf8");
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [
+      {
+        source: "handoff",
+        status: "invalid",
+        rawLine: "",
+        possibleMutation: true,
+        resolution: resolveClaims([]),
+        error: `Could not read the Linear publication handoff: ${errorMessage(error)}`,
+      },
+    ];
   }
 
   const evidence: PublicationHandoffEvidence[] = [];
@@ -1425,7 +1434,8 @@ async function preserveVerifiedHandoff(
   let current: string;
   try {
     current = await readFile(file, "utf8");
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     current = "";
   }
   const planned = new Map(publication.issues.map(findingEntry));

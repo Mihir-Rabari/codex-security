@@ -19,6 +19,8 @@ import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
+import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -147,7 +149,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     (
       await query(
         environment,
-        "SELECT finding_id FROM finding_severity_assessments",
+        "SELECT finding_id FROM scan_finding_severity_assessments",
       )
     ).map((row) => row["finding_id"]),
   ).toEqual([findings[0]!.findingId]);
@@ -171,7 +173,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   ).toEqual(assessment);
   const rows = await query(
     environment,
-    "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
   );
   calls.length = 0;
   expect(
@@ -181,7 +183,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(rows);
 
@@ -196,7 +198,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(revised.assessments[0]!.decision).toBe("excluded");
   const revisedRows = await query(
     environment,
-    "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
   );
   expect(revisedRows).toHaveLength(2);
   expect(
@@ -224,7 +226,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(revisedRows);
 });
@@ -550,4 +552,157 @@ test("migrates existing databases without changing findings and reads older stat
   expect(
     await query(environment, "SELECT * FROM findings ORDER BY id"),
   ).toEqual(original);
+});
+
+for (const legacy of [false, true]) {
+  test(`classifying another scan preserves both recurring-finding assessments (legacy: ${legacy})`, async () => {
+    const first = await fixture();
+    const second = await fixture();
+    const manifestPath = join(second.scanDirectory, "scan-manifest.json");
+    const manifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as ScanManifest;
+    manifest.scan.id = "scan_example_002";
+    for (const file of ["findings.json", "coverage.json"]) {
+      const path = join(second.scanDirectory, file);
+      const document = JSON.parse(await readFile(path, "utf8"));
+      document.scanId = manifest.scan.id;
+      if (file === "findings.json") {
+        for (const finding of document.findings as Finding[]) {
+          finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+        }
+      }
+      await writeFile(path, JSON.stringify(document));
+    }
+    for (const artifact of manifest.scan.artifacts)
+      artifact.sha256 = sha256(
+        await readFile(join(second.scanDirectory, artifact.path)),
+      );
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const { codex, calls } = recordingClassifier();
+    const options = {
+      environment: first.environment,
+      rubricPath: first.rubricPath,
+      codex,
+    };
+    await classifyScanDirectorySeverity(first.scanDirectory, options);
+    if (legacy) {
+      const columns = (
+        await query(
+          first.environment,
+          "PRAGMA table_info(finding_severity_assessments)",
+        )
+      )
+        .map((row) => row["name"])
+        .join(", ");
+      await query(
+        first.environment,
+        `INSERT INTO finding_severity_assessments (${columns}) SELECT ${columns} FROM scan_finding_severity_assessments`,
+      );
+      await query(
+        first.environment,
+        "DROP TABLE scan_finding_severity_assessments",
+      );
+      await query(
+        first.environment,
+        "DELETE FROM schema_migrations WHERE version = 42",
+      );
+      expect(
+        (
+          await prepareScanPublication(first.scanDirectory, {
+            ...destination,
+            environment: first.environment,
+          })
+        ).issues,
+      ).toHaveLength(2);
+    }
+    await classifyScanDirectorySeverity(second.scanDirectory, options);
+    expect(calls).toHaveLength(4);
+    calls.length = 0;
+    for (const scan of [first, second, first, second]) {
+      expect(
+        (
+          await prepareScanPublication(scan.scanDirectory, {
+            ...destination,
+            environment: first.environment,
+          })
+        ).issues,
+      ).toHaveLength(2);
+      await classifyScanDirectorySeverity(scan.scanDirectory, options);
+    }
+    expect(calls).toEqual([]);
+  });
+}
+
+test("classifies an in-scan member when dedupe chooses an outside-scan representative", async () => {
+  const scan = await fixture();
+  const current = scan.findings[0]!;
+  const outside = {
+    ...structuredClone(current),
+    findingId: `csf_${"f".repeat(24)}`,
+    severity: { ...current.severity, level: "critical" as const },
+  };
+  const deduper = new FindingDeduplicator(
+    {
+      potentialDuplicates: async (id) => ({
+        finding: scan.findings.find((finding) => finding.findingId === id)!,
+        potentialDuplicates: id === current.findingId ? [outside] : [],
+      }),
+    },
+    {
+      screen: async (findings) => ({
+        decisions: Object.fromEntries(
+          findings
+            .slice(1)
+            .map((_finding, index) => [
+              screeningPairSlot(index),
+              { decision: "SAME" as const, rationale: "One shared control." },
+            ]),
+        ),
+      }),
+      reviewPair: async () => ({
+        decision: "SAME",
+        canonicalFindingId: outside.findingId,
+        mergedFinding: outside,
+        rationale: "One shared control.",
+      }),
+    },
+  );
+  const result = await deduper.run(
+    scan.findings.map((finding) => finding.findingId),
+  );
+  expect(result.uniqueFindingIds).toContain(outside.findingId);
+  const { codex, calls } = recordingClassifier();
+  const options = {
+    environment: scan.environment,
+    rubricPath: scan.rubricPath,
+    codex,
+  };
+  await expect(
+    classifyScanDirectorySeverity(scan.scanDirectory, {
+      ...options,
+      findingIds: result.uniqueFindingIds,
+    }),
+  ).rejects.toThrow("Selected finding IDs must belong to the supplied scan");
+  const scanFindingIds = new Set(
+    scan.findings.map((finding) => finding.findingId),
+  );
+  const selectedIds = result.uniqueFindingIds.map((representative) => {
+    if (scanFindingIds.has(representative)) return representative;
+    return result.duplicateGroups
+      .find((group) => group.includes(representative))!
+      .find((member) => scanFindingIds.has(member))!;
+  });
+  await classifyScanDirectorySeverity(scan.scanDirectory, {
+    ...options,
+    findingIds: selectedIds,
+  });
+  expect(new Set(calls)).toEqual(scanFindingIds);
+  const publication = await prepareScanPublication(scan.scanDirectory, {
+    ...destination,
+    environment: scan.environment,
+  });
+  expect(new Set(publication.issues.map((issue) => issue.findingId))).toEqual(
+    scanFindingIds,
+  );
 });

@@ -27,14 +27,33 @@ FIELDS = {
 }
 
 
-def assessments(connection: sqlite3.Connection, finding_ids: list[str]) -> list[dict[str, Any]]:
+def assessments(
+    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str
+) -> list[dict[str, Any]]:
     rows = connection.execute(
         """SELECT assessment.* FROM json_each(?) AS selected
         JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
         ORDER BY selected.key""",
         (json.dumps(finding_ids),),
     )
-    return [{key: row[column] for key, column in FIELDS.items()} for row in rows]
+    # Retain surviving pre-migration checkpoints; their input hashes determine reuse.
+    selected = {
+        row["finding_id"]: {key: row[column] for key, column in FIELDS.items()} for row in rows
+    }
+    if (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_finding_severity_assessments'"
+        ).fetchone()
+        is not None
+    ):
+        for row in connection.execute(
+            """SELECT assessment.* FROM json_each(?) AS selected
+            JOIN scan_finding_severity_assessments AS assessment
+            ON assessment.finding_id = selected.value AND assessment.scan_id = ?""",
+            (json.dumps(finding_ids), scan_id),
+        ):
+            selected[row["finding_id"]] = {key: row[column] for key, column in FIELDS.items()}
+    return [selected[finding_id] for finding_id in finding_ids if finding_id in selected]
 
 
 def checkpoint(
@@ -59,7 +78,9 @@ def checkpoint(
                     payload["knowledgeBaseSha256"],
                 ),
             )
-            return {"assessments": assessments(connection, payload["findingIds"])}
+            return {
+                "assessments": assessments(connection, payload["findingIds"], payload["scanId"])
+            }
     if payload["action"] != "save":
         raise SystemExit("Unknown severity checkpoint action.")
     finding = payload["finding"]
@@ -77,11 +98,11 @@ def checkpoint(
         parameters = ", ".join("?" for _ in FIELDS)
         updates = ", ".join(f"{column} = excluded.{column}" for column in FIELDS.values())
         connection.execute(
-            f"""INSERT INTO finding_severity_assessments ({columns})
-            VALUES ({parameters})
-            ON CONFLICT(finding_id) DO UPDATE SET
+            f"""INSERT INTO scan_finding_severity_assessments (scan_id, {columns})
+            VALUES (?, {parameters})
+            ON CONFLICT(scan_id, finding_id) DO UPDATE SET
             {updates}""",
-            tuple(assessment[key] for key in FIELDS),
+            (payload["scanId"], *(assessment[key] for key in FIELDS)),
         )
     return {}
 
@@ -111,7 +132,7 @@ def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
             "assessedAt": row["assessed_at"],
             "rubricSha256": row["rubric_sha256"],
             "knowledgeBaseSha256": row["knowledge_base_sha256"],
-            "assessments": assessments(connection, finding_ids),
+            "assessments": assessments(connection, finding_ids, scan_id),
         }
 
 
