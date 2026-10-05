@@ -58,6 +58,13 @@ export async function testDeepScanLifecycle({
         current.calls.push(command);
         if (command === "get-scan") return { workspace: current.workspace };
         assert.equal(command, "cancel-scan");
+        if (current.workspace.results.progress.status === "failed")
+          throw new Error("Only a running scan can be canceled.");
+        if (
+          current.calls.filter((command) => command === "cancel-scan").length >
+          1
+        )
+          throw new Error("synthetic duplicate cancellation persistence");
         current.persistEntered.resolve();
         await current.persistRelease.promise;
         if (current.rejectPersistence)
@@ -98,10 +105,14 @@ export async function testDeepScanLifecycle({
         "final read",
         "final read heartbeat",
         "final read heartbeat microtask",
+        "final read repeated cancellation",
         "onComplete",
         "unpersisted failure",
         "persisted failure",
         "observed failure",
+        "lost-response failure",
+        "stale heartbeat failure",
+        "observed interrupted",
       ]) {
         for (const rejectPersistence of [false, true]) {
           const fixture = await fixtureRun(config);
@@ -112,12 +123,24 @@ export async function testDeepScanLifecycle({
           const release = Promise.withResolvers();
           const persistEntered = Promise.withResolvers();
           const persistRelease = Promise.withResolvers();
+          const failureEntered = Promise.withResolvers();
+          const failureRelease = Promise.withResolvers();
+          const failureSaved = Promise.withResolvers();
+          const heartbeatRead = Promise.withResolvers();
+          const heartbeatRelease = Promise.withResolvers();
           let publications = 0;
           let cancellation;
+          let repeatedCancellation;
           let coordinator;
-          const observeFailure = stage === "observed failure";
+          let gateHeartbeat = false;
+          const interrupted = stage === "observed interrupted";
+          const stoppedStatus = interrupted ? "interrupted" : "failed";
+          const observeFailure = stage === "observed failure" || interrupted;
+          const publicationGate =
+            stage === "lost-response failure" ||
+            stage === "stale heartbeat failure";
           const durableFailure =
-            stage === "persisted failure" || stage === "observed failure";
+            stage === "persisted failure" || observeFailure || publicationGate;
           current = {
             store,
             registry,
@@ -130,15 +153,24 @@ export async function testDeepScanLifecycle({
               results: { progress: { status: "running" } },
             },
           };
-          if (stage.startsWith("final read") || observeFailure) {
+          if (
+            stage.startsWith("final read") ||
+            observeFailure ||
+            publicationGate
+          ) {
             const get = store.get.bind(store);
             let paused = false;
             store.get = async () => {
               const snapshot = await get();
+              if (gateHeartbeat) {
+                gateHeartbeat = false;
+                heartbeatRead.resolve();
+                await heartbeatRelease.promise;
+              }
               if (
                 !paused &&
                 (observeFailure
-                  ? coordinator?.snapshot().status === "failed"
+                  ? coordinator?.snapshot().status === stoppedStatus
                   : snapshot.status === "succeeded")
               ) {
                 paused = true;
@@ -152,6 +184,20 @@ export async function testDeepScanLifecycle({
             store.fail = async () => {
               throw new Error("synthetic failure persistence unavailable");
             };
+          if (publicationGate) {
+            const fail = store.fail.bind(store);
+            store.fail = async (...args) => {
+              if (stage === "stale heartbeat failure") {
+                failureEntered.resolve();
+                await failureRelease.promise;
+              }
+              const result = await fail(...args);
+              current.workspace.results.progress.status = "failed";
+              if (stage === "lost-response failure")
+                throw new Error("synthetic committed failure response lost");
+              return result;
+            };
+          }
           const executor = new FakeExecutor(
             observeFailure
               ? { blockDiscovery: true }
@@ -178,6 +224,10 @@ export async function testDeepScanLifecycle({
             },
             onStopped: async () => {
               publications++;
+              if (publicationGate) {
+                entered.resolve();
+                await release.promise;
+              }
             },
             log: (event) => {
               if (
@@ -193,6 +243,10 @@ export async function testDeepScanLifecycle({
                 event.event !== "coordinator_failed"
               )
                 return;
+              if (publicationGate) {
+                failureSaved.resolve();
+                return;
+              }
               if (stage === "persisted failure")
                 current.workspace.results.progress.status = "failed";
               entered.resolve();
@@ -203,28 +257,44 @@ export async function testDeepScanLifecycle({
           const terminal = coordinator.settled();
           void terminal.catch(() => {});
           try {
+            if (stage === "stale heartbeat failure") {
+              await failureEntered.promise;
+              gateHeartbeat = true;
+              const heartbeat = coordinator.renewHeartbeat();
+              await heartbeatRead.promise;
+              failureRelease.resolve();
+              await failureSaved.promise;
+              heartbeatRelease.resolve();
+              await heartbeat;
+            }
             if (observeFailure) {
               await executor.discoveryStarted.promise;
-              store.run.status = "failed";
+              store.run.status = stoppedStatus;
               current.workspace.results.progress.status = "failed";
               await coordinator.renewHeartbeat();
             }
             await entered.promise;
-            if (stage.includes("heartbeat")) await coordinator.renewHeartbeat();
+            if (stage.startsWith("final read heartbeat"))
+              await coordinator.renewHeartbeat();
             if (!stage.endsWith("microtask")) {
               cancellation ??= cancel({ scanId: fixture.run.scanId });
               void cancellation.catch(() => {});
             }
+            if (stage === "final read repeated cancellation") {
+              await coordinator.renewHeartbeat();
+              repeatedCancellation = cancel({ scanId: fixture.run.scanId });
+              void repeatedCancellation.catch(() => {});
+            }
             release.resolve();
             if (durableFailure) {
-              assert.equal((await terminal).status, "failed");
+              assert.equal((await terminal).status, stoppedStatus);
               assert.equal(
                 (await cancellation).structuredContent.workspace.results
                   .progress.status,
                 "failed",
               );
               assert.deepEqual(current.calls, ["get-scan"]);
-              assert.equal(publications, 1);
+              assert.equal(publications, interrupted ? 0 : 1);
               continue;
             }
             await persistEntered.promise;
@@ -266,6 +336,11 @@ export async function testDeepScanLifecycle({
                 terminal,
                 /synthetic cancellation persistence failure/,
               );
+              if (repeatedCancellation)
+                await assert.rejects(
+                  repeatedCancellation,
+                  /synthetic cancellation persistence failure/,
+                );
               assert.equal(publications, 0);
             } else {
               assert.equal(
@@ -276,8 +351,19 @@ export async function testDeepScanLifecycle({
               assert.equal((await terminal).status, "canceled");
               assert.equal(store.run.status, "canceled");
               assert.equal(publications, 1);
+              if (repeatedCancellation)
+                assert.equal(
+                  (await repeatedCancellation).structuredContent.workspace
+                    .results.progress.status,
+                  "canceled",
+                );
             }
-            assert.deepEqual(current.calls, ["cancel-scan"]);
+            assert.deepEqual(
+              current.calls,
+              repeatedCancellation && !rejectPersistence
+                ? ["cancel-scan", "get-scan"]
+                : ["cancel-scan"],
+            );
           } catch (error) {
             failures.push(
               new Error(
@@ -288,8 +374,14 @@ export async function testDeepScanLifecycle({
           } finally {
             release.resolve();
             persistRelease.resolve();
+            failureRelease.resolve();
+            heartbeatRelease.resolve();
             registry.shutdown("fixture cleanup");
-            await Promise.allSettled([terminal, cancellation]);
+            await Promise.allSettled([
+              terminal,
+              cancellation,
+              repeatedCancellation,
+            ]);
           }
         }
       }
