@@ -300,6 +300,61 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test.each([
+    ["activity", 16],
+    ["details", 25],
+  ] as const)("retains wide graphemes in narrow %s frames", (view, columns) => {
+    for (const cluster of ["界", "👩‍💻"]) {
+      for (const code of [false, true]) {
+        const input = new DashboardTestInput();
+        let frame = "";
+        const dashboard = createDashboard(
+          {
+            columns,
+            rows: 50,
+            write: (text) => {
+              frame = text;
+              return true;
+            },
+          },
+          { input },
+        );
+        const text = cluster.repeat(3);
+        dashboard.start();
+        if (view === "details") {
+          input.emit("data", "d");
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            worker: 1,
+            event: {
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                output: code ? `\n${text}` : text,
+              },
+            },
+          });
+        } else {
+          dashboard.record({
+            id: "wide-text",
+            kind: "message",
+            status: "completed",
+            description: code ? `\`\`\`text\n${text}\n\`\`\`` : text,
+            paths: [],
+            worker: 1,
+          });
+        }
+        const clean = stripVTControlCharacters(frame);
+        expect(clean.split(cluster).length - 1).toBe(3);
+        for (const line of clean.split("\n")) {
+          expect(stringWidth(line)).toBeLessThanOrEqual(columns);
+        }
+        dashboard.stop();
+      }
+    }
+  });
+
   test("wraps wide activity text to terminal columns without losing it", () => {
     const stderr = capture(true);
     const dashboard = createDashboard({

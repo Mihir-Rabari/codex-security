@@ -1214,6 +1214,7 @@ function formatLocalTime(timestamp: number): string {
 }
 
 function wrapActivity(prefix: string, value: string, width: number): string[] {
+  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
   const available = Math.max(1, width - stringWidth(prefix));
   const continuation = " ".repeat(prefix.length);
   const lines: string[] = [];
@@ -1335,6 +1336,7 @@ function columnChunks(
 }
 
 function wrapCode(prefix: string, value: string, width: number): string[] {
+  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
   const prefixWidth = stringWidth(prefix);
   const continuation = " ".repeat(prefixWidth);
   return columnChunks(
