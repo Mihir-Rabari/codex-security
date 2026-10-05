@@ -693,10 +693,15 @@ async function preserveScanDraft(
           const history = (current.provenance as JsonObject).previousFindings;
           return (
             Array.isArray(history) &&
-            history.some(
-              (previous) =>
-                isObject(previous) && containsSavedFinding(previous, finding),
-            )
+            history.some((previous) => {
+              if (
+                !isObject(previous) ||
+                !containsSavedFinding(previous, finding)
+              )
+                return false;
+              preserveFindingDetails(previous, finding);
+              return true;
+            })
           );
         })
       )
@@ -1631,7 +1636,12 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
 }
 
 function sameSavedRevision(left: JsonObject, right: JsonObject): boolean {
+  const leftOwner = (left.provenance as JsonObject | undefined)?.workerId;
+  const rightOwner = (right.provenance as JsonObject | undefined)?.workerId;
   return (
+    (typeof leftOwner !== "string" ||
+      typeof rightOwner !== "string" ||
+      leftOwner === rightOwner) &&
     left.title === right.title &&
     isDeepStrictEqual(left.locations, right.locations) &&
     sameSavedFinding(left, right)

@@ -2563,3 +2563,136 @@ for (const layout of ["standard", "diff"] as const) {
     });
   }
 }
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const separateIdentity of [false, true]) {
+    test(`${layout}: represented historical findings retain nested ancestry (separateIdentity=${separateIdentity})`, async (t) => {
+      const f = await fixture(t, layout);
+      const original = finding("Synthetic ancestry review", {
+        identity: { anchor: "saved-report" },
+        summary: "Original evidence.",
+      });
+      const ancestor = { ...original, summary: "Earlier source evidence." };
+      await f.write({
+        ...f.draft(),
+        findings: [
+          {
+            ...original,
+            provenance: {
+              ...original.provenance,
+              previousFindings: [ancestor],
+            },
+          },
+        ],
+      });
+      const revised = {
+        ...original,
+        ...(separateIdentity ? { identity: { anchor: "revised-report" } } : {}),
+        summary: "Revised evidence.",
+        provenance: { ...original.provenance, previousFindings: [original] },
+      };
+      const containsAncestor = (value: unknown): boolean => {
+        if (Array.isArray(value)) return value.some(containsAncestor);
+        if (typeof value !== "object" || value === null) return false;
+        const row = value as Record<string, unknown>;
+        return (
+          row.summary === ancestor.summary ||
+          Object.values(row).some(containsAncestor)
+        );
+      };
+      let saved: { findings: FixtureFinding[] };
+      for (let replay = 0; replay < 2; replay++) {
+        await f.write({ ...f.draft(), findings: [revised] });
+        saved = JSON.parse(
+          await readFile(
+            path.join(
+              f.root,
+              layout === "worker" ? "result.json" : "findings.json",
+            ),
+            "utf8",
+          ),
+        );
+        assert.ok(
+          containsAncestor(saved.findings),
+          "Saved ancestry must survive the published revision and replay.",
+        );
+        const current = saved.findings.find(
+          (row) => row.summary === revised.summary,
+        )!;
+        assert.deepEqual(current.identity, revised.identity);
+      }
+      const parent = layout === "worker" ? await fixture(t, "deep") : f;
+      if (layout === "worker")
+        await parent.write({
+          ...parent.draft({}, true),
+          findings: saved!.findings,
+        });
+      const finalized = await recoverAndFinalize(
+        parent,
+        parent,
+        [],
+        true,
+        true,
+        true,
+      );
+      assert.ok(containsAncestor(finalized.normal));
+      assert.ok(containsAncestor(finalized.recovered));
+      assert.deepEqual(finalized.warnings, []);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  test(`${layout}: sibling revisions preserve independent worker identities`, async (t) => {
+    const f = await fixture(t, layout);
+    const initial = ["First review", "Second review"].map((title, index) =>
+      finding(title, {
+        identity: { anchor: `saved-${index}` },
+        provenance: {
+          source: "local_plugin",
+          candidateId: "shared-review",
+          workerId: `worker-${index}`,
+        },
+      }),
+    );
+    await f.write({ ...f.draft(), findings: initial });
+    const revised = initial.map(({ identity: _identity, ...row }, index) => ({
+      ...row,
+      title: index === 0 ? "Second review" : "Third review",
+      summary: "Revised evidence.",
+    }));
+    for (let replay = 0; replay < 2; replay++) {
+      await f.write({ ...f.draft(), findings: revised });
+      const saved: { findings: FixtureFinding[] } = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      );
+      for (const previous of initial) {
+        const retained = saved.findings.filter(
+          (row) => row.identity?.anchor === previous.identity!.anchor,
+        );
+        assert.equal(retained.length, 1);
+        assert.equal(
+          retained[0]!.provenance.workerId,
+          previous.provenance.workerId,
+        );
+      }
+      for (const row of saved.findings) {
+        for (const previous of (row.provenance.previousFindings ??
+          []) as FixtureFinding[]) {
+          assert.equal(previous.provenance.workerId, row.provenance.workerId);
+        }
+      }
+    }
+    const finalized = await recoverAndFinalize(f, f, [], true, true);
+    for (const rows of [finalized.normal, finalized.recovered]) {
+      for (const previous of initial) {
+        const retained = rows.filter(
+          (row) => row.identity.anchor === previous.identity!.anchor,
+        );
+        assert.equal(retained.length, 1);
+        assert.equal(retained[0]!.workerMetadata, previous.provenance.workerId);
+      }
+    }
+    assert.deepEqual(finalized.warnings, []);
+  });
+}
