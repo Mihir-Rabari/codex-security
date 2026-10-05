@@ -47,6 +47,31 @@ def draft_fixture(tmp_path: Path, *, deep: bool = False, workers: int = 1):
     return state, home, scan_dir, scan_id
 
 
+def stop_draft(tmp_path, state, home, scan_id, *, deep=False, retry=False):
+    args = (
+        "fail-deep-scan" if deep else "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+    )
+    if retry:
+        failed = run_workbench_with_fault(
+            tmp_path / "fault.py",
+            state,
+            home,
+            "def fail(*args, **kwargs):\n    raise OSError('injected publication failure')\n"
+            "workbench_saved_results._write_prepared_scan_finalization = fail\n",
+            *args,
+        )
+        assert failed.returncode == 0
+        assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"][
+            "resultsRecoveryNeeded"
+        ]
+        args = ("recover-scan-results", "--scan-id", scan_id)
+    run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
+
+
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan", "recover"])
 def test_empty_artifact_inventory_remains_an_unsealed_draft(tmp_path: Path, operation: str):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
@@ -574,8 +599,9 @@ def test_saved_identity_reuse_preserves_independent_worker_findings(
 @pytest.mark.parametrize(
     "history", ["identityless observation", "identified observation", "worker source"]
 )
+@pytest.mark.parametrize("retry", [False, True])
 def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(
-    tmp_path: Path, history: str
+    tmp_path: Path, history: str, retry: bool
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=history == "worker source")
     path = scan_dir / "findings.json"
@@ -603,19 +629,82 @@ def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(
         reviewed["provenance"]["previousFindings"] = [historical]
         write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical]))
     path.write_text(json.dumps(document))
-    run_workbench(
-        state,
-        "fail-deep-scan" if history == "worker source" else "fail-scan",
-        "--scan-id",
-        scan_id,
-        "--message",
-        "Stopped for test",
-        environment={"CODEX_HOME": str(home)},
-    )
+    stop_draft(tmp_path, state, home, scan_id, deep=history == "worker source", retry=retry)
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
     assert saved["findingCount"] == 1
     assert saved["findings"][0]["severity"]["level"] == "medium"
     assert saved["findings"][0]["title"] == "Reviewed finding"
+
+
+@pytest.mark.parametrize("first_candidate", ["candidate-a", "candidate-b"])
+def test_interleaved_candidate_observations_reuse_identities(tmp_path: Path, first_candidate: str):
+    published = []
+    for retry in (False, True):
+        root = tmp_path / str(retry)
+        root.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(root)
+        path = scan_dir / "findings.json"
+        document = json.loads(path.read_text())
+        template = document["findings"][0]
+        del template["identity"]
+        other_candidate = "candidate-b" if first_candidate == "candidate-a" else "candidate-a"
+        document["findings"] = []
+        for candidate, severity in (
+            (first_candidate, "low"),
+            (other_candidate, "medium"),
+            (first_candidate, "high"),
+        ):
+            finding = json.loads(json.dumps(template))
+            finding["provenance"]["candidateId"] = candidate
+            finding["severity"]["level"] = severity
+            document["findings"].append(finding)
+        path.write_text(json.dumps(document))
+        stop_draft(root, state, home, scan_id, retry=retry)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert len(findings) == 2
+        by_candidate = {
+            finding["provenance"]["candidateId"]: (
+                finding["severity"]["level"],
+                finding["identity"],
+            )
+            for finding in findings
+        }
+        assert by_candidate[first_candidate][0] == "high"
+        assert by_candidate[other_candidate][0] == "medium"
+        published.append(by_candidate)
+    assert published[0] == published[1]
+
+
+@pytest.mark.parametrize("source", ["parent", "worker"])
+@pytest.mark.parametrize("explicit_first", [False, True])
+def test_same_candidate_siblings_do_not_borrow_identities(
+    tmp_path: Path, source: str, explicit_first: bool
+):
+    for retry in (False, True):
+        root = tmp_path / str(retry)
+        root.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(root, deep=source == "worker")
+        path = scan_dir / "findings.json"
+        document = json.loads(path.read_text())
+        first = document["findings"][0]
+        del first["identity"]
+        first["title"] = "Alpha"
+        first["provenance"]["candidateId"] = "shared-candidate"
+        second = json.loads(json.dumps(first))
+        second.update(title="Beta", identity={"anchor": "beta"})
+        if source == "worker":
+            for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+                (scan_dir / name).unlink()
+            _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
+            document = json.loads(path.read_text())
+        document["findings"] = [second, first] if explicit_first else [first, second]
+        path.write_text(json.dumps(document))
+        stop_draft(root, state, home, scan_id, deep=source == "worker", retry=retry)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert {finding["title"]: finding["identity"] for finding in findings} == {
+            "Alpha": {"anchor": "alpha"},
+            "Beta": {"anchor": "beta"},
+        }
 
 
 @pytest.mark.parametrize("explicit_first", [False, True])
