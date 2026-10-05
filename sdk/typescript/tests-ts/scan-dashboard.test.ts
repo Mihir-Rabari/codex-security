@@ -1,3 +1,4 @@
+import stringWidth from "string-width";
 import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
@@ -1933,3 +1934,50 @@ function failingDashboardOutput(output: string[]) {
     return true;
   };
 }
+
+test("aligns component columns by terminal width and retains trailing cost", async () => {
+  const stderr = capture(true);
+  const dashboard = createDashboard(
+    { ...stderr.stream, columns: 160, rows: 24 },
+    { presentation: "components", showCost: true },
+  );
+  const receipts: ComponentReceipt[] = [
+    "a".repeat(74),
+    "界".repeat(37),
+    "e\u0301".repeat(37),
+  ].map((name, index) => ({
+    id: String(index),
+    name,
+    paths: ["src"],
+    status: "pending",
+    outputDir: `/synthetic/results/${index}`,
+  }));
+  dashboard.start();
+  dashboard.setComponents(receipts);
+  for (const receipt of receipts)
+    dashboard.recordComponentEvent({
+      componentId: receipt.id,
+      type: "cost",
+      value: {
+        model: "synthetic-model",
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 1,
+        estimatedUsd: 1,
+        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
+      },
+    });
+  await Promise.resolve();
+  const frame = stripVTControlCharacters(
+    stderr.text().split("\u001B[H").at(-1)!,
+  );
+  const rows = frame.split("\n").filter((line) => line.includes("Queued"));
+  expect(rows).toHaveLength(3);
+  for (const row of rows) expect(row).toContain("$1.00");
+  expect(
+    new Set(rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))))
+      .size,
+  ).toBe(1);
+  dashboard.stop();
+});

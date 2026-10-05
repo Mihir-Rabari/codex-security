@@ -3891,7 +3891,7 @@ describe("CodexSecurity orchestration", () => {
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench([]),
-        createCodex: completedCodex(root, copyCompletedScan),
+        createCodex: completedCodex(root),
       },
     );
     try {

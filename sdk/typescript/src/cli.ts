@@ -9228,9 +9228,14 @@ function componentScanEventLine(
     const progress = event.value;
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
   }
-  if (event.type !== "cost") return null;
-  const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatScanCost(cost)}` : ""}\n`;
+  if (event.type === "usage") {
+    const tokens = formatTokenUsage(event.value);
+    return tokens === null
+      ? null
+      : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type !== "cost" || !showCost) return null;
+  return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
 }
 
 function protectedRootErrorMessage(
