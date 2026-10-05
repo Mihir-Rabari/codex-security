@@ -304,6 +304,72 @@ def test_stopped_finding_keeps_explicit_identity_across_line_move(
 
 
 @pytest.mark.parametrize("retry", [False, True])
+def test_parent_candidates_keep_their_own_moved_checkpoint_history(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    template = document["findings"][0]
+    template["identity"] = {"anchor": "shared-explicit-identity"}
+    template["locations"][0].update(startLine=2, endLine=2)
+    parents = []
+    for candidate in ("candidate-a", "candidate-b"):
+        finding = json.loads(json.dumps(template))
+        finding["provenance"]["candidateId"] = candidate
+        finding["title"] = candidate
+        parents.append(finding)
+    checkpoint_finding = json.loads(json.dumps(parents[1]))
+    checkpoint_finding["locations"][0].update(startLine=1, endLine=1)
+    checkpoint_finding["title"] = "Earlier candidate B"
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan_id, findings=[checkpoint_finding])
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    document["findings"] = parents
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 2
+    by_candidate = {finding["provenance"]["candidateId"]: finding for finding in findings}
+    assert not any(
+        previous["provenance"].get("candidateId") == "candidate-b"
+        for previous in by_candidate["candidate-a"]["provenance"].get("previousFindings", [])
+    )
+    assert any(
+        previous["provenance"].get("candidateId") == "candidate-b"
+        and previous["locations"][0]["startLine"] == 1
+        for previous in by_candidate["candidate-b"]["provenance"].get("previousFindings", [])
+    )
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_source_reused_identity_keeps_independent_locations(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    finding["identity"] = {"anchor": "reused-source-identity"}
+    observations = []
+    for line in (1, 3):
+        previous = json.loads(json.dumps(finding))
+        previous["locations"][0].update(startLine=line, endLine=line)
+        observations.append(previous)
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan_id, findings=observations)
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    finding["locations"][0].update(startLine=2, endLine=2)
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 3
+    assert {finding["locations"][0]["startLine"] for finding in findings} == {1, 2, 3}
+
+
+@pytest.mark.parametrize("retry", [False, True])
 def test_ambiguous_parent_identity_keeps_stronger_independent_observation(
     tmp_path: Path, retry: bool
 ):
