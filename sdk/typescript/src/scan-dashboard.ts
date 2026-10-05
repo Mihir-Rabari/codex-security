@@ -1223,13 +1223,13 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
       separator = word;
       continue;
     }
-    const wordWidth = stringWidth(word);
+    const parts = columnChunks(word, available);
+    const wordWidth = parts.length > 1 ? available + 1 : stringWidth(word);
     if (wordWidth > available) {
       if (current !== "") {
         append(current);
         current = "";
       }
-      const parts = columnChunks(word, available);
       current = parts.pop()!;
       for (const part of parts) append(part);
     } else if (

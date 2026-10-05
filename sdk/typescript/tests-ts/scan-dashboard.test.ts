@@ -54,40 +54,49 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
-  test("retains the beginning and end of a large wrapped session result", () => {
-    const stderr = capture(true);
-    const input = new DashboardTestInput();
-    const dashboard = createDashboard(
-      { ...stderr.stream, columns: 88, rows: 24 },
-      { input },
-    );
-    dashboard.start();
-    input.emit("data", "d");
-    dashboard.recordDetails({
-      threadId: "synthetic-thread",
-      parentThreadId: null,
-      event: {
-        type: "response_item",
-        payload: {
-          type: "function_call_output",
-          output: "START\n" + "x".repeat(4 * 1024 * 1024) + "界\nEND",
+  test.each(["", "\n"])(
+    "retains a large wrapped session result with separator %j",
+    (separator) => {
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(
+        { ...stderr.stream, columns: 88, rows: 24 },
+        { input },
+      );
+      dashboard.start();
+      input.emit("data", "d");
+      dashboard.recordDetails({
+        threadId: "synthetic-thread",
+        parentThreadId: null,
+        event: {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            output: ["START", "x".repeat(4 * 1024 * 1024) + "界", "END"].join(
+              separator,
+            ),
+          },
         },
-      },
-    });
-    expect(lastFrame(stderr)).toContain("END");
-    dashboard.scroll(Number.MAX_SAFE_INTEGER);
-    expect(lastFrame(stderr)).toContain("START");
-    dashboard.scroll(-Number.MAX_SAFE_INTEGER);
-    expect(lastFrame(stderr)).toContain("END");
-    for (const line of lastFrame(stderr).split("\n")) {
-      expect(line.length).toBeLessThanOrEqual(88);
-    }
-    dashboard.stop();
-  });
+      });
+      expect(lastFrame(stderr)).toContain("END");
+      dashboard.scroll(Number.MAX_SAFE_INTEGER);
+      expect(lastFrame(stderr)).toContain("START");
+      dashboard.scroll(-Number.MAX_SAFE_INTEGER);
+      expect(lastFrame(stderr)).toContain("END");
+      for (const line of lastFrame(stderr).split("\n")) {
+        expect(line.length).toBeLessThanOrEqual(88);
+      }
+      dashboard.stop();
+    },
+  );
 
-  test.each(["A\u0301", "A\uFE0F", "1\uFE0F\u20E3", "\u0600A", "👩‍💻"])(
-    "keeps %s intact at ASCII wrapping boundaries",
-    (cluster) => {
+  test.each(
+    ["A\u0301", "A\uFE0F", "1\uFE0F\u20E3", "\u0600A", "👩‍💻"].flatMap(
+      (cluster) => [true, false].map((code) => [cluster, code] as const),
+    ),
+  )(
+    "keeps %s intact at ASCII wrapping boundaries with code=%s",
+    (cluster, code) => {
       for (let padding = 0; padding < 40; padding++) {
         const stderr = capture(true);
         const dashboard = createDashboard({
@@ -100,7 +109,12 @@ describe("live scan dashboard", () => {
           id: "mixed-code",
           kind: "message",
           status: "completed",
-          description: "```text\n" + "x".repeat(padding) + cluster + "yyy\n```",
+          description:
+            (code ? "```text\n" : "") +
+            "x".repeat(padding) +
+            cluster +
+            "yyy" +
+            (code ? "\n```" : ""),
           paths: [],
         });
         expect(lastFrame(stderr)).toContain(cluster);
