@@ -25,24 +25,10 @@ const PROMPTFOO_ENTRYPOINT = path.join(
 );
 
 function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
-  fs.mkdirSync(targetRoot, { recursive: true });
-  for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
-    if (excludedNames.has(entry.name)) {
-      continue;
-    }
-    const sourcePath = path.join(sourceRoot, entry.name);
-    const targetPath = path.join(targetRoot, entry.name);
-    if (entry.isDirectory()) {
-      copyDirectory(sourcePath, targetPath, excludedNames);
-      continue;
-    }
-    if (!entry.isFile()) {
-      throw new Error(
-        "Refusing to stage non-file runtime entry: " + sourcePath,
-      );
-    }
-    fs.copyFileSync(sourcePath, targetPath);
-  }
+  fs.cpSync(sourceRoot, targetRoot, {
+    recursive: true,
+    filter: (source) => !excludedNames.has(path.basename(source)),
+  });
 }
 
 /**
@@ -60,10 +46,10 @@ function stageSkillRuntime() {
     new Set(["evals"]),
   );
   for (const sharedDirectory of ["references", "schemas"]) {
-    const sourcePath = path.join(PLUGIN_ROOT, sharedDirectory);
-    if (fs.existsSync(sourcePath)) {
-      copyDirectory(sourcePath, path.join(stagedPluginRoot, sharedDirectory));
-    }
+    copyDirectory(
+      path.join(PLUGIN_ROOT, sharedDirectory),
+      path.join(stagedPluginRoot, sharedDirectory),
+    );
   }
   fs.mkdirSync(path.join(stagedPluginRoot, "scripts"));
   for (const launcher of [
