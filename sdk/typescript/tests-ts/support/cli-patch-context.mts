@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
@@ -46,12 +47,10 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
       kind.startsWith("relative")
         ? relative(repository, join(alias, ".git"))
         : join(alias, ".git")
-    )
-      .split(sep)
-      .join("/");
+    ).replaceAll(sep, "/");
     await writeFile(
       environment["GIT_CONFIG_GLOBAL"]!,
-      '[includeIf "gitdir:**/alias/.git"]\npath = identity\n',
+      `[includeIf "gitdir:${kind.startsWith("relative") ? `${repository.replaceAll(sep, "/")}/${environment["GIT_DIR"]}` : "**/alias/.git"}"]\npath = identity\n`,
     );
     await writeFile(
       join(directory, "identity"),
@@ -59,12 +58,11 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
     );
     git(["config", "--local", "--unset", "user.name"]);
     git(["config", "--local", "--unset", "user.email"]);
-    if (
-      !git(["var", "GIT_AUTHOR_IDENT"]).startsWith(
-        "Synthetic Alias <alias@example.test>",
-      )
-    )
-      throw new Error("Git alias identity was not selected before patching");
+    assert.ok(
+      git(["var", "GIT_AUTHOR_IDENT"]).startsWith(
+        "Synthetic Alias <alias@example.test> ",
+      ),
+    );
   } else {
     await mkdir(join(directory, "elsewhere", "target"), { recursive: true });
     await symlink(
