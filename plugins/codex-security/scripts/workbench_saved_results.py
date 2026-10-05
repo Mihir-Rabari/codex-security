@@ -563,26 +563,22 @@ def _finding_key(finding: dict[str, Any]) -> str:
         normalized.pop("identity", None)
         _ensure_finding_identity(normalized)
         identity = normalized["identity"]
+    return _digest([finding.get("ruleId"), identity, _finding_locations(finding)])
+
+
+def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
     locations = finding.get("locations", [])
-    if not isinstance(locations, list):
-        locations = []
-    return _digest(
-        [
-            finding.get("ruleId"),
-            identity,
-            sorted(
-                (
-                    (
-                        location.get("path"),
-                        location.get("startLine"),
-                        location.get("endLine", location.get("startLine")),
-                    )
-                    for location in locations
-                    if isinstance(location, dict)
-                ),
-                key=_encoded,
-            ),
-        ]
+    return sorted(
+        (
+            (
+                location.get("path"),
+                location.get("startLine"),
+                location.get("endLine", location.get("startLine")),
+            )
+            for location in (locations if isinstance(locations, list) else [])
+            if isinstance(location, dict)
+        ),
+        key=_encoded,
     )
 
 
@@ -1364,6 +1360,42 @@ def merge_saved_results(
             [],
         )
         return bool(document["findings"])
+
+    def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
+        provenance = finding.get("provenance", {})
+        candidate = finding_candidate_id(finding)
+        return _digest(
+            [
+                provenance.get("workerId") or owner,
+                candidate,
+                [finding.get("ruleId"), _finding_locations(finding)]
+                if candidate
+                else _finding_content(finding),
+            ]
+        )
+
+    # Raw checkpoints can omit an identity already assigned in another saved source.
+    saved_identities: dict[str, dict[str, Any] | None] = {}
+    for _, draft, owner in all_sources:
+        for finding in draft["findings"]:
+            if not isinstance(finding, dict) or not isinstance(finding.get("identity"), dict):
+                continue
+            if not valid_finding(finding):
+                continue
+            key = saved_identity_key(finding, owner)
+            if key not in saved_identities:
+                saved_identities[key] = finding["identity"]
+            elif saved_identities[key] != finding["identity"]:
+                saved_identities[key] = None
+    for _, draft, owner in all_sources:
+        for finding in draft["findings"]:
+            if not isinstance(finding, dict) or "identity" in finding:
+                continue
+            if not isinstance(finding.get("provenance"), dict):
+                continue
+            identity = saved_identities.get(saved_identity_key(finding, owner))
+            if identity is not None:
+                finding["identity"] = copy.deepcopy(identity)
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {

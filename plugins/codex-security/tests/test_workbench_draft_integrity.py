@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -457,3 +458,50 @@ def test_recovery_reserves_every_generated_sibling_identity(tmp_path: Path):
     assert {finding["provenance"]["candidateId"] for finding in findings} == {
         f"candidate-{index}" for index in range(4)
     }
+
+
+@pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("candidate_siblings", [False, True])
+def test_raw_checkpoint_and_published_rows_reuse_saved_identities(
+    tmp_path: Path, operation: str, candidate_siblings: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    expected_anchor = "saved-original"
+    finding["identity"] = {"anchor": expected_anchor}
+    if candidate_siblings:
+        finding["identity"]["anchor"] = re.sub(
+            r"[^a-z0-9._/-]+", "-", finding["title"].lower()
+        ).strip("._/-")
+        expected_anchor = finding["identity"]["anchor"]
+        finding["provenance"]["candidateId"] = "candidate-a"
+        second = json.loads(json.dumps(finding))
+        second["identity"]["instance"] = "saved-2"
+        second["provenance"]["candidateId"] = "candidate-b"
+        document["findings"].append(second)
+        raw = {key: value for key, value in second.items() if key != "identity"}
+        write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[raw]))
+    else:
+        finding["provenance"].pop("candidateId", None)
+        write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[finding]))
+        del finding["identity"]
+    path.write_text(json.dumps(document))
+    coverage = scan_dir / "coverage.json"
+    coverage.write_bytes(coverage.read_bytes())
+    run_workbench(
+        state,
+        operation,
+        "--scan-id",
+        scan_id,
+        *(["--message", "Stopped for test"] if operation == "fail-scan" else []),
+        environment={"CODEX_HOME": str(home)},
+    )
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert saved["findingCount"] == (2 if candidate_siblings else 1)
+    assert not saved["resultsRecoveryNeeded"]
+    identities = [row["identity"] for row in saved["findings"]]
+    assert {"anchor": expected_anchor} in identities
+    if candidate_siblings:
+        assert {"anchor": expected_anchor, "instance": "saved-2"} in identities
