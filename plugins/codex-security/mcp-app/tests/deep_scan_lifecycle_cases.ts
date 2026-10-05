@@ -54,7 +54,11 @@ export async function testDeepScanLifecycle({
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
 
   async function lateCancellationWaitsForPersistence() {
-    const completedParentStatus: string = JSON.parse(
+    const parentContract: {
+      complete: string;
+      failed: string;
+      cancellationError: string;
+    } = JSON.parse(
       execFileSync(
         process.env.PYTHON || "python3",
         [
@@ -70,13 +74,21 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     write_completed_contract(output, scan_id, target)
     run_workbench(state, "complete-scan", "--scan-id", scan_id)
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)
-    print(json.dumps(saved["workspace"]["results"]["progress"]["status"]))
+    complete = saved["workspace"]["results"]["progress"]["status"]
+with tempfile.TemporaryDirectory(prefix="deep-scan-failure-contract-") as root:
+    state, target, scan_id, output = empty_target_scan(Path(root))
+    run_workbench(state, "fail-scan", "--scan-id", scan_id, "--message", "synthetic external failure")
+    canceled = run_workbench(state, "cancel-scan", "--scan-id", scan_id, check=False)
+    assert canceled["returncode"] != 0
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)
+    print(json.dumps({"complete": complete, "failed": saved["workspace"]["results"]["progress"]["status"], "cancellationError": canceled["stderr"].strip()}))
 `,
           fileURLToPath(new URL("../../tests/", import.meta.url)),
         ],
         { encoding: "utf8" },
       ),
     );
+    const completedParentStatus = parentContract.complete;
     const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
     const source = await readFile(
       new URL("../server.ts", import.meta.url),
@@ -90,6 +102,8 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       rejectPersistence: boolean;
       calls: string[];
       readParent?: () => Promise<{ workspace: typeof current.workspace }>;
+      failureResponse?: PromiseWithResolvers<void>;
+      failureCommitted?: PromiseWithResolvers<void>;
       workspace: {
         setup: { submitted: boolean };
         results: { progress: { status: string } };
@@ -112,7 +126,9 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           if (command === "fail-scan") {
             current.store.run.status = "failed";
             current.store.run.error = "synthetic external failure";
-            current.workspace.results.progress.status = "failed";
+            current.workspace.results.progress.status = parentContract.failed;
+            current.failureCommitted?.resolve();
+            if (current.failureResponse) await current.failureResponse.promise;
             return { workspace: current.workspace };
           }
           assert.equal(command, "cancel-scan");
@@ -125,6 +141,8 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             throw new Error("synthetic duplicate cancellation persistence");
           current.persistEntered.resolve();
           await current.persistRelease.promise;
+          if (current.workspace.results.progress.status !== "running")
+            throw new Error(parentContract.cancellationError);
           if (current.rejectPersistence)
             throw new Error("synthetic cancellation persistence failure");
           current.store.run.status = "canceled";
@@ -181,6 +199,8 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
         "final read completed parent",
         "final read parent completes during admission",
         "onComplete external failure during cleanup",
+        "final read external failure during cancellation",
+        "final read delayed external failure response",
       ]) {
         for (const rejectPersistence of [false, true]) {
           const fixture = await fixtureRun(config);
@@ -194,6 +214,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           const failureEntered = Promise.withResolvers<void>();
           const failureRelease = Promise.withResolvers<void>();
           const failureSaved = Promise.withResolvers<void>();
+          const failureResponse = Promise.withResolvers<void>();
           const admissionEntered = Promise.withResolvers<void>();
           const admissionRelease = Promise.withResolvers<void>();
           const heartbeatRead = Promise.withResolvers<void>();
@@ -201,6 +222,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           let publications = 0;
           let cancellation: ReturnType<typeof cancel> | undefined;
           let repeatedCancellation: ReturnType<typeof cancel> | undefined;
+          let externalFailure: ReturnType<typeof fail> | undefined;
           let coordinator:
             | ReturnType<
                 InstanceType<
@@ -212,6 +234,11 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           const concurrentFailure = stage.endsWith("external failure");
           const failureDuringCleanup =
             stage === "onComplete external failure during cleanup";
+          const failureDuringCancellation =
+            stage === "final read external failure during cancellation" ||
+            stage === "final read delayed external failure response";
+          const delayedFailureResponse =
+            stage === "final read delayed external failure response";
           const completedParent = stage.includes("completed parent");
           const completesDuringAdmission = stage.includes(
             "completes during admission",
@@ -241,6 +268,9 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             persistRelease,
             rejectPersistence,
             calls: [],
+            ...(delayedFailureResponse
+              ? { failureResponse, failureCommitted: failureSaved }
+              : {}),
             workspace: {
               setup: { submitted: true },
               results: {
@@ -444,6 +474,36 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
               }
             }
             if (failureDuringCleanup) await failureSaved.promise;
+            if (failureDuringCancellation) {
+              await persistEntered.promise;
+              externalFailure = fail(
+                {
+                  scanId: fixture.run.scanId,
+                  message: "synthetic external failure",
+                },
+                {},
+              );
+              if (delayedFailureResponse) await failureSaved.promise;
+              else await externalFailure;
+              persistRelease.resolve();
+              await assert.rejects(
+                cancellation,
+                /Only a running scan can be canceled/,
+              );
+              release.resolve();
+              const failed = await terminal;
+              assert.equal(failed.status, "failed");
+              assert.match(failed.error, /synthetic external failure/);
+              assert.equal(publications, 1);
+              assert.equal(store.run.status, "failed");
+              assert.equal(
+                current.workspace.results.progress.status,
+                parentContract.failed,
+              );
+              failureResponse.resolve();
+              await externalFailure;
+              continue;
+            }
             release.resolve();
             if (completedParent || completesDuringAdmission) {
               persistRelease.resolve();
@@ -592,6 +652,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             release.resolve();
             persistRelease.resolve();
             failureRelease.resolve();
+            failureResponse.resolve();
             heartbeatRelease.resolve();
             admissionRelease.resolve();
             registry.shutdown("fixture cleanup");
@@ -599,6 +660,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
               terminal,
               cancellation,
               repeatedCancellation,
+              externalFailure,
             ]);
           }
         }

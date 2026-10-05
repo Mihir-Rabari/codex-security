@@ -462,6 +462,7 @@ export class DeepScanCoordinator {
           current.coordinatorGeneration ===
             this.options.run.coordinatorGeneration
         ) {
+          if (current.status === "failed") this.state = current;
           try {
             await this.options.onStopped(current);
           } catch (error) {
@@ -512,7 +513,7 @@ export class DeepScanCoordinator {
       }
       if (this.cancellationPersistence)
         await this.cancellationPersistence.promise.catch(() => {});
-      if (this.cancellationPersistence?.failure) {
+      if (this.cancellationPersistence?.failure && !this.failurePersisted) {
         throw this.cancellationPersistence.failure.error;
       }
       if (this.canceled && !this.failurePersisted)
