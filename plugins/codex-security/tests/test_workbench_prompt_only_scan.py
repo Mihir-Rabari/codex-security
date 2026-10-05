@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from unittest import mock
 
 import pytest
@@ -226,7 +227,7 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
 
 
 @pytest.mark.parametrize("target_changes", [False, True])
-def test_prompt_scan_checks_target_without_holding_database_lock(
+def test_prompt_scan_revalidates_target_after_database_lock_wait(
     tmp_path: Path, target_changes: bool
 ) -> None:
     state_dir = tmp_path / "state"
@@ -256,30 +257,59 @@ def test_prompt_scan_checks_target_without_holding_database_lock(
         reasoning_effort=None,
     )
 
+    acquiring = Event()
+
     def inspect_identity(*args, **kwargs):
         nonlocal calls
         calls += 1
-        # Another command must be able to open its own migration transaction
-        # while this scan hashes the target, even on a large source tree.
-        with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
-            other.execute("BEGIN IMMEDIATE")
-        if target_changes and calls == 2:
-            source.write_text("changed\n")
+        if calls == 1:
+            # Initial hashing does not need the database writer lock.
+            with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
+                other.execute("BEGIN IMMEDIATE")
         return identity(*args, **kwargs)
 
     with mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}):
         connection = globals_["connect"]()
+        blocker = sqlite3.connect(state_dir / "workbench.sqlite3", check_same_thread=False)
+
+        class ContendedConnection:
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+            def execute(self, sql, *parameters):
+                if sql == "BEGIN IMMEDIATE":
+                    blocker.execute("BEGIN IMMEDIATE")
+                    acquiring.set()
+                return connection.execute(sql, *parameters)
+
+        def release_writer():
+            assert acquiring.wait(timeout=10)
+            if target_changes:
+                source.write_text("changed during lock acquisition\n")
+            blocker.commit()
+
         try:
-            with mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}):
+            with (
+                ThreadPoolExecutor(max_workers=1) as pool,
+                mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}),
+            ):
+                released = pool.submit(release_writer)
                 if target_changes:
                     with pytest.raises(SystemExit, match="target changed"):
-                        start(connection, args, headless_standard=False)
+                        start(ContendedConnection(), args, headless_standard=False)
                 else:
                     assert (
-                        start(connection, args, headless_standard=False)["startDisposition"]
+                        start(ContendedConnection(), args, headless_standard=False)[
+                            "startDisposition"
+                        ]
                         == "created"
                     )
+                released.result()
+            count = connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+            assert count == (0 if target_changes else 1)
         finally:
+            acquiring.set()
+            blocker.close()
             connection.close()
     assert calls == 2
 

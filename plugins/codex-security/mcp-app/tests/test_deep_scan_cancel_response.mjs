@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { temporaryDirectory } from "./support/temporary-directories.mjs";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.mjs";
 
@@ -7,6 +10,7 @@ const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
 const source = await readFile(new URL("../server.ts", import.meta.url), "utf8");
 const calls = [];
 let workspace;
+let fixtureRoot;
 let joining = false;
 let persisted;
 let release;
@@ -25,9 +29,10 @@ globalThis.cancelResponseFixture = {
   },
   async workbench(args) {
     calls.push(args);
-    if (args[0] === "cancel-scan") workspace.scan.progress.status = "canceled";
+    if (args[0] === "cancel-scan")
+      workspace.results.progress.status = "canceled";
     return args[0] === "get-scan"
-      ? { workspace, scan: workspace.scan }
+      ? { workspace, scan: workspace.results }
       : workspace;
   },
 };
@@ -59,7 +64,7 @@ try {
     server._registeredTools.cancel_codex_security_scan_from_app.handler;
   workspace = {
     setup: { submitted: true },
-    scan: { progress: { status: "canceled" } },
+    results: { progress: { status: "canceled" } },
   };
   persisted = Promise.withResolvers();
   release = Promise.withResolvers();
@@ -76,7 +81,7 @@ try {
   );
   workspace = {
     setup: { submitted: true },
-    scan: { progress: { status: "failed" } },
+    results: { progress: { status: "failed" } },
   };
   assert.deepEqual(
     (await cancel({ scanId: "fixture-scan" })).structuredContent.workspace,
@@ -87,15 +92,61 @@ try {
     "get-scan",
     "late cancellation must not overwrite a saved failure",
   );
-  workspace = {
-    setup: { submitted: true },
-    scan: { progress: { status: "running" } },
-  };
+  fixtureRoot = await temporaryDirectory("cancel-saved-parent-", true);
+  const target = join(fixtureRoot, "repository");
+  const output = join(fixtureRoot, "output");
+  await mkdir(target);
+  await mkdir(output, { mode: 0o700 });
+  await writeFile(join(target, "fixture.py"), "value = 1\n");
+  const workbenchPath = fileURLToPath(
+    new URL("../../scripts/workbench_db.py", import.meta.url),
+  );
+  const run = (args) =>
+    JSON.parse(
+      execFileSync(
+        process.env.PYTHON || "python3",
+        ["-I", "-B", workbenchPath, ...args],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: join(fixtureRoot, "state"),
+          },
+        },
+      ),
+    );
+  const registered = run([
+    "register-cli-scan",
+    "--repository",
+    target,
+    "--scan-dir",
+    output,
+    "--recipe-json",
+    JSON.stringify({
+      repository: target,
+      target: { kind: "repository", paths: [] },
+      mode: "standard",
+      config: {},
+    }),
+  ]);
+  assert.equal(
+    run(["get-scan", "--scan-id", registered.scanId]).workspace.results.progress
+      .status,
+    "running",
+  );
   // Local completion can leave the durable parent running after discovery or a rejected failure write.
   globalThis.cancelResponseFixture.registry.cancelAndWait = async () => true;
-  const parentCanceled = await cancel({ scanId: "fixture-scan" });
+  globalThis.cancelResponseFixture.workbench = async (args) => {
+    calls.push(args);
+    return run(args);
+  };
+  const parentCanceled = await cancel({ scanId: registered.scanId });
   assert.equal(
-    parentCanceled.structuredContent.workspace.scan.progress.status,
+    parentCanceled.structuredContent.workspace.results.progress.status,
+    "canceled",
+  );
+  assert.equal(
+    run(["get-scan", "--scan-id", registered.scanId]).scan.progress.status,
     "canceled",
   );
   assert.equal(
@@ -106,4 +157,5 @@ try {
   await server.close();
 } finally {
   delete globalThis.cancelResponseFixture;
+  if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 }

@@ -160,3 +160,20 @@ def test_legacy_caller_can_supply_already_archived_output(previous_scan):
     assert registered["archivedScanDir"] == str(archive)
     assert (archive / "report.md").read_text() == "previous scan\n"
     assert stored_paths(state, scan_id) == (str(archive), str(archive / "report.md"))
+
+
+def test_registration_does_not_archive_an_ancestor_of_its_repository(tmp_path):
+    state = tmp_path / "state"
+    output = tmp_path / "output"
+    target = output / "repository"
+    target.mkdir(parents=True)
+    output.chmod(0o700)
+    source = target / "fixture.py"
+    source.write_text("preserved source\n")
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        register(state, target, output, "--archive-existing")
+    assert "selected target" in error.value.stderr
+    assert source.read_text() == "preserved source\n"
+    assert list(tmp_path.glob("output.previous-*")) == []
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0

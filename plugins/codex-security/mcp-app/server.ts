@@ -1279,7 +1279,7 @@ export function createCodexSecurityServer(): McpServer {
         "workspace"
       ] as JsonObject;
     }
-    const scan = workspace?.["scan"];
+    const scan = workspace?.["results"];
     const progress = isJsonObject(scan) ? scan["progress"] : undefined;
     if (
       workspace === undefined ||

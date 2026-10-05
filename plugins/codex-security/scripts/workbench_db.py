@@ -940,26 +940,27 @@ def _start_prompt_driven_scan(
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
 
-    current_target = require_remediation_target(target_path)
-    current_diff_target = (
-        require_diff_target(
-            current_target,
-            args.diff_target_kind,
-            args.diff_base_revision,
-            args.diff_head_revision,
-            args.diff_content_digest,
-        )
-        if args.mode == "diff"
-        else None
-    )
-    if (
-        scan_target_identity(current_target, current_diff_target) != target_identity
-        or scan_diff_identity(current_diff_target) != diff_identity
-    ):
-        raise SystemExit("The selected scan target changed while the scan was starting. Try again.")
-
     connection.execute("BEGIN IMMEDIATE")
     try:
+        current_target = require_remediation_target(target_path)
+        current_diff_target = (
+            require_diff_target(
+                current_target,
+                args.diff_target_kind,
+                args.diff_base_revision,
+                args.diff_head_revision,
+                args.diff_content_digest,
+            )
+            if args.mode == "diff"
+            else None
+        )
+        if (
+            scan_target_identity(current_target, current_diff_target) != target_identity
+            or scan_diff_identity(current_diff_target) != diff_identity
+        ):
+            raise SystemExit(
+                "The selected scan target changed while the scan was starting. Try again."
+            )
         existing = connection.execute(
             """
             SELECT scans.* FROM scans
@@ -1623,8 +1624,10 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
-    if scan_dir == repository or repository in scan_dir.parents:
-        raise SystemExit("The scan artifact directory must be outside the selected target.")
+    if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
+        raise SystemExit(
+            "The scan artifact directory must be outside and not contain the selected target."
+        )
     if (not args.archive_existing or args.archived_scan_dir is not None) and next(
         scan_dir.iterdir(), None
     ) is not None:
