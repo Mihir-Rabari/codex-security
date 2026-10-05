@@ -47,6 +47,8 @@ for (const layout of ["standard", "diff", "deep"]) {
     "owner",
     "siblings",
     "preserved",
+    "new-sibling",
+    "new-worker-sibling",
   ]) {
     for (const status of ["failed", "canceled"]) {
       test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
@@ -54,21 +56,35 @@ for (const layout of ["standard", "diff", "deep"]) {
         const count =
           variant === "three"
             ? 3
-            : ["siblings", "preserved"].includes(variant)
+            : [
+                  "siblings",
+                  "preserved",
+                  "new-sibling",
+                  "new-worker-sibling",
+                ].includes(variant)
               ? 2
               : 1;
         const findings = Array.from({ length: count }, (_, index) => {
           const finding = findingFor(
-            variant === "siblings" ? "shared-review" : `review-${index + 1}`,
+            variant.includes("sibling")
+              ? "shared-review"
+              : `review-${index + 1}`,
           );
-          if (variant === "owner") finding.provenance.workerId = "worker-1";
-          if (variant === "siblings")
+          if (["owner", "new-worker-sibling"].includes(variant))
+            finding.provenance.workerId = "worker-1";
+          if (variant.includes("sibling"))
             finding.title = `Synthetic sibling ${index + 1}`;
           if (variant === "preserved")
             finding.locations[0].startLine = index + 1;
           return finding;
         });
         await f.write({ ...f.draft(), findings });
+        if (variant.startsWith("new-")) {
+          const file = path.join(f.root, "findings.json");
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          saved.findings = saved.findings.slice(0, 1);
+          await writeFile(file, JSON.stringify(saved));
+        }
         if (variant === "preserved") {
           const file = path.join(f.root, "findings.json");
           const saved = JSON.parse(await readFile(file, "utf8"));

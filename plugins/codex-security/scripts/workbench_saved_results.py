@@ -1516,14 +1516,16 @@ def merge_saved_results(
             ordered_outcomes[key] = (order, relative)
     checkpoint_identities: dict[str, tuple[dict[str, Any], Any] | None] = {}
 
-    def checkpoint_identity_keys(finding: dict[str, Any]) -> tuple[str, str]:
+    def checkpoint_identity_keys(
+        finding: dict[str, Any], owner: str | None = None
+    ) -> tuple[str, str]:
         provenance = finding.get("provenance", {})
         extensions = finding.get("extensions")
         if not isinstance(extensions, dict):
             extensions = {}
         candidate = _digest(
             [
-                provenance.get("workerId"),
+                provenance.get("workerId", owner),
                 finding_candidate_id(finding),
                 finding.get("ruleId"),
                 finding.get("locations"),
@@ -1785,6 +1787,11 @@ def merge_saved_results(
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
+        source_siblings: dict[str, set[str]] = {}
+        for value in draft["findings"]:
+            if isinstance(value, dict) and isinstance(value.get("provenance"), dict):
+                sibling, candidate = checkpoint_identity_keys(value, worker_id)
+                source_siblings.setdefault(candidate, set()).add(sibling)
         for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
@@ -1859,7 +1866,11 @@ def merge_saved_results(
             # Reuse generated identities from the canonical parent, including the
             # original identity retained when distinct source locations collided.
             if "identity" not in finding:
-                for source_key in checkpoint_identity_keys(finding):
+                sibling, candidate = checkpoint_identity_keys(finding)
+                source_keys = [sibling]
+                if len(source_siblings.get(candidate, ())) == 1:
+                    source_keys.append(candidate)
+                for source_key in source_keys:
                     saved_identity = checkpoint_identities.get(source_key)
                     if saved_identity is not None:
                         identity, preserved_identity = copy.deepcopy(saved_identity)
