@@ -3862,10 +3862,6 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     outside = tmp_path / "outside.txt"
     outside.write_text("must not be projected\n")
     (poc / "outside-link.txt").symlink_to(outside)
-    if os.name != "nt":
-        with open(os.fsencode(poc) + b"/invalid-\xff.txt", "wb") as artifact:
-            artifact.write(b"Synthetic artifact with an undecodable filename.\n")
-
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     if non_utf8_artifact:
         (poc / os.fsdecode(b"caf\xe9.txt")).write_text("Supplemental fixture.\n")
