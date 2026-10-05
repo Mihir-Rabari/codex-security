@@ -76,6 +76,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
+  prepareScanRegistrationOutput,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -5776,7 +5777,13 @@ describe("runtime directories and plugin Python boundary", () => {
     await expect(stat(preview!)).rejects.toThrow();
 
     expect(
-      await prepareOutputDir(output, "repo", undefined, undefined, true),
+      await prepareScanRegistrationOutput(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+      ),
     ).toBe(output);
     expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
@@ -5799,6 +5806,45 @@ describe("runtime directories and plugin Python boundary", () => {
     }
 
     expect(await planOutputArchive(output)).not.toBeNull();
+  });
+
+  test("archives prior output through the exported preparation helper", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "scan");
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+    const archived: string[] = [];
+
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
+    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
+      "previous scan\n",
+    );
+    expect(await readdir(output)).toEqual([]);
+    expect(
+      await prepareOutputDir(
+        output,
+        "repo",
+        undefined,
+        undefined,
+        true,
+        (path) => {
+          archived.push(path);
+        },
+      ),
+    ).toBe(output);
+    expect(archived).toHaveLength(1);
   });
 
   test("validates explicit output directories and creates private temporary paths", async () => {
