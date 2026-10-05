@@ -4835,3 +4835,14 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test("imports maintainer utilities from a Node stdin module", () => {
+  const result = spawnSync("node", ["--input-type=module", "-"], {
+    cwd: resolve(import.meta.dir, ".."),
+    input:
+      'import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from "../../plugins/codex-security/native/check.mjs"; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);',
+    encoding: "utf8",
+  });
+  expect(result.status).toBe(0);
+  expect(result.stdout.trim()).toBe("function function function function");
+});

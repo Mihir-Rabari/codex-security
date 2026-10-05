@@ -297,7 +297,7 @@ testPosix(
   async () => {
     const digest = `sha256:${"a".repeat(64)}`;
     const response = JSON.stringify([
-      { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+      { name: digest, metadata: { container: { tags: ["0.1.4", "latest"] } } },
     ]);
     expect((await runVersionVerifier(response, false, digest)).status).toBe(0);
     expect(
@@ -308,5 +308,24 @@ testPosix(
       1,
     );
     expect((await runVersionVerifier(response, true, digest)).status).toBe(1);
+    const older = JSON.stringify([
+      { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+      {
+        name: `sha256:${"b".repeat(64)}`,
+        metadata: { container: { tags: ["0.1.5", "latest"] } },
+      },
+    ]);
+    expect((await runVersionVerifier(older, false, digest)).status).toBe(1);
+    expect(
+      (
+        await runVersionVerifier(
+          JSON.stringify([
+            { name: digest, metadata: { container: { tags: ["0.1.4"] } } },
+          ]),
+          false,
+          digest,
+        )
+      ).status,
+    ).toBe(1);
   },
 );

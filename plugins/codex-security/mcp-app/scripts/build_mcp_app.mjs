@@ -127,6 +127,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
 const invokedPath = process.argv[1];
 if (
   invokedPath !== undefined &&
+  invokedPath !== "-" &&
   pathToFileURL(realpathSync(invokedPath)).href === import.meta.url
 ) {
   const args = process.argv.slice(2);

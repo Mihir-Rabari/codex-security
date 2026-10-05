@@ -25,7 +25,9 @@ if ! already_published="$(
                 [.[][] | select(any(.metadata.container.tags[]?; . == $version))] as $existing |
                 if ($existing | length) == 0 then false
                 elif ($digest | test("^sha256:[a-fA-F0-9]{64}$")) then
-                    any($existing[]; .name != $digest)
+                    [.[][] | select(any(.metadata.container.tags[]?; . == "latest"))] as $latest |
+                    any($existing[]; .name != $digest) or
+                    ($latest | length) == 0 or any($latest[]; .name != $digest)
                 else true
                 end
             end
@@ -40,7 +42,7 @@ case "$already_published" in
         exit 0
         ;;
     true)
-        printf '%s\n' "::error::Container version $version already exists; stable version tags cannot be overwritten." >&2
+        printf '%s\n' "::error::Container version $version already exists; retries require both that version and latest to match the verified digest." >&2
         exit 1
         ;;
     *)

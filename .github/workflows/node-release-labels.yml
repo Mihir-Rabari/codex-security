@@ -91,7 +91,7 @@ jobs:
               --jq '.[].name'
           )"
 
-          declare -A label_actors=()
+          label_events=""
           if [[ -n "$current_labels" ]]; then
             label_events="$(
               gh api \
@@ -99,18 +99,19 @@ jobs:
                 --paginate \
                 --jq '.[] | select(.event == "labeled") | [.label.name, (.actor.login // "__unattributed__")] | @tsv'
             )"
-            while IFS=$'\t' read -r event_label event_actor; do
-              if [[ -n "$event_label" ]]; then
-                label_actors["$event_label"]="$event_actor"
-              fi
-            done <<< "$label_events"
           fi
 
           label_already_present=false
           while IFS= read -r current_label; do
             case "$current_label" in
               breaking-change | enhancement | bug | documentation | skip-release-notes)
-                if [[ "${label_actors[$current_label]:-}" != "github-actions[bot]" ]]; then
+                label_actor=""
+                while IFS=$'\t' read -r event_label event_actor; do
+                  if [[ "$event_label" == "$current_label" ]]; then
+                    label_actor="$event_actor"
+                  fi
+                done <<< "$label_events"
+                if [[ "$label_actor" != "github-actions[bot]" ]]; then
                   echo "Preserving existing $current_label label."
                   if [[ "$current_label" == "$label" ]]; then
                     label_already_present=true

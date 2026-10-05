@@ -40,6 +40,7 @@ function versionAfter(value: string, floor: string): boolean {
 
 if (
   process.argv[1] !== undefined &&
+  process.argv[1] !== "-" &&
   pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
 ) {
   const bytes = readFileSync(binaryPath);
