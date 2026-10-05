@@ -1399,6 +1399,28 @@ process.stdout.write(JSON.stringify({
     },
   );
 
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "preserves token-per-minute advice from a %s child failure",
+    async (command) => {
+      const detail = "tokens per minute limit exceeded token=SYNTHETIC_VALUE";
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("Wait and retry.");
+      expect(stderr.text()).toContain(detail);
+    },
+  );
+
   test("runs patching in a saved app-server thread", async () => {
     const source = `
 const assert = require("node:assert/strict");

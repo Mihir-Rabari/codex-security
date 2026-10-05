@@ -4842,7 +4842,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
       },
     })
@@ -7976,7 +7976,10 @@ export function skillCommandFailure(
     )
   ) {
     advice = "The selected model is unavailable for the current credentials.";
-  } else if (classification === "rate_limited") {
+  } else if (
+    classification === "rate_limited" ||
+    /\btokens[ _-]per[ _-]minute\b/iu.test(detail)
+  ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
     /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)

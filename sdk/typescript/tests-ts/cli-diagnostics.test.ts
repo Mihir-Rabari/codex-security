@@ -1,7 +1,9 @@
 import { stripVTControlCharacters } from "node:util";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { readCodexHomeConfig } from "../src/auth.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
   warningResult,
@@ -12,8 +14,41 @@ import {
 import { throwing } from "./support/errors.js";
 
 import { createCliTest } from "./support/cli-run.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 describe("CLI diagnostics", () => {
+  test.skipIf(process.platform === "win32")(
+    "escapes controls in expanded validation configuration diagnostics",
+    async () => {
+      const directory = await temporaryDirectory(
+        "codex-security-config-diagnostic-",
+      );
+      try {
+        const home = join(
+          directory,
+          "synthetic-\u001b[2J\u009b2J-token=SYNTHETIC_VALUE-home",
+        );
+        await mkdir(home);
+        await writeFile(join(home, "config.toml"), "synthetic = [");
+        const { stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          environment: { CODEX_HOME: home, OPENAI_API_KEY: "SYNTHETIC_VALUE" },
+          onCodex: async (_args, _output, environment) => {
+            await readCodexHomeConfig(environment!);
+            return 0;
+          },
+        });
+
+        expect(await runCli(["validate", "Synthetic finding"], deps)).toBe(2);
+        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain("token=SYNTHETIC_VALUE-home");
+        expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([{ flags: [] }, { flags: ["--json"] }])(
     "reports rerun history failures once: $flags",
     async ({ flags }) => {
