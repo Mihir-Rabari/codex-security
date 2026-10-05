@@ -6848,14 +6848,21 @@ async function patchCommandContext(
     (
       await dependencies.runRepositoryCommand(
         "git",
-        ["rev-parse", "--path-format=absolute", ...args],
+        ["rev-parse", ...args],
         repository,
         { trim: false },
       )
     ).replace(/\n$/u, "");
+  const gitDirectory = await gitPath(["--git-dir"]);
+  // Preserve aliases used by includeIf.gitdir; adding a worktree would canonicalize them.
   const environment: NodeJS.ProcessEnv = {
-    GIT_DIR: await gitPath(["--absolute-git-dir"]),
-    GIT_WORK_TREE: repository,
+    GIT_DIR: isAbsolute(gitDirectory)
+      ? gitDirectory
+      : `${directory}${sep}${gitDirectory}`,
+    ...(dependencies.environment["GIT_DIR"] !== undefined &&
+    dependencies.environment["GIT_WORK_TREE"] === undefined
+      ? {}
+      : { GIT_WORK_TREE: repository }),
   };
   // Resolve Git's own path semantics before a patch can remove the caller's cwd.
   for (const [name, args] of [
@@ -6864,20 +6871,12 @@ async function patchCommandContext(
     ["GIT_OBJECT_DIRECTORY", ["--git-path", "objects"]],
   ] as const) {
     if (dependencies.environment[name] !== undefined)
-      environment[name] = await gitPath([...args]);
+      environment[name] = await gitPath(["--path-format=absolute", ...args]);
   }
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
     if (value === undefined) continue;
-    const path = `${directory}${sep}${value}`;
-    environment[name] =
-      value === "" || isAbsolute(value)
-        ? value
-        : await realpath(path).catch(async () =>
-            realpath(dirname(path))
-              .then((parent) => join(parent, basename(path)))
-              .catch(() => path),
-          );
+    environment[name] = value === "" ? value : resolve(directory, value);
   }
   return { directory: await realpath(directory), environment };
 }

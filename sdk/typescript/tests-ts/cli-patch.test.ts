@@ -8,6 +8,7 @@ import { hash } from "node:crypto";
 import {
   copyFile,
   mkdir,
+  mkdtemp,
   readFile,
   rm,
   symlink,
@@ -157,6 +158,49 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test("preserves Git aliases and provider configuration in the Node runtime", async () => {
+    const bundle = await mkdtemp(
+      join(import.meta.dir, "..", ".patch-context-"),
+    );
+    const root = await temporaryDirectory("patch-node-context-");
+    try {
+      const built = await Bun.build({
+        entrypoints: [
+          join(import.meta.dir, "support", "cli-patch-context.mts"),
+        ],
+        outdir: bundle,
+        target: "node",
+        packages: "external",
+      });
+      expect(built.success).toBe(true);
+      const { stdout } = await promisify(execFile)(
+        "node",
+        [
+          "--input-type=module",
+          "--eval",
+          `await import(${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)})`,
+          "synthetic-launcher",
+          root,
+        ],
+        { encoding: "utf8" },
+      );
+      const outcomes = JSON.parse(stdout) as {
+        kind: string;
+        exitCode: number;
+        error: string;
+        applied: boolean;
+      }[];
+      expect(outcomes).toHaveLength(4);
+      for (const outcome of outcomes) {
+        expect(outcome.exitCode, `${outcome.kind}: ${outcome.error}`).toBe(0);
+        expect(outcome.applied).toBe(true);
+      }
+    } finally {
+      await rm(bundle, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     ["gh", "bin"],
     ["glab", "node_modules/.bin"],
@@ -249,6 +293,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     "ordinary",
     "HEAD filename",
     "relative Git environment",
+    "configured worktree",
     "absolute symlink Git environment",
     "relative symlink Git environment",
     "relative provider configuration",
@@ -256,6 +301,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     "removed component",
     "removed component replaced by a file",
     "removed component with relative Git environment",
+    "removed component with configured worktree",
     "removed component with relative index",
     "removed component with relative common directory",
     "removed component with relative object directory",
@@ -299,18 +345,20 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       const linkedGitRoot = `${kind.includes("relative symlink Git environment") ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
       const gitEnvironment = kind.includes("relative Git environment")
         ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
-        : kind.includes("symlink Git environment")
-          ? {
-              GIT_DIR: `${linkedGitRoot}${sep}.git`,
-              GIT_WORK_TREE: linkedGitRoot,
-            }
-          : kind.includes("relative index")
-            ? { GIT_INDEX_FILE: ".git/custom-index" }
-            : kind.includes("relative common directory")
-              ? { GIT_COMMON_DIR: "../metadata" }
-              : kind.includes("relative object directory")
-                ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
-                : {};
+        : kind.includes("configured worktree")
+          ? { GIT_DIR: "../.git" }
+          : kind.includes("symlink Git environment")
+            ? {
+                GIT_DIR: `${linkedGitRoot}${sep}.git`,
+                GIT_WORK_TREE: linkedGitRoot,
+              }
+            : kind.includes("relative index")
+              ? { GIT_INDEX_FILE: ".git/custom-index" }
+              : kind.includes("relative common directory")
+                ? { GIT_COMMON_DIR: "../metadata" }
+                : kind.includes("relative object directory")
+                  ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
+                  : {};
       const providerConfiguration = kind.includes(
         "removed provider configuration",
       )
@@ -353,6 +401,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         git("config", "user.email", "synthetic@example.test");
         git("config", "commit.gpgsign", "false");
         git("config", "diff.relative", "true");
+        if (kind.includes("configured worktree"))
+          git("config", "core.worktree", repository);
         if (
           kind.includes("relative common directory") ||
           kind.includes("relative object directory")
@@ -421,11 +471,13 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 )
               ) {
                 expect(
-                  execFileSync("git", ["rev-parse", "--show-toplevel"], {
-                    cwd: output.appServer.directory,
-                    env: environment,
-                    encoding: "utf8",
-                  }).replace(/\n$/u, ""),
+                  resolve(
+                    execFileSync("git", ["rev-parse", "--show-toplevel"], {
+                      cwd: output.appServer.directory,
+                      env: environment,
+                      encoding: "utf8",
+                    }).replace(/\n$/u, ""),
+                  ),
                 ).toBe(
                   kind === "nested Git metadata after patch"
                     ? subdirectory
@@ -3120,7 +3172,7 @@ test.each([
                 ["-C", disposable, "rev-parse", "--show-toplevel"],
                 { cwd: output.appServer.directory, env: environment },
               ).trim();
-              expect(selected).toBe(
+              expect(resolve(selected)).toBe(
                 kind.includes("explicit Git environment")
                   ? repository
                   : disposable,
