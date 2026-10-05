@@ -383,8 +383,8 @@ async function preserveScanDraft(
     await readPreviousScanDraft(context).catch(preserveInputOnError);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
-    throw new Error(
-      "scan checkpoint: saved result belongs to a different scan.",
+    return preserveInputOnError(
+      new Error("scan checkpoint: saved result belongs to a different scan."),
     );
   const current: SavedScanDraft[] = await readSavedCheckpoints(
     context,
