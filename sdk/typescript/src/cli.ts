@@ -5143,13 +5143,21 @@ export async function main(
               selected.repository,
               dependencies.currentDirectory(),
             );
+            const publication =
+              options.createPr && selected.findings.length > 0
+                ? await preparePatchPublication(
+                    selected.repository,
+                    selected.scanId,
+                    dependencies,
+                  )
+                : undefined;
             const patchRiskBase = options.assessPatchRisk
               ? await snapshotPatchTree(selected.repository, dependencies)
               : undefined;
             const patchBase =
               patchRiskBase ??
               (await snapshotPatchState(selected.repository, dependencies));
-            const patches = await runFindingPatches(
+            const patchRun = await runFindingPatches(
               selected,
               options,
               errorOutput,
@@ -5160,7 +5168,8 @@ export async function main(
                 validationPrompt,
               },
             );
-            exitCode = patchExitCode(patches);
+            const { patches } = patchRun;
+            exitCode = patchRun.exitCode;
             const files = await changedPatchFiles(
               selected.repository,
               patchBase,
@@ -5200,10 +5209,10 @@ export async function main(
                 );
               }
             }
-            const pullRequest = options.createPr
+            const pullRequest = publication
               ? await createPatchPullRequest(
                   selected.repository,
-                  selected.scanId,
+                  publication,
                   verifiedPatchFiles(selected, patches),
                   errorOutput,
                   dependencies,
@@ -5231,11 +5240,19 @@ export async function main(
               "--severity requires a saved finding identifier or --scan.",
             );
           }
-          const repository = dependencies.currentDirectory();
+          const directory = dependencies.currentDirectory();
+          const repository =
+            options.assessPatchRisk || options.createPr
+              ? await dependencies.runRepositoryCommand(
+                  "git",
+                  ["rev-parse", "--show-toplevel"],
+                  directory,
+                )
+              : directory;
           const validationPrompt = await resolvePatchValidationPrompt(
             options.validationPromptFile,
             repository,
-            repository,
+            directory,
           );
           const imports = linear
             ? await importLinearIssues({
@@ -5265,6 +5282,14 @@ export async function main(
               dependencies,
             );
           }
+          const identifier = directPatchIdentifier(positionals, imports);
+          const publication = options.createPr
+            ? await preparePatchPublication(
+                repository,
+                identifier ?? directPatchDigest(positionals, imports),
+                dependencies,
+              )
+            : undefined;
           const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
@@ -5319,11 +5344,10 @@ export async function main(
                 dependencies,
               )
             : undefined;
-          if (options.createPr) {
-            const identifier = directPatchIdentifier(positionals, imports);
+          if (publication) {
             await createPatchPullRequest(
               repository,
-              identifier ?? directPatchDigest(positionals, imports),
+              publication,
               files,
               errorOutput,
               dependencies,
@@ -6659,6 +6683,112 @@ function directPatchDigest(
   ).slice(0, 12)}`;
 }
 
+interface PatchPublication {
+  branch: string;
+  dirtyFiles: Set<string>;
+}
+
+async function patchPublicationDestination(
+  repository: string,
+  branch: string,
+  dependencies: CliDependencies,
+) {
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
+    dependencies.runRepositoryCommand(command, args, repository);
+  const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
+  const host = patchRemoteHost(remote);
+  const gitlabHost =
+    dependencies.environment["GITLAB_HOST"] ||
+    dependencies.environment["GITLAB_URI"] ||
+    dependencies.environment["GL_HOST"];
+  const gitlab =
+    host === "gitlab.com" ||
+    (host !== undefined &&
+      gitlabHost !== undefined &&
+      host ===
+        patchRemoteHost(
+          gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
+        ));
+  const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  const existing = await run(
+    command,
+    gitlab
+      ? [
+          "mr",
+          "list",
+          "--all",
+          "--source-branch",
+          branch,
+          "--output",
+          "json",
+          "--jq",
+          ".[0] | select(. != null) | {url: .web_url, head: .sha}",
+          "--repo",
+          remote,
+        ]
+      : [
+          "pr",
+          "list",
+          "--head",
+          branch,
+          "--state",
+          "all",
+          "--json",
+          "url,headRefOid",
+          "--jq",
+          ".[0] | select(. != null) | {url, head: .headRefOid}",
+        ],
+  );
+  return {
+    remote,
+    gitlab,
+    command,
+    existing: existing
+      ? (JSON.parse(existing) as { url: string; head: string })
+      : undefined,
+  };
+}
+
+async function preparePatchPublication(
+  repository: string,
+  patchId: string,
+  dependencies: CliDependencies,
+): Promise<PatchPublication> {
+  const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
+  const local = await dependencies.runRepositoryCommand(
+    "git",
+    ["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`],
+    repository,
+  );
+  if (
+    local ||
+    (await patchPublicationDestination(repository, branch, dependencies))
+      .existing
+  ) {
+    throw new CodexSecurityError(
+      `Patch branch or pull request already exists for ${branch}. Resume its saved commit with 'codex-security patch --resume-pr ${branch}', or review and publish further changes separately.`,
+    );
+  }
+  const status = await dependencies.runRepositoryCommand(
+    "git",
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    repository,
+    { trim: false },
+  );
+  const paths = status.split("\0");
+  const dirtyFiles = new Set<string>();
+  for (let index = 0; index < paths.length; index += 1) {
+    const entry = paths[index]!;
+    if (!entry) continue;
+    dirtyFiles.add(relative(repository, resolve(repository, entry.slice(3))));
+    if (/[RC]/u.test(entry.slice(0, 2)))
+      dirtyFiles.add(
+        relative(repository, resolve(repository, paths[++index]!)),
+      );
+  }
+  return { branch, dirtyFiles };
+}
+
 async function publishPatchBranch(
   repository: string,
   branch: string,
@@ -6669,50 +6799,20 @@ async function publishPatchBranch(
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
-    const host = patchRemoteHost(remote);
-    const gitlabHost =
-      dependencies.environment["GITLAB_HOST"] ||
-      dependencies.environment["GITLAB_URI"] ||
-      dependencies.environment["GL_HOST"];
-    const gitlab =
-      host === "gitlab.com" ||
-      (host !== undefined &&
-        gitlabHost !== undefined &&
-        host ===
-          patchRemoteHost(
-            gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
-          ));
-    const command = gitlab ? "glab" : "gh";
-    let url = await run(
-      command,
-      gitlab
-        ? [
-            "mr",
-            "list",
-            "--all",
-            "--source-branch",
-            branch,
-            "--output",
-            "json",
-            "--jq",
-            ".[0].web_url // empty",
-            "--repo",
-            remote,
-          ]
-        : [
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "all",
-            "--json",
-            "url",
-            "--jq",
-            ".[0].url // empty",
-          ],
-    );
+    const { remote, gitlab, command, existing } =
+      await patchPublicationDestination(repository, branch, dependencies);
+    let url = existing?.url;
+    if (existing) {
+      const commit = await run("git", [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${branch}`,
+      ]);
+      if (existing.head !== commit)
+        throw new CodexSecurityError(
+          "The existing pull request does not contain the saved patch commit. Review it before publishing.",
+        );
+    }
     if (!url) {
       await run("git", ["push", "--set-upstream", "origin", branch]);
       url = await run(
@@ -6828,7 +6928,7 @@ function verifiedPatchFiles(
 
 async function createPatchPullRequest(
   repository: string,
-  patchId: string,
+  publication: PatchPublication,
   files: readonly string[],
   stderr: Writable,
   dependencies: CliDependencies,
@@ -6840,27 +6940,74 @@ async function createPatchPullRequest(
     return;
   }
 
-  const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
+  const { branch, dirtyFiles } = publication;
+  const dirty = files.filter((file) => dirtyFiles.has(file));
+  if (dirty.length > 0) {
+    throw new CodexSecurityError(
+      `Cannot publish files with uncommitted changes before patching: ${dirty.join(", ")}. Local edits and patches were kept; review and publish them separately.`,
+    );
+  }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
-  await run(["switch", "-c", branch]);
-  await run(["--literal-pathspecs", "add", "--", ...files]);
-  await run([
-    "--literal-pathspecs",
-    "commit",
-    "--only",
-    "-m",
-    PATCH_PR_TITLE,
-    "--",
-    ...files,
-  ]);
-  const commit = await run(["rev-parse", "HEAD"]);
-  await run(["config", "--local", patchCommitKey(branch), commit]);
-  await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
+  const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const previousCommit = await run(["rev-parse", "HEAD"]);
+  let switched = false;
+  let committed = false;
+  try {
+    await run(["switch", "-c", branch]);
+    switched = true;
+    await run(["--literal-pathspecs", "add", "--", ...files]);
+    await run([
+      "--literal-pathspecs",
+      "commit",
+      "--only",
+      "-m",
+      PATCH_PR_TITLE,
+      "--",
+      ...files,
+    ]);
+    committed = true;
+    const commit = await run(["rev-parse", "HEAD"]);
+    await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
+    await run(["config", "--local", patchCommitKey(branch), commit]);
+  } catch (error) {
+    if (switched && !committed) {
+      try {
+        committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
+        if (!committed) {
+          await run([
+            "--literal-pathspecs",
+            "restore",
+            "--staged",
+            "--source=HEAD",
+            "--",
+            ...files,
+          ]);
+          await run(
+            previousBranch === "HEAD"
+              ? ["switch", "--detach", previousCommit]
+              : ["switch", previousBranch],
+          );
+          await run(["branch", "-D", branch]);
+        }
+      } catch (restoreError) {
+        throw new CodexSecurityError(
+          `${errorMessage(error)}. Could not restore the original patch checkout: ${errorMessage(restoreError)}`,
+          { cause: error },
+        );
+      }
+    }
+    if (committed) {
+      stderr.write(
+        `Patch commit kept on ${safePatchText(branch)}, but its publication checkpoint could not be saved. Review the branch before publishing.\n`,
+      );
+    }
+    throw error;
+  }
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
@@ -6922,7 +7069,16 @@ async function snapshotPatchState(
       throw error;
     return snapshotPatchDirectory(repository);
   }
-  return snapshotPatchTree(repository, dependencies);
+  const tree = await snapshotPatchTree(repository, dependencies);
+  const entries = await dependencies.runRepositoryCommand(
+    "git",
+    ["ls-tree", "-r", "-z", tree],
+    repository,
+    { trim: false },
+  );
+  return entries.split("\0").some((entry) => entry.startsWith("160000 "))
+    ? snapshotPatchDirectory(repository)
+    : tree;
 }
 
 // Literal patch inputs also work in directories without Git metadata.
@@ -7113,7 +7269,8 @@ async function snapshotPatchTree(
       environment,
     });
   try {
-    await run(["read-tree", "HEAD"]);
+    const heads = await run(["rev-parse", "--revs-only", "HEAD"]);
+    await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
     await run(["--literal-pathspecs", "add", "--all"]);
     return await run(["write-tree"]);
   } finally {
@@ -7148,10 +7305,10 @@ async function runFindingPatches(
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
   interactive = true,
-): Promise<FindingPatch[]> {
+): Promise<{ patches: FindingPatch[]; exitCode: number }> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
-    return [];
+    return { patches: [], exitCode: 0 };
   }
 
   stderr.write(
@@ -7196,9 +7353,6 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
-      if (status === 130 || status === 143) {
-        throw new CodexSecurityError("Patch operation was interrupted.");
-      }
       changedFiles = await changedPatchFiles(
         selected.repository,
         base,
@@ -7214,9 +7368,17 @@ async function runFindingPatches(
       files,
       reason,
     });
+    if (status === 130 || status === 143) {
+      patches.push(failed("Patch operation was interrupted.", changedFiles));
+      stderr.write("codex-security: Patch operation was interrupted.\n");
+      return { patches, exitCode: status };
+    }
     let patch: FindingPatch;
     if (status !== 0) {
-      patch = failed(`Patch command exited with status ${status}.`);
+      patch = failed(
+        `Patch command exited with status ${status}.`,
+        changedFiles,
+      );
     } else {
       try {
         const reported = JSON.parse(response.text()) as { patches?: unknown };
@@ -7264,7 +7426,7 @@ async function runFindingPatches(
     );
     patches.push(patch);
   }
-  return patches;
+  return { patches, exitCode: patchExitCode(patches) };
 }
 
 function captureOutput() {
@@ -8794,7 +8956,16 @@ async function executeScan(
       ),
     };
     try {
-      patches = await runFindingPatches(
+      const publication =
+        (arguments_.createPr || patchSelection?.createPullRequest) &&
+        selected.findings.length > 0
+          ? await preparePatchPublication(
+              selected.repository,
+              selected.scanId,
+              dependencies,
+            )
+          : undefined;
+      const patchRun = await runFindingPatches(
         selected,
         {
           codex: [
@@ -8815,14 +8986,14 @@ async function executeScan(
         },
         progress?.interactive === true,
       );
+      patches = patchRun.patches;
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
-      if (
-        (arguments_.createPr || patchSelection?.createPullRequest) &&
-        patchExitCode(patches) === 0
-      ) {
+      if (patchRun.exitCode === 130 || patchRun.exitCode === 143)
+        return completedScan(patchRun.exitCode);
+      if (publication && patchExitCode(patches) === 0) {
         const pullRequest = await createPatchPullRequest(
           selected.repository,
-          selected.scanId,
+          publication,
           verifiedPatchFiles(selected, patches),
           errorOutput,
           dependencies,

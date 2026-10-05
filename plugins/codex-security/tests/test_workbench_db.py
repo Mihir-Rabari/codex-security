@@ -4157,3 +4157,22 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     reopened = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert reopened["scan"]["reportAvailable"] is False
     assert "markdownReport" not in reopened["scan"]["artifacts"]
+
+
+@pytest.mark.parametrize("git_headers", [False, True])
+def test_patch_statistics_distinguish_hunk_content_from_file_headers(
+    tmp_path: Path, git_headers: bool
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    patch = b""
+    for filename in (b"first.txt", b"second.txt"):
+        if git_headers:
+            patch += b"diff --git a/" + filename + b" b/" + filename + b"\n"
+        patch += b"--- a/" + filename + b"\n+++ b/" + filename + b"\n"
+        patch += b"@@ -1,2 +1,2 @@\n--- deleted content\n+++ added content\n-old\n+new\n"
+    (tmp_path / "patch.diff").write_bytes(patch)
+    preview, stats = namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    )
+    assert preview == patch.decode()
+    assert stats == {"additions": 4, "deletions": 4, "fileCount": 2, "previewTruncated": False}

@@ -2037,9 +2037,16 @@ GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID -
 
 Both providers use the existing `pullRequest: { branch, url }` JSON result.
 Supplied-issue requests require a clean working tree before patching so
-existing work is never included. If publication fails, run the printed
+existing work is never included. Saved-scan publication also refuses any patched
+file that had staged, unstaged, or untracked changes before patching; local edits
+and generated patches remain available for review. Existing patch branches and
+pull requests are checked before patching, including closed or merged requests.
+Review and publish further patches from the same scan separately.
+
+If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit without rerunning Codex, but refuses to publish if the branch changed.
+commit without rerunning Codex, but refuses to publish if the branch changed or
+an existing request points to a different commit.
 Use the same GitLab host setting when resuming a self-hosted merge request.
 
 To patch Linear issues, repeat `--linear-issue ISSUE` (ID or URL), or use
