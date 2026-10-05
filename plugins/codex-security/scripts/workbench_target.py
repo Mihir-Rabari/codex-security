@@ -456,7 +456,8 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
             ) from exc
         if mode != b"160000":
             continue
-        entries.append((repository / os.fsdecode(raw_path), object_id.decode("ascii")))
+        relative_path = Path(os.fsdecode(raw_path)).relative_to(pathspec)
+        entries.append((target / relative_path, object_id.decode("ascii")))
     return tuple(entries)
 
 

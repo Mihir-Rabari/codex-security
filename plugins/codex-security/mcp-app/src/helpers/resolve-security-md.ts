@@ -234,19 +234,33 @@ function asciiJson(value: string): string {
 function directoryEntries(directory: Buffer) {
   return windows
     ? windowsFiles().entriesWithTypes(directory)
-    : readdirSync(directory, { encoding: "buffer", withFileTypes: true }).map(
-        (entry) => {
-          // Some Node-compatible runtimes return names without their types.
-          if (!(entry instanceof Uint8Array)) return entry;
-          const name = Buffer.from(entry);
-          const metadata = lstatSync(appendPath(directory, name));
-          return {
+    : readdirSync(directory, {
+        encoding: "buffer",
+        withFileTypes: true,
+      }).flatMap((entry) => {
+        // Some Node-compatible runtimes return names without their types.
+        if (!(entry instanceof Uint8Array)) return [entry];
+        const name = Buffer.from(entry);
+        let metadata;
+        try {
+          metadata = lstatSync(appendPath(directory, name));
+        } catch (error) {
+          if (
+            ["ENOENT", "ENOTDIR"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            return [];
+          throw error;
+        }
+        return [
+          {
             name,
             isDirectory: () => metadata.isDirectory(),
             isSymbolicLink: () => metadata.isSymbolicLink(),
-          };
-        },
-      );
+          },
+        ];
+      });
 }
 
 function listSecurityMd(repo: string, posixHome: string | undefined): string[] {

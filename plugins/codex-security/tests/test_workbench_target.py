@@ -126,6 +126,42 @@ def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scop
     assert directory_content_digest(selected) != original_digest
 
 
+@pytest.mark.parametrize("scope", [".", "component"])
+@pytest.mark.parametrize("alias_kind", ["symlink", "case"])
+def test_submodule_checks_preserve_target_alias_spelling(
+    tmp_path: Path, scope: str, alias_kind: str
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    scoped = target / scope
+    scoped.mkdir(exist_ok=True)
+    submodule = scoped / "submodule"
+    revision = initialize_git_repository(submodule)
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=target,
+        check=True,
+    )
+    alias = tmp_path / ("alias" if alias_kind == "symlink" else "TARGET")
+    if alias_kind == "symlink":
+        alias.symlink_to(target, target_is_directory=True)
+    elif not alias.exists():
+        pytest.skip("filesystem does not support case aliases")
+    selected = alias / scope
+    entries = WORKBENCH_TARGET["git_submodule_entries"](selected)
+    assert entries == ((selected / "submodule", revision),)
+    WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+    (submodule / "README.md").write_text("changed after commit\n")
+    with pytest.raises(SystemExit, match="Dirty Git submodules.*submodule"):
+        WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+
+
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str]

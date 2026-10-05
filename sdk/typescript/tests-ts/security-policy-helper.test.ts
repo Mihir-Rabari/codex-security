@@ -251,6 +251,54 @@ describe("built SECURITY.md helper", () => {
     expect(existsSync(join(root, "temporary.tmp"))).toBe(false);
   });
 
+  test
+    .skipIf(process.platform === "win32")
+    .each(["ENOENT", "ENOTDIR", "EACCES"])(
+    "handles %s for an unrelated raw directory entry",
+    (code) => {
+      const { root, output } = fixture();
+      write(root, "SECURITY.md", "root policy\n");
+      write(root, "unrelated.txt", "temporary file\n");
+      const hook = join(output, "raw-entry-race.cjs");
+      write(
+        output,
+        "raw-entry-race.cjs",
+        `
+        const fs = require("node:fs");
+        const readdir = fs.readdirSync;
+        const lstat = fs.lstatSync;
+        const directory = fs.realpathSync.native(${JSON.stringify(root)});
+        const unrelated = require("node:path").join(directory, "unrelated.txt");
+        fs.readdirSync = (path, options) => {
+          if (String(path) !== directory) return readdir(path, options);
+          const entries = readdir(path, { encoding: "buffer" });
+          if (${JSON.stringify(code)} === "ENOENT") fs.unlinkSync(unrelated);
+          return entries;
+        };
+        fs.lstatSync = (path, ...args) => {
+          if (String(path) === unrelated && ${JSON.stringify(code)} !== "ENOENT") {
+            throw Object.assign(new Error("synthetic raw entry ${code}"), { code: ${JSON.stringify(code)} });
+          }
+          return lstat(path, ...args);
+        };
+        require("node:module").syncBuiltinESMExports();
+      `,
+      );
+      const result = run(["--repo", root, "--list"], {
+        ...process.env,
+        NODE_OPTIONS: `${process.env["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(hook)}`,
+      });
+      if (code === "EACCES") {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("synthetic raw entry EACCES");
+      } else {
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe('["SECURITY.md"]\n');
+        expect(result.stderr).toBe("");
+      }
+    },
+  );
+
   test("frames Unicode paths as ASCII JSON in standard string order", () => {
     const { root } = fixture();
     for (const name of ["\u{10000}", "\ue000", "\u0080", "\u007f"]) {
