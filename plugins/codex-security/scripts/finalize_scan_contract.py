@@ -2777,6 +2777,30 @@ def build_findings_export(
     return build_csv_projection(findings, coverage)
 
 
+def _is_sealed_artifact(scan_dir: Path, relative_output: str, artifact_paths: list[str]) -> bool:
+    try:
+        output_metadata = (scan_dir / relative_output).stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ContractError(f"{relative_output}: unable to inspect export output") from exc
+    for artifact_path in artifact_paths:
+        if artifact_path == relative_output:
+            return True
+        if output_metadata is None:
+            continue
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+        )
+        try:
+            artifact_metadata = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if os.path.samestat(output_metadata, artifact_metadata):
+            return True
+    return False
+
+
 def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
     output_paths = {**EXPORT_PATHS, "md": THREAT_MODEL_EXPORT_PATH}
     if export_format not in output_paths:
@@ -2827,30 +2851,10 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
         for index, artifact in enumerate(artifacts)
         if isinstance(artifact, dict)
     ]
-    try:
-        output_metadata = output.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        output_metadata = None
-    except OSError as exc:
-        raise ContractError(f"{relative_output}: unable to inspect export output") from exc
-    for artifact_path in artifact_paths:
-        if artifact_path == relative_output:
-            raise ContractError(
-                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
-            )
-        if output_metadata is None:
-            continue
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+    if _is_sealed_artifact(scan_dir, relative_output, artifact_paths):
+        raise ContractError(
+            f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
         )
-        try:
-            artifact_metadata = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        if os.path.samestat(output_metadata, artifact_metadata):
-            raise ContractError(
-                f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
-            )
     write_scan_local_bytes(
         scan_dir, relative_output, contents, owner_read_write=export_format == "md"
     )
@@ -3028,15 +3032,15 @@ def _write_prepared_scan_finalization(
     if not was_sealed:
         _write_scan_local_json(scan_dir, "findings.json", findings)
         _write_scan_local_json(scan_dir, "coverage.json", coverage)
-    sealed_paths = {artifact["path"] for artifact in scan["artifacts"]} if was_sealed else set()
-    if "report.md" not in sealed_paths:
+    sealed_paths = [artifact["path"] for artifact in scan["artifacts"]] if was_sealed else []
+    if not _is_sealed_artifact(scan_dir, "report.md", sealed_paths):
         write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
-    if "report.html" not in sealed_paths:
+    if not _is_sealed_artifact(scan_dir, "report.html", sealed_paths):
         _remove_scan_local_file_if_exists(scan_dir, "report.html")
     if not was_sealed:
         _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
         _validate_existing_seal(scan_dir, scan)
-    if "exports/results.sarif" not in sealed_paths:
+    if not _is_sealed_artifact(scan_dir, "exports/results.sarif", sealed_paths):
         _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
     warning = write_threat_model_projection_if_possible(scan_dir, manifest)
     if (

@@ -990,6 +990,55 @@ The extraction root is not enforced.
                 )
                 self.assertEqual(output.read_bytes(), sealed_export)
 
+    def test_finalization_preserves_sealed_projection_aliases_and_distinct_paths(self) -> None:
+        root = self.scan_dir
+        for relative, alias, media_type in (
+            ("report.md", "Report.md", "text/markdown"),
+            ("report.html", "REPORT.HTML", "text/html"),
+            ("exports/results.sarif", "Exports/Results.SARIF", "application/sarif+json"),
+        ):
+            for hardlink in (False, True):
+                with self.subTest(relative=relative, hardlink=hardlink):
+                    with tempfile.TemporaryDirectory(dir=root) as directory:
+                        self.scan_dir = Path(directory)
+                        self.write_sealed_scan()
+                        output = self.scan_dir / relative
+                        artifact = self.scan_dir / alias
+                        artifact.parent.mkdir(exist_ok=True)
+                        contents = b"Sealed authored projection.\n"
+                        output.write_bytes(contents)
+                        if not artifact.exists():
+                            if hardlink:
+                                os.link(output, artifact)
+                            else:
+                                artifact.write_bytes(contents)
+                        same_file = output.samefile(artifact)
+                        manifest = self.read_json("scan-manifest.json")
+                        manifest["scan"]["artifacts"].append(
+                            {
+                                "path": alias,
+                                "mediaType": media_type,
+                                "sha256": hashlib.sha256(contents).hexdigest(),
+                            }
+                        )
+                        self.write_json("scan-manifest.json", manifest)
+                        sealed_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
+                        for _ in range(2):
+                            FINALIZER.finalize_scan(self.scan_dir)
+                            self.assertEqual(artifact.read_bytes(), contents)
+                            self.assertEqual(
+                                (self.scan_dir / "scan-manifest.json").read_bytes(),
+                                sealed_manifest,
+                            )
+                            if same_file:
+                                self.assertTrue(output.samefile(artifact))
+                                self.assertEqual(output.read_bytes(), contents)
+                            elif relative == "report.html":
+                                self.assertFalse(output.exists())
+                            else:
+                                self.assertNotEqual(output.read_bytes(), contents)
+        self.scan_dir = root
+
     def test_export_entrypoint_rejects_a_case_aliased_scan_directory(self) -> None:
         self.write_sealed_scan()
         alias = self.scan_dir.parent / self.scan_dir.name.swapcase()

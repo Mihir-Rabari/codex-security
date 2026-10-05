@@ -527,10 +527,17 @@ async function preserveScanDraft(
     let acceptProgress = coverageHasOutstandingWork(result.coverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
+      const deferred = (progress.coverage.deferred as JsonObject[]).filter(
+        (row) =>
+          keepsGenericWork(row) ||
+          !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
+      );
       const reopenedIds = new Set(
-        (progress.coverage.deferred as JsonObject[]).flatMap((row) =>
+        deferred.flatMap((row) =>
           [row.id, row.candidateId].filter(
-            (id): id is string => typeof id === "string" && closedIds.has(id),
+            (id): id is string =>
+              typeof id === "string" &&
+              (closedIds.has(id) || terminalSurfaceIds.has(id)),
           ),
         ),
       );
@@ -554,11 +561,6 @@ async function preserveScanDraft(
         [],
       );
       for (const surface of resolved) reopenedSurfaces.add(surface);
-      const deferred = (progress.coverage.deferred as JsonObject[]).filter(
-        (row) =>
-          keepsGenericWork(row) ||
-          !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
-      );
       result.coverage = preserveScanCoverage(
         {
           ...result.coverage,
