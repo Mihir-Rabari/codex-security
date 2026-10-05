@@ -2236,7 +2236,7 @@ def merge_saved_results(
                 [
                     _finding_key(recovered),
                     finding_candidate_id(finding),
-                    finding["provenance"].get("workerId"),
+                    _finding_content(finding),
                 ]
             )
             if id(finding) in inferred_identities and (recovered := recovered_finding(finding))

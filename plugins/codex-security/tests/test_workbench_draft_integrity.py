@@ -5,6 +5,7 @@ import os
 import re
 from itertools import permutations
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from test_workbench_standard_deep_results import (
@@ -220,6 +221,71 @@ def test_missing_finding_identity_is_stable_across_publication_retry(tmp_path: P
         assert len(findings) == 1
         identities.append(findings[0]["identity"])
     assert identities[0] == identities[1]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_worker_report_identities_survive_new_worker_uuid_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    target = tmp_path / "target"
+    template = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    template.pop("identity")
+    template["provenance"]["candidateId"] = "shared-candidate"
+    published = []
+    worker_orders = [
+        ("00000000-0000-4000-8000-000000000001", "ffffffff-ffff-4fff-bfff-fffffffffff1"),
+        ("ffffffff-ffff-4fff-bfff-fffffffffff2", "00000000-0000-4000-8000-000000000002"),
+    ]
+    for index, worker_ids in enumerate(worker_orders):
+        if index:
+            begun = run_workbench(
+                state,
+                "begin-deep-scan",
+                "--thread-id",
+                "standard-worker-thread",
+                "--target-path",
+                str(target),
+                "--scope",
+                ".",
+                "--scan-root",
+                str(tmp_path / "scans"),
+                "--available-parallelism",
+                "16",
+                environment={"CODEX_HOME": str(home)},
+            )["deepScan"]
+            scan_id, scan_dir = begun["scanId"], Path(begun["scanDir"])
+        for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+            (scan_dir / name).unlink(missing_ok=True)
+        for report, worker_id in zip(("report-a", "report-b"), worker_ids, strict=True):
+            with monkeypatch.context() as worker_patch:
+                worker_patch.setattr(
+                    "test_workbench_standard_deep_results.uuid.uuid4",
+                    lambda worker_id=worker_id: UUID(worker_id),
+                )
+                _, result_path = accepted_standard_worker(
+                    state, home, scan_dir, scan_id, name=report
+                )
+            finding = json.loads(json.dumps(template))
+            finding["summary"] = f"Independent {report} evidence."
+            finding["extensions"] = {"reportId": report}
+            document = json.loads(result_path.read_text())
+            document["findings"] = [finding]
+            result_path.write_text(json.dumps(document))
+
+        stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+        scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 2
+        assert not scan["resultsRecoveryNeeded"]
+        findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        published.append(
+            {
+                finding["extensions"]["reportId"]: (finding["identity"], finding["findingId"])
+                for finding in findings
+            }
+        )
+    assert published[0] == published[1]
 
 
 def test_canonical_missing_identity_remains_malformed_on_publication_retry(tmp_path: Path):
