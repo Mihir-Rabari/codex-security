@@ -298,6 +298,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     "relative symlink Git environment",
     "relative provider configuration",
     "nested Git metadata after patch",
+    "nested Git metadata with worktree environment",
+    "staged component changes",
     "removed component",
     "removed component replaced by a file",
     "removed component with relative Git environment",
@@ -332,8 +334,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       );
       const subdirectory = join(repository, "sub");
       const removesComponent = kind.startsWith("removed component");
-      const assessmentAtRoot =
-        removesComponent || kind === "nested Git metadata after patch";
+      const nestedMetadata = kind.startsWith("nested Git metadata");
+      const assessmentAtRoot = removesComponent || nestedMetadata;
       const replacesComponent = kind.includes("replaced by");
       const changedFiles = removesComponent
         ? [
@@ -345,22 +347,25 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         : ["shared.ts", "sub/app.ts"];
       const alias = join(directory, "alias");
       const linkedGitRoot = `${kind.includes("relative symlink Git environment") ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
-      const gitEnvironment = kind.includes("relative Git environment")
-        ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
-        : kind.includes("configured worktree")
-          ? { GIT_DIR: "../.git" }
-          : kind.includes("symlink Git environment")
-            ? {
-                GIT_DIR: `${linkedGitRoot}${sep}.git`,
-                GIT_WORK_TREE: linkedGitRoot,
-              }
-            : kind.includes("relative index")
-              ? { GIT_INDEX_FILE: ".git/custom-index" }
-              : kind.includes("relative common directory")
-                ? { GIT_COMMON_DIR: "../metadata" }
-                : kind.includes("relative object directory")
-                  ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
-                  : {};
+      const gitEnvironment =
+        kind === "nested Git metadata with worktree environment"
+          ? { GIT_WORK_TREE: repository }
+          : kind.includes("relative Git environment")
+            ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
+            : kind.includes("configured worktree")
+              ? { GIT_DIR: "../.git" }
+              : kind.includes("symlink Git environment")
+                ? {
+                    GIT_DIR: `${linkedGitRoot}${sep}.git`,
+                    GIT_WORK_TREE: linkedGitRoot,
+                  }
+                : kind.includes("relative index")
+                  ? { GIT_INDEX_FILE: ".git/custom-index" }
+                  : kind.includes("relative common directory")
+                    ? { GIT_COMMON_DIR: "../metadata" }
+                    : kind.includes("relative object directory")
+                      ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
+                      : {};
       const providerConfiguration = kind.includes(
         "removed provider configuration",
       )
@@ -420,10 +425,20 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         }
         for (const file of ["sub/app.ts", "shared.ts"])
           await writeFile(join(repository, file), "original\n");
+        if (kind === "staged component changes")
+          await writeFile(join(subdirectory, "shared.ts"), "original\n");
         if (kind === "HEAD filename")
           await writeFile(join(repository, "HEAD"), "ordinary source file\n");
         git("add", ".");
         git("commit", "-m", "Initial synthetic checkout");
+        if (kind === "staged component changes") {
+          await writeFile(
+            join(subdirectory, "shared.ts"),
+            "staged component\n",
+          );
+          git("add", "sub/shared.ts");
+          await writeFile(join(subdirectory, "shared.ts"), "original\n");
+        }
         const originalIndex = kind.includes("relative index")
           ? await readFile(join(repository, ".git/index"))
           : undefined;
@@ -521,7 +536,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   }
                 } else {
                   await writeFile(join(subdirectory, "app.ts"), "fixed\n");
-                  if (kind === "nested Git metadata after patch") {
+                  if (nestedMetadata) {
                     const nested = repositoryGit(subdirectory);
                     nested("init", "--initial-branch=main");
                     nested("config", "user.name", "Synthetic User");
@@ -597,6 +612,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         const result = JSON.parse(outcome.stdout);
         expect(result.repository).toBe(subdirectory);
         expect(result.applied).toBe(true);
+        if (kind === "staged component changes")
+          expect(git("show", ":sub/shared.ts")).toBe("staged component");
         expect(result.files).toEqual(
           changedFiles.map((file) =>
             relative(subdirectory, join(repository, file)).split(sep).join("/"),
@@ -642,7 +659,9 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             }),
           ).toBe("");
         } else if (!linkedComponent)
-          expect(git("status", "--porcelain")).toBe("");
+          expect(git("status", "--porcelain")).toBe(
+            kind === "staged component changes" ? "MM sub/shared.ts" : "",
+          );
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
