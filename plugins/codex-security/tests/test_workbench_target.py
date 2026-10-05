@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import difflib
+import errno
 import hashlib
 import os
 import runpy
+import shutil
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,9 +26,422 @@ update_digest_field = cast(
 )
 
 
+@pytest.fixture(params=[False, True], ids=["emulated", "native"])
+def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    import workbench_target
+
+    native = request.param
+    if native and os.name != "nt":
+        pytest.skip("requires native Windows junctions")
+    targets: dict[Path, Path] = {}
+    modes: dict[Path, int] = {}
+    if not native:
+        real_lstat = Path.lstat
+        real_readlink = os.readlink
+
+        def metadata(path: Path, *args: Any, **kwargs: Any) -> Any:
+            result = real_lstat(path, *args, **kwargs)
+            if path in targets:
+                fields = {key: getattr(result, key) for key in dir(result) if key.startswith("st_")}
+                fields["st_reparse_tag"] = 0xA0000003
+                fields["st_mode"] = modes.get(path, result.st_mode)
+                return SimpleNamespace(**fields)
+            return result
+
+        def readlink(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if Path(path) in targets:
+                return str(targets[Path(path)])
+            return real_readlink(path, *args, **kwargs)
+
+        def copy_junction(source: Path, destination: Path) -> None:
+            # Emulate the filesystem result, not the native GET/SET implementation.
+            if any(destination.iterdir()):
+                raise OSError(errno.ENOTEMPTY, "junction destination is not empty")
+            mode = destination.lstat().st_mode
+            # Windows readonly directories do not impose POSIX child-write permissions.
+            os.chmod(destination, stat.S_IMODE(mode) | stat.S_IWUSR)
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            os.chmod(destination, 0o755)
+            targets[destination] = targets[source]
+            modes[destination] = mode
+
+        monkeypatch.setattr(Path, "lstat", metadata)
+        monkeypatch.setattr(os, "readlink", readlink)
+        monkeypatch.setattr(workbench_target, "copy_directory_junction", copy_junction)
+
+    def create(link: Path, target: Path) -> None:
+        if native:
+            if link.exists():
+                link.rmdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True)
+        else:
+            shutil.copytree(target, link, dirs_exist_ok=True)
+            targets[link] = target
+
+    return create
+
+
+@pytest.mark.parametrize(
+    ("git_repository", "git_exclusion"),
+    [
+        (None, None),
+        ("untracked", None),
+        ("indexed", None),
+        ("untracked", ".gitignore"),
+        ("untracked", ".git/info/exclude"),
+    ],
+    ids=["plain", "git-untracked", "git-indexed", "gitignore", "git-info-exclude"],
+)
+@pytest.mark.parametrize(
+    "change",
+    ["unchanged", "unrelated_file", "junction_target", "same_content_target", "target_contents"],
+)
+def test_reviewed_patch_preserves_junction_boundaries(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    change: str,
+    git_repository: str | None,
+    git_exclusion: str | None,
+) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    source.mkdir()
+    if git_repository:
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    if git_exclusion is not None:
+        (source / git_exclusion).write_text("dependencies/linked_directory/\n")
+    (source / "dependencies").mkdir()
+    junction = source / "dependencies" / "linked_directory"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "source.txt").write_text("original contents\n")
+    junction_factory(junction, outside)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = b"diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    (source / "app.txt").write_text("before\n")
+    if git_repository == "indexed":
+        subprocess.run(["git", "add", "."], cwd=source, check=True)
+    remediation = {
+        "base_revision": "unversioned",
+        "base_content_digest": workbench_db.directory_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    if change in {"junction_target", "same_content_target"}:
+        junction_target = tmp_path / "other"
+        junction_target.mkdir()
+        (junction_target / "source.txt").write_text(
+            "original contents\n"
+            if change == "same_content_target"
+            else "different target contents\n"
+        )
+        junction_factory(junction, junction_target)
+    elif change == "target_contents":
+        (junction / "source.txt").write_text("changed outside the snapshot boundary\n")
+    elif change == "unrelated_file":
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+    if change == "unrelated_file" or (
+        change in {"junction_target", "same_content_target"} and git_exclusion is None
+    ):
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+
+
+@pytest.mark.parametrize(
+    ("git_repository", "readonly_target"),
+    [(False, False), (True, False), (False, True)],
+    ids=["plain", "git", "readonly-empty-target"],
+)
+def test_reviewed_patch_preserves_readonly_junction(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    git_repository: bool,
+    readonly_target: bool,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    if git_repository:
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if readonly_target:
+        os.chmod(outside, stat.S_IREAD | stat.S_IEXEC)
+    else:
+        (outside / "file.txt").write_text("external contents\n")
+    outside_mode = outside.stat().st_mode
+    junction = source / "linked"
+    junction_factory(junction, outside)
+    os.chmod(junction, stat.S_IREAD | stat.S_IEXEC)
+    try:
+        assert not junction.lstat().st_mode & stat.S_IWRITE
+        assert outside.stat().st_mode == outside_mode
+        assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n")
+        assert outside.stat().st_mode == outside_mode
+        if not readonly_target:
+            assert (outside / "file.txt").read_text() == "external contents\n"
+    finally:
+        os.chmod(junction, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+
+
+@pytest.mark.parametrize(
+    "case", ["ordering", "ignore_add", "ignore_remove", "git_metadata", "git_objects"]
+)
+def test_reviewed_patch_restores_junction_git_context(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None], case: str
+) -> None:
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    (source / "src").mkdir()
+    (source / "src" / "app.txt").write_text("stable contents\n")
+    (source / "src.py").write_text("adjacent contents\n")
+    (source / "Alpha.txt").write_text("mixed case ordering\n")
+    (source / ".gitignore").write_text("cache/\n")
+    (source / "cache").mkdir()
+    (source / "cache" / "output.txt").write_text("ignored output\n")
+    outside = tmp_path / "outside"
+    if case in {"git_metadata", "git_objects"}:
+        junction = source / (".git" if case == "git_metadata" else ".git/objects")
+        junction.rename(outside)
+    else:
+        outside.mkdir()
+        (outside / "file.txt").write_text("external contents\n")
+        junction = source / "linked"
+    junction_factory(junction, outside)
+    patched = ".gitignore" if case.startswith("ignore_") else "app.txt"
+    before = (
+        "# fixture\nlinked/\n"
+        if case == "ignore_remove"
+        else "# fixture\n"
+        if case == "ignore_add"
+        else "before\n"
+    )
+    after = (
+        "# fixture\nlinked/\n"
+        if case == "ignore_add"
+        else "# fixture\n"
+        if case == "ignore_remove"
+        else "after\n"
+    )
+    assert_reviewed_change(source, tmp_path, patched, before, after)
+    assert outside.is_dir()
+
+
+def assert_reviewed_change(
+    source: Path, tmp_path: Path, relative: str, before: str, after: str
+) -> None:
+    import workbench_db
+
+    patch = (
+        f"diff --git a/{relative} b/{relative}\n"
+        + "".join(
+            difflib.unified_diff(
+                before.splitlines(True),
+                after.splitlines(True),
+                fromfile=f"a/{relative}",
+                tofile=f"b/{relative}",
+            )
+        )
+    ).encode()
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    (source / relative).write_text(before)
+    revision, digest = workbench_db.remediation_checkout_snapshot(scan)
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": digest,
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / relative).write_text(after)
+    assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows path casing")
+def test_native_reviewed_patch_preserves_indexed_junction_spelling(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    subprocess.run(["git", "config", "core.ignorecase", "true"], cwd=source, check=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("external contents\n")
+    junction = source / "linked"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True)
+    (source / "app.txt").write_text("before\n")
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    junction.rename(source / "Linked")
+    assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n")
+
+
+def test_reverse_patch_cannot_write_through_junction(
+    tmp_path: Path, junction_factory: Callable[[Path, Path], None]
+) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("outside contents\n")
+    junction = source / "linked"
+    junction_factory(junction, outside)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = b"diff --git a/linked/deleted.txt b/linked/deleted.txt\ndeleted file mode 100644\n--- a/linked/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed\n"
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    remediation = {
+        "base_revision": "unversioned",
+        "base_content_digest": "different base",
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    with pytest.raises(OSError):
+        workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
+    assert (outside / "keep.txt").read_text() == "outside contents\n"
+
+
+def test_reverse_patch_cannot_redirect_junction_restoration(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    (source / "dep").mkdir(parents=True)
+    original_target = tmp_path / "original"
+    original_target.mkdir()
+    (original_target / "keep.txt").write_text("original contents\n")
+    junction = source / "dep" / "linked"
+    junction_factory(junction, original_target)
+    os.chmod(junction, stat.S_IREAD | stat.S_IEXEC)
+    outside = tmp_path / "outside"
+    external = outside / "linked"
+    external.mkdir(parents=True)
+    original_mode = external.stat().st_mode
+    config = tmp_path / "gitconfig"
+    config.write_text("[core]\n\tsymlinks = true\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = f"""diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-before
++after
+diff --git a/dep b/dep
+deleted file mode 120000
+--- a/dep
++++ /dev/null
+@@ -1 +0,0 @@
+-{outside.as_posix()}
+\\ No newline at end of file
+diff --git a/dep/linked b/dep/linked
+new file mode 160000
+index {"0" * 40}..{"1" * 40}
+--- /dev/null
++++ b/dep/linked
+@@ -0,0 +1 @@
++Subproject commit {"1" * 40}
+""".encode()
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    (source / "app.txt").write_text("before\n")
+    remediation = {
+        "base_revision": "unversioned",
+        "base_content_digest": workbench_db.directory_content_digest(source),
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    (source / "app.txt").write_text("after\n")
+    try:
+        with pytest.raises(SystemExit, match="checkout path was replaced"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+        assert external.lstat().st_mode == original_mode
+        assert not getattr(external.lstat(), "st_reparse_tag", 0)
+        assert list(external.iterdir()) == []
+        assert (original_target / "keep.txt").read_text() == "original contents\n"
+    finally:
+        os.chmod(junction, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+
+
 def initialize_unborn_git_repository(target: Path) -> None:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+
+
+@pytest.mark.parametrize("change", ["unchanged", "ignored_file", "unrelated_file"])
+def test_reviewed_patch_preserves_unborn_git_inventory(tmp_path: Path, change: str) -> None:
+    import workbench_db
+
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    (source / "src").mkdir()
+    app = source / "src" / "app.txt"
+    app.write_text("before\n")
+    (source / ".gitignore").write_text("ignored-cache/\n")
+    cache = source / "ignored-cache"
+    cache.mkdir()
+    cached_file = cache / "output.txt"
+    cached_file.write_text("ignored build output\n")
+    subprocess.run(["git", "add", ".gitignore", "src/app.txt"], cwd=source, check=True)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    patch = (
+        b"diff --git a/src/app.txt b/src/app.txt\n"
+        b"--- a/src/app.txt\n+++ b/src/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    )
+    (scan_dir / "reviewed.patch").write_bytes(patch)
+    scan = {
+        "target_path": str(source),
+        "target_inode": source.stat().st_ino,
+        "target_revision": "unversioned",
+        "scan_dir": str(scan_dir),
+    }
+    revision, digest = workbench_db.remediation_checkout_snapshot(scan)
+    assert revision == "unversioned"
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": digest,
+        "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
+    }
+    app.write_text("after\n")
+    if change == "ignored_file":
+        cached_file.write_text("updated ignored build output\n")
+    elif change == "unrelated_file":
+        (source / "unrelated.txt").write_text("outside the reviewed patch\n")
+    if change == "unrelated_file":
+        with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+            workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+    else:
+        assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
 
 
 def set_default_subprocess_encoding(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:

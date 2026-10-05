@@ -17,6 +17,7 @@ from typing import Any, BinaryIO
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
+from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
@@ -494,6 +495,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
+    junction_prefixes: dict[str, bool] = {}
     listing_args: list[str] = []
     inventory_pathspec = pathspec
     if scope_depth:
@@ -541,12 +543,27 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
             path = scope.joinpath(*relative.parts[scope_depth:])
         try:
+            # Git can list descendants of a junction; snapshots retain the link.
+            prefix = scope
+            for component in path.relative_to(scope).parts[:-1]:
+                prefix /= component
+                key = str(prefix)
+                if key not in junction_prefixes:
+                    junction_prefixes[key] = bool(
+                        getattr(prefix.lstat(), "st_reparse_tag", 0) & 0x20000000
+                    )
+                if junction_prefixes[key]:
+                    path = prefix
+                    break
             metadata = path.lstat()
         except FileNotFoundError:
             # The index can retain a path that was staged and then deleted.
             continue
         paths.append(path)
-        if not stat.S_ISDIR(metadata.st_mode):
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if (
@@ -557,11 +574,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
-        paths.extend(
-            nested_path
-            for nested_path in path.rglob("*")
-            if ".git" not in nested_path.relative_to(path).parts
-        )
+        paths.extend(source_directory_snapshot_paths(path))
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
@@ -584,7 +597,10 @@ def source_directory_snapshot_paths(target: Path) -> list[Path]:
 
 
 def directory_content_digest(
-    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+    target: Path,
+    *,
+    excluded: tuple[Path, ...] = (),
+    include_ignored: bool = False,
 ) -> str:
     excluded_relative = []
     for path in excluded:
@@ -612,17 +628,21 @@ def directory_content_digest(
             metadata = path.lstat()
         except OSError as exc:
             raise SystemExit(f"Could not read local file: {relative_path}") from exc
+        mode = metadata.st_mode
+        link_target = (
+            os.readlink(path)
+            if stat.S_ISLNK(mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            else None
+        )
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
-        update_digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode())
-        if stat.S_ISLNK(metadata.st_mode) or (
-            include_ignored and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-        ):
+        update_digest_field(digest, b"mode", str(stat.S_IMODE(mode)).encode())
+        if link_target is not None:
             update_digest_field(digest, b"kind", b"symlink")
-            update_digest_field(digest, b"content", os.fsencode(os.readlink(path)))
-        elif stat.S_ISDIR(metadata.st_mode):
+            update_digest_field(digest, b"content", os.fsencode(link_target))
+        elif stat.S_ISDIR(mode):
             update_digest_field(digest, b"kind", b"directory")
-        elif stat.S_ISREG(metadata.st_mode):
+        elif stat.S_ISREG(mode):
             content_digest = hashlib.sha256()
             content_size = 0
             try:
@@ -655,7 +675,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
     return count
 
 
-def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Path, ...]) -> None:
+def copy_directory_excluding(
+    source: Path, destination: Path, excluded: tuple[Path, ...]
+) -> list[Path]:
     excluded_relative = []
     for path in excluded:
         try:
@@ -663,15 +685,43 @@ def copy_directory_excluding(source: Path, destination: Path, excluded: tuple[Pa
         except ValueError:
             continue
 
+    junctions: list[Path] = []
+
     def ignored(directory: str, names: list[str]) -> list[str]:
         relative = Path(directory).relative_to(source)
-        return [
+        skipped = [
             path.name
             for path in excluded_relative
             if path.parent == relative and path.name in names
         ]
+        for name in names:
+            if name in skipped:
+                continue
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if (
+                stat.S_ISDIR(metadata.st_mode)
+                and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
+                junctions.append(relative / name)
+                skipped.append(name)
+        return skipped
 
     shutil.copytree(source, destination, symlinks=True, ignore=ignored)
+
+    # Empty placeholders retain parent directories while a patch is reversed.
+    for path in junctions:
+        (destination / path).mkdir()
+    return junctions
+
+
+def restore_directory_junctions(source: Path, destination: Path, junctions: list[Path]) -> None:
+    # Recreate links only after patch application can no longer write through them.
+    destination = destination.resolve()
+    for path in junctions:
+        placeholder = require_remediation_target(str(destination / path))
+        os.chmod(placeholder, stat.S_IMODE((source / path).lstat().st_mode))
+        copy_directory_junction(source / path, placeholder)
 
 
 def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:

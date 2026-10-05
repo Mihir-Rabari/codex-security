@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -922,3 +924,28 @@ def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert output.read_bytes() == b"app/caf\xe9.py\n"
+
+
+def test_local_diff_inventory_skips_unreadable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inventory = runpy.run_path(str(SCRIPT))
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    unreadable = write_file(repository, "app/unreadable.py")
+    write_file(repository, "app/readable.py")
+    output = tmp_path / "in_scope_files.txt"
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError(errno.EACCES, "Synthetic unreadable file", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    count = inventory["generate_diff_in_scope_files"](
+        repository, "HEAD", "HEAD", "local-patch", output
+    )
+    assert count == 1
+    assert output.read_text(encoding="utf-8") == "app/readable.py\n"

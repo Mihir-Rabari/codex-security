@@ -133,6 +133,7 @@ from workbench_target import (
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
+    restore_directory_junctions,
     scan_target_warning,
     worktree_content_digest,
     worktree_content_digest_for_context,
@@ -2423,7 +2424,7 @@ def require_reviewed_patch_applied(
         checkout_root = Path(temporary) / "checkout"
         if unversioned:
             checkout = checkout_root
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
         else:
             copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
@@ -2443,6 +2444,8 @@ def require_reviewed_patch_applied(
             raise SystemExit(
                 "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
             )
+        if unversioned:
+            restore_directory_junctions(target, checkout, junctions)
         reverted_digest = (
             directory_content_digest(checkout)
             if unversioned
@@ -2455,11 +2458,12 @@ def require_reviewed_patch_applied(
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
             checkout = Path(temporary) / "checkout-lf"
-            copy_directory_excluding(target, checkout, excluded)
+            junctions = copy_directory_excluding(target, checkout, excluded)
             applied_without_conversion = git_command(
                 checkout, "-c", "core.autocrlf=input", *arguments, text=True
             )
             if applied_without_conversion.returncode == 0:
+                restore_directory_junctions(target, checkout, junctions)
                 reverted_digest = directory_content_digest(checkout)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(

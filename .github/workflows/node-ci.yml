@@ -492,9 +492,21 @@ jobs:
         env:
           PYTHON_TEST_PATH: ${{ matrix.tests }}
         run: python -m pytest "$PYTHON_TEST_PATH" -q -n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml
+      - name: Prepare private Windows test root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Test native Windows junction snapshots
+        if: runner.os == 'Windows'
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+        run: python -m pytest plugins/codex-security/tests/test_workbench_target.py -k native -q -rA --junitxml=reports/python-junctions.xml
       - name: Require native platform coverage
         if: runner.os != 'Linux'
-        run: python -c "import xml.etree.ElementTree as ET; assert not ET.parse('reports/python.xml').findall('.//testcase/skipped'), 'Native platform tests must run without skips'"
+        run: python -c "import pathlib, xml.etree.ElementTree as ET; assert not any(ET.parse(report).findall('.//testcase/skipped') for report in pathlib.Path('reports').glob('python*.xml')), 'Native platform tests must run without skips'"
       - name: Upload Python test reports
         if: always()
         continue-on-error: true
@@ -502,7 +514,7 @@ jobs:
         with:
           name: python-test-reports-${{ matrix.os }}-${{ matrix.python }}
           overwrite: true
-          path: reports/python.xml
+          path: reports/python*.xml
           if-no-files-found: warn
           retention-days: 14
       - name: Build SDK and type-check eval tooling
