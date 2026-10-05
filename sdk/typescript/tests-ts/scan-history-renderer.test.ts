@@ -3,6 +3,40 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("counts singleton sides when the other side is grouped", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        coverage: { afterCompleteness: "complete" },
+        summary: { persisting: 2 },
+        findings: [
+          {
+            title: "Merged group",
+            severity: "high",
+            status: "persisting",
+            path: "merged.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+            afterOccurrenceId: "after-one",
+          },
+          {
+            title: "Expanded group",
+            severity: "high",
+            status: "persisting",
+            path: "expanded.ts",
+            beforeOccurrenceId: "before-one",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 1");
+    expect(text).toContain("1 → 2");
+  });
+
   test("shows zero findings on the absent side of grouped comparisons", () => {
     const text = renderScanHistory(
       {

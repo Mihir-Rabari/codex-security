@@ -54,6 +54,32 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each(["\t", "\u0007"])(
+    "wraps code after escaping terminal control %j",
+    (control) => {
+      const stderr = capture(true);
+      const dashboard = createDashboard({
+        ...stderr.stream,
+        columns: 40,
+        rows: 24,
+      });
+      dashboard.start();
+      dashboard.record({
+        id: "escaped-code",
+        kind: "message",
+        status: "completed",
+        description:
+          "```ts\n" + control.repeat(2) + "callWithLongName(value123)\n```",
+        paths: [],
+      });
+      const frame = lastFrame(stderr);
+      expect(frame.replace(/\s+/gu, "")).toContain(
+        "callWithLongName(value123)",
+      );
+      dashboard.stop();
+    },
+  );
+
   test.each(["activity", "details"] as const)(
     "coalesces %s replay frames while retaining event order and cancellation",
     (view) => {

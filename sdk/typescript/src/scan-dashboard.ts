@@ -1218,7 +1218,7 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   };
   let current = "";
   let separator = "";
-  for (const word of value.split(/(\s+)/u)) {
+  for (const word of terminalText(value).split(/(\s+)/u)) {
     if (/^\s+$/u.test(word)) {
       separator = word;
       continue;
@@ -1268,7 +1268,10 @@ function columnChunks(value: string, width: number): string[] {
 }
 
 function wrapCode(prefix: string, value: string, width: number): string[] {
-  return columnChunks(value, Math.max(1, width - stringWidth(prefix))).map(
+  return columnChunks(
+    terminalText(value),
+    Math.max(1, width - stringWidth(prefix)),
+  ).map(
     (part, index) =>
       `${index === 0 ? prefix : " ".repeat(stringWidth(prefix))}${part}`,
   );
@@ -1338,11 +1341,15 @@ function budgetBar(cost: number, limit: number): string {
   return `[${"█".repeat(filled)}${"░".repeat(12 - filled)}] ${Math.round(proportion * 100)}%`;
 }
 
-function fitLine(value: string, width: number): string {
-  const clean = stripVTControlCharacters(value).replaceAll(
+function terminalText(value: string): string {
+  return stripVTControlCharacters(value).replaceAll(
     /[\u0000-\u001F\u007F]/gu,
     " ",
   );
+}
+
+function fitLine(value: string, width: number): string {
+  const clean = terminalText(value);
   if (stringWidth(clean) <= width) return clean;
   let clipped = "";
   let columns = 0;

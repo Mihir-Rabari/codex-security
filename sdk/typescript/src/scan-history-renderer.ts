@@ -103,7 +103,7 @@ export function renderScanHistory(
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
-        ? `  ${accent("·")}  ${before?.length ?? 0} → ${after?.length ?? 0}`
+        ? `  ${accent("·")}  ${before?.length ?? (entry["beforeOccurrenceId"] ? 1 : 0)} → ${after?.length ?? (entry["afterOccurrenceId"] ? 1 : 0)}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
     const related = entry["related"] as JsonObject[] | undefined;
