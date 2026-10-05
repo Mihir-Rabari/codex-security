@@ -158,6 +158,8 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  const repositories = createTemporaryDirectories();
+  afterEach(repositories.cleanup);
   test("preserves Git aliases and provider configuration in the Node runtime", async () => {
     const bundle = await mkdtemp(
       join(import.meta.dir, "..", ".patch-context-"),
@@ -1446,6 +1448,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
   });
 
   test("preserves patch-risk details in display and publication summaries", async () => {
+    const directory = await repositories.create("patch-risk-publication-");
     const result = resultWithFindings(["high"]);
     const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
     const report = patchRiskAssessment().report.replace(
@@ -1466,7 +1469,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         "--json",
       ],
       {
-        onWorkbench: () => savedScan(result),
+        onWorkbench: () => savedScan(result, "scan-1", directory),
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
@@ -2388,11 +2391,13 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
   });
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
+    const directory = await repositories.create("patch-unpublishable-");
     for (const status of ["blocked", "no_change", "outside"] as const) {
       let commandStarted = false;
       const outcome = await runWorkflow(
         ["scan", "--patch", "--create-pr", "--json"],
         {
+          currentDirectory: directory,
           result: resultWithFindings(["high"]),
           onCodex: (_args, output) => {
             output?.stdout.write(
@@ -2828,6 +2833,9 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
   ] as const)(
     "publishes saved-finding patches for origin %s with environment %j using %s",
     async (origin, environment, client) => {
+      const directory = await repositories.create(
+        "patch-provider-publication-",
+      );
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2845,11 +2853,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         ],
         {
           environment,
-          onWorkbench: () => savedScan(result),
+          onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, target) => {
-            expect(target).toBe(SAVED_REPOSITORY);
+            expect(target).toBe(directory);
             if (command === "git") {
-              if (args.includes("--show-toplevel")) return SAVED_REPOSITORY;
+              if (args.includes("--show-toplevel")) return directory;
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
