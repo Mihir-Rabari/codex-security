@@ -303,6 +303,145 @@ def test_stopped_finding_keeps_explicit_identity_across_line_move(
     )
 
 
+@pytest.mark.parametrize("retry", [False, True])
+def test_ambiguous_parent_identity_keeps_stronger_independent_observation(
+    tmp_path: Path, retry: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    template = document["findings"][0]
+    template["identity"] = {"anchor": "reused-identity"}
+    parents = []
+    for line in (1, 2):
+        finding = json.loads(json.dumps(template))
+        finding["locations"][0].update(startLine=line, endLine=line)
+        parents.append(finding)
+    observations = []
+    for severity in ("low", "high"):
+        finding = json.loads(json.dumps(template))
+        finding["locations"][0].update(startLine=3, endLine=3)
+        finding["severity"]["level"] = severity
+        observations.append(finding)
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan_id, findings=observations)
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    document["findings"] = parents
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 3
+    independent = next(row for row in findings if row["locations"][0]["startLine"] == 3)
+    assert independent["severity"]["level"] == "high"
+    assert any(
+        previous["severity"]["level"] == "low"
+        for previous in independent["provenance"]["previousFindings"]
+    )
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_represented_worker_finding_preserves_structured_provenance(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    finding["provenance"].update(
+        workerId=worker_id, candidateId="candidate-a", preservedIdentity={"anchor": []}
+    )
+    path.write_text(json.dumps(document))
+    worker = json.loads(result_path.read_text())
+    worker_finding = json.loads(json.dumps(finding))
+    worker_finding["title"] = "Stronger worker observation"
+    worker_finding["severity"]["level"] = "critical"
+    worker["findings"] = [worker_finding]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 1
+    assert scan["findings"][0]["title"] == worker_finding["title"]
+    assert scan["findings"][0]["provenance"]["preservedIdentity"] == {"anchor": []}
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_older_worker_attempt_keeps_newer_parent_location(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    finding["identity"] = {"anchor": "stable-worker-identity"}
+    finding["provenance"].update(workerId=worker_id, candidateId="candidate-a")
+    finding["locations"][0].update(startLine=2, endLine=2)
+    finding["severity"]["level"] = "low"
+    path.write_text(json.dumps(document))
+    previous = json.loads(json.dumps(finding))
+    previous["locations"][0].update(startLine=1, endLine=1)
+    previous["severity"]["level"] = "critical"
+    worker = saved_draft(scan_id, findings=[previous])
+    result_path.write_text(json.dumps(worker))
+    checkpoint = write_checkpoint(result_path.parent / "checkpoints", worker)
+    head = result_path.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    for saved in (result_path, checkpoint, head):
+        os.utime(saved, ns=(100, 100))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(200, 200))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["locations"] == finding["locations"]
+    assert findings[0]["severity"]["level"] == "low"
+    assert any(
+        previous["locations"][0]["startLine"] == 1 and previous["severity"]["level"] == "critical"
+        for previous in findings[0]["provenance"]["previousFindings"]
+    )
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_tied_parent_checkpoint_keeps_identityless_semantic_rows(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    finding = json.loads(path.read_text())["findings"][0]
+    finding.pop("identity")
+    finding["title"] = "Independent semantic observation"
+    finding["locations"][0].update(startLine=2, endLine=2)
+    semantic = saved_draft(
+        scan_id,
+        findings=[finding],
+        deferred=[{"reason": "Validation remains."}],
+        surfaces=[{"label": "Semantic review", "disposition": "needs_follow_up"}],
+    )
+    checkpoint = write_checkpoint(scan_dir / "checkpoints", semantic)
+    head = scan_dir / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    for saved in (
+        checkpoint,
+        head,
+        path,
+        scan_dir / "coverage.json",
+        scan_dir / "scan-manifest.json",
+    ):
+        os.utime(saved, ns=(200, 200))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 2
+    assert any(row["title"] == finding["title"] and row["identity"] for row in findings)
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert any(row["reason"] == "Validation remains." and row["id"] for row in coverage["deferred"])
+    assert any(row["label"] == "Semantic review" and row["id"] for row in coverage["surfaces"])
+
+
 @pytest.mark.parametrize("separate_workers", [False, True])
 def test_stopped_worker_candidates_remain_distinct(tmp_path: Path, separate_workers: bool):
     state, home, scan_dir, scan_id = draft_fixture(

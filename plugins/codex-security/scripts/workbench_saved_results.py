@@ -687,6 +687,8 @@ def _merge_tied_parent_observations(
         if finding not in merged["findings"]:
             merged["findings"].append(copy.deepcopy(finding))
     coverage = merged["coverage"]
+    # A union with semantic checkpoint rows is no longer a canonical document.
+    coverage.pop("documentType", None)
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
         rows = previous["coverage"].get(field, [])
         output = coverage.setdefault(field, [])
@@ -2027,7 +2029,10 @@ def merge_saved_results(
                 ) in represented_explicit:
                     mapped_key = represented_explicit[identity_key]
                     historical_contents = set()
-                    represented_by_parent = source_order["parent"] >= source_order[relative]
+                    represented_by_parent = (
+                        mapped_key is not None
+                        and source_order["parent"][1] >= source_order[relative][1]
+                    )
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     if candidate_key not in represented_candidates:
@@ -2044,7 +2049,7 @@ def merge_saved_results(
                     )
             canonical_candidate = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
-                if worker_id and candidate_id
+                if key not in represented and worker_id and candidate_id
                 else None
             )
             if not represented_by_parent and not (
