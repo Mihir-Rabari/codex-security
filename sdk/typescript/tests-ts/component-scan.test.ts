@@ -581,6 +581,14 @@ test.each([
             filesCompleted: 2,
             filesTotal: 2,
           });
+          options.onUsage?.({
+            input_tokens: 100,
+            cached_input_tokens: 10,
+            cache_write_input_tokens: 0,
+            output_tokens: 20,
+            reasoning_output_tokens: 0,
+            total_tokens: 120,
+          });
           options.onCost?.({
             model: "gpt-5.6",
             inputTokens: 100,
