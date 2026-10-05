@@ -54,9 +54,40 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
-  test.each(["", "\n"])(
-    "retains a large wrapped session result with separator %j",
-    (separator) => {
+  test.each([
+    ["single line", () => "START" + "x".repeat(4 * 1024 * 1024) + "界END"],
+    [
+      "multiple lines",
+      () => "START\n" + "x".repeat(4 * 1024 * 1024) + "界\nEND",
+    ],
+    [
+      "ASCII prose",
+      () =>
+        "START " +
+        "ordinary tool output with small words ".repeat(50_000) +
+        " END",
+    ],
+    ["CJK", () => "START " + "界".repeat(500_000) + " END"],
+    [
+      "Japanese prose",
+      () =>
+        "START " +
+        "日本語の出力です テスト結果を表示します ".repeat(50_000) +
+        " END",
+    ],
+    [
+      "distinct Japanese words",
+      () =>
+        "START " +
+        Array.from(
+          { length: 40_000 },
+          (_, index) => `日本語出力${index} 結果表示${index} `,
+        ).join("") +
+        " END",
+    ],
+  ] as const)(
+    "retains a large wrapped session result with %s",
+    (_name, output) => {
       const stderr = capture(true);
       const input = new DashboardTestInput();
       const dashboard = createDashboard(
@@ -72,9 +103,7 @@ describe("live scan dashboard", () => {
           type: "response_item",
           payload: {
             type: "function_call_output",
-            output: ["START", "x".repeat(4 * 1024 * 1024) + "界", "END"].join(
-              separator,
-            ),
+            output: output(),
           },
         },
       });

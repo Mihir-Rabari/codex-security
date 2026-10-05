@@ -1218,27 +1218,51 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   };
   let current = "";
   let separator = "";
-  for (const word of terminalText(value).split(/(\s+)/u)) {
+  let currentWidth = 0;
+  const widths = new Map<string, number>();
+  const wrappedWords = new Map<string, ReturnType<typeof columnChunks>>();
+  const text = terminalText(value);
+  const segments = graphemes.segment(text);
+  let offset = 0;
+  for (const word of text.split(/(\s+)/u)) {
+    const start = offset;
+    offset += word.length;
     if (/^\s+$/u.test(word)) {
       separator = word;
       continue;
     }
-    const parts = columnChunks(word, available);
-    const wordWidth = parts.length > 1 ? available + 1 : stringWidth(word);
+    const ascii = /^[\u0020-\u007E]*$/u.test(word);
+    let parts = ascii ? undefined : wrappedWords.get(word);
+    if (!ascii && parts === undefined) {
+      parts = columnChunks(word, available, widths, segments, start);
+      wrappedWords.set(word, parts);
+    }
+    const wordWidth = ascii
+      ? word.length
+      : parts!.length > 1
+        ? available + 1
+        : parts![0]!.columns;
     if (wordWidth > available) {
       if (current !== "") {
         append(current);
         current = "";
       }
-      current = parts.pop()!;
-      for (const part of parts) append(part);
+      const chunks =
+        parts ?? columnChunks(word, available, widths, segments, start);
+      const last = chunks.at(-1)!;
+      current = last.text;
+      currentWidth = last.columns;
+      for (let index = 0; index < chunks.length - 1; index++)
+        append(chunks[index]!.text);
     } else if (
       current !== "" &&
-      stringWidth(current) + stringWidth(separator) + wordWidth > available
+      currentWidth + stringWidth(separator) + wordWidth > available
     ) {
       append(current);
       current = word;
+      currentWidth = wordWidth;
     } else {
+      currentWidth += (current === "" ? 0 : stringWidth(separator)) + wordWidth;
       current = current === "" ? word : `${current}${separator}${word}`;
     }
     separator = "";
@@ -1249,33 +1273,48 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
 
 const graphemes = new Intl.Segmenter();
 
-function columnChunks(value: string, width: number): string[] {
-  const parts: string[] = [];
+function columnChunks(
+  value: string,
+  width: number,
+  widths = new Map<string, number>(),
+  segments = graphemes.segment(value),
+  offset = 0,
+): { text: string; columns: number }[] {
+  const parts: { text: string; columns: number }[] = [];
   let current = "";
   let columns = 0;
   const append = (text: string, size: number): void => {
     if (current !== "" && columns + size > width) {
-      parts.push(current);
+      parts.push({ text: current, columns });
       current = "";
       columns = 0;
     }
     current += text;
     columns += size;
   };
-  const appendGraphemes = (text: string): void => {
-    for (const { segment } of graphemes.segment(text)) {
-      append(segment, stringWidth(segment));
+  const appendGraphemes = (start: number, end: number): void => {
+    while (start < end) {
+      const next = segments.containing(offset + start)!;
+      const boundary = Math.min(end, next.index + next.segment.length - offset);
+      const segment = value.slice(start, boundary);
+      let size = widths.get(segment);
+      if (size === undefined) {
+        size = stringWidth(segment);
+        widths.set(segment, size);
+      }
+      append(segment, size);
+      start = boundary;
     }
   };
   let cursor = 0;
   for (const match of value.matchAll(/[\u0020-\u007E]{2,}/gu)) {
     // Keep edge characters with Unicode that can attach to their grapheme.
-    appendGraphemes(value.slice(cursor, match.index + 1));
+    appendGraphemes(cursor, match.index + 1);
     let start = match.index + 1;
     const end = match.index + match[0].length - 1;
     while (start < end) {
       if (columns >= width) {
-        parts.push(current);
+        parts.push({ text: current, columns });
         current = "";
         columns = 0;
       }
@@ -1285,8 +1324,9 @@ function columnChunks(value: string, width: number): string[] {
     }
     cursor = end;
   }
-  appendGraphemes(value.slice(cursor));
-  if (current !== "" || parts.length === 0) parts.push(current);
+  appendGraphemes(cursor, value.length);
+  if (current !== "" || parts.length === 0)
+    parts.push({ text: current, columns });
   return parts;
 }
 
@@ -1296,7 +1336,7 @@ function wrapCode(prefix: string, value: string, width: number): string[] {
   return columnChunks(
     terminalText(value),
     Math.max(1, width - prefixWidth),
-  ).map((part, index) => `${index === 0 ? prefix : continuation}${part}`);
+  ).map((part, index) => `${index === 0 ? prefix : continuation}${part.text}`);
 }
 
 function styleLine(
