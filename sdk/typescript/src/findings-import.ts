@@ -10,13 +10,11 @@ import type { Finding, FindingsDocument } from "./models.js";
 export const CSV_TARGET_ID = "codex-security-csv-import";
 export type FindingsImportFormat = "csv" | "json";
 
-const LEGACY_CSV_ESCAPE = /^'(?:[\t\r\n]|\s*[=+\-@＝＋－＠])/u;
-const EXPORTED_CSV_ESCAPE = /^'(?:['\t\r\n]|\s*[=+\-@＝＋－＠])/u;
+// Match the Python exporter's str.lstrip(), including its extra C0 separators.
+const EXPORTED_CSV_ESCAPE =
+  /^'(?:['\t\r\n]|[\p{White_Space}\u001c-\u001f]*[=+\-@＝＋－＠])/u;
 const csvFindingRowSchema = z
   .object({
-    csv_encoding: z
-      .literal("apostrophe-v1", { error: "has an invalid csv_encoding" })
-      .optional(),
     occurrence_id: z.string().regex(/^occ_[a-f0-9]{24}$/u, {
       error: "has an invalid occurrence_id",
     }),
@@ -223,6 +221,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
     header: true,
     delimiter: ",",
     skipEmptyLines: "greedy",
+    transform: decodeExportedCsvCell,
   });
   const fieldMismatch = errors.find(
     (error) => error.code === "TooFewFields" || error.code === "TooManyFields",
@@ -244,7 +243,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
     new Set(headers).size !== headers.length
   ) {
     throw new CodexSecurityError(
-      `Findings CSV must use the Codex Security export columns: ${REQUIRED_CSV_COLUMNS.join(", ")} (candidate_id and csv_encoding are optional).`,
+      `Findings CSV must use the Codex Security export columns: ${REQUIRED_CSV_COLUMNS.join(", ")} (candidate_id is optional).`,
     );
   }
   if (rows.length === 0) {
@@ -256,18 +255,7 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
   const occurrenceIds = new Set<string>();
   return rows.map((record, index) => {
     const rowNumber = index + 2;
-    const escape =
-      record["csv_encoding"] === "apostrophe-v1"
-        ? EXPORTED_CSV_ESCAPE
-        : LEGACY_CSV_ESCAPE;
-    const parsed = csvFindingRowSchema.safeParse(
-      Object.fromEntries(
-        Object.entries(record).map(([key, value]) => [
-          key,
-          escape.test(value) ? value.slice(1) : value,
-        ]),
-      ),
-    );
+    const parsed = csvFindingRowSchema.safeParse(record);
     if (!parsed.success) {
       throw csvRowError(rowNumber, parsed.error.issues[0]!.message);
     }
@@ -280,9 +268,13 @@ export function parseFindingsCsv(source: string): CsvFindingRow[] {
   });
 }
 
+function decodeExportedCsvCell(value: string): string {
+  return EXPORTED_CSV_ESCAPE.test(value) ? value.slice(1) : value;
+}
+
 export function csvRowFinding(row: CsvFindingRow): Finding {
   const ruleId = "import.csv";
-  const anchor = row.finding_id;
+  const anchor = row.occurrence_id;
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;

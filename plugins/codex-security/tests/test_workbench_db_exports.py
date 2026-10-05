@@ -331,6 +331,7 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     ]
     with Path(str(exported["path"])).open(newline="") as source:
         row = next(csv.DictReader(source))
+
     assert row["title"] == original["title"]
     assert row["summary"] == original["summary"]
     assert row["severity"] == original["severity"]["level"]
@@ -952,7 +953,6 @@ def test_deep_csv_export_adds_only_candidate_id_column(
         "path",
         "start_line",
         "end_line",
-        "csv_encoding",
     ]
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == expected_candidate_id
@@ -984,7 +984,6 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     with Path(exported["path"]).open(newline="") as source:
         row = next(csv.DictReader(source))
 
-    assert row["csv_encoding"] == "apostrophe-v1"
     assert row["title"] == "'\n=1+1"
     assert row["summary"] == "'＝1+1"
     assert row["remediation"] == "' \t＋1+1"

@@ -1,5 +1,4 @@
-import { spawnSync } from "node:child_process";
-import { resolvePluginPython } from "../src/runtime.js";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -9,6 +8,7 @@ import {
 } from "../src/findings-import.js";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { PYTHON } from "./support/security-policy.js";
 
 const BYTE_ORDER_MARK = "\uFEFF";
 const CSV_SOURCE =
@@ -27,7 +27,122 @@ async function sourceDocument(): Promise<FindingsDocument> {
   );
 }
 
+function exportCsv(findings: Finding[]): string {
+  return execFileSync(
+    PYTHON,
+    [
+      "-c",
+      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), {}))",
+      join(PLUGIN_ROOT, "scripts"),
+    ],
+    {
+      cwd: join(PLUGIN_ROOT, "scripts"),
+      input: JSON.stringify({ findings }),
+      encoding: "utf8",
+    },
+  );
+}
+
 describe("findings import formats", () => {
+  test("retains distinct occurrences of a shared finding in CSV and JSON", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    const rows = [
+      finding!,
+      { ...finding!, occurrenceId: "occ_111111111111111111111111" },
+    ];
+    for (const format of ["csv", "json"] as const) {
+      const source =
+        format === "csv" ? exportCsv(rows) : JSON.stringify({ findings: rows });
+      const parsed = await parseImportedFindings(source, format, PLUGIN_ROOT);
+      expect(
+        parsed.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
+      ).toEqual(
+        rows.map(({ findingId, occurrenceId }) => [findingId, occurrenceId]),
+      );
+      const bound = bindImportedFindings(parsed, format, "scan", "target");
+      expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
+      if (format === "csv") {
+        expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
+      }
+    }
+    await expect(
+      parseImportedFindings(
+        exportCsv([finding!, finding!]),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow("duplicate occurrence_id");
+  });
+
+  test("round-trips literal apostrophes and spreadsheet escapes through the exporter", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    const values = [
+      "'--no-verify' skips hooks",
+      "''=literal",
+      "'Literal",
+      "'=1+1",
+      "''-x",
+      "''literal",
+      "ordinary λ",
+      "=formula",
+      "\u0085=formula",
+      "\u001c=formula",
+      "\u001d=formula",
+      "\u001e=formula",
+      "\u001f=formula",
+      "\uFEFF=formula",
+      " +formula",
+      "-option",
+      "@owner",
+      "\tTabbed",
+      "\nNewline",
+      "  ＝wide",
+      " ＋wide",
+      "－wide",
+      "＠wide",
+    ];
+    for (const value of values) {
+      const source = {
+        ...finding!,
+        title: value,
+        summary: value,
+        remediation: value,
+        locations: [
+          {
+            path: value.replace(/[\u0000-\u001F]/gu, "") + ".ts",
+            startLine: 1,
+          },
+        ],
+      };
+      const [imported] = await parseImportedFindings(
+        exportCsv([source]),
+        "csv",
+        PLUGIN_ROOT,
+      );
+      expect(imported).toMatchObject({
+        title: source.title,
+        summary: source.summary,
+        remediation: source.remediation,
+        locations: source.locations,
+      });
+    }
+  });
+
+  test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {
+    const title = "'\uFEFF=formula";
+    const [imported] = await parseImportedFindings(
+      CSV_SOURCE.replace("Reported CSV import issue", title),
+      "csv",
+      PLUGIN_ROOT,
+    );
+
+    expect(imported!.title).toBe(title);
+  });
+
   test("accepts full findings documents and findings-service payloads", async () => {
     const document = await sourceDocument();
     document.findings[0]!.summary =
@@ -147,88 +262,4 @@ describe("findings import formats", () => {
       ),
     ).rejects.toThrow("duplicate occurrenceId");
   });
-});
-
-test("CSV imports retain separate occurrences of the same finding", async () => {
-  const second = CSV_SOURCE.split("\r\n")[1]!.replace(
-    "occ_000000000000000000000001",
-    "occ_000000000000000000000002",
-  );
-  const parsed = await parseImportedFindings(
-    `${CSV_SOURCE}${second}\r\n`,
-    "csv",
-    PLUGIN_ROOT,
-  );
-  expect(parsed).toHaveLength(2);
-  expect(parsed[0]!.findingId).toBe(parsed[1]!.findingId);
-  const bound = bindImportedFindings(parsed, "csv", "scan_import", "dataset");
-  expect(new Set(bound.map((row) => row.findingId)).size).toBe(2);
-  expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
-});
-
-test("legacy CSV keeps literal apostrophes and its original formula decoding", async () => {
-  for (const [encoded, title] of [
-    ["''literal", "''literal"],
-    ["'ordinary", "'ordinary"],
-    ["'=1+1", "=1+1"],
-  ]) {
-    const parsed = await parseImportedFindings(
-      CSV_SOURCE.replace("Reported CSV import issue", encoded!).replace(
-        "src/extract.ts",
-        "''literal.ts",
-      ),
-      "csv",
-      PLUGIN_ROOT,
-    );
-    expect(parsed[0]!.title).toBe(title!);
-    expect(parsed[0]!.locations[0]!.path).toBe("''literal.ts");
-  }
-});
-
-test("versioned CSV exports round-trip literal apostrophes and spreadsheet formulas", async () => {
-  const titles = [
-    "'--no-verify' skips hooks",
-    "'=1+1",
-    "'ordinary",
-    "=1+1",
-    "''-x",
-    "''literal",
-  ];
-  const document = await sourceDocument();
-  document.findings[0]!.locations[0]!.path = "''literal.ts";
-  const exported = spawnSync(
-    await resolvePluginPython({}),
-    [
-      "-c",
-      `import json,sys
-sys.path.insert(0,sys.argv[1])
-from finalize_scan_contract import build_csv_projection
-document = json.loads(sys.argv[2])
-exports = []
-for title in json.loads(sys.argv[3]):
-    document["findings"][0]["title"] = title
-    exports.append(build_csv_projection(document, {"mode": "repository"}).decode())
-print(json.dumps(exports))`,
-      join(PLUGIN_ROOT, "scripts"),
-      JSON.stringify(document),
-      JSON.stringify(titles),
-    ],
-    { encoding: "utf8" },
-  );
-  expect(exported.status, exported.stderr).toBe(0);
-  for (const [index, csv] of (
-    JSON.parse(exported.stdout) as string[]
-  ).entries()) {
-    expect(csv.split("\r\n")[0]).toContain("csv_encoding");
-    const parsed = await parseImportedFindings(csv, "csv", PLUGIN_ROOT);
-    expect(parsed[0]!.title).toBe(titles[index]!);
-    expect(parsed[0]!.locations[0]!.path).toBe("''literal.ts");
-    await expect(
-      parseImportedFindings(
-        csv.replace("apostrophe-v1", "unknown"),
-        "csv",
-        PLUGIN_ROOT,
-      ),
-    ).rejects.toThrow("csv_encoding");
-  }
 });
