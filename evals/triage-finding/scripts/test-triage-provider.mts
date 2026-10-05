@@ -205,6 +205,18 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       fs.constants.COPYFILE_FICLONE,
     );
     calibration.config.cli_env.CODEX_MCP_NODE_PATH = customNode;
+    const selectedNode = path.join(
+      root,
+      "selected-node",
+      "bin",
+      "synthetic-node",
+    );
+    fs.mkdirSync(path.dirname(selectedNode), { recursive: true });
+    fs.copyFileSync(
+      process.execPath,
+      selectedNode,
+      fs.constants.COPYFILE_FICLONE,
+    );
     const nodeAlias = path.join(root, "node-alias");
     fs.symlinkSync(customNode, nodeAlias);
     const nodeChoices = [
@@ -213,6 +225,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       "node",
       nodeAlias,
       path.join(root, "missing-node"),
+      "synthetic-node",
     ];
     const calibrationConfig = path.join(root, "calibration.json");
     fs.mkdirSync(path.join(root, "case"));
@@ -227,7 +240,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
             cli_env: {
               ...calibration.config.cli_env,
               CODEX_MCP_NODE_PATH: nodePath,
-              PATH: `${path.dirname(customNode)}${path.delimiter}${process.env.PATH}`,
+              PATH: `${path.dirname(selectedNode)}${path.delimiter}${path.dirname(customNode)}${path.delimiter}${process.env.PATH}`,
             },
           },
         })),
@@ -266,7 +279,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 9);
+    assert.equal(rows.length, 10);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 5);
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
@@ -278,12 +291,13 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       );
       assert.deepEqual(
         row.directories,
-        row.nodePath === customNode
-          ? [path.join(root, "case"), path.dirname(customNode)]
+        row.nodePath === customNode || row.nodePath === selectedNode
+          ? [path.join(root, "case"), path.dirname(row.nodePath)]
           : [path.dirname(row.nodePath)],
       );
     }
     assert.equal(rows.filter((row) => row.nodePath === customNode).length, 5);
+    assert.equal(rows.filter((row) => row.nodePath === selectedNode).length, 1);
     assert.equal(rows.filter((row) => row.nodePath === ambientNode).length, 3);
     assert.equal(
       rows.filter((row) => row.nodePath === fs.realpathSync(process.execPath))

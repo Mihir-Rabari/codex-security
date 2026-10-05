@@ -25,36 +25,39 @@ export default class TriageProvider implements ApiProvider {
           "Run this evaluation through scripts/run-promptfoo.mts.",
         );
       }
-      let requestedNode =
+      const requestedNode =
         this.config.cli_env?.CODEX_MCP_NODE_PATH ??
         process.env.CODEX_MCP_NODE_PATH ??
         process.execPath;
       const environment = { ...process.env, ...this.config.cli_env };
+      const resolveNodeCommand = (command: string) =>
+        /[/\\]/.test(command)
+          ? command
+          : execFileSync(
+              process.platform === "win32"
+                ? path.join(process.env.SystemRoot!, "System32", "where.exe")
+                : "/bin/sh",
+              process.platform === "win32"
+                ? [command]
+                : ["-c", 'command -v "$1"', "triage-node", command],
+              {
+                cwd: process.env.TRIAGE_RUNTIME_ROOT,
+                env: environment,
+                encoding: "utf8",
+              },
+            )
+              .trim()
+              .split(/\r?\n/)[0];
+      let nodeCommand: string;
       try {
+        nodeCommand = resolveNodeCommand(requestedNode);
         accessSync(
-          path.resolve(process.env.TRIAGE_RUNTIME_ROOT, requestedNode),
+          path.resolve(process.env.TRIAGE_RUNTIME_ROOT, nodeCommand),
           process.platform === "win32" ? constants.F_OK : constants.X_OK,
         );
       } catch {
-        requestedNode = "node";
+        nodeCommand = resolveNodeCommand("node");
       }
-      const nodeCommand = /[/\\]/.test(requestedNode)
-        ? requestedNode
-        : execFileSync(
-            process.platform === "win32"
-              ? path.join(process.env.SystemRoot!, "System32", "where.exe")
-              : "/bin/sh",
-            process.platform === "win32"
-              ? [requestedNode]
-              : ["-c", 'command -v "$1"', "triage-node", requestedNode],
-            {
-              cwd: process.env.TRIAGE_RUNTIME_ROOT,
-              env: environment,
-              encoding: "utf8",
-            },
-          )
-            .trim()
-            .split(/\r?\n/)[0];
       const nodePath = realpathSync(
         path.resolve(process.env.TRIAGE_RUNTIME_ROOT, nodeCommand),
       );
