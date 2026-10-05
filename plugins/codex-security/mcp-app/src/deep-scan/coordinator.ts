@@ -458,13 +458,13 @@ export class DeepScanCoordinator {
             });
           }
         } while (persistence !== this.cancellationPersistence?.promise);
+        if (current?.status === "failed") this.state = current;
         if (
           current &&
           (current.status === "failed" || current.status === "canceled") &&
           current.coordinatorGeneration ===
             this.options.run.coordinatorGeneration
         ) {
-          if (current.status === "failed") this.state = current;
           try {
             await this.options.onStopped(current);
           } catch (error) {
