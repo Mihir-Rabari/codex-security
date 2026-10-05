@@ -6799,6 +6799,7 @@ function directPatchDigest(
 
 interface PatchPublication {
   branch: string;
+  directory: string;
   dirtyFiles: Set<string>;
 }
 
@@ -6959,6 +6960,7 @@ async function preparePatchPublication(
     );
   }
   const root = await patchRepositoryRoot(repository, dependencies);
+  const directory = await realpath(repository);
   const status = await dependencies.runRepositoryCommand(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -6987,16 +6989,16 @@ async function preparePatchPublication(
     worktreeChanges
       .split("\0")
       .filter(Boolean)
-      .map((path) => relative(repository, resolve(root, path))),
+      .map((path) => relative(directory, resolve(root, path))),
   );
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
-    dirtyFiles.add(relative(repository, resolve(root, entry.slice(3))));
+    dirtyFiles.add(relative(directory, resolve(root, entry.slice(3))));
     if (/[RC]/u.test(entry.slice(0, 2)))
-      dirtyFiles.add(relative(repository, resolve(root, paths[++index]!)));
+      dirtyFiles.add(relative(directory, resolve(root, paths[++index]!)));
   }
-  return { branch, dirtyFiles };
+  return { branch, directory, dirtyFiles };
 }
 
 async function publishPatchBranch(
@@ -7157,7 +7159,7 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, dirtyFiles } = publication;
+  const { branch, directory, dirtyFiles } = publication;
   const dirty = files.filter((file) => dirtyFiles.has(file));
   if (dirty.length > 0) {
     throw new CodexSecurityError(
@@ -7165,7 +7167,7 @@ async function createPatchPullRequest(
     );
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const pathspec = files.map((file) => resolve(repository, file));
+  const pathspec = files.map((file) => resolve(directory, file));
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   await run(["--literal-pathspecs", "add", "--dry-run", "--", ...pathspec]);
