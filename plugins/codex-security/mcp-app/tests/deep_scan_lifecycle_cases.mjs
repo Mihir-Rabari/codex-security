@@ -160,7 +160,7 @@ export async function testDeepScanLifecycle({
       1,
       "cancellation response failure must not skip saved results",
     );
-    assert.equal(result.status, "canceled");
+    assert.match(result.message, /response lost/);
   }
 
   async function lateCancellationKeepsPersistedFailure() {

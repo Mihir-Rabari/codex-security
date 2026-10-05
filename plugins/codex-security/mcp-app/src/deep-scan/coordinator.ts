@@ -106,6 +106,7 @@ export class DeepScanCoordinator {
   private cancellationPersistence?: {
     promise: Promise<void>;
     resolve: () => void;
+    failure?: { error: unknown };
   };
   private started = false;
   private terminal = false;
@@ -255,9 +256,12 @@ export class DeepScanCoordinator {
     await this.cancellationReady;
     try {
       await persistCancellation();
+    } catch (error) {
+      this.cancellationPersistence.failure = { error };
+      throw error;
     } finally {
-      // The caller owns persistence errors. Cleanup must still inspect durable
-      // state and preserve results when the process lost a committed response.
+      // Cleanup still inspects durable state and preserves results when the
+      // process lost a committed response, then reports the persistence failure.
       this.cancellationPersistence.resolve();
     }
     return await this.settled();
@@ -450,6 +454,9 @@ export class DeepScanCoordinator {
           event: "coordinator_cleanup_settled",
           scanId: this.state.scanId,
         });
+      }
+      if (this.cancellationPersistence?.failure) {
+        throw this.cancellationPersistence.failure.error;
       }
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
       if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
