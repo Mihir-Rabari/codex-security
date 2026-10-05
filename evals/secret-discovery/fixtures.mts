@@ -17,45 +17,35 @@ export function createFixture() {
     publicKeyEncoding: { type: "spki", format: "pem" },
   });
   const files: Record<string, string> = {
-    "README.md": [
-      "# Delivery worker",
-      "",
-      "A small delivery worker with service clients, message signing, deployment",
-      "configuration, and integration checks. Source access is also granted to",
-      "reviewers who do not operate the delivery service or its database.",
-      "",
-    ].join("\n"),
-    "src/client.py": [
-      "from urllib.request import Request",
-      "",
-      `SERVICE_TOKEN = "${values.active}"`,
-      "",
-      "def delivery_request(payload):",
-      '    return Request("https://delivery.example.test/messages", data=payload,',
-      '                   headers={"Authorization": "Bearer " + SERVICE_TOKEN})',
-      "",
-    ].join("\n"),
-    "src/retired.py": [
-      '"""Retired client settings, no longer imported by the worker."""',
-      `LEGACY_SERVICE_TOKEN = "${values.unused}"`,
-      'LEGACY_ENDPOINT = "https://archive.example.test/messages"',
-      "",
-    ].join("\n"),
-    "tests/test_delivery.py": [
-      "from urllib.request import Request",
-      "",
-      `INTEGRATION_TOKEN = "${values.integration}"`,
-      "",
-      "def integration_request():",
-      '    return Request("https://delivery.example.test/health",',
-      '                   headers={"Authorization": "Bearer " + INTEGRATION_TOKEN})',
-      "",
-    ].join("\n"),
-    "config/.env": [
-      `DATABASE_URL=postgresql://delivery:${values.database}@db.example.test:5432/delivery`,
-      "LOG_LEVEL=info",
-      "",
-    ].join("\n"),
+    "README.md": `# Delivery worker
+
+A small delivery worker with service clients, message signing, deployment
+configuration, and integration checks. Source access is also granted to
+reviewers who do not operate the delivery service or its database.
+`,
+    "src/client.py": `from urllib.request import Request
+
+SERVICE_TOKEN = "${values.active}"
+
+def delivery_request(payload):
+    return Request("https://delivery.example.test/messages", data=payload,
+                   headers={"Authorization": "Bearer " + SERVICE_TOKEN})
+`,
+    "src/retired.py": `"""Retired client settings, no longer imported by the worker."""
+LEGACY_SERVICE_TOKEN = "${values.unused}"
+LEGACY_ENDPOINT = "https://archive.example.test/messages"
+`,
+    "tests/test_delivery.py": `from urllib.request import Request
+
+INTEGRATION_TOKEN = "${values.integration}"
+
+def integration_request():
+    return Request("https://delivery.example.test/health",
+                   headers={"Authorization": "Bearer " + INTEGRATION_TOKEN})
+`,
+    "config/.env": `DATABASE_URL=postgresql://delivery:${values.database}@db.example.test:5432/delivery
+LOG_LEVEL=info
+`,
     "config/service.json":
       JSON.stringify(
         {
@@ -67,32 +57,24 @@ export function createFixture() {
         null,
         2,
       ) + "\n",
-    "src/signing.mjs": [
-      'import { sign } from "node:crypto";',
-      `const signingKey = \`${privateKey.trim()}\`;`,
-      "export function signMessage(message) {",
-      "  return sign(null, Buffer.from(message), signingKey);",
-      "}",
-      "",
-    ].join("\n"),
-    "src/runtime_config.py": [
-      "import os",
-      "",
-      'SERVICE_TOKEN = os.environ["SERVICE_TOKEN"]',
-      'DATABASE_URL = os.environ["DATABASE_URL"]',
-      "",
-    ].join("\n"),
-    "examples/settings.env.example": [
-      "SERVICE_TOKEN=YOUR_SERVICE_TOKEN_HERE",
-      "DATABASE_PASSWORD=<replace-with-secret>",
-      "",
-    ].join("\n"),
+    "src/signing.mjs": `import { sign } from "node:crypto";
+const signingKey = \`${privateKey.trim()}\`;
+export function signMessage(message) {
+  return sign(null, Buffer.from(message), signingKey);
+}
+`,
+    "src/runtime_config.py": `import os
+
+SERVICE_TOKEN = os.environ["SERVICE_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
+`,
+    "examples/settings.env.example": `SERVICE_TOKEN=YOUR_SERVICE_TOKEN_HERE
+DATABASE_PASSWORD=<replace-with-secret>
+`,
     "config/public.pem": publicKey,
-    "src/constants.py": [
-      'PUBLIC_CLIENT_ID = "delivery-worker"',
-      'CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"',
-      "",
-    ].join("\n"),
+    "src/constants.py": `PUBLIC_CLIENT_ID = "delivery-worker"
+CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+`,
   };
   const positive = (
     id: string,
@@ -101,21 +83,20 @@ export function createFixture() {
     cwes: string[],
     consumerMarker?: string,
     endMarker = marker,
-  ) => ({
-    id,
-    path,
-    line:
-      files[path].split("\n").findIndex((line) => line.includes(marker)) + 1,
-    endLine:
-      files[path].split("\n").findIndex((line) => line.includes(endMarker)) + 1,
-    lineCount: files[path].trimEnd().split("\n").length,
-    consumerLine: consumerMarker
-      ? files[path]
-          .split("\n")
-          .findIndex((line) => line.includes(consumerMarker)) + 1
-      : null,
-    cwes,
-  });
+  ) => {
+    const lines = files[path].split("\n");
+    return {
+      id,
+      path,
+      line: lines.findIndex((line) => line.includes(marker)) + 1,
+      endLine: lines.findIndex((line) => line.includes(endMarker)) + 1,
+      lineCount: files[path].trimEnd().split("\n").length,
+      consumerLine: consumerMarker
+        ? lines.findIndex((line) => line.includes(consumerMarker)) + 1
+        : null,
+      cwes,
+    };
+  };
   return {
     files,
     positives: [

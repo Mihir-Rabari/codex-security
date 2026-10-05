@@ -10,7 +10,7 @@ Install the SDK and MCP app’s locked dependencies using the repository's norma
 
 ```sh
 pnpm --dir sdk/typescript run build:evals
-node evals/deep-reducer/run.mjs
+node --experimental-strip-types evals/deep-reducer/run.mts
 ```
 
 The run uses the caller's normal Codex credentials and configuration and consumes model usage. An optional final argument selects a model; otherwise Codex uses its configured model. This eval is opt-in and does not run in CI. The model receives only the production reducer prompt and must discover and carry out recovery itself. The SDK does not expose every code-mode error event, so the grade relies on the observed oversized response, changed request, and saved result.
@@ -24,6 +24,5 @@ The same fixture, real transport, and grading helpers live under `plugins/codex-
 Run that test directly from the repository root:
 
 ```sh
-pnpm --dir plugins/codex-security/mcp-app run build:tests
-node --test plugins/codex-security/mcp-app/tests/test_deep_reducer_paging_eval.js
+node --experimental-strip-types --test plugins/codex-security/mcp-app/tests/test_deep_reducer_paging_eval.ts
 ```

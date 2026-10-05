@@ -40,13 +40,14 @@ Credential values remain part of the source evidence.
 
 Install dependencies and build the TypeScript SDK using the repository's normal
 setup, including the MCP app dependencies. `build:evals` type-checks the eval
-sources and emits ignored `.mjs` files beside their `.mts` sources. The eval reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
+sources; Node runs them directly with `--experimental-strip-types`. The eval
+reuses the pinned Codex SDK, CLI, esbuild, and SDK helper for
 creating private homes. It bundles the MCP app's permission-profile preflight
 locally with esbuild and adds no dependencies.
 
 ```sh
 pnpm --dir sdk/typescript run build:evals
-node evals/secret-discovery/run.mjs
+node --experimental-strip-types evals/secret-discovery/run.mts
 ```
 
 An optional positional argument selects a model. When omitted, Codex selects
@@ -103,7 +104,7 @@ the model.
 
 ```sh
 pnpm --dir sdk/typescript run build:evals
-node --test evals/secret-discovery/test_*.mjs
+node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 ```
 
 CI runs these Node-only checks for fixture staging, production-prompt loading,

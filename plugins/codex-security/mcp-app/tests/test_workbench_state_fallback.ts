@@ -1,3 +1,4 @@
+import { readJsonLines } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -13,10 +14,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 
-import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.js";
-import * as streams from "./support/streams.js";
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
+import * as streams from "./support/streams.ts";
 
 if (process.platform !== "win32") {
   await testWorkbenchStateFallback();
@@ -64,15 +64,12 @@ async function testWorkbenchStateFallback() {
         );
         await mkdir(defaultState, { recursive: true });
         await chmod(defaultState, 0o500);
-        const server = startServer(
-          serverBundlePath,
-          childEnvironment({
-            CODEX_HOME: codexHome,
-            CODEX_SECURITY_SCAN_ROOT: undefined,
-            CODEX_SECURITY_STATE_DIR: undefined,
-            PYTHON: realPython,
-          }),
-        );
+        const server = startServer(serverBundlePath, {
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_SCAN_ROOT: undefined,
+          CODEX_SECURITY_STATE_DIR: undefined,
+          PYTHON: realPython,
+        });
         let fallbackState;
         try {
           await initialize(server, 1);
@@ -176,12 +173,12 @@ async function testWorkbenchStateFallback() {
       const readFirstScanRoot = path.join(fixtureRoot, "read-first-scans");
       await mkdir(readFirstDefaultState, { recursive: true });
       await chmod(readFirstDefaultState, 0o500);
-      const readFirstEnvironment = childEnvironment({
+      const readFirstEnvironment = {
         CODEX_HOME: readFirstHome,
         CODEX_SECURITY_SCAN_ROOT: readFirstScanRoot,
         CODEX_SECURITY_STATE_DIR: undefined,
         PYTHON: realPython,
-      });
+      };
       let readFirstServer = startServer(serverBundlePath, readFirstEnvironment);
       try {
         await initialize(readFirstServer, 1);
@@ -255,19 +252,15 @@ async function testWorkbenchStateFallback() {
     }
 
     const scanRoot = path.join(fixtureRoot, "fallback-scans");
-    await mkdir(scanRoot, { recursive: true });
-    const fallbackServer = startServer(
-      serverBundlePath,
-      childEnvironment({
-        CODEX_SECURITY_SCAN_ROOT: scanRoot,
-        CODEX_SECURITY_STATE_DIR: undefined,
-        FAKE_PYTHON_ALWAYS_FAIL: undefined,
-        FAKE_PYTHON_FAILURE: undefined,
-        FAKE_PYTHON_LOG: invocationLog,
-        FAKE_REAL_PYTHON: realPython,
-        PYTHON: fakePythonPath,
-      }),
-    );
+    const fallbackServer = startServer(serverBundlePath, {
+      CODEX_SECURITY_SCAN_ROOT: scanRoot,
+      CODEX_SECURITY_STATE_DIR: undefined,
+      FAKE_PYTHON_ALWAYS_FAIL: undefined,
+      FAKE_PYTHON_FAILURE: undefined,
+      FAKE_PYTHON_LOG: invocationLog,
+      FAKE_REAL_PYTHON: realPython,
+      PYTHON: fakePythonPath,
+    });
     try {
       await initialize(fallbackServer, 1);
       const promptOnly = await startPromptOnlyScan(
@@ -311,30 +304,22 @@ async function testWorkbenchStateFallback() {
         event: "state_fallback_pinned",
         reason: "persistent_sqlite_unwritable",
       });
-      assert.doesNotMatch(
-        JSON.stringify(events[0]),
-        new RegExp(escapeRegex(fixtureRoot)),
-      );
     } finally {
       await fallbackServer.stop();
     }
 
     await writeFile(invocationLog, "");
     const explicitStateDir = path.join(fixtureRoot, "explicit-state");
-    await mkdir(explicitStateDir, { recursive: true });
-    const explicitServer = startServer(
-      serverBundlePath,
-      childEnvironment({
-        CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "explicit-scans"),
-        CODEX_SECURITY_STATE_DIR: explicitStateDir,
-        FAKE_PYTHON_ALWAYS_FAIL: "1",
-        FAKE_PYTHON_FAILURE:
-          "sqlite3.OperationalError: unable to open database file",
-        FAKE_PYTHON_LOG: invocationLog,
-        FAKE_REAL_PYTHON: realPython,
-        PYTHON: fakePythonPath,
-      }),
-    );
+    const explicitServer = startServer(serverBundlePath, {
+      CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "explicit-scans"),
+      CODEX_SECURITY_STATE_DIR: explicitStateDir,
+      FAKE_PYTHON_ALWAYS_FAIL: "1",
+      FAKE_PYTHON_FAILURE:
+        "sqlite3.OperationalError: unable to open database file",
+      FAKE_PYTHON_LOG: invocationLog,
+      FAKE_REAL_PYTHON: realPython,
+      PYTHON: fakePythonPath,
+    });
     try {
       await initialize(explicitServer, 10);
       assertToolError(
@@ -360,26 +345,18 @@ async function testWorkbenchStateFallback() {
       fixtureRoot,
       "inspection-first-scans",
     );
-    const inspectionFirstCodexHome = path.join(
-      fixtureRoot,
-      "inspection-first-codex-home",
-    );
-    await mkdir(inspectionFirstCodexHome, { recursive: true });
-    const inspectionFirstServer = startServer(
-      serverBundlePath,
-      childEnvironment({
-        CODEX_HOME: inspectionFirstCodexHome,
-        CODEX_SECURITY_SCAN_ROOT: inspectionFirstScanRoot,
-        CODEX_SECURITY_STATE_DIR: undefined,
-        FAKE_PYTHON_ALWAYS_FAIL: undefined,
-        FAKE_PYTHON_FAILURE:
-          "sqlite3.OperationalError: unable to open database file",
-        FAKE_PYTHON_LOG: invocationLog,
-        FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
-        FAKE_REAL_PYTHON: realPython,
-        PYTHON: fakePythonPath,
-      }),
-    );
+    const inspectionFirstServer = startServer(serverBundlePath, {
+      CODEX_HOME: path.join(fixtureRoot, "inspection-first-codex-home"),
+      CODEX_SECURITY_SCAN_ROOT: inspectionFirstScanRoot,
+      CODEX_SECURITY_STATE_DIR: undefined,
+      FAKE_PYTHON_ALWAYS_FAIL: undefined,
+      FAKE_PYTHON_FAILURE:
+        "sqlite3.OperationalError: unable to open database file",
+      FAKE_PYTHON_LOG: invocationLog,
+      FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
+      FAKE_REAL_PYTHON: realPython,
+      PYTHON: fakePythonPath,
+    });
     try {
       await initialize(inspectionFirstServer, 15);
       assertNoError(await inspectTarget(inspectionFirstServer, 16, targetPath));
@@ -409,24 +386,19 @@ async function testWorkbenchStateFallback() {
     }
 
     await writeFile(invocationLog, "");
-    const provenCodexHome = path.join(fixtureRoot, "proven-codex-home");
     const provenScanRoot = path.join(fixtureRoot, "proven-scans");
-    await mkdir(provenCodexHome, { recursive: true });
-    const provenServer = startServer(
-      serverBundlePath,
-      childEnvironment({
-        CODEX_HOME: provenCodexHome,
-        CODEX_SECURITY_SCAN_ROOT: provenScanRoot,
-        CODEX_SECURITY_STATE_DIR: undefined,
-        FAKE_PYTHON_ALWAYS_FAIL: undefined,
-        FAKE_PYTHON_FAILURE:
-          "sqlite3.OperationalError: unable to open database file",
-        FAKE_PYTHON_LOG: invocationLog,
-        FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
-        FAKE_REAL_PYTHON: realPython,
-        PYTHON: fakePythonPath,
-      }),
-    );
+    const provenServer = startServer(serverBundlePath, {
+      CODEX_HOME: path.join(fixtureRoot, "proven-codex-home"),
+      CODEX_SECURITY_SCAN_ROOT: provenScanRoot,
+      CODEX_SECURITY_STATE_DIR: undefined,
+      FAKE_PYTHON_ALWAYS_FAIL: undefined,
+      FAKE_PYTHON_FAILURE:
+        "sqlite3.OperationalError: unable to open database file",
+      FAKE_PYTHON_LOG: invocationLog,
+      FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
+      FAKE_REAL_PYTHON: realPython,
+      PYTHON: fakePythonPath,
+    });
     try {
       await initialize(provenServer, 18);
       assertNoError(
@@ -456,19 +428,16 @@ async function testWorkbenchStateFallback() {
 
     await writeFile(invocationLog, "");
     const genericScanRoot = path.join(fixtureRoot, "generic-scans");
-    const genericServer = startServer(
-      serverBundlePath,
-      childEnvironment({
-        CODEX_SECURITY_SCAN_ROOT: genericScanRoot,
-        CODEX_SECURITY_STATE_DIR: undefined,
-        FAKE_PYTHON_ALWAYS_FAIL: "1",
-        FAKE_PYTHON_FAILURE:
-          "sqlite3.OperationalError: database disk image is malformed",
-        FAKE_PYTHON_LOG: invocationLog,
-        FAKE_REAL_PYTHON: realPython,
-        PYTHON: fakePythonPath,
-      }),
-    );
+    const genericServer = startServer(serverBundlePath, {
+      CODEX_SECURITY_SCAN_ROOT: genericScanRoot,
+      CODEX_SECURITY_STATE_DIR: undefined,
+      FAKE_PYTHON_ALWAYS_FAIL: "1",
+      FAKE_PYTHON_FAILURE:
+        "sqlite3.OperationalError: database disk image is malformed",
+      FAKE_PYTHON_LOG: invocationLog,
+      FAKE_REAL_PYTHON: realPython,
+      PYTHON: fakePythonPath,
+    });
     try {
       await initialize(genericServer, 20);
       assertToolError(
@@ -492,15 +461,6 @@ async function testWorkbenchStateFallback() {
     await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
   }
-}
-
-function childEnvironment(overrides: NodeJS.ProcessEnv) {
-  const environment = { ...process.env };
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) delete environment[key];
-    else environment[key] = value;
-  }
-  return environment;
 }
 
 async function writeFakePython(executablePath: string) {
@@ -530,19 +490,15 @@ async function writeFakePython(executablePath: string) {
 }
 
 function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
-  const server = streams.startServer(serverPath, env, {
-    cwd: path.dirname(path.dirname(serverPath)),
-    component: "codex_security_workbench",
-    withTimeout,
-    responseLabel: "response",
-    // Tool errors are asserted from MCP responses; only structured diagnostics matter here.
-    checkSignalCode: false,
-  });
-  return {
-    request: server.request.bind(server),
-    stderrEvents: server.stderrEvents,
-    stop: server.stop,
-  };
+  return streams.startServer(
+    serverPath,
+    { ...process.env, ...env },
+    {
+      cwd: path.dirname(path.dirname(serverPath)),
+      component: "codex_security_workbench",
+      timeoutMessage: (id) => `Timed out waiting for response ${id}`,
+    },
+  );
 }
 
 async function initialize(server: ReturnType<typeof startServer>, id: number) {
@@ -653,14 +609,6 @@ function assertToolError(
   );
 }
 
-async function readJsonLines(filePath: string) {
-  const content = await readFile(filePath, "utf8");
-  return content
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-}
-
 async function pathExists(filePath: string) {
   try {
     await stat(filePath);
@@ -669,21 +617,4 @@ async function pathExists(filePath: string) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
     throw error;
   }
-}
-
-function withTimeout<Value>(
-  promise: Promise<Value>,
-  timeoutMs: number,
-  label: string,
-) {
-  return Promise.race([
-    promise,
-    delay(timeoutMs).then(() => {
-      throw new Error(`Timed out waiting for ${label}`);
-    }),
-  ]);
-}
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

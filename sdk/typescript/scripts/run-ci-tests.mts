@@ -1,22 +1,16 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { shardTestFiles } from "./test-shards.mjs";
+import { shardTestFiles } from "./test-shards.mts";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
 const shard = Number(selection?.[1]);
 const count = Number(selection?.[2]);
-if (
-  !Number.isSafeInteger(shard) ||
-  !Number.isSafeInteger(count) ||
-  shard > count
-) {
+if (!Number.isSafeInteger(count) || shard > count) {
   throw new Error(
-    "Usage: node scripts/run-ci-tests.mjs <shard>/<count> [bun test options]",
+    "Usage: node --experimental-strip-types scripts/run-ci-tests.mts <shard>/<count> [bun test options]",
   );
 }
-const packageDirectory = fileURLToPath(new URL("../", import.meta.url));
 const tests = (await readdir(new URL("../tests-ts/", import.meta.url))).filter(
   (file) =>
     file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
@@ -140,7 +134,7 @@ do {
   }
 } while (bareOptional);
 const child = spawn("bun", testArguments, {
-  cwd: packageDirectory,
+  cwd: new URL("../", import.meta.url),
   env: {
     ...process.env,
     CODEX_SECURITY_TEST_TIMEOUT_MS: parsed.values.timeout as string | undefined,
@@ -148,10 +142,7 @@ const child = spawn("bun", testArguments, {
   stdio: "inherit",
   windowsHide: true,
 });
-child.once("error", (error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+child.once("error", console.error);
 child.once("close", (code) => {
   process.exitCode = code ?? 1;
 });

@@ -1,4 +1,4 @@
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -15,7 +15,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { applicationRoot, buildServer } from "./build-server.js";
+import { applicationRoot, buildServer } from "./build-server.ts";
 
 const fixture = await temporaryDirectory("codex-security-storage-test-", true);
 const stateRoot = path.join(fixture, "state");
@@ -105,7 +105,7 @@ try {
 
   const outside = path.join(fixture, "outside.txt");
   await writeFile(outside, "outside\n");
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       storage: "persistent",
@@ -114,7 +114,7 @@ try {
     }),
   );
   await symlink(outside, path.join(scratch.directory, "linked.txt"));
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       storage: "persistent",
@@ -132,7 +132,7 @@ try {
     "artifacts/name.",
     "artifacts/name ",
   ]) {
-    await rejected(() =>
+    await assert.rejects(() =>
       save({
         ...identity,
         storage: "persistent",
@@ -153,11 +153,11 @@ try {
     "artifacts/02_discovery/CANDIDATE_LEDGER.JSONL",
     "artifacts/02_discovery/in_scope_files.txt",
   ]) {
-    await rejected(() =>
+    await assert.rejects(() =>
       save({ ...identity, storage: "persistent", path: owned, content: "bad" }),
     );
   }
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       handoffClaimToken: "00000000-0000-4000-8000-000000000000",
@@ -224,7 +224,7 @@ try {
     ).content,
     legacyModel,
   );
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       targetPath: repository,
@@ -294,7 +294,7 @@ try {
     ),
     content,
   );
-  await rejected(() =>
+  await assert.rejects(() =>
     call("export_codex_security_findings", {
       scanId,
       artifact: "threat-model",
@@ -339,7 +339,7 @@ try {
     { env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateRoot } },
   );
   // Preparation seals receipts before the database transitions to complete.
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       storage: "persistent",
@@ -349,7 +349,7 @@ try {
   );
   assert.equal(await readFile(saved.path, "utf8"), content);
   await call("complete_codex_security_scan", identity);
-  await rejected(() =>
+  await assert.rejects(() =>
     save({
       ...identity,
       storage: "persistent",
@@ -416,7 +416,4 @@ function save(input: Record<string, unknown>) {
 }
 function read(input: Record<string, unknown>) {
   return call<{ content: string }>("read_codex_security_artifact", input);
-}
-async function rejected(action: () => Promise<unknown>) {
-  await assert.rejects(action);
 }

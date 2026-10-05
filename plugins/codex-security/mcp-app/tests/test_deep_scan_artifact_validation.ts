@@ -1,9 +1,10 @@
-import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
+import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const { validateDiscoveryArtifacts, validateReducerArtifacts } =
   await importSource(
@@ -24,13 +25,11 @@ try {
 console.log("deep scan artifact validation tests passed");
 
 async function testDiscoveryValidation(root: string) {
-  const artifacts = await createLayout(path.join(root, "discovery"));
   const result = draft([finding("shared", "src/a.js")], {
     threatModel: { summary: "Requests reach shared code." },
   });
-  const worker = await createWorker(
-    artifacts,
-    "discovery-0001",
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "discovery"),
     "worker-001",
     result,
   );
@@ -195,20 +194,12 @@ async function testDiscoveryValidation(root: string) {
 }
 
 async function testReducerValidation(root: string) {
-  const artifacts = await createLayout(path.join(root, "reducer"));
   const firstFinding = finding("shared", "src/a.js");
   const secondFinding = finding("independent", "src/b.js");
-  const first = await createWorker(
-    artifacts,
-    "discovery-0001",
+  const { artifacts, ...first } = await createWorker(
+    path.join(root, "reducer"),
     "worker-001",
     draft([firstFinding]),
-  );
-  await createWorker(
-    artifacts,
-    "discovery-0002",
-    "worker-002",
-    draft([firstFinding, secondFinding]),
   );
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
   const resultPath = path.join(artifactDir, "result.json");
@@ -222,15 +213,9 @@ async function testReducerValidation(root: string) {
       ],
       previous: null,
     };
-  const validateSnapshot = () =>
+  const validateSnapshot = (reducerId = "dedup-0001", snapshot = sources) =>
     validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir,
-        resultPath,
-        reducerId: "dedup-0001",
-        sources,
-      },
+      { artifacts, artifactDir, resultPath, reducerId, sources: snapshot },
       scanId,
     );
   await assert.rejects(validateSnapshot(), /unaccounted source findings/);
@@ -238,7 +223,7 @@ async function testReducerValidation(root: string) {
   await writeFile(first.resultPath, "{source changed after dispatch");
   const validatedSnapshot = await validateSnapshot();
   assert.equal(validatedSnapshot.newFindings, 2);
-  const admitted = JSON.parse(await readFile(resultPath, "utf8"));
+  const admitted = await readJson(resultPath);
   assert.deepEqual(
     validatedSnapshot.result,
     admitted,
@@ -254,8 +239,8 @@ async function testReducerValidation(root: string) {
   await writeResult(resultPath, draft([firstFinding, secondFinding]));
   assert.equal((await validateSnapshot()).newFindings, 0);
   assert.equal(
-    JSON.parse(await readFile(resultPath, "utf8")).findings[0].provenance
-      .previousFindings[0].summary,
+    (await readJson(resultPath)).findings[0].provenance.previousFindings[0]
+      .summary,
     sources.previous!.findings[0].summary,
   );
 
@@ -272,52 +257,34 @@ async function testReducerValidation(root: string) {
     previous: null,
   };
   await writeResult(resultPath, draft([firstFinding]));
-  await validateReducerArtifacts(
-    {
-      artifacts,
-      artifactDir,
-      resultPath,
-      reducerId: "dedup-threat-model",
-      sources: threatModelSources,
-    },
-    scanId,
-  );
+  await validateSnapshot("dedup-threat-model", threatModelSources);
   assert.deepEqual(
-    JSON.parse(await readFile(resultPath, "utf8")).threatModel,
+    (await readJson(resultPath)).threatModel,
     inheritedThreatModel,
     "a reducer cannot erase the accepted discovery threat model by omission",
   );
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
-    validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir,
-        resultPath,
-        reducerId: "dedup-ambiguous-threat-model",
-        sources: {
-          discoveries: [
-            {
-              workerId: "worker-a",
-              result: draft([], {
-                threatModel: { summary: "Public API." },
-                scope: { summary: "Public API" },
-              }),
-            },
-            {
-              workerId: "worker-b",
-              result: draft([], {
-                threatModel: { summary: "Local operator." },
-                scope: { summary: "Local operator" },
-              }),
-            },
-          ],
-          previous: null,
+    validateSnapshot("dedup-ambiguous-threat-model", {
+      discoveries: [
+        {
+          workerId: "worker-a",
+          result: draft([], {
+            threatModel: { summary: "Public API." },
+            scope: { summary: "Public API" },
+          }),
         },
-      },
-      scanId,
-    ),
+        {
+          workerId: "worker-b",
+          result: draft([], {
+            threatModel: { summary: "Local operator." },
+            scope: { summary: "Local operator" },
+          }),
+        },
+      ],
+      previous: null,
+    }),
     /ambiguous threat models/i,
   );
 
@@ -326,26 +293,17 @@ async function testReducerValidation(root: string) {
     includePaths: ["src"],
   };
   await writeResult(resultPath, draft([firstFinding]));
-  await validateReducerArtifacts(
-    {
-      artifacts,
-      artifactDir,
-      resultPath,
-      reducerId: "dedup-scope",
-      sources: {
-        discoveries: [
-          {
-            workerId: first.id,
-            result: draft([firstFinding], { scope: inheritedScope }),
-          },
-        ],
-        previous: null,
+  await validateSnapshot("dedup-scope", {
+    discoveries: [
+      {
+        workerId: first.id,
+        result: draft([firstFinding], { scope: inheritedScope }),
       },
-    },
-    scanId,
-  );
+    ],
+    previous: null,
+  });
   assert.deepEqual(
-    JSON.parse(await readFile(resultPath, "utf8")).scope,
+    (await readJson(resultPath)).scope,
     inheritedScope,
     "a reducer cannot erase an unambiguous accepted scope by omission",
   );
@@ -359,28 +317,19 @@ async function testReducerValidation(root: string) {
 
   await writeResult(resultPath, draft([]));
   await assert.rejects(
-    validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir,
-        resultPath,
-        reducerId: "dedup-ambiguous-scope",
-        sources: {
-          discoveries: [
-            {
-              workerId: "worker-a",
-              result: draft([], { scope: { summary: "Public API" } }),
-            },
-            {
-              workerId: "worker-b",
-              result: draft([], { scope: { summary: "Admin API" } }),
-            },
-          ],
-          previous: null,
+    validateSnapshot("dedup-ambiguous-scope", {
+      discoveries: [
+        {
+          workerId: "worker-a",
+          result: draft([], { scope: { summary: "Public API" } }),
         },
-      },
-      scanId,
-    ),
+        {
+          workerId: "worker-b",
+          result: draft([], { scope: { summary: "Admin API" } }),
+        },
+      ],
+      previous: null,
+    }),
     /ambiguous scopes/i,
   );
 
@@ -426,19 +375,8 @@ async function testReducerValidation(root: string) {
       },
     ]),
   );
-  await validateReducerArtifacts(
-    {
-      artifacts,
-      artifactDir,
-      resultPath,
-      reducerId: "dedup-colliding-previous",
-      sources: collidingSources,
-    },
-    scanId,
-  );
-  const reconciledCollisions = JSON.parse(
-    await readFile(resultPath, "utf8"),
-  ).findings;
+  await validateSnapshot("dedup-colliding-previous", collidingSources);
+  const reconciledCollisions = (await readJson(resultPath)).findings;
   assert.deepEqual(
     reconciledCollisions.map(
       (item: { provenance: { sourceFindingIds: string[] } }) =>
@@ -647,10 +585,8 @@ async function testReducerValidation(root: string) {
 }
 
 async function testEmptyDiscoveryAndReduction(root: string) {
-  const artifacts = await createLayout(path.join(root, "empty"));
-  const worker = await createWorker(
-    artifacts,
-    "discovery-0001",
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "empty"),
     "worker-empty",
     draft([]),
   );
@@ -673,38 +609,15 @@ async function testEmptyDiscoveryAndReduction(root: string) {
   );
 }
 
-async function createLayout(scanDir: string) {
-  const workersRoot = path.join(
+async function createWorker(scanDir: string, id: string, result: unknown) {
+  const artifacts = {
     scanDir,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-  );
-  const dedupRoot = path.join(scanDir, "artifacts", "deep_discovery", "dedup");
-  await Promise.all([
-    mkdir(workersRoot, { recursive: true }),
-    mkdir(dedupRoot, { recursive: true }),
-  ]);
-  return {
-    scanDir,
-    workersRoot,
-    dedupRoot,
+    workersRoot: path.join(scanDir, "artifacts", "deep_discovery", "workers"),
+    dedupRoot: path.join(scanDir, "artifacts", "deep_discovery", "dedup"),
   };
-}
-
-async function createWorker(
-  artifacts: Awaited<ReturnType<typeof createLayout>>,
-  label: string,
-  id: string,
-  result: unknown,
-) {
-  const output = path.join(artifacts.workersRoot, label, "output");
+  const output = path.join(artifacts.workersRoot, "discovery-0001", "output");
   await mkdir(output, { recursive: true });
   const resultPath = path.join(output, "result.json");
   await writeResult(resultPath, result);
-  return { id, resultPath };
-}
-
-async function writeResult(file: string, value: unknown) {
-  await writeFile(file, JSON.stringify(value) + "\n");
+  return { artifacts, id, resultPath };
 }

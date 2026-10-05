@@ -1,13 +1,10 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { copyCompletedScanFixture } from "../plugin-root.js";
 
-export function createTemporaryDirectories({
-  canonical = true,
-}: { canonical?: boolean } = {}) {
+export function createTemporaryDirectories(canonical = true) {
   const directories: string[] = [];
 
   return {
@@ -16,8 +13,7 @@ export function createTemporaryDirectories({
     },
 
     async create(prefix: string): Promise<string> {
-      const directory = await mkdtemp(join(tmpdir(), prefix));
-      const path = canonical ? await realpath(directory) : directory;
+      const path = await temporaryDirectory(prefix, canonical);
       directories.push(path);
       return path;
     },
@@ -36,9 +32,7 @@ export function createApiTestFixtures(
   prefix = "codex-security-api-",
   canonicalize = true,
 ) {
-  const temporaryDirectories = createTemporaryDirectories({
-    canonical: canonicalize,
-  });
+  const temporaryDirectories = createTemporaryDirectories(canonicalize);
   return {
     temporaryDirectories,
     cleanup: temporaryDirectories.cleanup,
@@ -53,31 +47,6 @@ export function createApiTestFixtures(
       return temporaryDirectories.create(directoryPrefix);
     },
   };
-}
-
-export function createSyncTestDirectories(
-  prefix: string,
-  canonicalize = false,
-) {
-  const temporaryDirectories: string[] = [];
-  return {
-    temporaryDirectories,
-    cleanup(): void {
-      for (const directory of temporaryDirectories.splice(0)) {
-        rmSync(directory, { recursive: true, force: true });
-      }
-    },
-    temporaryDirectory(directoryPrefix = prefix): string {
-      const created = temporaryDirectorySync(directoryPrefix);
-      const path = canonicalize ? realpathSync(created) : created;
-      temporaryDirectories.push(path);
-      return path;
-    },
-  };
-}
-
-export function temporaryDirectorySync(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix));
 }
 
 export async function temporaryDirectory(

@@ -1,5 +1,5 @@
 import { posix, win32 } from "node:path";
-import type { createFixture } from "./fixtures.mjs";
+import type { createFixture } from "./fixtures.mts";
 type Fixture = ReturnType<typeof createFixture>;
 type Expected = Fixture["positives"][number];
 export interface SourceLocation {

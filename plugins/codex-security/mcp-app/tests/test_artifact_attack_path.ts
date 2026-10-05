@@ -1,10 +1,11 @@
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { jsonLines, readJson, readJsonLines } from "./support/json.ts";
+import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type { RawDiscoveryCandidate } from "../src/artifact-discovery.js";
 import type { CandidateValidationRecord } from "../src/artifact-validation-phase.js";
 import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const {
   candidateAttackPathsInputSchema,
@@ -31,14 +32,9 @@ try {
 }
 
 async function testSchemaMatchesDocumentedAttackPathDecisions() {
-  const schema = JSON.parse(
-    await readFile(
-      new URL(
-        "../../schemas/tools/candidate-attack-paths.schema.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
+  const schema = await readJson(
+    import.meta.dirname,
+    "../../schemas/tools/candidate-attack-paths.schema.json",
   );
 
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -122,7 +118,7 @@ async function testEligibleRowsKeepDiscoveryValidationAndOrder() {
     operation: "replace",
     rowsWritten: 2,
   });
-  assert.deepEqual(await readRows(fixture), [
+  assert.deepEqual(await readJsonLines(fixture.ledgerPath), [
     { ...fixture.originalRows[0], attack_path: reportable },
     fixture.originalRows[1],
     { ...fixture.originalRows[2], attack_path: deferred },
@@ -294,13 +290,12 @@ async function createFixture(
     "candidate_ledger.jsonl",
   );
   await mkdir(path.dirname(ledgerPath), { recursive: true });
-  await writeFile(ledgerPath, jsonl(originalRows), "utf8");
+  await writeFile(ledgerPath, jsonLines(originalRows), "utf8");
   return {
     context: {
       root,
       repoRoot: root,
       layout: "scan",
-      scanId,
     },
     ledgerPath,
     originalRows: structuredClone(originalRows),
@@ -363,23 +358,11 @@ function attackPath(decision = "reportable") {
   return value;
 }
 
-async function readRows(fixture: Awaited<ReturnType<typeof createFixture>>) {
-  const content = await readFile(fixture.ledgerPath, "utf8");
-  return content
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-}
-
 async function assertUnchanged(
   fixture: Awaited<ReturnType<typeof createFixture>>,
 ) {
   assert.equal(
     await readFile(fixture.ledgerPath, "utf8"),
-    jsonl(fixture.originalRows),
+    jsonLines(fixture.originalRows),
   );
-}
-
-function jsonl(rows: unknown[]) {
-  return rows.map((row) => `${JSON.stringify(row)}\n`).join("");
 }

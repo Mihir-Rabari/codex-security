@@ -1,10 +1,11 @@
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { jsonLines, readJson, readJsonLines } from "./support/json.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const {
   candidateValidationsInputSchema,
@@ -13,14 +14,9 @@ const {
   new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
 );
 
-const toolSchema = JSON.parse(
-  await readFile(
-    new URL(
-      "../../schemas/tools/candidate-validations.schema.json",
-      import.meta.url,
-    ),
-    "utf8",
-  ),
+const toolSchema = await readJson(
+  import.meta.dirname,
+  "../../schemas/tools/candidate-validations.schema.json",
 );
 assert.equal(
   toolSchema.$schema,
@@ -88,14 +84,18 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-validation-phase-", true);
 try {
-  const context = await scanContext(root, "scan", scanId);
+  const context = {
+    root: path.join(root, "scan"),
+    repoRoot: root,
+    layout: "scan" as const,
+  };
   const ledger = path.join(
-    root,
-    "scan",
+    context.root,
     "artifacts",
     "02_discovery",
     "candidate_ledger.jsonl",
   );
+  await mkdir(path.dirname(ledger), { recursive: true });
   const original: (ReturnType<typeof candidate> & Record<string, unknown>)[] = [
     {
       ...candidate("candidate-a", "src/a.ts"),
@@ -108,7 +108,7 @@ try {
       instance: "second-route",
     },
   ];
-  await writeJsonl(ledger, original);
+  await writeFile(ledger, jsonLines(original));
 
   const recorded = await recordCodexSecurityCandidateValidations(context, {
     validations: updates,
@@ -122,16 +122,12 @@ try {
     { ...original[0], validation: firstValidation },
     { ...original[1], validation: secondValidation },
   ];
-  assert.deepEqual(await readJsonl(ledger), expected);
-  assert.deepEqual(
-    (await readJsonl(ledger))[0].attack_path,
-    original[0].attack_path,
-  );
+  assert.deepEqual(await readJsonLines(ledger), expected);
 
   await recordCodexSecurityCandidateValidations(context, {
     validations: updates,
   });
-  assert.deepEqual(await readJsonl(ledger), expected);
+  assert.deepEqual(await readJsonLines(ledger), expected);
 
   await assertNoMutation(
     context,
@@ -187,7 +183,7 @@ try {
     /scan-bound artifact context/,
   );
 
-  await writeJsonl(ledger, [original[0], original[0]]);
+  await writeFile(ledger, jsonLines([original[0], original[0]]));
   await assertNoMutation(
     context,
     ledger,
@@ -199,15 +195,15 @@ try {
     /repeats candidate candidate-a/,
   );
 
-  const empty = await scanContext(root, "empty", randomUUID());
+  const empty = { ...context, root: path.join(root, "empty") };
   const emptyLedger = path.join(
-    root,
-    "empty",
+    empty.root,
     "artifacts",
     "02_discovery",
     "candidate_ledger.jsonl",
   );
-  await writeJsonl(emptyLedger, []);
+  await mkdir(path.dirname(emptyLedger), { recursive: true });
+  await writeFile(emptyLedger, jsonLines([]));
   assert.deepEqual(
     await recordCodexSecurityCandidateValidations(empty, {
       validations: [],
@@ -218,11 +214,11 @@ try {
       rowsWritten: 0,
     },
   );
-  assert.deepEqual(await readJsonl(emptyLedger), []);
+  assert.deepEqual(await readJsonLines(emptyLedger), []);
 
   if (process.platform !== "win32") {
     const outside = path.join(root, "outside-candidate-ledger.jsonl");
-    await writeJsonl(outside, original);
+    await writeFile(outside, jsonLines(original));
     await rm(ledger);
     await symlink(outside, ledger, "file");
     await assert.rejects(
@@ -231,27 +227,10 @@ try {
       }),
       /symbolic|symlink|canonical|escape|contained|regular/i,
     );
-    assert.deepEqual(await readJsonl(outside), original);
+    assert.deepEqual(await readJsonLines(outside), original);
   }
 } finally {
   await rm(root, { recursive: true, force: true });
-}
-
-async function scanContext(root: string, directory: string, scanId: string) {
-  const scanRoot = path.join(root, directory);
-  const repository = path.join(root, "repository");
-  await Promise.all([
-    mkdir(path.join(scanRoot, "artifacts", "02_discovery"), {
-      recursive: true,
-    }),
-    mkdir(repository, { recursive: true }),
-  ]);
-  return {
-    root: scanRoot,
-    repoRoot: repository,
-    layout: "scan" as const,
-    scanId,
-  };
 }
 
 function candidate(candidateId: string, sourcePath: string) {
@@ -293,20 +272,4 @@ async function assertNoMutation(
     expectedError,
   );
   assert.equal(await readFile(ledger, "utf8"), before);
-}
-
-async function writeJsonl(file: string, rows: unknown[]) {
-  await writeFile(
-    file,
-    rows.length > 0
-      ? `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
-      : "",
-  );
-}
-
-async function readJsonl(file: string) {
-  return (await readFile(file, "utf8"))
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
 }

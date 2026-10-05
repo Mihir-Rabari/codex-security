@@ -10,8 +10,6 @@ export interface PromptfooTest {
 
 export interface PromptfooRow {
   vars?: Record<string, unknown>;
-  testCase?: PromptfooTest;
-  test?: PromptfooTest;
   latencyMs?: number;
   cost?: number;
   response?: {
@@ -67,12 +65,6 @@ export interface CalibrationCase {
     fix_patch_ref?: string;
   };
   variants: CalibrationVariant[];
-}
-
-export interface CalibrationOptions {
-  repoRoot: string;
-  caseId?: string | null;
-  variantId?: string | null;
 }
 
 export interface SastLocation {

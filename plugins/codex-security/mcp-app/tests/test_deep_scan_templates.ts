@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
   new URL("../src/deep-scan/templates.ts", import.meta.url).pathname,
@@ -34,27 +34,7 @@ assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
 assert.match(rendered, /coverage\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
-assert.deepEqual(discoveryContext, {
-  scanId: "a0d89285-66b7-4e4f-b51a-e21b93b7081b",
-  pluginRoot: "/fixture/plugins/codex-security",
-  targetPath: "/fixture/repository",
-  scope: ".",
-  userContext:
-    "preserve literal {{DISCOVERY_CONTEXT_JSON}} text and https://security.example.test/callback",
-  workerLabel: "discovery-0001",
-  subagents: 3,
-});
-for (const field of [
-  "artifactDir",
-  "threatModelPath",
-  "inScopeFilesPath",
-  "candidateLedgerPath",
-  "artifactSchemas",
-  "rankInputPath",
-  "deepReviewInputPath",
-]) {
-  assert.equal(Object.hasOwn(discoveryContext, field), false);
-}
+assert.deepEqual(discoveryContext, discoveryInput);
 
 const feedbackPath =
   "/fixture/scans/run/artifacts/01_context/false_positive_feedback.json";
@@ -73,19 +53,6 @@ assert.deepEqual(dedupContext, {
   reducerLabel: "dedup-0001",
   claimedWorkerIds: ["worker-001"],
 });
-for (const field of [
-  "artifactDir",
-  "previousCandidateLedgerPath",
-  "previousReducerResultPath",
-  "discoveries",
-  "canonicalOutputs",
-  "resultPath",
-  "rawCandidatesPath",
-  "previousInventoryPath",
-  "artifactSchemas",
-]) {
-  assert.equal(Object.hasOwn(dedupContext, field), false);
-}
 
 const previousReduction = firstJsonBlock(renderDedupPrompt("dedup-0002", []));
 assert.deepEqual(previousReduction, {

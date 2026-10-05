@@ -1,7 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "lib": ["ES2024"]
-  },
-  "include": ["tests/**/*.ts", "src/assets.d.ts", "scripts/*.mts"]
-}

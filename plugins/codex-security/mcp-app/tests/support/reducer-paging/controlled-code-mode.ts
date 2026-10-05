@@ -1,4 +1,4 @@
-import { temporaryDirectory } from "../temporary-directories.js";
+import { temporaryDirectory } from "../temporary-directories.ts";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { AddressInfo } from "node:net";
@@ -8,7 +8,8 @@ interface ToolOutput {
   output: string | { text: string }[];
 }
 import { spawn } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { once } from "node:events";
+import { rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -38,17 +39,14 @@ function responseEvents(id: string, item: unknown) {
 /** Execute one scripted cell through the real CLI, external code host, and MCP. */
 export async function runControlledCodeMode({
   code,
-  mcpServers,
+  mcpServer,
   workingDirectory,
-  prompt = "Run the deterministic transport eval.",
+  prompt,
 }: {
   code: string;
-  mcpServers: Record<
-    string,
-    { command: string; args?: string[]; env?: Record<string, string> }
-  >;
-  workingDirectory?: string;
-  prompt?: string;
+  mcpServer: { command: string; args: string[] };
+  workingDirectory: string;
+  prompt: string;
 }) {
   // Resolve through the SDK so the launcher and native host use its pinned version.
   const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
@@ -57,8 +55,7 @@ export async function runControlledCodeMode({
     "bin",
     "codex.js",
   );
-  const fixtureRoot = await temporaryDirectory("codex-controlled-ipc-");
-  const codexHome = path.join(fixtureRoot, "home");
+  const codexHome = await temporaryDirectory("codex-controlled-ipc-");
   const toolOutputs = new Map<string, ToolOutput>();
   const serverErrors: string[] = [];
   let responseCount = 0;
@@ -75,8 +72,7 @@ export async function runControlledCodeMode({
         response.end("{}");
         return;
       }
-      const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
+      const chunks = await request.toArray();
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       for (const item of body.input ?? []) {
         if (
@@ -122,7 +118,6 @@ export async function runControlledCodeMode({
     }
   });
   try {
-    await mkdir(codexHome, { mode: 0o700 });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
@@ -134,22 +129,9 @@ export async function runControlledCodeMode({
       "features.code_mode.enabled=true",
       "features.code_mode_host.enabled=true",
       "features.code_mode_host.disable_in_process_fallback=true",
+      `mcp_servers.cs_artifacts.command=${JSON.stringify(mcpServer.command)}`,
+      `mcp_servers.cs_artifacts.args=${JSON.stringify(mcpServer.args)}`,
     ];
-    for (const [name, entry] of Object.entries(mcpServers)) {
-      const prefix = `mcp_servers.${name}`;
-      config.push(`${prefix}.command=${JSON.stringify(entry.command)}`);
-      config.push(`${prefix}.args=${JSON.stringify(entry.args ?? [])}`);
-      if (entry.env) {
-        config.push(
-          `${prefix}.env={${Object.entries(entry.env)
-            .map(
-              ([key, value]) =>
-                `${JSON.stringify(key)}=${JSON.stringify(value)}`,
-            )
-            .join(",")}}`,
-        );
-      }
-    }
     // Pass only process-launch essentials; never inherit the caller's model auth.
     const env: NodeJS.ProcessEnv = {
       CODEX_HOME: codexHome,
@@ -180,7 +162,7 @@ export async function runControlledCodeMode({
       prompt,
     ];
     child = spawn(process.execPath, args, {
-      cwd: workingDirectory ?? fixtureRoot,
+      cwd: workingDirectory,
       env,
       // JSONL stdout can duplicate the deliberately oversized MCP response.
       stdio: ["ignore", "ignore", "pipe"],
@@ -189,26 +171,18 @@ export async function runControlledCodeMode({
     child.stderr.setEncoding("utf8").on("data", (chunk) => {
       stderr += chunk;
     });
-    const outcome = await new Promise<{
-      code: number | null;
-      signal: NodeJS.Signals | null;
-    }>((resolve, reject) => {
-      child!.once("error", reject);
-      child!.once("close", (code, signal) => resolve({ code, signal }));
-    });
+    const exitCode: number | null = (await once(child, "close"))[0];
     return {
-      outcome,
+      exitCode,
       toolOutputs: [...toolOutputs.values()],
       stderr,
       serverErrors,
     };
   } finally {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill();
-    }
+    child?.kill();
     if (closed) await closed;
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(codexHome, { recursive: true, force: true });
   }
 }

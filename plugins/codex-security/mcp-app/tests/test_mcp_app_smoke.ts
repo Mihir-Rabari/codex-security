@@ -1,13 +1,15 @@
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
-import { assertNoError } from "./assertions.js";
-import { readOnlyParentSandboxState } from "./sandbox-state.js";
+import { assertNoError } from "./assertions.ts";
+import { consumeStreamLines, writeMessage } from "./support/streams.ts";
+import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -15,27 +17,33 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const sourcePluginRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../..",
-);
+const continuationOptions = [
+  {
+    label: "Continue",
+    description: "Continue the current workflow.",
+  },
+  {
+    label: "Cancel",
+    description: "Leave the current workflow paused.",
+  },
+];
+
+const sourcePluginRoot = path.resolve(import.meta.dirname, "../..");
 const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
   ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
   : path.resolve(sourcePluginRoot, "../../sdk/typescript/_bundled_plugin");
 const mcpAppRoot = path.join(sourcePluginRoot, "mcp-app");
-const pluginManifest = JSON.parse(
-  await readFile(path.join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+const pluginManifest = await readJson(
+  pluginRoot,
+  ".codex-plugin",
+  "plugin.json",
 );
 const PLUGIN_VERSION = pluginManifest.version;
 assert.equal(typeof PLUGIN_VERSION, "string");
 const parentSandboxState = readOnlyParentSandboxState(pluginRoot);
-const installedPluginRoot = pluginRoot;
-const serverPath = path.join(installedPluginRoot, "mcp", "server.mjs");
-const mcpConfig = JSON.parse(
-  await readFile(path.join(installedPluginRoot, ".mcp.json"), "utf8"),
-);
+const serverPath = path.join(pluginRoot, "mcp", "server.mjs");
+const mcpConfig = await readJson(pluginRoot, ".mcp.json");
 assert.equal(
   mcpConfig.mcpServers["codex-security"].command,
   "./scripts/launch_codex_security_mcp",
@@ -131,21 +139,15 @@ assert.match(
   /throw new Error\(error\.stderr\.trim\(\),\s*\{\s*cause:\s*error\s*\}\)/,
   "Workbench failures must preserve subprocess exit, signal, and stderr diagnostics.",
 );
-const target = await mkdtemp(path.join(tmpdir(), "codex-security-target-"));
-const replacementTarget = await mkdtemp(
-  path.join(tmpdir(), "codex-security-replacement-"),
+const target = await temporaryDirectory("codex-security-target-");
+const replacementTarget = await temporaryDirectory(
+  "codex-security-replacement-",
 );
-const gitTarget = await mkdtemp(
-  path.join(tmpdir(), "codex-security-git-target-"),
-);
-const stateDir = await mkdtemp(path.join(tmpdir(), "codex-security-state-"));
-const scanRoot = await mkdtemp(
-  path.join(tmpdir(), "codex-security-scan-root-"),
-);
+const gitTarget = await temporaryDirectory("codex-security-git-target-");
+const stateDir = path.join(tmpdir(), randomUUID());
+const scanRoot = await temporaryDirectory("codex-security-scan-root-");
 const resolvedScanRoot = await realpath(scanRoot);
-const launchCwd = await mkdtemp(
-  path.join(tmpdir(), "codex-security-launch-cwd-"),
-);
+const launchCwd = await temporaryDirectory("codex-security-launch-cwd-");
 await mkdir(path.join(target, "src"));
 await writeFile(path.join(target, "src/a.py"), "vulnerable\n");
 execFileSync("git", ["init", "-q", gitTarget]);
@@ -189,12 +191,10 @@ function startTestServer({
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }) {
-  const childEnvironment = { ...process.env };
+  const childEnvironment = { ...process.env, ...env };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) {
       delete childEnvironment[name];
-    } else {
-      childEnvironment[name] = value;
     }
   }
   const childProcess = spawn(command, args, {
@@ -203,43 +203,26 @@ function startTestServer({
     stdio: ["pipe", "pipe", "inherit"],
   });
   const responses: ReturnType<typeof JSON.parse>[] = [];
-  let stdout = "";
-  childProcess.stdout.setEncoding("utf8");
-  childProcess.stdout.on("data", (chunk) => {
-    stdout += chunk;
-    let newlineIndex = stdout.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = stdout.slice(0, newlineIndex).trim();
-      stdout = stdout.slice(newlineIndex + 1);
-      if (line) responses.push(JSON.parse(line));
-      newlineIndex = stdout.indexOf("\n");
-    }
-  });
+  consumeStreamLines(childProcess.stdout, (line) =>
+    responses.push(JSON.parse(line)),
+  );
 
   return {
     notify(method: string, params = {}) {
-      childProcess.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`,
-      );
+      writeMessage(childProcess, { jsonrpc: "2.0", method, params });
     },
     sendRequest(id: number, method: string, params = {}) {
-      childProcess.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
+      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
     },
     sendResponse(id: string, result: unknown) {
-      childProcess.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`,
-      );
+      writeMessage(childProcess, { jsonrpc: "2.0", id, result });
     },
     sendError(id: string, code: number, message: string) {
-      childProcess.stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id,
-          error: { code, message },
-        })}\n`,
-      );
+      writeMessage(childProcess, {
+        jsonrpc: "2.0",
+        id,
+        error: { code, message },
+      });
     },
     async waitForMessage(
       predicate: (message: ReturnType<typeof JSON.parse>) => boolean,
@@ -254,9 +237,7 @@ function startTestServer({
       throw new Error(`Timed out waiting for ${description}`);
     },
     async requestAndWait(id: number, method: string, params = {}) {
-      childProcess.stdin.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
+      writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
       const started = Date.now();
       while (Date.now() - started < 30000) {
         const response = responses.find((candidate) => candidate.id === id);
@@ -297,9 +278,7 @@ const testServer = startTestServer({
 const requestAndWait = testServer.requestAndWait;
 
 async function assertBundledNodeLauncher() {
-  const emptyPath = await mkdtemp(
-    path.join(tmpdir(), "codex-security-empty-path-"),
-  );
+  const emptyPath = await temporaryDirectory("codex-security-empty-path-");
   const launcherPath = path.join(
     pluginRoot,
     "scripts",
@@ -409,8 +388,8 @@ async function assertMissingPythonError() {
 
 async function assertWorkbenchStdinFailureDoesNotCrashServer() {
   if (process.platform === "win32") return;
-  const helperRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-security-early-exit-helper-"),
+  const helperRoot = await temporaryDirectory(
+    "codex-security-early-exit-helper-",
   );
   const helper = path.join(helperRoot, "python");
   await writeFile(helper, "#!/bin/sh\nexit 2\n");
@@ -470,16 +449,7 @@ async function assertUnavailableUserInputFallback() {
             header: "Continue?",
             id: "continue_scan",
             question: "Should Codex Security continue?",
-            options: [
-              {
-                label: "Continue",
-                description: "Continue the current workflow.",
-              },
-              {
-                label: "Cancel",
-                description: "Leave the current workflow paused.",
-              },
-            ],
+            options: continuationOptions,
           },
         ],
       },
@@ -494,9 +464,7 @@ async function assertUnavailableUserInputFallback() {
 }
 
 async function assertWorkspaceWorksWithoutUiCapability() {
-  const nonUiStateDir = await mkdtemp(
-    path.join(tmpdir(), "codex-security-non-ui-state-"),
-  );
+  const nonUiStateDir = path.join(tmpdir(), randomUUID());
   const nonUiServer = startTestServer({
     cwd: pluginRoot,
     env: { CODEX_SECURITY_STATE_DIR: nonUiStateDir },
@@ -532,12 +500,8 @@ async function assertWorkspaceWorksWithoutUiCapability() {
 }
 
 async function assertHeadlessStandardScanWorksWithoutUiCapability() {
-  const headlessStateDir = await mkdtemp(
-    path.join(tmpdir(), "codex-security-headless-state-"),
-  );
-  const headlessScanRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-security-headless-scans-"),
-  );
+  const headlessStateDir = path.join(tmpdir(), randomUUID());
+  const headlessScanRoot = path.join(tmpdir(), randomUUID());
   const headlessServer = startTestServer({
     cwd: pluginRoot,
     env: {
@@ -713,8 +677,8 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
 }
 
 async function assertDeepScanPersistsRetryableWorkerStartupError() {
-  const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "codex-security-deep-inventory-"),
+  const fixtureRoot = await temporaryDirectory(
+    "codex-security-deep-inventory-",
   );
   const fixtureTarget = path.join(fixtureRoot, "repository");
   const fixtureState = path.join(fixtureRoot, "state");
@@ -807,7 +771,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
     });
     assertNoError(canceled);
     await deepServer.waitForMessage(
-      (message: ReturnType<typeof JSON.parse>) => message.id === 2,
+      (message) => message.id === 2,
       "Deep Scan start response after cancellation",
     );
     await assert.rejects(
@@ -826,12 +790,10 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
       "Saved result publication failed: fixture retained result publication failure";
     execFileSync(process.env.PYTHON?.trim() || "python3", [
       "-c",
-      [
-        "import sqlite3, sys",
-        "with sqlite3.connect(sys.argv[1]) as connection:",
-        "    updated = connection.execute(\"UPDATE deep_scan_runs SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = ? WHERE scan_id = ?\", (sys.argv[2], sys.argv[3]))",
-        "    assert updated.rowcount == 1",
-      ].join("\n"),
+      `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    updated = connection.execute("UPDATE deep_scan_runs SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = ? WHERE scan_id = ?", (sys.argv[2], sys.argv[3]))
+    assert updated.rowcount == 1`,
       path.join(fixtureState, "workbench.sqlite3"),
       publicationFailure,
       scan.scanId,
@@ -890,23 +852,13 @@ async function assertUserInputFailureLogging() {
             header: "Continue?",
             id: "continue_scan",
             question: "Should Codex Security continue?",
-            options: [
-              {
-                label: "Continue",
-                description: "Continue the current workflow.",
-              },
-              {
-                label: "Cancel",
-                description: "Leave the current workflow paused.",
-              },
-            ],
+            options: continuationOptions,
           },
         ],
       },
     });
     const elicitationRequest = await failingElicitationServer.waitForMessage(
-      (message: ReturnType<typeof JSON.parse>) =>
-        message.method === "elicitation/create",
+      (message) => message.method === "elicitation/create",
       "failing Codex Security elicitation request",
     );
     failingElicitationServer.sendError(
@@ -915,8 +867,7 @@ async function assertUserInputFailureLogging() {
       "Fixture elicitation failure",
     );
     const logMessage = await failingElicitationServer.waitForMessage(
-      (message: ReturnType<typeof JSON.parse>) =>
-        message.method === "notifications/message",
+      (message) => message.method === "notifications/message",
       "Codex Security elicitation failure log",
     );
     assert.equal(logMessage.params.level, "warning");
@@ -933,7 +884,7 @@ async function assertUserInputFailureLogging() {
     );
 
     const response = await failingElicitationServer.waitForMessage(
-      (message: ReturnType<typeof JSON.parse>) => message.id === 2,
+      (message) => message.id === 2,
       "Codex Security unavailable response after elicitation failure",
     );
     assertNoError(response);
@@ -948,9 +899,7 @@ async function assertUserInputFailureLogging() {
 async function assertBundledPythonRuntime() {
   if (process.platform === "win32") return;
 
-  const runtimeHome = await mkdtemp(
-    path.join(tmpdir(), "codex-security-runtime-home-"),
-  );
+  const runtimeHome = await temporaryDirectory("codex-security-runtime-home-");
   const bundledPythonPath = path.join(
     runtimeHome,
     ".cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
@@ -988,12 +937,10 @@ async function assertBundledPythonRuntime() {
     await mkdir(path.dirname(bundledPythonPath), { recursive: true });
     await writeFile(
       bundledPythonPath,
-      [
-        "#!/bin/sh",
-        'printf bundled > "$CODEX_SECURITY_BUNDLED_PYTHON_MARKER"',
-        'exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"',
-        "",
-      ].join("\n"),
+      `#!/bin/sh
+printf bundled > "$CODEX_SECURITY_BUNDLED_PYTHON_MARKER"
+exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"
+`,
       { mode: 0o755 },
     );
     assertNoError(
@@ -1014,90 +961,78 @@ async function writeCompletedContract(
   scanId: string,
   snapshotDigest: string,
 ) {
-  const targetId = `target_sha256_${createHash("sha256")
-    .update(`local-workspace\0${await realpath(target)}`)
-    .digest("hex")}`;
-  await writeFile(
-    path.join(scanDir, "findings.json"),
-    JSON.stringify({
-      documentType: "codex-security.findings",
-      schemaVersion: "1.0",
-      scanId,
-      findings: [
-        {
-          ruleId: "path-traversal.archive-extraction",
-          identity: { anchor: "archive-entry-write-without-containment" },
-          title: "Fixture finding",
-          summary: "An attacker-controlled path reaches a filesystem write.",
-          severity: { level: "high" },
-          confidence: { level: "high", rationale: "Direct source trace." },
-          taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
-          locations: [{ path: "src/a.py", startLine: 1 }],
-          remediation:
-            "Reject archive entries that escape the extraction root.",
-          provenance: { source: "local_plugin" },
-        },
-        {
-          ruleId: "fixture.informational",
-          identity: { anchor: "informational-observation" },
-          title: "Fixture informational observation",
-          summary: "A low-risk implementation detail is worth recording.",
-          severity: { level: "informational" },
-          confidence: { level: "high", rationale: "Direct source inspection." },
-          taxonomy: { category: "hardening", cwe: [] },
-          locations: [{ path: "src/info.py", startLine: 2 }],
-          remediation: "Consider hardening this implementation detail.",
-          provenance: { source: "local_plugin" },
-        },
-      ],
-    }),
-  );
-  await writeFile(
-    path.join(scanDir, "coverage.json"),
-    JSON.stringify({
-      documentType: "codex-security.coverage",
-      schemaVersion: "1.0",
-      scanId,
-      mode: "repository",
-      completeness: "complete",
-      inventoryStrategy: "repository",
-      includePaths: ["."],
-      excludePaths: [],
-      surfaces: [
-        {
-          id: "surface_fixture",
-          label: "Fixture surface",
-          disposition: "reported",
-          receiptRefs: [],
-        },
-      ],
-      explicitExclusions: [],
-      deferred: [],
-    }),
-  );
-  await writeFile(
-    path.join(scanDir, "scan-manifest.json"),
-    JSON.stringify({
-      documentType: "codex-security.scan-manifest",
-      schemaVersion: "1.0",
-      scan: {
-        id: scanId,
-        producer: { name: "codex-security-plugin", version: PLUGIN_VERSION },
-        status: "completed",
-        startedAt: "2026-06-02T18:00:00Z",
-        completedAt: "2026-06-02T18:09:00Z",
-        target: {
-          kind: "directory_snapshot",
-          targetId,
-          displayName: path.basename(target),
-          snapshotDigest,
-        },
-        scope: { includePaths: ["."], excludePaths: [] },
-        coverageRef: "coverage.json",
-        findingsRef: "findings.json",
+  const targetId = `target_sha256_${hash("sha256", `local-workspace\0${await realpath(target)}`)}`;
+  await writeJson(path.join(scanDir, "findings.json"), {
+    documentType: "codex-security.findings",
+    schemaVersion: "1.0",
+    scanId,
+    findings: [
+      {
+        ruleId: "path-traversal.archive-extraction",
+        identity: { anchor: "archive-entry-write-without-containment" },
+        title: "Fixture finding",
+        summary: "An attacker-controlled path reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: { level: "high", rationale: "Direct source trace." },
+        taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+        locations: [{ path: "src/a.py", startLine: 1 }],
+        remediation: "Reject archive entries that escape the extraction root.",
+        provenance: { source: "local_plugin" },
       },
-    }),
-  );
+      {
+        ruleId: "fixture.informational",
+        identity: { anchor: "informational-observation" },
+        title: "Fixture informational observation",
+        summary: "A low-risk implementation detail is worth recording.",
+        severity: { level: "informational" },
+        confidence: { level: "high", rationale: "Direct source inspection." },
+        taxonomy: { category: "hardening", cwe: [] },
+        locations: [{ path: "src/info.py", startLine: 2 }],
+        remediation: "Consider hardening this implementation detail.",
+        provenance: { source: "local_plugin" },
+      },
+    ],
+  });
+  await writeJson(path.join(scanDir, "coverage.json"), {
+    documentType: "codex-security.coverage",
+    schemaVersion: "1.0",
+    scanId,
+    mode: "repository",
+    completeness: "complete",
+    inventoryStrategy: "repository",
+    includePaths: ["."],
+    excludePaths: [],
+    surfaces: [
+      {
+        id: "surface_fixture",
+        label: "Fixture surface",
+        disposition: "reported",
+        receiptRefs: [],
+      },
+    ],
+    explicitExclusions: [],
+    deferred: [],
+  });
+  await writeJson(path.join(scanDir, "scan-manifest.json"), {
+    documentType: "codex-security.scan-manifest",
+    schemaVersion: "1.0",
+    scan: {
+      id: scanId,
+      producer: { name: "codex-security-plugin", version: PLUGIN_VERSION },
+      status: "completed",
+      startedAt: "2026-06-02T18:00:00Z",
+      completedAt: "2026-06-02T18:09:00Z",
+      target: {
+        kind: "directory_snapshot",
+        targetId,
+        displayName: path.basename(target),
+        snapshotDigest,
+      },
+      scope: { includePaths: ["."], excludePaths: [] },
+      coverageRef: "coverage.json",
+      findingsRef: "findings.json",
+    },
+  });
 }
 
 try {
@@ -1626,8 +1561,7 @@ try {
     },
   });
   const elicitationRequest = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) =>
-      message.method === "elicitation/create",
+    (message) => message.method === "elicitation/create",
     "Codex Security elicitation request",
   );
   assert.equal(elicitationRequest.params.mode, "form");
@@ -1682,7 +1616,7 @@ try {
     },
   });
   const userInputResponse = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) => message.id === 9000,
+    (message) => message.id === 9000,
     "Codex Security user-input tool response",
   );
   assertNoError(userInputResponse);
@@ -1725,29 +1659,20 @@ try {
           header: "Decline?",
           id: "decline_request",
           question: "Decline this Codex Security input request?",
-          options: [
-            {
-              label: "Continue",
-              description: "Continue the current workflow.",
-            },
-            {
-              label: "Cancel",
-              description: "Leave the current workflow paused.",
-            },
-          ],
+          options: continuationOptions,
         },
       ],
     },
   });
   const declinedElicitation = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) =>
+    (message) =>
       message.method === "elicitation/create" &&
       message.params?.message === "Decline this Codex Security input request?",
     "declined Codex Security elicitation request",
   );
   testServer.sendResponse(declinedElicitation.id, { action: "decline" });
   const declinedUserInput = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) => message.id === 9002,
+    (message) => message.id === 9002,
     "declined Codex Security user-input response",
   );
   assertNoError(declinedUserInput);
@@ -1763,29 +1688,20 @@ try {
           header: "Cancel?",
           id: "cancel_request",
           question: "Cancel this Codex Security input request?",
-          options: [
-            {
-              label: "Continue",
-              description: "Continue the current workflow.",
-            },
-            {
-              label: "Cancel",
-              description: "Leave the current workflow paused.",
-            },
-          ],
+          options: continuationOptions,
         },
       ],
     },
   });
   const cancelledElicitation = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) =>
+    (message) =>
       message.method === "elicitation/create" &&
       message.params?.message === "Cancel this Codex Security input request?",
     "cancelled Codex Security elicitation request",
   );
   testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });
   const cancelledUserInput = await testServer.waitForMessage(
-    (message: ReturnType<typeof JSON.parse>) => message.id === 9003,
+    (message) => message.id === 9003,
     "cancelled Codex Security user-input response",
   );
   assertNoError(cancelledUserInput);
@@ -2736,6 +2652,26 @@ try {
     /preflightChecks derives/,
   );
 
+  const successfulPreflightChecks = [
+    {
+      capability: "delegated_workers",
+      reason: "Delegated workers are available.",
+      severity: "warn",
+      status: "pass",
+    },
+    {
+      capability: "goal_tools",
+      reason: "Goal tools help long scans preserve completion criteria.",
+      severity: "suggest",
+      status: "pass",
+    },
+    {
+      capability: "goals_enabled",
+      reason: "Goals are enabled.",
+      severity: "suggest",
+      status: "pass",
+    },
+  ];
   const incompletePreflightProgress = await requestAndWait(
     90162,
     "tools/call",
@@ -2751,24 +2687,7 @@ try {
             severity: "block",
             status: "unknown",
           },
-          {
-            capability: "delegated_workers",
-            reason: "Delegated workers are available.",
-            severity: "warn",
-            status: "pass",
-          },
-          {
-            capability: "goal_tools",
-            reason: "Goal tools help long scans preserve completion criteria.",
-            severity: "suggest",
-            status: "pass",
-          },
-          {
-            capability: "goals_enabled",
-            reason: "Goals are enabled.",
-            severity: "suggest",
-            status: "pass",
-          },
+          ...successfulPreflightChecks,
         ],
       },
     },
@@ -2797,24 +2716,7 @@ try {
           severity: "block",
           status: "fail",
         },
-        {
-          capability: "delegated_workers",
-          reason: "Delegated workers are available.",
-          severity: "warn",
-          status: "pass",
-        },
-        {
-          capability: "goal_tools",
-          reason: "Goal tools help long scans preserve completion criteria.",
-          severity: "suggest",
-          status: "pass",
-        },
-        {
-          capability: "goals_enabled",
-          reason: "Goals are enabled.",
-          severity: "suggest",
-          status: "pass",
-        },
+        ...successfulPreflightChecks,
       ],
     },
   });
@@ -2849,24 +2751,7 @@ try {
           severity: "warn",
           status: "fail",
         },
-        {
-          capability: "delegated_workers",
-          reason: "Delegated workers are available.",
-          severity: "warn",
-          status: "pass",
-        },
-        {
-          capability: "goal_tools",
-          reason: "Goal tools help long scans preserve completion criteria.",
-          severity: "suggest",
-          status: "pass",
-        },
-        {
-          capability: "goals_enabled",
-          reason: "Goals are enabled.",
-          severity: "suggest",
-          status: "pass",
-        },
+        ...successfulPreflightChecks,
       ],
     },
   });
@@ -3087,15 +2972,13 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
-  const remediationPatch = [
-    "diff --git a/src/a.py b/src/a.py",
-    "--- a/src/a.py",
-    "+++ b/src/a.py",
-    "@@ -1 +1 @@",
-    "-vulnerable",
-    "+fixed",
-    "",
-  ].join("\n");
+  const remediationPatch = `diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1 @@
+-vulnerable
++fixed
+`;
   await writeFile(
     path.join(initializedScanDir, "remediation.patch"),
     remediationPatch,
@@ -3109,7 +2992,7 @@ try {
       expectedVersion: 1,
       state: "generated",
       patchPath: "remediation.patch",
-      patchDigest: `sha256:${createHash("sha256").update(remediationPatch).digest("hex")}`,
+      patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
       summary: "Contain archive extraction under the output root.",
     },
   });
@@ -3501,12 +3384,10 @@ try {
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
   execFileSync(process.env.PYTHON?.trim() || "python3", [
     "-c",
-    [
-      "import sqlite3, sys",
-      "with sqlite3.connect(sys.argv[1]) as connection:",
-      "    updated = connection.execute(\"UPDATE scans SET handoff_status = 'pending', handoff_claim_token = ?, continuation_thread_id = NULL WHERE id = ?\", (sys.argv[2], sys.argv[3]))",
-      "    assert updated.rowcount == 1",
-    ].join("\n"),
+    `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    updated = connection.execute("UPDATE scans SET handoff_status = 'pending', handoff_claim_token = ?, continuation_thread_id = NULL WHERE id = ?", (sys.argv[2], sys.argv[3]))
+    assert updated.rowcount == 1`,
     path.join(stateDir, "workbench.sqlite3"),
     rotatedFallbackClaimToken,
     fallbackScanId,

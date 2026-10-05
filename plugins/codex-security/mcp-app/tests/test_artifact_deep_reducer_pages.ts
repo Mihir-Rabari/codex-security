@@ -1,13 +1,15 @@
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { readJson } from "./support/json.ts";
+import { finding as draftFinding } from "./scan-draft-fixture.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import type {
   DeepReducerPageInput,
   DeepReducerPage,
 } from "../src/artifact-deep-reducer-pages.js";
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importModule } from "./import-module.js";
+import { importModule } from "./import-module.ts";
 
 type SourceFinding = { id: string; finding: unknown };
 
@@ -72,11 +74,9 @@ try {
     "current",
     "output",
   );
-  await Promise.all(
-    [workerRoot, previousRoot, outputRoot].map((directory) =>
-      mkdir(directory, { recursive: true }),
-    ),
-  );
+  for (const directory of [workerRoot, previousRoot, outputRoot]) {
+    await mkdir(directory, { recursive: true });
+  }
   const largeText =
     'Quoted "text" with \\ newline\n and Unicode 😀é\u0000'.repeat(2048);
   const fresh = finding("fresh", {
@@ -125,10 +125,8 @@ try {
   };
   const workerPath = path.join(workerRoot, "result.json");
   const previousPath = path.join(previousRoot, "result.json");
-  await Promise.all([
-    writeFile(workerPath, JSON.stringify(worker)),
-    writeFile(previousPath, JSON.stringify(previous)),
-  ]);
+  await writeFile(workerPath, JSON.stringify(worker));
+  await writeFile(previousPath, JSON.stringify(previous));
   const context = {
     root: outputRoot,
     repoRoot: root,
@@ -241,9 +239,7 @@ try {
     scope: projected.discoveries[0].result.scope,
     threatModel: projected.previous.threatModel,
   });
-  const saved = JSON.parse(
-    await readFile(path.join(outputRoot, "result.json"), "utf8"),
-  );
+  const saved = await readJson(outputRoot, "result.json");
   const allSources: SourceFinding[] = saved.findings.flatMap(
     (entry: { provenance: { sourceFindings: SourceFinding[] } }) =>
       entry.provenance.sourceFindings,
@@ -308,19 +304,7 @@ function finding<Extra extends object = object>(
   extra: Extra = {} as Extra,
 ) {
   return {
-    ruleId: "cross-site-scripting." + id,
-    identity: { anchor: id },
-    title: "Unsafe request output " + id,
-    summary: "A request-controlled value reaches an HTML response.",
-    severity: { level: "high" },
-    confidence: {
-      level: "high",
-      rationale: "The source establishes reachability.",
-    },
-    taxonomy: { category: "cross-site-scripting", cwe: ["CWE-79"] },
-    locations: [{ path: `src/${id}.ts`, startLine: 1, endLine: 2 }],
-    remediation: "Encode request-controlled values before emitting HTML.",
-    provenance: { source: "local_plugin" },
+    ...draftFinding(id, `src/${id}.ts`),
     ...extra,
   };
 }

@@ -2,8 +2,3 @@
 dist/
 node_modules/
 /reports/
-/tests/**/*.js
-
-# Compiled TypeScript tooling.
-/scripts/test_host_build.mjs
-/scripts/test_reporter.mjs

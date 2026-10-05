@@ -1,3 +1,4 @@
+import { readJson, readJsonLines } from "./support/json.ts";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 interface PreflightFixture {
   codexPath: string;
@@ -10,7 +11,7 @@ interface PreflightFixture {
   terminatedPath: string;
   children: ChildProcess[];
 }
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import {
@@ -26,19 +27,16 @@ import {
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID: profileId,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
 } = await importSource(
-  fileURLToPath(
-    new URL(
-      "../src/deep-scan/permission-profile-preflight.ts",
-      import.meta.url,
-    ),
+  path.join(
+    import.meta.dirname,
+    "../src/deep-scan/permission-profile-preflight.ts",
   ),
 );
 
@@ -113,7 +111,7 @@ async function testAllowedProfileAndRawArgv() {
     async ({ codexPath, cwd, argvPath, callsPath }) => {
       await preflight(codexPath, cwd);
 
-      assert.deepEqual(JSON.parse(await readFile(argvPath, "utf8")), [
+      assert.deepEqual(await readJson(argvPath), [
         "--config",
         rawOverrides[0],
         "--config",
@@ -137,11 +135,10 @@ async function testAllowedProfileAndRawArgv() {
 async function testProvidedEnvForwardedWithoutMutation() {
   const codexHome = "/fixture/canonical-codex-home";
   const env = Object.freeze({
-    ...stringEnvironment(),
+    ...process.env,
     CODEX_HOME: codexHome,
     DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
   });
-  const originalEntries = Object.entries(env);
 
   await withFakeCodex(
     {
@@ -150,11 +147,10 @@ async function testProvidedEnvForwardedWithoutMutation() {
     },
     async ({ codexPath, cwd, envPath }) => {
       await preflight(codexPath, cwd, env);
-      assert.deepEqual(JSON.parse(await readFile(envPath, "utf8")), {
+      assert.deepEqual(await readJson(envPath), {
         codexHome,
         sentinel: "same-snapshot",
       });
-      assert.deepEqual(Object.entries(env), originalEntries);
     },
   );
 }
@@ -231,7 +227,7 @@ async function testPreflightStartsInWorkerCwd() {
       assert.notEqual(cwd, process.cwd());
       await preflight(codexPath, cwd);
 
-      const childCwd = JSON.parse(await readFile(cwdPath, "utf8"));
+      const childCwd = await readJson(cwdPath);
       assert.equal(await realpath(childCwd), await realpath(cwd));
       const calls = await readJsonLines(callsPath);
       assert.deepEqual(
@@ -744,12 +740,6 @@ function preflight(
   });
 }
 
-function stringEnvironment() {
-  return Object.fromEntries(
-    Object.entries(process.env).filter((entry) => typeof entry[1] === "string"),
-  );
-}
-
 function configReadResult(
   profile: unknown,
   defaultPermissions: unknown = profileId,
@@ -958,15 +948,6 @@ function send(id, result, error) {
   process.stdout.write(JSON.stringify(message) + "\\n");
 }
 `;
-}
-
-async function readJsonLines(file: string) {
-  const content = await readFile(file, "utf8");
-  return content
-    .trim()
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
 }
 
 async function waitForFile(file: string) {

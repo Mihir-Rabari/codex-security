@@ -1,6 +1,8 @@
-import { assertNoError, assertFlagPair } from "./assertions.js";
-import { readOnlyParentSandboxState } from "./sandbox-state.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
+import { readJson, readJsonLines } from "./support/json.ts";
+import { assertNoError, assertFlagPair } from "./assertions.ts";
+import { readOnlyParentSandboxState } from "./sandbox-state.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -17,8 +19,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
-import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.js";
-import * as streams from "./support/streams.js";
+import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
+import * as streams from "./support/streams.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,7 +41,6 @@ async function testDeepScanStdioLifecycle() {
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
-  const scanRoot = path.join(fixtureRoot, "scans");
   const codexHome = path.join(fixtureRoot, "codex-home");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
@@ -68,8 +69,6 @@ async function testDeepScanStdioLifecycle() {
 
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
-  await mkdir(stateDir, { recursive: true });
-  await mkdir(scanRoot, { recursive: true });
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFile(
@@ -78,25 +77,21 @@ async function testDeepScanStdioLifecycle() {
   );
   await writeFile(
     path.join(codexHome, "codex-security", "config.toml"),
-    [
-      "[deep_scan]",
-      "workers = 1",
-      "subagents = 0",
-      "stop_after_no_new = 1",
-      "max_discovery_runs = 2",
-      "",
-    ].join("\n"),
+    `[deep_scan]
+workers = 1
+subagents = 0
+stop_after_no_new = 1
+max_discovery_runs = 2
+`,
   );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(
     runtimeConfigPath,
-    [
-      'model_reasoning_summary = "detailed"',
-      'profile = "selected"',
-      "[profiles.selected]",
-      'model_reasoning_summary = "none"',
-      "",
-    ].join("\n"),
+    `model_reasoning_summary = "detailed"
+profile = "selected"
+[profiles.selected]
+model_reasoning_summary = "none"
+`,
   );
   await writePythonWrapper(pythonWrapperPath);
   await buildServer(serverBundlePath, { target: "node20" });
@@ -108,7 +103,7 @@ async function testDeepScanStdioLifecycle() {
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
-    CODEX_SECURITY_SCAN_ROOT: scanRoot,
+    CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
     REAL_PYTHON: process.env.PYTHON?.trim() || "python3",
@@ -186,7 +181,7 @@ async function testDeepScanStdioLifecycle() {
         .join(" "),
       /parent.*sandbox|sandbox.*metadata|permission/i,
     );
-    assert.deepEqual(await readJsonLines(startLogPath), []);
+    assert.deepEqual(await readLogLines(startLogPath), []);
 
     server.sendRequest(
       10,
@@ -207,8 +202,7 @@ async function testDeepScanStdioLifecycle() {
     assert.match(startedWorker.stdin, /record_codex_security_scan_draft/);
     const startedState = await getDeepScan({ environment, scanId, threadId });
     const startedArtifactRoot = startedState.workers.find(
-      (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-        worker.kind === "discovery",
+      (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof startedArtifactRoot, "string");
     assert.equal(workerContext.pluginRoot, pluginRoot);
@@ -287,8 +281,7 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(stillRunning.cancelRequested, false);
     assert.equal(
       stillRunning.workers.some(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-          worker.kind === "setup",
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
       ),
       false,
     );
@@ -296,7 +289,7 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(stillRunning.workers[0].kind, "discovery");
     assert.equal(stillRunning.workers[0].status, "running");
     assertProcessAlive(startedWorker.pid);
-    assert.equal((await readJsonLines(startLogPath)).length, 1);
+    assert.equal((await readLogLines(startLogPath)).length, 1);
 
     // Two live calls with the persisted scanId must join the one coordinator.
     server.sendRequest(
@@ -319,7 +312,7 @@ async function testDeepScanStdioLifecycle() {
           ).length >= 2,
       "both scanId callers to join the coordinator",
     );
-    assert.equal((await readJsonLines(startLogPath)).length, 1);
+    assert.equal((await readLogLines(startLogPath)).length, 1);
 
     const rejectedWrongThreadCancel = await server.request(
       1312,
@@ -381,7 +374,7 @@ async function testDeepScanStdioLifecycle() {
     );
     assertNoError(cancelResponse);
     assert.equal(
-      (await readJsonLines(cancelLogPath)).length,
+      (await readLogLines(cancelLogPath)).length,
       2,
       "each cancellation request must invoke the durable transition exactly once",
     );
@@ -400,11 +393,9 @@ async function testDeepScanStdioLifecycle() {
           ),
       "cancellation persistence failure to reach the coordinator",
     );
-    const canceledManifest = JSON.parse(
-      await readFile(
-        path.join(startedState.scanDir, "scan-manifest.json"),
-        "utf8",
-      ),
+    const canceledManifest = await readJson(
+      startedState.scanDir,
+      "scan-manifest.json",
     );
     assert.equal(
       Object.keys(canceledManifest.scan.preservedSources ?? {}).some((source) =>
@@ -422,15 +413,13 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(canceledState.cancelRequested, true);
     assert.equal(
       canceledState.workers.some(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-          worker.kind === "setup",
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
       ),
       false,
     );
     assert.equal(
       canceledState.workers.every(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-          worker.status === "canceled",
+        (worker: PersistedDeepScanWorker) => worker.status === "canceled",
       ),
       true,
     );
@@ -441,7 +430,7 @@ async function testDeepScanStdioLifecycle() {
       toolCall("start_codex_security_deep_scan", { scanId }, threadId),
     );
     assertCanceled(lateJoin, scanId, startedState.scanDir);
-    assert.equal((await readJsonLines(startLogPath)).length, 1);
+    assert.equal((await readLogLines(startLogPath)).length, 1);
 
     const failureThreadId = "deep-scan-stdio-failure-thread";
     server.sendRequest(
@@ -477,8 +466,7 @@ async function testDeepScanStdioLifecycle() {
       threadId: failureThreadId,
     });
     const failedArtifactRoot = activeFailureState.workers.find(
-      (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-        worker.kind === "discovery",
+      (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof failedArtifactRoot, "string");
     assert.equal(failedWorkerContext.pluginRoot, pluginRoot);
@@ -507,8 +495,7 @@ async function testDeepScanStdioLifecycle() {
     assertReadOnlyWorkerInvocation(failedWorker.argv);
     assert.equal(
       activeFailureState.workers.some(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-          worker.kind === "setup",
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
       ),
       false,
     );
@@ -576,14 +563,13 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(failedState.error, failureMessage);
     assert.equal(
       failedState.workers.some(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-          worker.kind === "setup",
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
       ),
       false,
     );
     assert.equal(
       failedState.workers.every(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
+        (worker: PersistedDeepScanWorker) =>
           !["queued", "running"].includes(worker.status),
       ),
       true,
@@ -681,7 +667,7 @@ async function testDeepScanStdioLifecycle() {
       );
     }
 
-    const restartStartIndex = (await readJsonLines(startLogPath)).length;
+    const restartStartIndex = (await readLogLines(startLogPath)).length;
     await writeFile(restartControlPath, "before-restart");
     server.sendRequest(
       29,
@@ -711,24 +697,17 @@ async function testDeepScanStdioLifecycle() {
       });
       return (
         partial.workers.some(
-          (
-            worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker,
-          ) => worker.status === "succeeded",
+          (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
         ) &&
         partial.workers.some(
-          (
-            worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker,
-          ) => worker.status === "running",
+          (worker: PersistedDeepScanWorker) => worker.status === "running",
         )
       );
     }, "one completed discovery and one interrupted discovery");
     const completedWorker = partial!.workers.find(
-      (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
-        worker.status === "succeeded",
+      (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
     );
-    const completedDraft = JSON.parse(
-      await readFile(completedWorker.resultManifestPath, "utf8"),
-    );
+    const completedDraft = await readJson(completedWorker.resultManifestPath);
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
     await server.stop();
@@ -841,16 +820,15 @@ async function testDeepScanStdioLifecycle() {
       );
       assert.equal(finished.dispatchedCount, 2);
       const successfulDiscoveries = finished.workers.filter(
-        (worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker) =>
+        (worker: PersistedDeepScanWorker) =>
           worker.kind === "discovery" && worker.status === "succeeded",
       );
       assert.equal(successfulDiscoveries.length, 2);
       assert.equal(successfulDiscoveries[0].id, completedWorker.id);
       assert.equal(
         finished.workers.some(
-          (
-            worker: import("../src/deep-scan/types.js").PersistedDeepScanWorker,
-          ) => worker.kind === "dedup" && worker.status === "succeeded",
+          (worker: PersistedDeepScanWorker) =>
+            worker.kind === "dedup" && worker.status === "succeeded",
         ),
         true,
       );
@@ -866,12 +844,7 @@ async function testDeepScanStdioLifecycle() {
         { code: "ENOENT" },
       );
       assert.deepEqual(
-        JSON.parse(
-          await readFile(
-            path.join(resumedScan.scanDir, "findings.json"),
-            "utf8",
-          ),
-        ).findings,
+        (await readJson(resumedScan.scanDir, "findings.json")).findings,
         [],
       );
       const completion = await restartedServer.request(
@@ -888,9 +861,7 @@ async function testDeepScanStdioLifecycle() {
       );
       assertNoError(completion);
       const completedScan = resumed.result.structuredContent;
-      const sealedManifest = JSON.parse(
-        await readFile(completedScan.manifestPath, "utf8"),
-      );
+      const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
       assert.ok(sealedManifest.scan.sealedAt);
       const report = await readFile(
@@ -898,7 +869,7 @@ async function testDeepScanStdioLifecycle() {
         "utf8",
       );
       assert.ok(report.length > 0);
-      const executions = (await readJsonLines(startLogPath)).slice(
+      const executions = (await readLogLines(startLogPath)).slice(
         restartStartIndex,
       );
       for (const execution of executions) {
@@ -938,11 +909,7 @@ function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
   return streams.startServer(serverPath, env, {
     cwd: pluginRoot,
     component: "codex_security_deep_scan",
-    withTimeout,
-    responseLabel: "JSON-RPC response",
-    // Non-structured diagnostics remain available in the child process on test failure.
-    stderrLines: [],
-    checkSignalCode: true,
+    timeoutMessage: (id) => `Timed out waiting for JSON-RPC response ${id}.`,
   });
 }
 
@@ -1042,22 +1009,15 @@ async function getDeepScan({
   return result.deepScan;
 }
 
-async function waitForDeepScanWorker({
-  environment,
-  scanId,
-  threadId,
-}: Parameters<typeof getDeepScan>[0]) {
-  let worker!: import("../src/deep-scan/types.js").PersistedDeepScanWorker;
+async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
-    const deepScan = await getDeepScan({ environment, scanId, threadId });
-    worker = deepScan.workers.find(
-      (
-        candidate: import("../src/deep-scan/types.js").PersistedDeepScanWorker,
-      ) => candidate.kind === "discovery" && candidate.status === "running",
+    const deepScan = await getDeepScan(input);
+    const worker = deepScan.workers.find(
+      (candidate: PersistedDeepScanWorker) =>
+        candidate.kind === "discovery" && candidate.status === "running",
     );
     return worker !== undefined;
   }, "active Standard scan worker");
-  return worker;
 }
 
 function discoveryPromptContext(prompt: string) {
@@ -1083,80 +1043,76 @@ async function runWorkbench(environment: NodeJS.ProcessEnv, args: string[]) {
 async function writeFakeCodex(executablePath: string) {
   await writeFile(
     executablePath,
-    [
-      "#!/usr/bin/env node",
-      'import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";',
-      'import path from "node:path";',
-      "if (process.argv.includes('app-server')) {",
-      "  let buffer = '';",
-      "  process.stdin.setEncoding('utf8');",
-      "  process.stdin.on('data', (chunk) => {",
-      "    buffer += chunk;",
-      "    while (true) {",
-      "      const newline = buffer.indexOf('\\n');",
-      "      if (newline < 0) return;",
-      "      const line = buffer.slice(0, newline).trim();",
-      "      buffer = buffer.slice(newline + 1);",
-      "      if (!line) continue;",
-      "      const message = JSON.parse(line);",
-      "      if (message.method === 'initialized') continue;",
-      "      let result;",
-      "      if (message.method === 'initialize') {",
-      "        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };",
-      "      } else if (message.method === 'config/read') {",
-      "        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read' }, network: { enabled: false } } } }, origins: {}, layers: null };",
-      "      } else if (message.method === 'permissionProfile/list') {",
-      "        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };",
-      "      } else if (message.method === 'account/read') {",
-      "        result = { account: null, requiresOpenaiAuth: true };",
-      "      } else {",
-      "        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');",
-      "        continue;",
-      "      }",
-      "      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');",
-      "    }",
-      "  });",
-      "  process.stdin.on('end', () => process.exit(0));",
-      "} else {",
-      "let stdin = '';",
-      "for await (const chunk of process.stdin) stdin += chunk;",
-      "const context = JSON.parse(stdin.match(/```json\\n([\\s\\S]*?)\\n```/u)[1]);",
-      "const root = process.argv[process.argv.indexOf('--cd') + 1];",
-      "appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');",
-      "console.log(JSON.stringify({ type: 'thread.started', thread_id: `stdio-fixture-${process.pid}` }));",
-      "if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {",
-      "  const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');",
-      "  if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {",
-      "    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };",
-      "    if (context.claimedWorkerIds) {",
-      "      const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');",
-      "      const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));",
-      "      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));",
-      "    } else {",
-      "      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));",
-      "    }",
-      "    console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));",
-      "    console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));",
-      "    process.exit(0);",
-      "  }",
-      "}",
-      "const timer = setInterval(() => {}, 1_000);",
-      "const stop = (signal) => {",
-      "  clearInterval(timer);",
-      "  if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {",
-      "    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };",
-      "    const checkpointDir = path.join(root, 'checkpoints');",
-      "    mkdirSync(checkpointDir, { recursive: true });",
-      "    writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));",
-      "  }",
-      "  appendFileSync(process.env.FAKE_CODEX_EXIT_LOG, JSON.stringify({ pid: process.pid, signal }) + '\\n');",
-      "  process.exit(0);",
-      "};",
-      "process.once('SIGINT', () => stop('SIGINT'));",
-      "process.once('SIGTERM', () => stop('SIGTERM'));",
-      "}",
-      "",
-    ].join("\n"),
+    `#!/usr/bin/env node
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+if (process.argv.includes('app-server')) {
+  let buffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    while (true) {
+      const newline = buffer.indexOf('\\n');
+      if (newline < 0) return;
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const message = JSON.parse(line);
+      if (message.method === 'initialized') continue;
+      let result;
+      if (message.method === 'initialize') {
+        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'config/read') {
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read' }, network: { enabled: false } } } }, origins: {}, layers: null };
+      } else if (message.method === 'permissionProfile/list') {
+        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
+      } else if (message.method === 'account/read') {
+        result = { account: null, requiresOpenaiAuth: true };
+      } else {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
+        continue;
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
+    }
+  });
+  process.stdin.on('end', () => process.exit(0));
+} else {
+const stdin = (await process.stdin.toArray()).join('');
+const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
+const root = process.argv[process.argv.indexOf('--cd') + 1];
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
+console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
+if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
+  const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
+  if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
+    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    if (context.claimedWorkerIds) {
+      const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
+      const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
+      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));
+    } else {
+      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
+    }
+    console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
+    console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+    process.exit(0);
+  }
+}
+setInterval(() => {}, 1_000);
+const stop = (signal) => {
+  if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
+    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const checkpointDir = path.join(root, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
+  }
+  appendFileSync(process.env.FAKE_CODEX_EXIT_LOG, JSON.stringify({ pid: process.pid, signal }) + '\\n');
+  process.exit(0);
+};
+process.once('SIGINT', () => stop('SIGINT'));
+process.once('SIGTERM', () => stop('SIGTERM'));
+}
+`,
   );
   await chmod(executablePath, 0o755);
 }
@@ -1164,25 +1120,23 @@ async function writeFakeCodex(executablePath: string) {
 async function writePythonWrapper(executablePath: string) {
   await writeFile(
     executablePath,
-    [
-      "#!/usr/bin/env node",
-      'import { appendFileSync, existsSync, unlinkSync } from "node:fs";',
-      'import { spawnSync } from "node:child_process";',
-      "const args = process.argv.slice(2);",
-      "const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;",
-      "if (args[1] === 'cancel-scan') {",
-      "  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');",
-      "}",
-      "if (args[1] === 'cancel-scan' && control && existsSync(control)) {",
-      "  unlinkSync(control);",
-      "  console.error('injected cancel-scan failure');",
-      "  process.exit(1);",
-      "}",
-      "const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });",
-      "if (result.error) throw result.error;",
-      "process.exit(result.status ?? 1);",
-      "",
-    ].join("\n"),
+    `#!/usr/bin/env node
+import { appendFileSync, existsSync, unlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
+if (args[1] === 'cancel-scan') {
+  appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(args) + '\\n');
+}
+if (args[1] === 'cancel-scan' && control && existsSync(control)) {
+  unlinkSync(control);
+  console.error('injected cancel-scan failure');
+  process.exit(1);
+}
+const result = spawnSync(process.env.REAL_PYTHON || 'python3', args, { stdio: 'inherit' });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
   );
   await chmod(executablePath, 0o755);
 }
@@ -1221,10 +1175,10 @@ function assertProcessAlive(pid: number) {
 }
 
 async function waitForJsonLines(filePath: string, count: number) {
-  let lines: Awaited<ReturnType<typeof readJsonLines>> = [];
+  let lines: Awaited<ReturnType<typeof readLogLines>> = [];
   await waitFor(
     async () => {
-      lines = await readJsonLines(filePath);
+      lines = await readLogLines(filePath);
       return lines.length >= count;
     },
     `${count} record(s) in ${path.basename(filePath)}`,
@@ -1232,48 +1186,21 @@ async function waitForJsonLines(filePath: string, count: number) {
   return lines;
 }
 
-async function readJsonLines(filePath: string) {
-  try {
-    return (await readFile(filePath, "utf8"))
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  } catch (error) {
+function readLogLines(filePath: string) {
+  return readJsonLines(filePath).catch((error) => {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     throw error;
-  }
+  });
 }
 
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   label: string,
-  timeoutMs: number = 15_000,
 ) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await delay(25);
   }
   throw new Error(`Timed out waiting for ${label}.`);
-}
-
-async function withTimeout<Value>(
-  promise: Promise<Value>,
-  timeoutMs: number,
-  label: string,
-) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Timed out waiting for ${label}.`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }

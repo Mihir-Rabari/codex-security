@@ -1,25 +1,9 @@
 import { link, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { build } from "../../sdk/typescript/node_modules/esbuild/lib/main.js";
+import { importModule } from "../../plugins/codex-security/mcp-app/tests/import-module.ts";
 
 // Bundle production runtime helpers directly for the deterministic checks.
-const bundle = await build({
-  stdin: {
-    contents: [
-      'export { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID, preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";',
-      'export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";',
-      'export { inlineToml } from "../../sdk/typescript/src/config.ts";',
-      'export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-environment.ts";',
-    ].join("\n"),
-    resolveDir: fileURLToPath(new URL(".", import.meta.url)),
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
-});
 export const {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   preflightDeepScanWorkerPermissionProfile,
@@ -27,72 +11,67 @@ export const {
   executablePathForSpawn,
   inlineToml,
   bundledCodexSdkEnvironment,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
-
-/** Share saved login updates without importing the caller's configuration. */
-export async function createEvalHome(
-  createHome: (parent?: string) => Promise<string>,
-  ambientHome: string,
-) {
-  let auth;
-  try {
-    const path = await realpath(join(ambientHome, "auth.json"));
-    if ((await stat(path)).isFile()) auth = path;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  // A hard link must stay on the saved login's filesystem, including symlinks.
-  const home = await createHome(auth ? dirname(auth) : undefined);
-  try {
-    if (auth) await link(auth, join(home, "auth.json"));
-    return { home };
-  } catch (error) {
-    await rm(home, { recursive: true, force: true });
-    throw error;
-  }
-}
+} = await importModule({
+  stdin: {
+    contents: `export { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID, preflightDeepScanWorkerPermissionProfile, deepScanPermissionProfileFallbackError } from "../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts";
+export { executablePathForSpawn } from "../../plugins/codex-security/mcp-app/src/deep-scan/executable-path.ts";
+export { inlineToml } from "../../sdk/typescript/src/config.ts";
+export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-environment.ts";`,
+    resolveDir: import.meta.dirname,
+  },
+});
 
 /** Keep temporary source and the login link alive until cancelled work stops. */
-export async function withEvalState<State extends { home: string }, Value>(
-  createHome: () => Promise<State>,
-  run: (state: State & { root: string; signal: AbortSignal }) => Promise<Value>,
+export async function withEvalState(
+  createHome: (parent?: string) => Promise<string>,
+  ambientHome: string,
+  run: (state: {
+    home: string;
+    root: string;
+    signal: AbortSignal;
+  }) => Promise<void>,
 ) {
   const controller = new AbortController();
-  let interrupted;
-  const handlers = ["SIGINT", "SIGTERM"].map((signal) => {
-    const handler = () => {
-      interrupted = signal;
-      process.exitCode = signal === "SIGINT" ? 130 : 143;
-      controller.abort(
-        new DOMException(`Eval interrupted by ${signal}`, "AbortError"),
-      );
-    };
-    process.on(signal, handler);
-    return [signal, handler] as const;
-  });
+  let interrupted: NodeJS.Signals | undefined;
+  const signals = ["SIGINT", "SIGTERM"];
+  const handler = (signal: NodeJS.Signals) => {
+    interrupted = signal;
+    controller.abort(
+      new DOMException(`Eval interrupted by ${signal}`, "AbortError"),
+    );
+  };
+  for (const signal of signals) process.on(signal, handler);
   let root;
-  let state;
+  let home;
   try {
     root = await mkdtemp(join(tmpdir(), "source-audit-"));
-    state = await createHome();
-    controller.signal.throwIfAborted();
-    const result = await run({ root, ...state, signal: controller.signal });
-    controller.signal.throwIfAborted();
-    return result;
+    // Share saved login updates without importing the caller's configuration.
+    let auth;
+    try {
+      const path = await realpath(join(ambientHome, "auth.json"));
+      if ((await stat(path)).isFile()) auth = path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    // A hard link must stay on the saved login's filesystem, including symlinks.
+    const allocatedHome = await createHome(auth ? dirname(auth) : undefined);
+    try {
+      if (auth) await link(auth, join(allocatedHome, "auth.json"));
+    } catch (error) {
+      await rm(allocatedHome, { recursive: true, force: true });
+      throw error;
+    }
+    home = allocatedHome;
+    if (!interrupted) await run({ root, home, signal: controller.signal });
   } catch (error) {
     if (!interrupted) throw error;
-    process.exitCode = interrupted === "SIGINT" ? 130 : 143;
   } finally {
-    try {
-      await Promise.all(
-        [root, state?.home]
-          .filter(Boolean)
-          .map((path) => rm(path!, { recursive: true, force: true })),
-      );
-    } finally {
-      for (const [signal, handler] of handlers) process.off(signal, handler);
-    }
+    await Promise.all([
+      root && rm(root, { recursive: true, force: true }),
+      home && rm(home, { recursive: true, force: true }),
+    ]).finally(() => {
+      for (const signal of signals) process.off(signal, handler);
+      if (interrupted) process.exitCode = interrupted === "SIGINT" ? 130 : 143;
+    });
   }
 }

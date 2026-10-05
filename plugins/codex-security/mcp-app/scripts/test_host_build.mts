@@ -1,15 +1,15 @@
+import { temporaryDirectory } from "../tests/support/temporary-directories.ts";
+import { readJson } from "../tests/support/json.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 
@@ -27,7 +27,7 @@ function runNode(
 }
 
 test("builds and loads the host runtime from standalone plugin source", async (t) => {
-  const output = await mkdtemp(join(tmpdir(), "codex-security-host-build-"));
+  const output = await temporaryDirectory("codex-security-host-build-");
   const mcp = join(output, "mcp");
   t.after(() => rm(output, { recursive: true, force: true }));
 
@@ -41,9 +41,7 @@ test("builds and loads the host runtime from standalone plugin source", async (t
   ]);
 
   const { nativeTarget } = await import("../../native/platform.mjs");
-  const contract = JSON.parse(
-    await readFile(join(plugin, "plugin-files.json"), "utf8"),
-  );
+  const contract = await readJson(plugin, "plugin-files.json");
   const actual = (await readdir(mcp, { recursive: true, withFileTypes: true }))
     .filter((entry) => entry.isFile())
     .map((entry) =>
@@ -118,7 +116,7 @@ test("builds and loads the host runtime from standalone plugin source", async (t
 });
 
 test("rejects an unsupported native host before replacing existing output", async (t) => {
-  const output = await mkdtemp(join(tmpdir(), "codex-security-unsupported-"));
+  const output = await temporaryDirectory("codex-security-unsupported-");
   t.after(() => rm(output, { recursive: true, force: true }));
   const marker = join(output, "keep");
   await writeFile(marker, "previous output");

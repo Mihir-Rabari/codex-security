@@ -3,7 +3,10 @@ import type { Readable } from "node:stream";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
-function consumeStreamLines(stream: Readable, consume: (line: string) => void) {
+export function consumeStreamLines(
+  stream: Readable,
+  consume: (line: string) => void,
+) {
   let buffer = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk) => {
@@ -23,21 +26,11 @@ export function startServer(
   {
     cwd,
     component,
-    withTimeout,
-    responseLabel,
-    stderrLines,
-    checkSignalCode,
+    timeoutMessage,
   }: {
     cwd: string;
     component: string;
-    withTimeout: <T>(
-      promise: Promise<T>,
-      timeoutMs: number,
-      label: string,
-    ) => Promise<T>;
-    responseLabel: string;
-    stderrLines?: string[];
-    checkSignalCode: boolean;
+    timeoutMessage: (id: number) => string;
   },
 ) {
   const child = spawn(process.execPath, [serverPath, "--stdio"], {
@@ -51,6 +44,7 @@ export function startServer(
     (response: ReturnType<typeof JSON.parse>) => void
   >();
   const stderrEvents: ReturnType<typeof JSON.parse>[] = [];
+  const stderrLines: string[] = [];
   consumeStreamLines(child.stdout, (line) => {
     const response = JSON.parse(line);
     responses.set(response.id, response);
@@ -58,12 +52,12 @@ export function startServer(
     waiters.delete(response.id);
   });
   consumeStreamLines(child.stderr, (line) => {
-    stderrLines?.push(line);
+    stderrLines.push(line);
     try {
       const event = JSON.parse(line);
       if (event.component === component) stderrEvents.push(event);
     } catch {
-      // Callers choose whether to retain non-structured diagnostics.
+      // Non-structured diagnostics remain available through stderrText.
     }
   });
   return {
@@ -78,44 +72,40 @@ export function startServer(
       this.sendRequest(id, method, params);
       return this.waitForResponse(id);
     },
-    waitForResponse(id: number, timeoutMs = 15_000) {
+    async waitForResponse(id: number, timeoutMs = 15_000) {
       const existing = responses.get(id);
-      if (existing) return Promise.resolve(existing);
-      return withTimeout(
-        new Promise<ReturnType<typeof JSON.parse>>((resolve) =>
-          waiters.set(id, resolve),
-        ),
+      if (existing) return existing;
+      const { promise, resolve, reject } =
+        Promise.withResolvers<ReturnType<typeof JSON.parse>>();
+      waiters.set(id, resolve);
+      const timer = setTimeout(
+        () => reject(new Error(timeoutMessage(id))),
         timeoutMs,
-        `${responseLabel} ${id}`,
       );
+      return promise.finally(() => clearTimeout(timer));
     },
     stderrEvents() {
       return [...stderrEvents];
     },
     stderrText() {
-      return stderrLines!.join("\n");
+      return stderrLines.join("\n");
     },
     response(id: number) {
       return responses.get(id);
     },
     async stop() {
-      if (
-        child.exitCode !== null ||
-        (checkSignalCode && child.signalCode !== null)
-      )
-        return;
-      child.stdin.end();
+      if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.stdin.end();
       await Promise.race([exited, delay(2_000)]);
-      if (child.exitCode === null && child.signalCode === null)
-        child.kill("SIGKILL");
+      child.kill("SIGKILL");
       await exited;
     },
   };
 }
 
 export function writeMessage(
-  child: ChildProcessWithoutNullStreams,
+  child: Pick<ChildProcessWithoutNullStreams, "stdin">,
   message: unknown,
 ) {
   child.stdin.write(`${JSON.stringify(message)}\n`);

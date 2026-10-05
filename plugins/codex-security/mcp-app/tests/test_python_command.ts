@@ -2,15 +2,11 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { importSource } from "./import-module.js";
-
-const {
+import {
   isUsablePythonExecutable,
   missingPythonHelperMessage,
   resolvePythonCommand,
-} = await importSource(
-  new URL("../src/python_command.ts", import.meta.url).pathname,
-);
+} from "../src/python_command.ts";
 
 const windowsHome = "C:\\Users\\fixture";
 const windowsRoot = path.win32.join(
@@ -122,7 +118,7 @@ try {
 const pythonCommand = "/selected/python";
 for (const code of ["ENOENT", "EACCES", "ENOEXEC", "UNKNOWN"]) {
   assert.match(
-    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand),
+    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand)!,
     /could not start its Python 3 helper/,
   );
 }

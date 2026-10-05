@@ -1,10 +1,11 @@
-import { sourceReferences } from "./support/source-references.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
-import { finding, scanId, workerDraft } from "./scan-draft-fixture.js";
+import { readJson, writeJson } from "./support/json.ts";
+import { sourceReferences } from "./support/source-references.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 type Finding = ReturnType<typeof finding>;
 
@@ -61,10 +62,6 @@ try {
     "workers",
   );
   const dedupRoot = path.join(scanRoot, "artifacts", "deep_discovery", "dedup");
-  await Promise.all([
-    mkdir(workersRoot, { recursive: true }),
-    mkdir(dedupRoot, { recursive: true }),
-  ]);
 
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
@@ -103,7 +100,6 @@ try {
       threatModel: { summary: "Requests may reach shared code." },
       coverage: rejectedCoverage,
     }),
-    completionSequence: 1,
   });
   const second = await createWorker({
     workersRoot,
@@ -113,7 +109,6 @@ try {
       scope: { summary: "Shared and independent request handling." },
       coverage: { ...workerDraft([]).coverage, completeness: "unknown" },
     }),
-    completionSequence: 2,
   });
   const originalWorkerArtifacts = await Promise.all(
     [first, second].map((worker) => readFile(worker.resultPath, "utf8")),
@@ -216,18 +211,13 @@ try {
     consumedWorkerIds: [first.id, second.id],
   });
   assert.deepEqual(
-    JSON.parse(await readFile(path.join(outputRoot, "result.json"), "utf8")),
+    await readJson(outputRoot, "result.json"),
     mergedWithSources,
   );
   const checkpointNames = await readdir(path.join(outputRoot, "checkpoints"));
   assert.equal(checkpointNames.length, 1);
   assert.deepEqual(
-    JSON.parse(
-      await readFile(
-        path.join(outputRoot, "checkpoints", checkpointNames[0]),
-        "utf8",
-      ),
-    ),
+    await readJson(outputRoot, "checkpoints", checkpointNames[0]),
     mergedWithSources,
     "reducer checkpoints retain the accepted findings and scope without coverage",
   );
@@ -250,7 +240,6 @@ try {
     label: "discovery-collision",
     id: "worker-collision",
     result: workerDraft([shared, collision]),
-    completionSequence: 5,
   });
   const collisionRoot = path.join(dedupRoot, "dedup-collision", "output");
   await mkdir(collisionRoot, { recursive: true });
@@ -283,9 +272,7 @@ try {
       },
     ]),
   );
-  const collisionOutput = JSON.parse(
-    await readFile(path.join(collisionRoot, "result.json"), "utf8"),
-  );
+  const collisionOutput = await readJson(collisionRoot, "result.json");
   assert.deepEqual(collisionOutput.findings[0].provenance.sourceFindings, [
     { id: "worker-collision:0", finding: shared },
     { id: "worker-collision:1", finding: collision },
@@ -322,7 +309,6 @@ try {
     label: "discovery-0003",
     id: "worker-003",
     result: workerDraft([shared]),
-    completionSequence: 3,
   });
   const nextOutputRoot = path.join(dedupRoot, "dedup-0002", "output");
   await mkdir(nextOutputRoot, { recursive: true });
@@ -351,22 +337,17 @@ try {
     await recordCodexSecurityDeepReduction(nextContext, merged),
     { findingCount: 2, consumedWorkerIds: [third.id] },
   );
-  assert.deepEqual(
-    JSON.parse(
-      await readFile(path.join(nextOutputRoot, "result.json"), "utf8"),
-    ),
-    {
-      ...mergedWithSources,
-      findings: [
-        retainedFinding(shared, [
-          { id: "worker-003:0", finding: shared },
-          { id: "worker-001:0", finding: shared },
-          { id: "worker-002:0", finding: shared },
-        ]),
-        mergedWithSources.findings[1],
-      ],
-    },
-  );
+  assert.deepEqual(await readJson(nextOutputRoot, "result.json"), {
+    ...mergedWithSources,
+    findings: [
+      retainedFinding(shared, [
+        { id: "worker-003:0", finding: shared },
+        { id: "worker-001:0", finding: shared },
+        { id: "worker-002:0", finding: shared },
+      ]),
+      mergedWithSources.findings[1],
+    ],
+  });
 
   const enrichedPrevious = structuredClone(mergedWithSources);
   enrichedPrevious.findings[0].summary =
@@ -405,9 +386,7 @@ try {
     "utf8",
   );
   await recordCodexSecurityDeepReduction(nextContext, merged);
-  const preservedEnrichment = JSON.parse(
-    await readFile(path.join(nextOutputRoot, "result.json"), "utf8"),
-  );
+  const preservedEnrichment = await readJson(nextOutputRoot, "result.json");
   assert.equal(
     Object.hasOwn(preservedEnrichment, "coverage"),
     false,
@@ -455,10 +434,7 @@ try {
     /repeats assigned Standard scan worker/,
   );
 
-  await writeFile(
-    first.resultPath,
-    JSON.stringify({ ...first.result, complete: false }),
-  );
+  await writeJson(first.resultPath, { ...first.result, complete: false });
   await assert.rejects(
     getCodexSecurityDeepReducerInputs(context),
     /only a checkpoint/,
@@ -469,10 +445,10 @@ try {
     undefined,
     { ...workerDraft([]).coverage, completeness: "outdated" },
   ]) {
-    await writeFile(
-      first.resultPath,
-      JSON.stringify({ ...first.result, coverage: invalidCoverage }),
-    );
+    await writeJson(first.resultPath, {
+      ...first.result,
+      coverage: invalidCoverage,
+    });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
       /coverage|completeness/,
@@ -489,13 +465,10 @@ try {
       !error.message.includes(root),
   );
 
-  await writeFile(
-    first.resultPath,
-    JSON.stringify({
-      ...first.result,
-      scanId: "12c17317-9594-49e0-b06a-d72fd7e14bba",
-    }),
-  );
+  await writeJson(first.resultPath, {
+    ...first.result,
+    scanId: "12c17317-9594-49e0-b06a-d72fd7e14bba",
+  });
   await assert.rejects(
     getCodexSecurityDeepReducerInputs(context),
     (error: Error) =>
@@ -514,19 +487,17 @@ async function createWorker({
   label,
   id,
   result,
-  completionSequence,
 }: {
   workersRoot: string;
   label: string;
   id: string;
   result: ReturnType<typeof workerDraft<Finding>>;
-  completionSequence: number;
 }) {
   const workerRoot = path.join(workersRoot, label, "output");
   await mkdir(workerRoot, { recursive: true });
   const resultPath = path.join(workerRoot, "result.json");
   await writeFile(resultPath, JSON.stringify(result) + "\n");
-  return { id, resultPath, completionSequence, result };
+  return { id, resultPath, result };
 }
 
 function reduction(findings: Record<string, unknown>[], extra = {}) {

@@ -214,13 +214,13 @@ describe("TypeScript package skeleton", () => {
       await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
     );
     expect(packageJson.scripts.test).toBe(
-      "node --run build:ci && node --run build:plugin && bun test --timeout 30000 ./tests-ts",
+      "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
   });

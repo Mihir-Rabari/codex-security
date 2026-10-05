@@ -4,24 +4,24 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { parse } from "../../sdk/typescript/node_modules/smol-toml/dist/index.js";
-import { createFixture } from "./fixtures.mjs";
+import { createFixture } from "./fixtures.mts";
 import type {
   CodeEvidence,
   Coverage,
   SourceLocation,
   Finding,
   Result,
-} from "./grade.mjs";
-import type { EvalCodex } from "./harness.mjs";
+} from "./grade.mts";
+import type { EvalCodex } from "./harness.mts";
 import type { ThreadOptions } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
-import { gradeResult } from "./grade.mjs";
+import { gradeResult } from "./grade.mts";
 import {
   codexSettings,
   prepareEval,
   runPreparedEval,
   threadSettings,
-} from "./harness.mjs";
-import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mjs";
+} from "./harness.mts";
+import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mts";
 
 function sourceEvidence(
   fixture: ReturnType<typeof createFixture>,
@@ -76,6 +76,11 @@ function retainedResult(fixture: ReturnType<typeof createFixture>): TestResult {
   };
 }
 
+function retainedFixture() {
+  const fixture = createFixture();
+  return { fixture, result: retainedResult(fixture) };
+}
+
 test("counts every retained secret location, including unused and integration source", () => {
   const fixture = createFixture();
   const report = gradeResult(retainedResult(fixture), fixture);
@@ -95,8 +100,7 @@ test("counts every retained secret location, including unused and integration so
 });
 
 test("resolved, deferred, and intermediate findings do not satisfy final recall", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.deferred = result.findings;
   result.resolved_questions = result.findings;
   result.findings = [];
@@ -138,8 +142,7 @@ for (const [name, mutate] of [
   ],
 ] as const) {
   test(`rejects ${name}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     mutate(result.findings[0]);
     const report = gradeResult(result, fixture);
     assert.equal(report.passed, false);
@@ -167,8 +170,7 @@ for (const category of [
   "without-credentials",
 ]) {
   test(`rejects negated category ${category}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     result.findings[0].taxonomy.category = category;
     const report = gradeResult(result, fixture);
     assert.equal(report.passed, false);
@@ -205,8 +207,7 @@ test("accepts plural and identifier-style credential categories", () => {
 });
 
 test("accepts credential exposure with non-secret context in the category", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   for (const category of [
     "credential exposure with non-secret context",
     "credential exposure with no-secret context",
@@ -219,8 +220,7 @@ test("accepts credential exposure with non-secret context in the category", () =
 });
 
 test("accepts a secret's valid source range and sensitive-data category", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.findings[0].locations[0].endLine = fixture.positives[0].line + 1;
   result.findings[0].taxonomy.category = "sensitive-data-exposure";
   assert.equal(gradeResult(result, fixture).passed, true);
@@ -232,8 +232,7 @@ for (const category of [
   "api-key-exposure",
 ]) {
   test(`accepts credential category ${category}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     result.findings[0].taxonomy.category = category;
     assert.equal(gradeResult(result, fixture).passed, true);
   });
@@ -313,8 +312,7 @@ test("matches path casing only on Windows while preserving citation checks", () 
 
 for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
   test(`accepts ${cwe} for the password in the database configuration`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     const databaseIndex = fixture.positives.findIndex(
       (entry) => entry.id === "dotenv-url",
     );
@@ -327,8 +325,7 @@ for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
 
 for (const cwe of ["CWE-312", "CWE-313"]) {
   test(`accepts ${cwe} for credentials stored in source and configuration files`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     for (const finding of result.findings) finding.taxonomy.cwe = [cwe];
     assert.equal(gradeResult(result, fixture).passed, true);
 
@@ -360,8 +357,7 @@ test("keeps password and cryptographic-key CWEs specific to those exposures", ()
 
 for (const cwe of ["CWE-200", "CWE-540"]) {
   test(`accepts ${cwe} for specifically categorized credential exposure`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     for (const finding of result.findings) finding.taxonomy.cwe = [cwe];
     assert.equal(gradeResult(result, fixture).passed, true);
 
@@ -374,8 +370,7 @@ for (const cwe of ["CWE-200", "CWE-540"]) {
 
 for (const negativeIndex of [0, 1, 2, 3]) {
   test(`rejects a finding against negative control ${negativeIndex}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     result.findings.push({
       taxonomy: { category: "hardcoded-credentials", cwe: ["CWE-798"] },
       locations: [
@@ -447,8 +442,7 @@ for (const [name, location] of [
   ["negative control", { path: "src/runtime_config.py", startLine: 1 }],
 ] as const) {
   test(`rejects an additional non-supporting location at ${name}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     result.findings[0].locations.push({ ...location, role: "root_control" });
     const report = gradeResult(result, fixture);
     assert.equal(report.recall, 1);
@@ -459,8 +453,7 @@ for (const [name, location] of [
 
 for (const role of ["root_control", "sink"]) {
   test(`rejects a ${role} citation classified only by a different finding`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     const finding = result.findings[0];
     finding.taxonomy.cwe = ["CWE-522"];
     const key = fixture.positives.find(
@@ -627,8 +620,7 @@ test("accepts actual credential-use lines and excerpts containing them", () => {
 });
 
 test("multiple expected exposures can share a finding", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   const unused = result.findings.splice(1, 1)[0];
   result.findings[0].locations.push(...unused.locations);
   assert.deepEqual(gradeResult(result, fixture).errors, [
@@ -639,8 +631,7 @@ test("multiple expected exposures can share a finding", () => {
 });
 
 test("grouped exposures retain their applicable CWE classifications", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   const indices = ["dotenv-url", "private-key"].map((id) =>
     fixture.positives.findIndex((expected) => expected.id === id),
   );
@@ -669,8 +660,7 @@ test("grouped exposures retain their applicable CWE classifications", () => {
 
 for (const role of ["supporting", "expected_control"]) {
   test(`${role} citations cannot satisfy an independently missed exposure`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     const unused = result.findings.splice(1, 1)[0];
     result.findings[0].locations.push({
       ...unused.locations[0],
@@ -683,8 +673,7 @@ for (const role of ["supporting", "expected_control"]) {
 }
 
 test("accepts real credential-use sinks without treating them as separate exposures", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   for (const [index, expected] of fixture.positives.entries()) {
     if (expected.consumerLine === null) continue;
     const sink = {
@@ -758,8 +747,7 @@ test("path normalization does not make unrelated or unsafe source locations vali
 });
 
 test("accepts the private-key body and rejects reversed source ranges", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   const keyIndex = fixture.positives.findIndex(
     (entry) => entry.id === "private-key",
   );
@@ -772,8 +760,7 @@ test("accepts the private-key body and rejects reversed source ranges", () => {
 
 for (const footerLocation of [true, false]) {
   test(`rejects footer-only private-key evidence with ${footerLocation ? "footer" : "declaration"} location`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     const keyIndex = fixture.positives.findIndex(
       (entry) => entry.id === "private-key",
     );
@@ -794,8 +781,7 @@ for (const footerLocation of [true, false]) {
 }
 
 test("accepts public-key context alongside credential evidence", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.findings[0].codeEvidence.push(
     sourceEvidence(fixture, "src/signing.mjs", 2, 4),
     sourceEvidence(fixture, "config/public.pem", 1, 3),
@@ -804,8 +790,7 @@ test("accepts public-key context alongside credential evidence", () => {
 });
 
 test("incomplete coverage cannot pass even with all positive findings", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.completeness = "partial";
   assert.equal(gradeResult(result, fixture).passed, false);
 });
@@ -832,8 +817,7 @@ for (const [name, mutate] of [
   ],
 ] as const) {
   test(`complete coverage cannot pass with ${name}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     mutate(result.coverage);
     const report = gradeResult(result, fixture);
     assert.equal(report.recall, 1);
@@ -843,8 +827,7 @@ for (const [name, mutate] of [
 }
 
 test("complete coverage permits reviewed surfaces and nonblocking questions", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.surfaces.push({
     label: "configuration",
     disposition: "reported",
@@ -869,8 +852,7 @@ for (const pattern of [
   "/",
 ]) {
   test(`complete coverage cannot exclude fixture path ${pattern}`, () => {
-    const fixture = createFixture();
-    const result = retainedResult(fixture);
+    const { fixture, result } = retainedFixture();
     result.coverage.explicitExclusions.push({
       pattern,
       reason: "Not reviewed",
@@ -883,8 +865,7 @@ for (const pattern of [
 }
 
 test("complete coverage permits exclusions outside the generated fixture", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.explicitExclusions.push(
     { pattern: "node_modules/**", reason: "No dependencies in fixture" },
     { pattern: "https://delivery.example.test/**", reason: "Offline review" },
@@ -944,8 +925,7 @@ for (const repo of [
 }
 
 test("POSIX exclusion globs remain case-sensitive", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.explicitExclusions.push({
     pattern: "SRC/**/*.PY",
     reason: "Outside fixture",
@@ -954,8 +934,7 @@ test("POSIX exclusion globs remain case-sensitive", () => {
 });
 
 test("Windows drive casing does not hide an in-scope exclusion", () => {
-  const fixture = createFixture();
-  const result = retainedResult(fixture);
+  const { fixture, result } = retainedFixture();
   result.coverage.explicitExclusions.push({
     pattern: "c:/Temp/repository/src/client.py",
     reason: "Not reviewed",
@@ -1114,7 +1093,9 @@ test("named read-only profile excludes gold and credentials without a legacy san
     CODEX_SQLITE_HOME: "/tmp/ambient-state",
     CODEX_CLI_PATH: "/tmp/ambient-codex",
   });
-  const config = parse(settings.configOverrides.join("\n")) as {
+  const config = structuredClone(
+    parse(settings.configOverrides.join("\n")),
+  ) as {
     default_permissions: string;
     features: Record<string, boolean>;
     allow_login_shell: boolean;
@@ -1143,19 +1124,12 @@ test("named read-only profile excludes gold and credentials without a legacy san
   assert.equal(config.features.shell_snapshot, false);
   assert.equal(config.allow_login_shell, false);
   assert.equal(config.windows.sandbox, "elevated");
+  assert.deepEqual(config.shell_environment_policy, {
+    inherit: "core",
+    ignore_default_excludes: false,
+  });
   assert.deepEqual(
-    { ...config.shell_environment_policy },
-    {
-      inherit: "core",
-      ignore_default_excludes: false,
-    },
-  );
-  assert.deepEqual(
-    JSON.parse(
-      JSON.stringify(
-        config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].filesystem,
-      ),
-    ),
+    config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].filesystem,
     {
       ":minimal": "read",
       ":workspace_roots": "read",
@@ -1164,7 +1138,7 @@ test("named read-only profile excludes gold and credentials without a legacy san
     },
   );
   assert.deepEqual(
-    { ...config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network },
+    config.permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID].network,
     { enabled: false },
   );
   assert.equal(

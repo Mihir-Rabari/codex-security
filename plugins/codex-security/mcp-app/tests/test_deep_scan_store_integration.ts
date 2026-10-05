@@ -1,4 +1,5 @@
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { readJson, writeJsonLine } from "./support/json.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -6,14 +7,10 @@ import { once } from "node:events";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.js";
+import { importModule } from "./import-module.ts";
 
 const execFileAsync = promisify(execFile);
-const mcpAppRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const mcpAppRoot = path.resolve(import.meta.dirname, "..");
 const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const {
@@ -22,11 +19,9 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
 } = await importModule({
   stdin: {
-    contents: [
-      'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
-      'export { createScanArtifactContext } from "./src/artifact-context.ts";',
-      'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
-    ].join("\n"),
+    contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { createScanArtifactContext } from "./src/artifact-context.ts";
+export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
 });
@@ -39,25 +34,32 @@ await testRecoveredPublicationRejectsLateFailure();
 await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
 
-async function createWorkbenchFixture(prefix: string, homeName = "home") {
+async function createWorkbenchFixture(prefix: string) {
   const fixtureRoot = await temporaryDirectory(prefix);
   const targetPath = path.join(fixtureRoot, "target");
   const environment = {
     ...process.env,
-    CODEX_HOME: path.join(fixtureRoot, homeName),
+    CODEX_HOME: path.join(fixtureRoot, "codex-home"),
     CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
   };
-  return { fixtureRoot, targetPath, environment };
+  try {
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
+    return { fixtureRoot, targetPath, environment };
+  } catch (error) {
+    await rm(fixtureRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function createWorkbenchRunner(
-  python: string,
   environment: NodeJS.ProcessEnv,
   options: { timeout?: number; maxBuffer?: number } = {
     timeout: 30_000,
     maxBuffer: 4 * 1024 * 1024,
   },
 ) {
+  const python = process.env.PYTHON?.trim() || "python3";
   return async (args: string[]) => {
     const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
       cwd: pluginRoot,
@@ -72,11 +74,8 @@ async function testRecoveredPublicationRejectsLateFailure() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-publication-failure-",
   );
-  const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(python, environment);
+  const runWorkbench = createWorkbenchRunner(environment);
   try {
-    await mkdir(targetPath, { recursive: true });
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const store = new WorkbenchDeepScanStore(runWorkbench);
     const run = await store.begin({
       targetPath,
@@ -95,23 +94,11 @@ async function testRecoveredPublicationRejectsLateFailure() {
     });
     await recordCodexSecurityScanDraftViaWorkbench(
       context,
-      {
-        scanId: run.scanId,
-        complete: false,
-        findings: [],
-        coverage: {
-          completeness: "partial",
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [
-            {
-              candidateId: "publication-recovery-candidate",
-              reason: "Publication recovery remains pending.",
-              paths: ["fixture.py"],
-            },
-          ],
-        },
-      },
+      checkpoint(
+        run.scanId,
+        "publication-recovery-candidate",
+        "Publication recovery remains pending.",
+      ),
       runWorkbench,
     );
     await runWorkbench([
@@ -151,11 +138,8 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-noop-publication-",
   );
-  const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(python, environment);
+  const runWorkbench = createWorkbenchRunner(environment);
   try {
-    await mkdir(targetPath, { recursive: true });
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const store = new WorkbenchDeepScanStore(runWorkbench);
     const run = await store.begin({
       targetPath,
@@ -197,12 +181,25 @@ async function testNoopStoppedRefreshRetainsPublicationFailure() {
   }
 }
 
+function checkpoint(scanId: string, candidateId: string, reason: string) {
+  return {
+    scanId,
+    complete: false,
+    findings: [],
+    coverage: {
+      completeness: "partial",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [{ candidateId, reason, paths: ["fixture.py"] }],
+    },
+  };
+}
+
 async function testConcurrentParentDraftsPreserveBothCheckpoints() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "scan-draft-concurrency-integration-",
   );
-  const python = process.env.PYTHON?.trim() || "python3";
-  const rawRunWorkbench = createWorkbenchRunner(python, environment);
+  const rawRunWorkbench = createWorkbenchRunner(environment);
   let stagedWrites = 0;
   const initialWritesReady = Promise.withResolvers<void>();
   const runWorkbench = async (args: string[]) => {
@@ -213,8 +210,6 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
     return rawRunWorkbench(args);
   };
   try {
-    await mkdir(targetPath, { recursive: true });
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const run = await new WorkbenchDeepScanStore(rawRunWorkbench).begin({
       targetPath,
       scope: ".",
@@ -224,33 +219,24 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
     const context = await createScanArtifactContext(run.scanId, runWorkbench, {
       requireRunning: true,
     });
-    const checkpoint = (candidateId: string) => ({
-      scanId: run.scanId,
-      complete: false,
-      findings: [],
-      coverage: {
-        completeness: "partial",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [
-          {
-            candidateId,
-            reason: "Independent review remains pending.",
-            paths: ["fixture.py"],
-          },
-        ],
-      },
-    });
 
     await Promise.all([
       recordCodexSecurityScanDraftViaWorkbench(
         context,
-        checkpoint("concurrent-a"),
+        checkpoint(
+          run.scanId,
+          "concurrent-a",
+          "Independent review remains pending.",
+        ),
         runWorkbench,
       ),
       recordCodexSecurityScanDraftViaWorkbench(
         context,
-        checkpoint("concurrent-b"),
+        checkpoint(
+          run.scanId,
+          "concurrent-b",
+          "Independent review remains pending.",
+        ),
         runWorkbench,
       ),
     ]);
@@ -260,9 +246,7 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
       "the stale writer retries after the host rejects its digest",
     );
 
-    const coverage = JSON.parse(
-      await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readJson(run.scanDir, "coverage.json");
     assert.deepEqual(
       new Set(
         coverage.deferred.map(
@@ -281,11 +265,8 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "scan-draft-cancel-integration-",
   );
-  const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(python, environment);
+  const runWorkbench = createWorkbenchRunner(environment);
   try {
-    await mkdir(targetPath, { recursive: true });
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const run = await new WorkbenchDeepScanStore(runWorkbench).begin({
       targetPath,
       scope: ".",
@@ -295,26 +276,13 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     const context = await createScanArtifactContext(run.scanId, runWorkbench, {
       requireRunning: true,
     });
-    const checkpoint = (candidateId: string) => ({
-      scanId: run.scanId,
-      complete: false,
-      findings: [],
-      coverage: {
-        completeness: "partial",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [
-          {
-            candidateId,
-            reason: "Source validation remains pending.",
-            paths: ["fixture.py"],
-          },
-        ],
-      },
-    });
     await recordCodexSecurityScanDraftViaWorkbench(
       context,
-      checkpoint("early-result"),
+      checkpoint(
+        run.scanId,
+        "early-result",
+        "Source validation remains pending.",
+      ),
       runWorkbench,
     );
     await runWorkbench([
@@ -331,7 +299,11 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     await assert.rejects(
       recordCodexSecurityScanDraftViaWorkbench(
         context,
-        checkpoint("late-result"),
+        checkpoint(
+          run.scanId,
+          "late-result",
+          "Source validation remains pending.",
+        ),
         runWorkbench,
       ),
       /not running|stopped|terminal/i,
@@ -343,9 +315,7 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     );
     const stopped = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
     assert.equal(stopped.scan.progress.status, "canceled");
-    const coverage = JSON.parse(
-      await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readJson(run.scanDir, "coverage.json");
     const pending = coverage.deferred.map(
       (item: { candidateId: string }) => item.candidateId,
     );
@@ -364,38 +334,25 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-store-integration-",
-    "codex-home",
   );
   const scanRoot = path.join(fixtureRoot, "scans");
-  const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-integration-thread";
   const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(python, environment, {
-    maxBuffer: 4 * 1024 * 1024,
-    timeout: 30_000,
-  });
+  const runWorkbench = createWorkbenchRunner(environment);
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
-    await Promise.all([
-      mkdir(targetPath, { recursive: true }),
-      mkdir(scanRoot, { recursive: true }),
-      mkdir(stateDir, { recursive: true }),
-      mkdir(path.join(codexHome, "codex-security"), { recursive: true }),
-    ]);
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
+    await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
     await writeFile(
       path.join(codexHome, "codex-security", "config.toml"),
-      [
-        "[deep_scan]",
-        "workers = 2",
-        "subagents = 0",
-        "stop_after_no_new = 2",
-        "max_discovery_runs = 3",
-        "max_time_hours = 2.5",
-        "",
-      ].join("\n"),
+      `[deep_scan]
+workers = 2
+subagents = 0
+stop_after_no_new = 2
+max_discovery_runs = 3
+max_time_hours = 2.5
+`,
     );
 
     const run = await store.begin({
@@ -433,17 +390,15 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
     );
     const writer = spawn(python, [
       "-c",
-      [
-        "import sqlite3, sys",
-        "connection = sqlite3.connect(sys.argv[1])",
-        'connection.execute("UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?", ("2000-01-01T00:00:00Z", sys.argv[2]))',
-        "connection.commit()",
-        'connection.execute("BEGIN IMMEDIATE")',
-        'print("locked", flush=True)',
-        "sys.stdin.read(1)",
-        "connection.rollback()",
-      ].join("\n"),
-      path.join(stateDir, "workbench.sqlite3"),
+      `import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?", ("2000-01-01T00:00:00Z", sys.argv[2]))
+connection.commit()
+connection.execute("BEGIN IMMEDIATE")
+print("locked", flush=True)
+sys.stdin.read(1)
+connection.rollback()`,
+      path.join(fixtureRoot, "state", "workbench.sqlite3"),
       run.scanId,
     ]);
     await once(writer.stdout, "data");
@@ -466,16 +421,11 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
         renewed.coordinatorGeneration,
         owned.run.coordinatorGeneration,
       );
-      const lease = JSON.parse(
-        await readFile(
-          path.join(
-            run.scanDir,
-            "artifacts",
-            "deep_discovery",
-            `coordinator-heartbeat-${owned.run.coordinatorGeneration}.json`,
-          ),
-          "utf8",
-        ),
+      const lease = await readJson(
+        run.scanDir,
+        "artifacts",
+        "deep_discovery",
+        `coordinator-heartbeat-${owned.run.coordinatorGeneration}.json`,
       );
       assert.deepEqual(lease, {
         coordinatorGeneration: owned.run.coordinatorGeneration,
@@ -498,29 +448,22 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
       owned.run.coordinatorGeneration,
     );
 
-    const first = await createSucceededDiscovery(store, run, "first");
-    const second = await createSucceededDiscovery(store, run, "second");
-    const late = await createRunningDiscovery(store, run, "late");
+    const first = await createDiscovery(store, run, "first", "succeeded");
+    const second = await createDiscovery(store, run, "second", "succeeded");
+    const late = await createDiscovery(store, run, "late", "running");
     if (replaceFailedReducer) {
-      const retired = await createWorkerFixture(run.scanDir, "retired-reducer");
+      const retired = await createWorkerFixture(
+        run,
+        "retired-reducer",
+        "dedup",
+      );
       await store.claimDedup({
-        id: retired.id,
-        scanId: run.scanId,
+        ...retired,
         workerIds: [first.id, second.id],
-        promptPath: retired.promptPath,
-        artifactDir: retired.artifactDir,
       });
-      const mutation = {
-        id: retired.id,
-        scanId: run.scanId,
-        kind: "dedup",
-        promptPath: retired.promptPath,
-        artifactDir: retired.artifactDir,
-        attempt: 1,
-      };
-      await store.updateWorker({ ...mutation, status: "running" });
+      await store.updateWorker({ ...retired, status: "running" });
       await store.updateWorker({
-        ...mutation,
+        ...retired,
         status: "failed",
         error: "Request blocked by cyberPolicy.",
       });
@@ -536,25 +479,19 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
         );
       }
     }
-    const reducer = await createReducerFixture(run.scanDir, [
-      first.id,
-      second.id,
-    ]);
+    const reducer = await createWorkerFixture(run, "dedup-0001", "dedup");
+    await writeJsonLine(reducer.resultPath, {
+      schemaVersion: 1,
+      consumedWorkerIds: [first.id, second.id],
+      merges: [],
+    });
     await store.claimDedup({
-      id: reducer.id,
-      scanId: run.scanId,
+      ...reducer,
       workerIds: [first.id, second.id],
-      promptPath: reducer.promptPath,
-      artifactDir: reducer.artifactDir,
     });
     await store.updateWorker({
-      id: reducer.id,
-      scanId: run.scanId,
-      kind: "dedup",
+      ...reducer,
       status: "running",
-      promptPath: reducer.promptPath,
-      artifactDir: reducer.artifactDir,
-      attempt: 1,
       threadId: "fixture-reducer-thread",
     });
 
@@ -590,14 +527,8 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
     );
 
     const acceptedLate = await store.updateWorker({
-      id: late.id,
-      scanId: run.scanId,
-      kind: "discovery",
+      ...late,
       status: "succeeded",
-      promptPath: late.promptPath,
-      artifactDir: late.artifactDir,
-      attempt: 1,
-      threadId: "fixture-late-thread",
       resultManifestPath: late.resultPath,
     });
     assert.equal(acceptedLate.status, "succeeded");
@@ -675,24 +606,14 @@ async function testReducerCommitAndFinishAgainstRealWorkbench(
 async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-store-zero-discovery-",
-    "codex-home",
   );
-  const scanRoot = path.join(fixtureRoot, "scans");
-  const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex-home");
   const threadId = "deep-scan-store-zero-discovery-thread";
-  const python = process.env.PYTHON?.trim() || "python3";
-  const runWorkbench = createWorkbenchRunner(python, environment, {});
+  const runWorkbench = createWorkbenchRunner(environment, {});
   const store = new WorkbenchDeepScanStore(runWorkbench);
 
   try {
-    await Promise.all([
-      mkdir(targetPath, { recursive: true }),
-      mkdir(scanRoot, { recursive: true }),
-      mkdir(stateDir, { recursive: true }),
-      mkdir(path.join(codexHome, "codex-security"), { recursive: true }),
-    ]);
-    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
+    await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
     await writeFile(
       path.join(codexHome, "codex-security", "config.toml"),
       "[deep_scan]\nworkers = 1\nmax_discovery_runs = 3\nmax_time_hours = 1e-12\n",
@@ -702,7 +623,7 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
       targetPath,
       scope: ".",
       threadId,
-      scanRoot,
+      scanRoot: path.join(fixtureRoot, "scans"),
     });
     assert.equal(run.config.maxTimeHours, 1e-12);
     const owned = await store.claimCoordinator({
@@ -752,84 +673,52 @@ async function testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench(
   }
 }
 
-async function createSucceededDiscovery(
+async function createDiscovery(
   store: import("../src/deep-scan/types.js").DeepScanStore,
   run: import("../src/deep-scan/types.js").DeepScanRunState,
   label: string,
+  finalState: "running" | "succeeded",
 ) {
-  const fixture = await createWorkerFixture(run.scanDir, `discovery-${label}`);
-  await store.updateWorker({
-    id: fixture.id,
-    scanId: run.scanId,
-    kind: "discovery",
-    status: "queued",
-    promptPath: fixture.promptPath,
-    artifactDir: fixture.artifactDir,
-    attempt: 1,
-  });
-  await store.updateWorker({
-    id: fixture.id,
-    scanId: run.scanId,
-    kind: "discovery",
-    status: "running",
-    promptPath: fixture.promptPath,
-    artifactDir: fixture.artifactDir,
-    attempt: 1,
-    threadId: `fixture-${label}-thread`,
-  });
-  const persisted = await store.updateWorker({
-    id: fixture.id,
-    scanId: run.scanId,
-    kind: "discovery",
-    status: "succeeded",
-    promptPath: fixture.promptPath,
-    artifactDir: fixture.artifactDir,
-    attempt: 1,
-    threadId: `fixture-${label}-thread`,
-    resultManifestPath: fixture.resultPath,
-  });
-  return { ...fixture, ...persisted };
-}
-
-async function createRunningDiscovery(
-  store: import("../src/deep-scan/types.js").DeepScanStore,
-  run: import("../src/deep-scan/types.js").DeepScanRunState,
-  label: string,
-) {
-  const fixture = await createWorkerFixture(run.scanDir, `discovery-${label}`);
-  await store.updateWorker({
-    id: fixture.id,
-    scanId: run.scanId,
-    kind: "discovery",
-    status: "running",
-    promptPath: fixture.promptPath,
-    artifactDir: fixture.artifactDir,
-    attempt: 1,
-    threadId: `fixture-${label}-thread`,
-  });
-  return fixture;
-}
-
-async function createReducerFixture(scanDir: string, workerIds: string[]) {
-  const fixture = await createWorkerFixture(scanDir, "dedup-0001");
-  await writeFile(
-    fixture.resultPath,
-    `${JSON.stringify({ schemaVersion: 1, consumedWorkerIds: workerIds, merges: [] })}\n`,
+  const fixture = await createWorkerFixture(
+    run,
+    `discovery-${label}`,
+    "discovery",
   );
-  return fixture;
+  await writeFile(fixture.resultPath, "{}\n");
+  if (finalState === "succeeded") {
+    await store.updateWorker({ ...fixture, status: "queued" });
+  }
+  const started = { ...fixture, threadId: `fixture-${label}-thread` };
+  await store.updateWorker({ ...started, status: "running" });
+  if (finalState === "succeeded") {
+    await store.updateWorker({
+      ...started,
+      status: "succeeded",
+      resultManifestPath: fixture.resultPath,
+    });
+  }
+  return started;
 }
 
-async function createWorkerFixture(scanDir: string, label: string) {
-  const root = path.join(scanDir, "artifacts", "deep_discovery", label);
+async function createWorkerFixture(
+  run: import("../src/deep-scan/types.js").DeepScanRunState,
+  label: string,
+  kind: "discovery" | "dedup",
+) {
+  const root = path.join(run.scanDir, "artifacts", "deep_discovery", label);
   const artifactDir = path.join(root, "output");
   const promptPath = path.join(root, "prompt.md");
-  const resultPath = path.join(artifactDir, "result.json");
   await mkdir(artifactDir, { recursive: true });
-  await Promise.all([
-    writeFile(promptPath, "fixture prompt\n"),
-    writeFile(resultPath, "{}\n"),
-  ]);
-  return { id: randomUUID(), artifactDir, promptPath, resultPath };
+  await writeFile(promptPath, "fixture prompt\n");
+  return {
+    id: randomUUID(),
+    scanId: run.scanId,
+    kind,
+    artifactDir,
+    promptPath,
+    resultPath: path.join(artifactDir, "result.json"),
+    attempt: 1,
+  };
 }
 
 async function createCanonicalFixture(scanDir: string) {
@@ -847,10 +736,8 @@ async function createCanonicalFixture(scanDir: string) {
       "candidate_ledger.jsonl",
     ),
   };
-  await Promise.all([
-    writePrivateFile(paths.inScopeFilesPath, "fixture.py\n"),
-    writePrivateFile(paths.candidateLedgerPath, ""),
-  ]);
+  await writePrivateFile(paths.inScopeFilesPath, "fixture.py\n");
+  await writePrivateFile(paths.candidateLedgerPath, "");
   return paths;
 }
 

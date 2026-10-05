@@ -1,6 +1,5 @@
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as auth from "../../sdk/typescript/dist/auth.js";
 import {
@@ -12,21 +11,18 @@ import {
   preflightEval,
   prepareEval,
   runPreparedEval,
-} from "./harness.mjs";
-import { createEvalHome, withEvalState } from "./runtime.mjs";
+} from "./harness.mts";
+import { withEvalState } from "./runtime.mts";
 
-const reports = fileURLToPath(new URL("./reports/", import.meta.url));
+const reports = join(import.meta.dirname, "reports/");
 await mkdir(reports, { recursive: true });
 const reportDirectory = await mkdtemp(join(reports, "run-"));
 console.log(`Eval artifacts: ${reportDirectory}`);
 await withEvalState(
-  () =>
-    createEvalHome(
-      createIsolatedHome,
-      (
-        auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
-      ).configuredCodexHome(process.env),
-    ),
+  createIsolatedHome,
+  (
+    auth as unknown as typeof import("../../sdk/typescript/src/auth.js")
+  ).configuredCodexHome(process.env),
   async ({ root, home, signal }) => {
     const prepared = await prepareEval(root);
     const codexPath = await realpath(resolveCodexCommand({}).command);

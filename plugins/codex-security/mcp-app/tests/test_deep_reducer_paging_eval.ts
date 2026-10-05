@@ -1,21 +1,19 @@
+import { readJson, readJsonLines } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
   gradeReducerPagingTrace,
   runReducerPagingEval,
-} from "./support/reducer-paging/deep-reducer-paging.js";
-import {
-  createReducerPagingFixture,
-  gradeReducerPagingResult,
-} from "./support/reducer-paging/deep-reducer-paging-fixture.js";
+} from "./support/reducer-paging/deep-reducer-paging.ts";
+import { gradeReducerPagingResult } from "./support/reducer-paging/deep-reducer-paging-fixture.ts";
 
 test("a reducer recovers from the real IPC frame limit and records all sources", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "deep-reducer-ipc-eval-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const report = await runReducerPagingEval({ root });
+  const { report, fixture } = await runReducerPagingEval({ root });
   assert.equal(report.realIpcErrorObserved, true);
   assert.ok(report.actualOversizedResponseBytes! > report.ipcFrameLimitBytes);
   assert.ok(report.recoveryBudget < report.firstBudget);
@@ -26,10 +24,7 @@ test("a reducer recovers from the real IPC frame limit and records all sources",
   assert.equal(report.previousIdentityPreserved, true);
   assert.equal(report.synthesizedHistoryPreserved, true);
 
-  const trace = (await readFile(path.join(root, "tool-trace.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const trace = await readJsonLines(path.join(root, "tool-trace.jsonl"));
   const rootPages = trace.filter(
     (event) =>
       event.event === "request" &&
@@ -49,12 +44,11 @@ test("a reducer recovers from the real IPC frame limit and records all sources",
   );
 
   // Keeping every original is insufficient if distinct issues are collapsed.
-  const fixture = await createReducerPagingFixture(root);
   const result: {
     findings: {
       provenance: { sourceFindingIds: string[]; sourceFindings: unknown[] };
     }[];
-  } = JSON.parse(await readFile(fixture.resultPath, "utf8"));
+  } = await readJson(fixture.resultPath);
   const previous = result.findings.find((finding) =>
     finding.provenance.sourceFindingIds.includes(
       fixture.expected.previousSourceId,

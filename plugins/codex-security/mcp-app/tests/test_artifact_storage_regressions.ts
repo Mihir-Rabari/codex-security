@@ -14,7 +14,6 @@ interface ArtifactToolResults {
 }
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
@@ -23,8 +22,8 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { build } from "esbuild";
-import { applicationRoot, buildServer } from "./build-server.js";
+import { importModule } from "./import-module.ts";
+import { applicationRoot, buildServer } from "./build-server.ts";
 
 const pluginRoot = path.dirname(applicationRoot);
 const python = process.env.PYTHON || "python3";
@@ -34,7 +33,6 @@ const fixture = await fs.realpath(
 );
 const repository = path.join(fixture, "repository");
 const bundle = path.join(fixture, "server.cjs");
-const helpers = path.join(fixture, "helpers.cjs");
 const environment: Record<string, string | undefined> = {
   ...process.env,
   CODEX_SECURITY_STATE_DIR: path.join(fixture, "state"),
@@ -53,12 +51,13 @@ await buildServer(bundle, {
     "import.meta.url": "__filename",
   },
 });
-await build({
-  bundle: true,
-  format: "cjs",
-  platform: "node",
+const {
+  readCodexSecurityArtifact,
+  saveCodexSecurityArtifact,
+  standaloneArtifactContext,
+  createScanArtifactContext,
+} = await importModule({
   logLevel: "silent",
-  outfile: helpers,
   stdin: {
     resolveDir: applicationRoot,
     contents: `
@@ -67,12 +66,6 @@ await build({
   `,
   },
 });
-const {
-  readCodexSecurityArtifact,
-  saveCodexSecurityArtifact,
-  standaloneArtifactContext,
-  createScanArtifactContext,
-} = createRequire(import.meta.url)(helpers);
 
 async function workbench(args: string[], input?: string, launcher?: string) {
   const command = launcher

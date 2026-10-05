@@ -1,9 +1,3 @@
 node_modules/
 .promptfoo/
 artifacts/
-
-# Compiled TypeScript tooling.
-/assertions/*.js
-/scripts/*.js
-/sastbench/assertions/*.js
-/sastbench/scripts/*.js

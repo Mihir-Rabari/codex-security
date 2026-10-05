@@ -1,13 +1,12 @@
 import { mkdir, mkdtemp } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { runReducerPagingEval } from "../../plugins/codex-security/mcp-app/tests/support/reducer-paging/deep-reducer-paging.js";
+import { runReducerPagingEval } from "../../plugins/codex-security/mcp-app/tests/support/reducer-paging/deep-reducer-paging.ts";
 
-const reports = fileURLToPath(new URL("./reports/", import.meta.url));
+const reports = path.join(import.meta.dirname, "reports/");
 await mkdir(reports, { recursive: true });
 const root = await mkdtemp(path.join(reports, "deep-reducer-paging-"));
 console.log(`Eval artifacts: ${root}`);
-const report = await runReducerPagingEval({
+const { report } = await runReducerPagingEval({
   root,
   mode: "model",
   model: process.argv[2],

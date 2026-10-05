@@ -1,11 +1,7 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { build, type BuildOptions } from "esbuild";
 
-export const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+export const applicationRoot = path.resolve(import.meta.dirname, "..");
 
 export function buildServer(outfile: string, options: BuildOptions = {}) {
   return build({

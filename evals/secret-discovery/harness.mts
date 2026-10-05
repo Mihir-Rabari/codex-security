@@ -2,9 +2,8 @@ import type { ThreadOptions } from "../../sdk/typescript/node_modules/@openai/co
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createFixture, writeFixture } from "./fixtures.mjs";
-import { gradeResult } from "./grade.mjs";
+import { createFixture, writeFixture } from "./fixtures.mts";
+import { gradeResult } from "./grade.mts";
 import {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   bundledCodexSdkEnvironment,
@@ -12,7 +11,7 @@ import {
   executablePathForSpawn,
   inlineToml,
   preflightDeepScanWorkerPermissionProfile,
-} from "./runtime.mjs";
+} from "./runtime.mts";
 
 export type PreparedEval = Awaited<ReturnType<typeof prepareEval>>;
 export interface EvalSettings {
@@ -37,9 +36,7 @@ export interface EvalCodex {
   };
 }
 
-const pluginRoot = fileURLToPath(
-  new URL("../../plugins/codex-security/", import.meta.url),
-);
+const pluginRoot = join(import.meta.dirname, "../../plugins/codex-security/");
 const text = { type: "string" };
 const array = (items: unknown) => ({ type: "array", items });
 const object = (properties: Record<string, unknown>) => ({

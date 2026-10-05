@@ -1,16 +1,15 @@
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { TestContext } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { ArtifactContext } from "../src/artifact-io.js";
-import { importModule } from "./import-module.js";
-export const draftApi = await importModule({
-  absWorkingDir: path.dirname(fileURLToPath(import.meta.url)),
-  entryPoints: ["../src/artifact-scan-draft.ts"],
+import { importSource } from "./import-module.ts";
+export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
+  absWorkingDir: import.meta.dirname,
 });
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
@@ -72,25 +71,15 @@ export function draftFixture(root: string, layout: Layout) {
       layout === "worker"
         ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
         : draftApi.recordCodexSecurityScanDraft(context, input),
-    read: async () => {
-      const value = JSON.parse(
-        await readFile(
-          path.join(
-            root,
-            layout === "worker" ? "result.json" : "coverage.json",
-          ),
-          "utf8",
-        ),
-      );
-      return layout === "worker" ? value.coverage : value;
-    },
+    read: async () =>
+      layout === "worker"
+        ? (await readJson(root, "result.json")).coverage
+        : await readJson(root, "coverage.json"),
   };
 }
 
 export async function fixture(t: TestContext, layout: Layout) {
-  const directory = await realpath(
-    await mkdtemp(path.join(tmpdir(), "draft-recovery-")),
-  );
+  const directory = await temporaryDirectory("draft-recovery-", true);
   t.after(() => rm(directory, { recursive: true, force: true }));
   const root = path.join(directory, "output");
   await mkdir(root);
@@ -112,3 +101,11 @@ export async function interruptDraftWrite(
     fs.rename = rename;
   }
 }
+
+export const surfaceDisposition = ({
+  id,
+  disposition,
+}: {
+  id: string;
+  disposition: string;
+}) => ({ id, disposition });

@@ -6,9 +6,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "build:mcp": "node scripts/build_mcp_app.mjs --output .preview/mcp",
-    "build:tests": "tsc -p tsconfig.tests.json && node scripts/build_tests.mjs",
-    "test:mcp": "node --run build:tests && node --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mjs \"tests/test_*.js\"",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json"
+    "test:mcp": "node --experimental-strip-types --test --test-concurrency=2 --test-reporter=./scripts/test_reporter.mts \"tests/test_*.ts\"",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

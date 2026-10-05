@@ -1,10 +1,10 @@
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
 import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const execFile = promisify(nodeExecFile);
 const temporaryDirectories = createTemporaryDirectories(true);
@@ -57,29 +57,41 @@ async function testSchemasAreBoundAndExact() {
 
 async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
-  await writeRepositoryFile(
-    fixture.repoRoot,
-    "src/a.ts",
-    "export const a = 1;\n",
-  );
-  await writeRepositoryFile(
-    fixture.repoRoot,
-    "src/résumé.ts",
-    "export const b = 2;\n",
-  );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
+  await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");
+  await fixture.writeRepositoryFile(
     ".hidden/handler.ts",
     "export const c = 3;\n",
   );
 
   const result = await inventory.prepareCodexSecurityReviewItems(fixture.scan);
   const stored = await readFile(fixture.scanInventory, "utf8");
-  const expected = await standardInventory(fixture.repoRoot, ".");
+  const { stdout } = await execFile(
+    "rg",
+    [
+      "--files",
+      "--hidden",
+      "--glob",
+      "!**/.git",
+      "--glob",
+      "!**/.git/**",
+      "--path-separator=/",
+      "--",
+      ".",
+    ],
+    { cwd: fixture.repoRoot, encoding: "utf8" },
+  );
+  const expectedPaths = stdout
+    .split("\n")
+    .filter(Boolean)
+    .sort((left, right) =>
+      Buffer.compare(Buffer.from(left), Buffer.from(right)),
+    );
+  const expected = expectedPaths.map((line) => `${line}\n`).join("");
 
   assert.equal(stored, expected);
   assert.deepEqual(result, {
-    reviewItemsTotal: expected.split("\n").filter(Boolean).length,
+    reviewItemsTotal: expectedPaths.length,
   });
   const first = await inventory.listCodexSecurityReviewItems(fixture.scan, {
     limit: 2,
@@ -100,17 +112,16 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     [...first.items, ...second.items].map(
       (item: { path: string }) => item.path,
     ),
-    expected.split("\n").filter(Boolean),
+    expectedPaths,
   );
 }
 
 async function testPrepareListsIgnoredTrackedFilesOnce() {
   const fixture = await createFixture("ignored tracked files");
-  await initializeRepository(fixture.repoRoot);
-  await writeRepositoryFile(fixture.repoRoot, ".gitignore", "generated/\n");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(".gitignore", "generated/\n");
   for (const name of ["a.ts", "b.ts"]) {
-    await writeRepositoryFile(
-      fixture.repoRoot,
+    await fixture.writeRepositoryFile(
       `generated/${name}`,
       "export const value = 1;\n",
     );
@@ -150,7 +161,7 @@ async function testPrepareExcludesGitMetadata() {
     [".github/workflows/check.yml", "name: example\n"],
     ["src/widget.git", "example\n"],
   ] as const) {
-    await writeRepositoryFile(fixture.repoRoot, name, source);
+    await fixture.writeRepositoryFile(name, source);
   }
 
   assert.deepEqual(
@@ -182,19 +193,16 @@ async function testPrepareExcludesGitMetadata() {
 
 async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   const fixture = await createFixture("selected committed changes");
-  await initializeRepository(fixture.repoRoot);
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(
     "src/changed.ts",
     "export const value = 1;\n",
   );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/deleted.ts",
     "export const guard = true;\n",
   );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/unrelated.ts",
     "export const unrelated = 1;\n",
   );
@@ -202,18 +210,15 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
   await runGit(fixture.repoRoot, "commit", "-qm", "base");
   const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
 
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/changed.ts",
     "export const value = 2;\n",
   );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/new.ts",
     "export const added = true;\n",
   );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "tests/example.ts",
     "export const ignored = true;\n",
   );
@@ -243,9 +248,8 @@ async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
 
 async function testPrepareIncludesStagedAndUnstagedChanges() {
   const fixture = await createFixture("selected working tree changes");
-  await initializeRepository(fixture.repoRoot);
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(
     "src/changed.ts",
     "export const value = 1;\n",
   );
@@ -253,19 +257,16 @@ async function testPrepareIncludesStagedAndUnstagedChanges() {
   await runGit(fixture.repoRoot, "commit", "-qm", "base");
   const revision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
 
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/changed.ts",
     "export const value = 2;\n",
   );
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/staged.ts",
     "export const staged = true;\n",
   );
   await runGit(fixture.repoRoot, "add", "src/staged.ts");
-  await writeRepositoryFile(
-    fixture.repoRoot,
+  await fixture.writeRepositoryFile(
     "src/untracked.ts",
     "export const untracked = true;\n",
   );
@@ -433,14 +434,14 @@ async function createFixture(label: string) {
   const scanRoot = path.join(fixtureRoot, "scan");
   const workerRoot = path.join(fixtureRoot, "worker");
   const pluginRoot = new URL("../../", import.meta.url).pathname;
-  await Promise.all([
-    mkdir(repoRoot, { recursive: true }),
-    mkdir(scanRoot, { recursive: true }),
-    mkdir(workerRoot, { recursive: true }),
-  ]);
+  await mkdir(repoRoot, { recursive: true });
+  await mkdir(scanRoot, { recursive: true });
   return {
     root,
     repoRoot,
+    async writeRepositoryFile(relativePath: string, source: string) {
+      return writeInventory(path.join(repoRoot, relativePath), source);
+    },
     scanInventory: path.join(
       scanRoot,
       "artifacts",
@@ -457,7 +458,6 @@ async function createFixture(label: string) {
       root: scanRoot,
       repoRoot,
       layout: "scan",
-      scanId: "f84c8312-a602-4660-8e01-518a176cd75a",
       scope: ".",
       pluginRoot,
       pythonCommand: process.env.PYTHON ?? "python3",
@@ -470,49 +470,9 @@ async function createFixture(label: string) {
   };
 }
 
-async function writeRepositoryFile(
-  repository: string,
-  relativePath: string,
-  source: string,
-) {
-  const destination = path.join(repository, relativePath);
-  await mkdir(path.dirname(destination), { recursive: true });
-  await writeFile(destination, source);
-}
-
 async function writeInventory(destination: string, source: string) {
   await mkdir(path.dirname(destination), { recursive: true });
   await writeFile(destination, source);
-}
-
-async function standardInventory(repository: string, scope: string) {
-  const { stdout } = await execFile(
-    "rg",
-    [
-      "--files",
-      "--hidden",
-      "--glob",
-      "!**/.git",
-      "--glob",
-      "!**/.git/**",
-      "--path-separator=/",
-      "--",
-      scope,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  );
-  return stdout
-    .split("\n")
-    .filter(Boolean)
-    .sort((left, right) =>
-      Buffer.compare(Buffer.from(left), Buffer.from(right)),
-    )
-    .map((line) => `${line}\n`)
-    .join("");
-}
-
-async function initializeRepository(repository: string) {
-  await runGit(repository, "init", "-q");
 }
 
 async function runGit(repository: string, ...arguments_: string[]) {

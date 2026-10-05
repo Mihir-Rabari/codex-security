@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { importSource } from "./import-module.js";
+import path from "node:path";
+import { importSource } from "./import-module.ts";
 
 const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
   await importSource(
-    fileURLToPath(
-      new URL("../src/deep-scan/parent-sandbox.ts", import.meta.url),
-    ),
+    path.join(import.meta.dirname, "../src/deep-scan/parent-sandbox.ts"),
   );
 
 const rootRead = {
@@ -37,9 +35,8 @@ assert.deepEqual(
 assert.deepEqual(
   resolveDeepWorkerParentSandbox(
     extra({
-      type: "managed",
+      ...pinnedReadOnly,
       file_system: { type: "unrestricted" },
-      network: "restricted",
     }),
   ),
   {
@@ -48,23 +45,17 @@ assert.deepEqual(
 );
 assert.deepEqual(
   resolveDeepWorkerParentSandbox(
-    extra({
-      ...pinnedReadOnly,
-      file_system: {
-        type: "restricted",
-        entries: [
-          rootRead,
-          {
-            path: { type: "special", value: { kind: "project_roots" } },
-            access: "write",
-          },
-          {
-            path: { type: "special", value: { kind: "tmpdir" } },
-            access: "write",
-          },
-        ],
+    restricted([
+      rootRead,
+      {
+        path: { type: "special", value: { kind: "project_roots" } },
+        access: "write",
       },
-    }),
+      {
+        path: { type: "special", value: { kind: "tmpdir" } },
+        access: "write",
+      },
+    ]),
   ),
   {
     filesystemDenies: [],
@@ -72,32 +63,28 @@ assert.deepEqual(
 );
 assert.deepEqual(
   resolveDeepWorkerParentSandbox(
-    extra({
-      ...pinnedReadOnly,
-      file_system: {
-        type: "restricted",
-        entries: [
-          rootRead,
-          {
-            path: { type: "path", path: "/repo/.env" },
-            access: "deny",
-          },
-          {
-            path: { type: "generated_default_path", path: "/repo/.secrets" },
-            access: "none",
-          },
-          {
-            path: { type: "glob_pattern", pattern: "/repo-a/**/.env" },
-            access: "deny",
-          },
-          {
-            path: { type: "glob_pattern", pattern: "/repo-b/**/*.pem" },
-            access: "none",
-          },
-        ],
-        glob_scan_max_depth: 3,
-      },
-    }),
+    restricted(
+      [
+        rootRead,
+        {
+          path: { type: "path", path: "/repo/.env" },
+          access: "deny",
+        },
+        {
+          path: { type: "generated_default_path", path: "/repo/.secrets" },
+          access: "none",
+        },
+        {
+          path: { type: "glob_pattern", pattern: "/repo-a/**/.env" },
+          access: "deny",
+        },
+        {
+          path: { type: "glob_pattern", pattern: "/repo-b/**/*.pem" },
+          access: "none",
+        },
+      ],
+      { glob_scan_max_depth: 3 },
+    ),
   ),
   {
     filesystemDenies: [
@@ -113,22 +100,16 @@ assert.deepEqual(
 assert.throws(
   () =>
     resolveDeepWorkerParentSandbox(
-      extra({
-        ...pinnedReadOnly,
-        file_system: {
-          type: "restricted",
-          entries: [
-            rootRead,
-            {
-              path: {
-                type: "glob_pattern",
-                pattern: "codex-project-roots://**/*.pem",
-              },
-              access: "deny",
-            },
-          ],
+      restricted([
+        rootRead,
+        {
+          path: {
+            type: "glob_pattern",
+            pattern: "codex-project-roots://**/*.pem",
+          },
+          access: "deny",
         },
-      }),
+      ]),
     ),
   (error: Error) =>
     error.name === "DeepScanNonRetryableError" &&
@@ -169,13 +150,9 @@ assert.deepEqual(
 );
 assert.deepEqual(
   resolveDeepWorkerParentSandbox(
-    extra(
-      {
-        ...pinnedReadOnly,
-      },
-      "file:///tmp/codex-security-parent",
-      { type: "readOnly" },
-    ),
+    extra(pinnedReadOnly, "file:///tmp/codex-security-parent", {
+      type: "readOnly",
+    }),
   ),
   {
     filesystemDenies: [],
@@ -195,73 +172,37 @@ for (const invalid of [
   extra({ ...pinnedReadOnly, network: { enabled: true } }),
   extra({ ...pinnedReadOnly, file_system: null }),
   extra({ ...pinnedReadOnly, file_system: { type: "unknown" } }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: { type: "restricted", entries: "not-an-array" },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: { type: "restricted", entries: [] },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [{ path: { type: "path", path: "/limited" }, access: "read" }],
+  restricted("not-an-array"),
+  restricted([]),
+  restricted([{ path: { type: "path", path: "/limited" }, access: "read" }]),
+  restricted([
+    {
+      path: {
+        type: "special",
+        value: { kind: "root", subpath: "only-this-subtree" },
+      },
+      access: "read",
     },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        {
-          path: {
-            type: "special",
-            value: { kind: "root", subpath: "only-this-subtree" },
-          },
-          access: "read",
-        },
-      ],
+  ]),
+  restricted([
+    rootRead,
+    {
+      path: { type: "special", value: { kind: "tmpdir" } },
+      access: "deny",
     },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        {
-          path: { type: "special", value: { kind: "tmpdir" } },
-          access: "deny",
-        },
-      ],
+  ]),
+  restricted([
+    rootRead,
+    { path: { type: "glob_pattern", pattern: "**/*.env" }, access: "deny" },
+  ]),
+  restricted([
+    rootRead,
+    {
+      path: { type: "path", path: "/private" },
+      access: "deny",
+      missing_path_behavior: "skip",
     },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        { path: { type: "glob_pattern", pattern: "**/*.env" }, access: "deny" },
-      ],
-    },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        {
-          path: { type: "path", path: "/private" },
-          access: "deny",
-          missing_path_behavior: "skip",
-        },
-      ],
-    },
-  }),
+  ]),
   ...[
     "",
     "relative/private",
@@ -269,66 +210,27 @@ for (const invalid of [
     "/repo/?.env",
     "/repo/[literal]",
   ].map((deniedPath) =>
-    extra({
-      ...pinnedReadOnly,
-      file_system: {
-        type: "restricted",
-        entries: [
-          rootRead,
-          { path: { type: "path", path: deniedPath }, access: "deny" },
-        ],
-      },
-    }),
+    restricted([
+      rootRead,
+      { path: { type: "path", path: deniedPath }, access: "deny" },
+    ]),
   ),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        rootRead,
-        {
-          path: { type: "glob_pattern", pattern: "/repo/**/*.env" },
-          access: "read",
-        },
-      ],
+  restricted([
+    rootRead,
+    {
+      path: { type: "glob_pattern", pattern: "/repo/**/*.env" },
+      access: "read",
     },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [rootRead],
-      glob_scan_max_depth: 0,
+  ]),
+  restricted([rootRead], { glob_scan_max_depth: 0 }),
+  restricted([rootRead], { glob_scan_max_depth: 2, globScanMaxDepth: 3 }),
+  restricted([
+    {
+      path: { type: "special", value: { kind: "unknown" } },
+      access: "read",
     },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [rootRead],
-      glob_scan_max_depth: 2,
-      globScanMaxDepth: 3,
-    },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [
-        {
-          path: { type: "special", value: { kind: "unknown" } },
-          access: "read",
-        },
-      ],
-    },
-  }),
-  extra({
-    ...pinnedReadOnly,
-    file_system: {
-      type: "restricted",
-      entries: [{ path: { type: "path", path: "" }, access: "read" }],
-    },
-  }),
+  ]),
+  restricted([{ path: { type: "path", path: "" }, access: "read" }]),
   extra(pinnedReadOnly, "relative/working-directory"),
   extra(pinnedReadOnly, "file://remote-host/tmp/codex-security-parent"),
   {
@@ -360,4 +262,11 @@ function extra(
       },
     },
   };
+}
+
+function restricted(entries: unknown, options: Record<string, unknown> = {}) {
+  return extra({
+    ...pinnedReadOnly,
+    file_system: { type: "restricted", entries, ...options },
+  });
 }

@@ -1,10 +1,12 @@
+import { readJson } from "./support/json.ts";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
+import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 
 const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
   new URL("../src/deep-scan/store.ts", import.meta.url).pathname,
@@ -105,11 +107,9 @@ async function testBeginProtocolAndParsing() {
 async function testWriteSerializationAndRecovery() {
   const calls: string[][] = [];
   const firstGate = Promise.withResolvers<void>();
-  let first = true;
   const runner = async (args: string[]) => {
     calls.push(args);
-    if (first) {
-      first = false;
+    if (calls.length === 1) {
       await firstGate.promise;
       throw new Error("first write failed");
     }
@@ -219,16 +219,11 @@ async function testHeartbeatBypassesBlockedWriteQueue() {
     );
     assert.equal(renewed.coordinatorGeneration, 2);
     assert.deepEqual(
-      JSON.parse(
-        await readFile(
-          join(
-            scanDir,
-            "artifacts",
-            "deep_discovery",
-            "coordinator-heartbeat-2.json",
-          ),
-          "utf8",
-        ),
+      await readJson(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        "coordinator-heartbeat-2.json",
       ),
       { coordinatorGeneration: 2, updatedAt: renewed.updatedAt },
     );
@@ -247,10 +242,9 @@ async function testOwnershipReadClearsStaleLease() {
   const scanId = randomUUID();
   const calls: string[][] = [];
   let generation = 2;
-  let rejectProgress = false;
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args);
-    if (args[0] === "update-progress" && rejectProgress) {
+    if (args[0] === "update-progress") {
       throw new Error(
         "Deep Scan coordinator lease belongs to a newer generation.",
       );
@@ -276,7 +270,6 @@ async function testOwnershipReadClearsStaleLease() {
     "a confirmed newer generation must clear the cached lease before a later claim",
   );
 
-  rejectProgress = true;
   await assert.rejects(
     store.updateProgress({ scanId, phase: "discovery" }),
     /newer generation/,
@@ -751,128 +744,50 @@ function idempotentPersistenceScenarios() {
   const scanId = randomUUID();
   const workerId = randomUUID();
   const reducerId = randomUUID();
-  const worker = {
+  const mutation = {
     id: workerId,
-    kind: "discovery",
-    status: "succeeded",
-    mergeState: "buffered",
+    kind: "discovery" as const,
     promptPath: "/fixture/discovery/prompt.md",
     artifactDir: "/fixture/discovery/output",
     attempt: 1,
-    resultManifestPath: "/fixture/discovery/output/result.json",
-    completionSequence: 1,
   };
+  const resultManifestPath = "/fixture/discovery/output/result.json";
 
   return [
-    {
+    ...(
+      [
+        { status: "running" },
+        { status: "running", threadId: "thread-worker" },
+        { status: "queued" },
+        { status: "failed" },
+        { status: "canceled" },
+        { status: "succeeded", resultManifestPath },
+      ] satisfies Partial<
+        import("../src/deep-scan/types.js").DeepScanWorkerMutation
+      >[]
+    ).map((update) => ({
       operation: "upsert-deep-scan-worker",
       result: stateResult(scanId, {
         deepScan: {
           workers: [
             {
-              ...worker,
-              status: "running",
-              mergeState: "none",
-              resultManifestPath: undefined,
-              completionSequence: undefined,
+              ...mutation,
+              status: update.status,
+              sdkThreadId: update.threadId,
+              mergeState: update.status === "succeeded" ? "buffered" : "none",
+              resultManifestPath: update.resultManifestPath,
+              completionSequence: update.status === "succeeded" ? 1 : undefined,
             },
           ],
         },
       }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
-        store.updateWorker({
-          id: workerId,
-          scanId,
-          kind: "discovery",
-          status: "running",
-          promptPath: worker.promptPath,
-          artifactDir: worker.artifactDir,
-          attempt: worker.attempt,
-        }),
-    },
-    {
-      operation: "upsert-deep-scan-worker",
-      result: stateResult(scanId, {
-        deepScan: {
-          workers: [
-            {
-              ...worker,
-              status: "running",
-              mergeState: "none",
-              resultManifestPath: undefined,
-              completionSequence: undefined,
-              sdkThreadId: "thread-worker",
-            },
-          ],
-        },
-      }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
-        store.updateWorker({
-          id: workerId,
-          scanId,
-          kind: "discovery",
-          status: "running",
-          promptPath: worker.promptPath,
-          artifactDir: worker.artifactDir,
-          attempt: worker.attempt,
-          threadId: "thread-worker",
-        }),
-    },
-    ...(["queued", "failed", "canceled"] as const).map((status) => ({
-      operation: "upsert-deep-scan-worker",
-      result: stateResult(scanId, {
-        deepScan: {
-          workers: [
-            {
-              ...worker,
-              status,
-              mergeState: "none",
-              resultManifestPath: undefined,
-              completionSequence: undefined,
-            },
-          ],
-        },
-      }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
-        store.updateWorker({
-          id: workerId,
-          scanId,
-          kind: "discovery",
-          status,
-          promptPath: worker.promptPath,
-          artifactDir: worker.artifactDir,
-          attempt: worker.attempt,
-        }),
+      invoke: (store: Store) =>
+        store.updateWorker({ ...mutation, scanId, ...update }),
     })),
-    {
-      operation: "upsert-deep-scan-worker",
-      result: stateResult(scanId, { deepScan: { workers: [worker] } }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
-        store.updateWorker({
-          id: workerId,
-          scanId,
-          kind: "discovery",
-          status: "succeeded",
-          promptPath: worker.promptPath,
-          artifactDir: worker.artifactDir,
-          attempt: worker.attempt,
-          resultManifestPath: worker.resultManifestPath,
-        }),
-    },
     {
       operation: "claim-deep-scan-dedup",
       result: {},
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
+      invoke: (store: Store) =>
         store.claimDedup({
           id: reducerId,
           scanId,
@@ -886,17 +801,12 @@ function idempotentPersistenceScenarios() {
       result: stateResult(scanId, {
         deepScan: { canonicalArtifacts: canonical },
       }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
+      invoke: (store: Store) =>
         store.commitDedup({
           id: reducerId,
           scanId,
           newFindings: 1,
-          canonicalArtifacts: canonical,
           resultManifestPath: "/fixture/reducer/output/result.json",
-        } as import("../src/deep-scan/types.js").DedupCommit & {
-          canonicalArtifacts: typeof canonical;
         }),
     },
     {
@@ -908,9 +818,7 @@ function idempotentPersistenceScenarios() {
           manifestPath: "/fixture/scans/run/coordinator-manifest.json",
         },
       }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
+      invoke: (store: Store) =>
         store.finish({
           scanId,
           reason: "saturated",
@@ -926,9 +834,7 @@ function idempotentPersistenceScenarios() {
           error: "Saved result publication failed: fixture publication failure",
         },
       }),
-      invoke: (
-        store: import("../src/deep-scan/store.js").WorkbenchDeepScanStore,
-      ) =>
+      invoke: (store: Store) =>
         store.recordStoppedPublicationFailure(
           scanId,
           "Saved result publication failed: fixture publication failure",

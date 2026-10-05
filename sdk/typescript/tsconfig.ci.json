@@ -2,10 +2,7 @@
   "extends": "./tsconfig.json",
   "include": [
     "../../.github/scripts/*.mts",
-    "../../plugins/codex-security/native/*.mts",
-    "scripts/compare-test-reports.mts",
-    "scripts/run-ci-tests.mts",
-    "scripts/test-shards.mts"
+    "../../plugins/codex-security/native/*.mts"
   ],
   "compilerOptions": {
     "rootDir": "../..",

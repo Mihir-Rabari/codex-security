@@ -1,3 +1,4 @@
+import { writeJson } from "../json.ts";
 import type { DeepReducerPageInput } from "../../../src/artifact-deep-reducer-pages.js";
 export interface ReducerTraceEvent {
   event: string;
@@ -11,16 +12,14 @@ export interface ReducerTraceEvent {
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex } from "@openai/codex-sdk";
 import { build } from "esbuild";
-import { runControlledCodeMode } from "./controlled-code-mode.js";
+import { importSource } from "../../import-module.ts";
+import { runControlledCodeMode } from "./controlled-code-mode.ts";
 import {
   createReducerPagingFixture,
   gradeReducerPagingResult,
-} from "./deep-reducer-paging-fixture.js";
-
-const supportDirectory = path.dirname(fileURLToPath(import.meta.url));
+} from "./deep-reducer-paging-fixture.ts";
 
 /** Run one reducer through real code-mode IPC and the production artifact tools. */
 export async function runReducerPagingEval({
@@ -32,21 +31,16 @@ export async function runReducerPagingEval({
   mode?: "deterministic" | "model";
   model?: string;
 }) {
-  assert.ok(mode === "deterministic" || mode === "model");
   const fixture = await createReducerPagingFixture(root);
   const tracePath = path.join(root, "tool-trace.jsonl");
   const serverConfigPath = path.join(root, "server-config.json");
   const serverPath = path.join(root, "artifact-server.cjs");
-  const promptModulePath = path.join(root, "prompt.mjs");
   await writeFile(tracePath, "");
-  await writeFile(
-    serverConfigPath,
-    JSON.stringify({ context: fixture.context, tracePath }),
-  );
-  await Promise.all([
+  await writeJson(serverConfigPath, { context: fixture.context, tracePath });
+  const [, { renderDedupPrompt }] = await Promise.all([
     build({
       entryPoints: [
-        path.join(supportDirectory, "deep-reducer-paging-server.js"),
+        path.join(import.meta.dirname, "deep-reducer-paging-server.ts"),
       ],
       outfile: serverPath,
       bundle: true,
@@ -54,20 +48,11 @@ export async function runReducerPagingEval({
       format: "cjs",
       loader: { ".md": "text" },
     }),
-    build({
-      entryPoints: [
-        path.join(supportDirectory, "../../../src/deep-scan/templates.ts"),
-      ],
-      outfile: promptModulePath,
-      bundle: true,
-      platform: "node",
-      format: "esm",
-      loader: { ".md": "text" },
-    }),
+    importSource(
+      path.join(import.meta.dirname, "../../../src/deep-scan/templates.ts"),
+      { loader: { ".md": "text" } },
+    ),
   ]);
-  const { renderDedupPrompt } = await import(
-    pathToFileURL(promptModulePath).href
-  );
   const claimedWorkerIds = fixture.context.deepReducer.claimedWorkers.map(
     (worker) => worker.id,
   );
@@ -76,23 +61,21 @@ export async function runReducerPagingEval({
     reducerLabel: "paging-eval",
     claimedWorkerIds,
   });
-  const mcpServers = {
-    cs_artifacts: {
-      command: process.execPath,
-      args: [serverPath, serverConfigPath],
-      required: true,
-    },
+  const mcpServer = {
+    command: process.execPath,
+    args: [serverPath, serverConfigPath],
+    required: true,
   };
   let transport;
   let usage;
   if (mode === "deterministic") {
     transport = await runControlledCodeMode({
       code: controlledReducerCode,
-      mcpServers,
+      mcpServer,
       workingDirectory: fixture.context.repoRoot,
       prompt,
     });
-    assert.equal(transport.outcome.code, 0, transport.stderr);
+    assert.equal(transport.exitCode, 0, transport.stderr);
     assert.deepEqual(transport.serverErrors, []);
     const output = JSON.stringify(transport.toolOutputs);
     assert.match(
@@ -104,7 +87,7 @@ export async function runReducerPagingEval({
   } else {
     const codex = new Codex({
       config: {
-        mcp_servers: mcpServers,
+        mcp_servers: { cs_artifacts: mcpServer },
         features: {
           code_mode: { enabled: true },
           code_mode_host: { enabled: true, disable_in_process_fallback: true },
@@ -142,7 +125,7 @@ export async function runReducerPagingEval({
     path.join(root, "report.json"),
     JSON.stringify(report, null, 2),
   );
-  return report;
+  return { report, fixture };
 }
 
 /** Grade the captured I/O independently of model wording or another model run. */
@@ -191,14 +174,9 @@ export function gradeReducerPagingTrace(
     1,
     "the reducer must successfully record its result exactly once",
   );
-  const beforeRecording = trace.slice(
-    0,
-    trace.findIndex(
-      (event) => event.event === "request" && event.id === recorded[0].id,
-    ),
-  );
-  const pageEdges = new Map<string, Set<string | undefined>>();
-  for (const page of beforeRecording) {
+  const pageEdges = new Map<string | undefined, Set<string | undefined>>();
+  for (const page of trace) {
+    if (page.event === "request" && page.id === recorded[0].id) break;
     const request = readsById.get(page.id);
     if (
       page.event !== "response" ||
@@ -212,16 +190,14 @@ export function gradeReducerPagingTrace(
     edges.add(page.nextCursor);
     pageEdges.set(cursor, edges);
   }
-  const reached = new Set(["0"]);
-  let inputsComplete = false;
+  const reached = new Set<string | undefined>(["0"]);
   for (const cursor of reached) {
     for (const next of pageEdges.get(cursor) ?? []) {
-      if (next === undefined) inputsComplete = true;
-      else reached.add(next);
+      reached.add(next);
     }
   }
   assert.equal(
-    inputsComplete,
+    reached.has(undefined),
     true,
     "read every assigned-input page before recording",
   );
@@ -230,7 +206,7 @@ export function gradeReducerPagingTrace(
     firstBudget: failed!.input!.maxBytes,
     recoveryBudget: retried.input!.maxBytes,
     successfulPages: pages.length,
-    assignedInputsFullyRead: inputsComplete,
+    assignedInputsFullyRead: reached.has(undefined),
     referenceReads: reads.filter((event) => event.input!.findingRef).length,
   };
 }

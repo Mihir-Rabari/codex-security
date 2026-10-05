@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import {
   mkdir,
@@ -11,44 +12,34 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
+import { importSource } from "./import-module.ts";
 
-const compiled = await build({
-  bundle: true,
-  entryPoints: [
-    new URL("../src/artifact-io.ts", import.meta.url).pathname,
-    new URL("../src/artifact-context.ts", import.meta.url).pathname,
-    new URL("../artifact-writer-main.ts", import.meta.url).pathname,
-    new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
-  ],
-  format: "esm",
-  outdir: "codex-security-artifact-foundation",
-  platform: "node",
-  write: false,
-  plugins: [
-    {
-      name: "observe-worker-context",
-      setup(builder) {
-        builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
-          contents:
-            "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
-          loader: "js",
-        }));
-      },
-    },
-  ],
-});
-const modules = new Map(
-  compiled.outputFiles.map((file) => [
-    path.basename(file.path),
-    "data:text/javascript;base64," +
-      Buffer.from(file.contents).toString("base64"),
-  ]),
+const io = await importSource(
+  new URL("../src/artifact-io.ts", import.meta.url).pathname,
 );
-const io = await import(modules.get("artifact-io.js")!);
-const contextApi = await import(modules.get("artifact-context.js")!);
-const writerApi = await import(modules.get("artifact-writer-main.js")!);
-const schemas = await import(modules.get("artifact-schema-loader.js")!);
+const contextApi = await importSource(
+  new URL("../src/artifact-context.ts", import.meta.url).pathname,
+);
+const writerApi = await importSource(
+  new URL("../artifact-writer-main.ts", import.meta.url).pathname,
+  {
+    plugins: [
+      {
+        name: "observe-worker-context",
+        setup(builder) {
+          builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
+            contents:
+              "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  },
+);
+const schemas = await importSource(
+  new URL("../src/artifact-schema-loader.ts", import.meta.url).pathname,
+);
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
 );
@@ -76,14 +67,9 @@ try {
 console.log("Codex Security compact artifact foundation tests passed");
 
 async function testWorkerThreatModelSchema() {
-  const schema = JSON.parse(
-    await readFile(
-      new URL(
-        "../../schemas/tools/worker-threat-model.schema.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
+  const schema = await readJson(
+    import.meta.dirname,
+    "../../schemas/tools/worker-threat-model.schema.json",
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
   assert.equal(
@@ -100,14 +86,9 @@ async function testWorkerThreatModelSchema() {
 }
 
 async function testSchemaSourceOfTruth() {
-  const common = JSON.parse(
-    await readFile(
-      new URL(
-        "../../schemas/definitions/artifact-common.schema.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
+  const common = await readJson(
+    import.meta.dirname,
+    "../../schemas/definitions/artifact-common.schema.json",
   );
   const fixtureDocument = {
     $id: "codex-security://schemas/tools/artifact-foundation-fixture.schema.json",
@@ -198,10 +179,8 @@ async function testSchemaSourceOfTruth() {
 async function testScanContext() {
   const root = path.join(fixture, "scan");
   const repoRoot = path.join(fixture, "repository");
-  await Promise.all([
-    mkdir(root, { recursive: true }),
-    mkdir(repoRoot, { recursive: true }),
-  ]);
+  await mkdir(root, { recursive: true });
+  await mkdir(repoRoot, { recursive: true });
   const scanId = "61a20957-1be8-4ccf-8de8-eab4061e8cc3";
   const contract = {
     target: {
@@ -440,7 +419,7 @@ async function testAtomicReplacement() {
   await Promise.all(
     replacements.map((row) => io.replaceArtifactJsonl(destination, [row])),
   );
-  const written = JSON.parse(await readFile(destination, "utf8"));
+  const written = await readJson(destination);
   assert.deepEqual(
     written,
     replacements.find((row) => row.candidate_id === written.candidate_id),

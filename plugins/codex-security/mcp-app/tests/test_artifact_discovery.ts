@@ -1,4 +1,5 @@
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { jsonLines, readJson } from "./support/json.ts";
+import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import type {
   RawDiscoveryLocation,
@@ -14,9 +15,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { importSource } from "./import-module.js";
+import { importSource } from "./import-module.ts";
 
 const {
   compactDiscoveryCandidateSchema,
@@ -30,28 +30,18 @@ const {
   new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
 );
 
-const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
-const definitions = JSON.parse(
-  await readFile(
-    path.join(
-      pluginRoot,
-      "schemas",
-      "definitions",
-      "discovery-candidate.schema.json",
-    ),
-    "utf8",
-  ),
+const pluginRoot = path.join(import.meta.dirname, "../../");
+const definitions = await readJson(
+  pluginRoot,
+  "schemas",
+  "definitions",
+  "discovery-candidate.schema.json",
 );
-const toolSchemas = JSON.parse(
-  await readFile(
-    path.join(
-      pluginRoot,
-      "schemas",
-      "tools",
-      "discovery-candidates.schema.json",
-    ),
-    "utf8",
-  ),
+const toolSchemas = await readJson(
+  pluginRoot,
+  "schemas",
+  "tools",
+  "discovery-candidates.schema.json",
 );
 
 assert.equal(
@@ -91,6 +81,7 @@ assert.deepEqual(toolSchemas.$defs.workbenchListCandidatesInput.required, [
 const rootDirectories = createTemporaryDirectories(true);
 const root = await rootDirectories.create("security-artifact-discovery-");
 const runtimePluginRoot = path.join(root, "plugin");
+const repoRoot = path.join(root, "repository");
 try {
   await build({
     bundle: true,
@@ -108,7 +99,6 @@ try {
       path.join(destination, "windows.node"),
     );
   }
-  const repoRoot = path.join(root, "repository");
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   await mkdir(path.join(repoRoot, "support"), { recursive: true });
   await writeFile(
@@ -124,16 +114,16 @@ try {
     "first\nsecond\n",
   );
 
-  const scan = await createContext(root, repoRoot, "scan", "scan");
+  const scan = await createContext("scan", "scan");
   await verifyInputSchema();
   await verifyNormalizationAndPagination(scan);
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
-  await verifyDiffInventoryAllowsDeletedFiles(root, repoRoot);
+  await verifyDiffInventoryAllowsDeletedFiles();
   await verifyEmptyReplacement(scan);
-  await verifyWorkerContext(root, repoRoot);
-  await verifyMalformedLedgerIsNotModified(root, repoRoot);
-  await verifySymlinkRejection(root, repoRoot);
+  await verifyWorkerContext();
+  await verifyMalformedLedgerIsNotModified();
+  await verifySymlinkRejection();
 } finally {
   await rootDirectories.cleanup();
 }
@@ -414,11 +404,8 @@ async function verifyNormalizerFailuresPreserveOutput(
   assert.equal(await readFile(destination, "utf8"), original);
 }
 
-async function verifyDiffInventoryAllowsDeletedFiles(
-  root: string,
-  repoRoot: string,
-) {
-  const context = await createContext(root, repoRoot, "diff-output", "scan");
+async function verifyDiffInventoryAllowsDeletedFiles() {
+  const context = await createContext("diff-output", "scan");
   const inventory = path.join(
     context.root,
     "artifacts",
@@ -474,15 +461,10 @@ async function verifyReaderPreservesSharedPhaseRecords(
     disposition: "reportable",
     evidence: "The existing attack-path phase confirmed request reachability.",
   };
-  await writeFile(
-    destination,
-    `${rows.map((row: CompactDiscoveryCandidate) => JSON.stringify(row)).join("\n")}\n`,
-  );
+  await writeFile(destination, jsonLines(rows));
 
   const page = await listCodexSecurityCandidates({}, context);
   assert.deepEqual(page.rows, rows);
-  assert.deepEqual(page.rows[0].validation, rows[0].validation);
-  assert.deepEqual(page.rows[0].attack_path, rows[0].attack_path);
 
   await writeFile(destination, original);
 }
@@ -508,8 +490,8 @@ async function verifyEmptyReplacement(context: ArtifactContext) {
   assert.equal(content, "");
 }
 
-async function verifyWorkerContext(root: string, repoRoot: string) {
-  const worker = await createContext(root, repoRoot, "worker-output", "worker");
+async function verifyWorkerContext() {
+  const worker = await createContext("worker-output", "worker");
   const result = await recordCodexSecurityDiscoveryCandidates(
     {
       candidates: [rawCandidate()],
@@ -522,16 +504,8 @@ async function verifyWorkerContext(root: string, repoRoot: string) {
   assert.match(page.rows[0].candidate_id, /^candidate-[a-f0-9]{16}$/u);
 }
 
-async function verifyMalformedLedgerIsNotModified(
-  root: string,
-  repoRoot: string,
-) {
-  const context = await createContext(
-    root,
-    repoRoot,
-    "malformed-output",
-    "scan",
-  );
+async function verifyMalformedLedgerIsNotModified() {
+  const context = await createContext("malformed-output", "scan");
   const destination = path.join(
     context.root,
     "artifacts",
@@ -547,10 +521,10 @@ async function verifyMalformedLedgerIsNotModified(
   assert.equal(await readFile(destination, "utf8"), malformed);
 }
 
-async function verifySymlinkRejection(root: string, repoRoot: string) {
+async function verifySymlinkRejection() {
   if (process.platform === "win32") return;
 
-  const context = await createContext(root, repoRoot, "unsafe-output", "scan");
+  const context = await createContext("unsafe-output", "scan");
   const outside = path.join(root, "outside.jsonl");
   await writeFile(outside, "outside must not change\n");
   const destination = path.join(
@@ -576,8 +550,6 @@ async function verifySymlinkRejection(root: string, repoRoot: string) {
 }
 
 async function createContext(
-  root: string,
-  repoRoot: string,
   name: string,
   layout: ArtifactContext["layout"],
 ): Promise<ArtifactContext> {

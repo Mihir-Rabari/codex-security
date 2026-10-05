@@ -1,7 +1,8 @@
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import {
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   rm,
@@ -10,35 +11,26 @@ import {
 } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { build } from "esbuild";
-import { draftFixture } from "./scan-draft-recovery-fixture.js";
+import { importModule } from "./import-module.ts";
+import { draftFixture } from "./scan-draft-recovery-fixture.ts";
 
-const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
-const bundled = await build({
-  stdin: {
-    contents:
-      'export * from "./artifact-scan-draft.ts"; export { saveThreatModelDocument } from "./threat-model-document.ts";',
-    resolveDir: join(pluginRoot, "mcp-app/src"),
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
-});
+const pluginRoot = join(import.meta.dirname, "../../");
 const {
   recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   saveThreatModelDocument,
   scanDraftInputSchema,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString("base64")}`
-);
+} = await importModule({
+  stdin: {
+    contents:
+      'export * from "./artifact-scan-draft.ts"; export { saveThreatModelDocument } from "./threat-model-document.ts";',
+    resolveDir: join(pluginRoot, "mcp-app/src"),
+  },
+});
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const coverage = {
   completeness: "partial",
@@ -58,7 +50,7 @@ const threatModel = {
 for (const complete of [true, undefined]) {
   for (const publication of ["direct", "workbench"]) {
     test(`terminal Deep ${publication} drafts retain an omitted model (${complete})`, async () => {
-      const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-final-"));
+      const root = await temporaryDirectory("threatmodel-deep-final-");
       try {
         const { context, draft } = draftFixture(root, "deep");
         context.pluginRoot = pluginRoot;
@@ -80,15 +72,11 @@ for (const complete of [true, undefined]) {
           const expectedModel = model ?? threatModel;
           if (publication === "direct") {
             await recordCodexSecurityScanDraft(context, terminal);
-            const manifest = JSON.parse(
-              await readFile(join(root, "scan-manifest.json"), "utf8"),
-            );
+            const manifest = await readJson(root, "scan-manifest.json");
             assert.deepEqual(manifest.scan.threatModel, expectedModel);
             const checkpoints = await Promise.all(
-              (await readdir(join(root, "checkpoints"))).map(async (name) =>
-                JSON.parse(
-                  await readFile(join(root, "checkpoints", name), "utf8"),
-                ),
+              (await readdir(join(root, "checkpoints"))).map(
+                async (name) => await readJson(root, "checkpoints", name),
               ),
             );
             assert.ok(
@@ -99,9 +87,7 @@ for (const complete of [true, undefined]) {
                   checkpoint.coverage.deferred.length === 0,
               ),
             );
-            const savedCoverage = JSON.parse(
-              await readFile(join(root, "coverage.json"), "utf8"),
-            );
+            const savedCoverage = await readJson(root, "coverage.json");
             assert.deepEqual(savedCoverage.deferred, []);
             assert.ok(
               (await readFile(join(root, "threatmodel.md"), "utf8")).startsWith(
@@ -113,17 +99,11 @@ for (const complete of [true, undefined]) {
               context,
               terminal,
               async (args: string[]) => {
-                const staged = JSON.parse(
-                  await readFile(
-                    args[args.indexOf("--draft-path") + 1],
-                    "utf8",
-                  ),
+                const staged = await readJson(
+                  args[args.indexOf("--draft-path") + 1],
                 );
-                const checkpoint = JSON.parse(
-                  await readFile(
-                    args[args.indexOf("--checkpoint-path") + 1],
-                    "utf8",
-                  ),
+                const checkpoint = await readJson(
+                  args[args.indexOf("--checkpoint-path") + 1],
                 );
                 assert.deepEqual(
                   staged.manifest.scan.threatModel,
@@ -145,7 +125,7 @@ for (const complete of [true, undefined]) {
 }
 
 test("terminal Deep model inheritance retries a changed canonical draft", async () => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-retry-"));
+  const root = await temporaryDirectory("threatmodel-deep-retry-");
   try {
     const { context, draft } = draftFixture(root, "deep");
     context.pluginRoot = pluginRoot;
@@ -156,15 +136,13 @@ test("terminal Deep model inheritance retries a changed canonical draft", async 
       context,
       draft({}, true),
       async (args: string[]) => {
-        const staged = JSON.parse(
-          await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
-        );
+        const staged = await readJson(args[args.indexOf("--draft-path") + 1]);
         assert.ok(args.includes("--expected-draft-digest"));
         digests.push(args[args.indexOf("--expected-draft-digest") + 1]);
         if (digests.length === 1) {
           assert.deepEqual(staged.manifest.scan.threatModel, threatModel);
           const manifestPath = join(root, "scan-manifest.json");
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          const manifest = await readJson(manifestPath);
           manifest.scan.threatModel = replacement;
           await writeFile(manifestPath, JSON.stringify(manifest));
           throw new Error(
@@ -182,7 +160,7 @@ test("terminal Deep model inheritance retries a changed canonical draft", async 
 });
 
 test("terminal Deep input remains checkpointed when reading the previous model fails", async () => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-deep-read-failure-"));
+  const root = await temporaryDirectory("threatmodel-deep-read-failure-");
   try {
     const { context, draft } = draftFixture(root, "deep");
     await writeFile(join(root, "scan-manifest.json"), "unfinished manifest");
@@ -192,9 +170,7 @@ test("terminal Deep input remains checkpointed when reading the previous model f
     );
     const checkpoints = await readdir(join(root, "checkpoints"));
     assert.equal(checkpoints.length, 1);
-    const saved = JSON.parse(
-      await readFile(join(root, "checkpoints", checkpoints[0]), "utf8"),
-    );
+    const saved = await readJson(root, "checkpoints", checkpoints[0]);
     assert.equal(saved.complete, true);
     assert.deepEqual(saved.findings, []);
     assert.deepEqual(saved.coverage.deferred, []);
@@ -204,7 +180,7 @@ test("terminal Deep input remains checkpointed when reading the previous model f
 });
 
 test("model-only worker checkpoints save Markdown before findings and retain it on retry", async () => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-worker-"));
+  const root = await temporaryDirectory("threatmodel-worker-");
   try {
     const context = {
       root,
@@ -260,7 +236,7 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       findings: [],
       coverage,
     });
-    const saved = JSON.parse(await readFile(join(root, "result.json"), "utf8"));
+    const saved = await readJson(root, "result.json");
     assert.deepEqual(saved.threatModel, threatModel);
     assert.equal(
       await readFile(join(root, "threatmodel.md"), "utf8"),
@@ -272,7 +248,7 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
 });
 
 test("a convenience-document failure preserves the worker result and reports a warning", async () => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-write-failure-"));
+  const root = await temporaryDirectory("threatmodel-write-failure-");
   try {
     await mkdir(join(root, "threatmodel.md"));
     const result = await recordCodexSecurityWorkerScanDraft(
@@ -281,7 +257,7 @@ test("a convenience-document failure preserves the worker result and reports a w
     );
     assert.match(result.warnings[0], /threatmodel\.md could not be written/);
     assert.deepEqual(
-      JSON.parse(await readFile(join(root, "result.json"), "utf8")).threatModel,
+      (await readJson(root, "result.json")).threatModel,
       threatModel,
     );
   } finally {
@@ -290,7 +266,7 @@ test("a convenience-document failure preserves the worker result and reports a w
 });
 
 test("the configured worker interpreter is honored without losing the canonical model on failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-python-"));
+  const root = await temporaryDirectory("threatmodel-python-");
   try {
     const result = await recordCodexSecurityWorkerScanDraft(
       {
@@ -305,7 +281,7 @@ test("the configured worker interpreter is honored without losing the canonical 
     );
     assert.match(result.warnings[0], /missing-interpreter/);
     assert.deepEqual(
-      JSON.parse(await readFile(join(root, "result.json"), "utf8")).threatModel,
+      (await readJson(root, "result.json")).threatModel,
       threatModel,
     );
   } finally {
@@ -314,15 +290,14 @@ test("the configured worker interpreter is honored without losing the canonical 
 });
 
 test("overlapping draft projections retain the latest committed model", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "threatmodel-concurrent-"));
+  const root = await temporaryDirectory("threatmodel-concurrent-");
   const childProcess = createRequire(import.meta.url)("node:child_process");
   const firstStarted = Promise.withResolvers<{
     provenance: { revision: string; snapshotDigest: string };
   }>();
-  let releaseFirst!: () => void;
+  let releaseFirst: (() => void) | undefined;
   let activeRenderers = 0;
   let maximumRenderers = 0;
-  let renderCount = 0;
   t.mock.method(childProcess, "spawn", (command: string, args: string[]) => {
     assert.equal(command, "fixture-python");
     assert.deepEqual(args, [
@@ -354,7 +329,7 @@ test("overlapping draft projections retain the latest committed model", async (t
           activeRenderers -= 1;
           child.emit("close", 0, null);
         };
-        if (renderCount++ === 0) {
+        if (!releaseFirst) {
           releaseFirst = finish;
           firstStarted.resolve(input);
         } else {
@@ -382,9 +357,7 @@ test("overlapping draft projections retain the latest committed model", async (t
   const latestCommitted = (async () => {
     for await (const event of events) {
       if (event.filename !== "result.json") continue;
-      const value = JSON.parse(
-        await readFile(join(root, "result.json"), "utf8"),
-      );
+      const value = await readJson(root, "result.json");
       if (value.threatModel.content === latestModel.content) return;
     }
   })();
@@ -410,7 +383,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       coverage,
     });
     await latestCommitted;
-    releaseFirst();
+    releaseFirst!();
     const results = await Promise.all([first, latest]);
     assert.deepEqual(
       results.map((result) => result.warnings),
@@ -428,7 +401,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       latestModel.content,
     );
     assert.deepEqual(
-      JSON.parse(await readFile(join(root, "result.json"), "utf8")).threatModel,
+      (await readJson(root, "result.json")).threatModel,
       latestModel,
     );
   } finally {
