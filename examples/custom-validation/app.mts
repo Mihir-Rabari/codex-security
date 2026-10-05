@@ -1,6 +1,6 @@
 // Deliberately vulnerable local fixture. Do not deploy this application.
 import { once } from "node:events";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pathToFileURL } from "node:url";
@@ -53,6 +53,7 @@ export async function createServer(): Promise<Server> {
 if (
   process.argv[1] &&
   process.argv[1] !== "-" &&
+  existsSync(process.argv[1]) &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   const server = await createServer();

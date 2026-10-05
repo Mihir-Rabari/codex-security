@@ -1,5 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { realpathSync, appendFileSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  realpathSync,
+  appendFileSync,
+  readFileSync,
+} from "node:fs";
 import { pathToFileURL } from "node:url";
 
 function eligible(pr, repository, sha) {
@@ -64,6 +69,7 @@ export async function resolveScanTargets(
 if (
   process.argv[1] &&
   process.argv[1] !== "-" &&
+  existsSync(process.argv[1]) &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   const repository = process.env.GITHUB_REPOSITORY;

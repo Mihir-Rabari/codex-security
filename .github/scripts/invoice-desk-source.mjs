@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { realpathSync, closeSync, mkdirSync, openSync } from "node:fs";
+import {
+  existsSync,
+  realpathSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+} from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -46,6 +52,7 @@ export function extractApplication(repository, sha, destination) {
 if (
   process.argv[1] &&
   process.argv[1] !== "-" &&
+  existsSync(process.argv[1]) &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   const count = extractApplication(
