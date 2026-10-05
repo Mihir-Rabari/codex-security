@@ -1,6 +1,6 @@
 import { createCliTest, captureCli } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
-import { parseJsonLines, readJsonLines } from "./support/json.js";
+import { readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
 import {
@@ -2079,58 +2079,6 @@ describe("multiscan", () => {
     }
   });
 
-  test("removes mixed-case repository Git variables before cloning", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "isolated");
-    const trace = join(paths.root, "git-events.jsonl");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nisolated,${source.path},${source.revision}\n`,
-    );
-    const repositoryVariables = [
-      "Git_Dir",
-      "gIt_Work_Tree",
-      "Git_Index_File",
-      "gIt_Object_Directory",
-      "Git_Alternate_Object_Directories",
-    ];
-    const previous = new Map(
-      [...repositoryVariables, "GIT_TRACE2_EVENT", "GIT_TRACE2_ENV_VARS"].map(
-        (name) => [name, process.env[name]] as const,
-      ),
-    );
-
-    try {
-      for (const name of repositoryVariables) {
-        process.env[name] = join(paths.root, `missing-${name}`);
-      }
-      process.env["GIT_TRACE2_EVENT"] = trace;
-      process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
-
-      const summary = await runMultiscan(
-        options(paths, client(completeRunWithoutAwait)),
-      );
-      expect(summary).toMatchObject({ completed: 1, failed: 0 });
-
-      const leakedVariables = parseJsonLines<{
-        event: string;
-        param?: string;
-        value?: string;
-      }>(await readFile(trace, "utf8")).filter(
-        (event) =>
-          event.event === "def_param" &&
-          repositoryVariables.includes(event.param ?? "") &&
-          event.value === join(paths.root, `missing-${event.param}`),
-      );
-      expect(leakedVariables).toEqual([]);
-    } finally {
-      for (const [name, value] of previous) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
-  });
-
   test("rejects output-directory symlinks before deleting external checkouts", async () => {
     for (const directory of ["", "checkouts", "artifacts"]) {
       const paths = await fixture();
@@ -2563,32 +2511,37 @@ test("bulk checkout preserves SHA-256 repository object format", async () => {
   expect(run).toHaveBeenCalledTimes(1);
 });
 
-test.each(["GIT_DIR", "GIT_COMMON_DIR"])(
-  "bulk scan rejects %s before creating checkouts",
-  async (name) => {
-    if (
-      runTestInSubprocess(
-        "./tests-ts/multiscan.test.ts",
-        `bulk scan rejects ${name} before creating checkouts`,
-      )
+test.each([
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "Git_Dir",
+  "gIt_Work_Tree",
+  "Git_Index_File",
+  "gIt_Object_Directory",
+  "Git_Alternate_Object_Directories",
+])("bulk scan rejects %s before creating checkouts", async (name) => {
+  if (
+    runTestInSubprocess(
+      "./tests-ts/multiscan.test.ts",
+      `bulk scan rejects ${name} before creating checkouts`,
     )
-      return;
-    const paths = await fixture();
-    const repo = await repository(paths.root, "source");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
-    );
-    const previous = process.env[name];
-    process.env[name] = join(repo.path, ".git");
-    try {
-      await expect(
-        runMultiscan(options(paths, client(completeRun))),
-      ).rejects.toThrow(`${name} is not supported`);
-      expect(await lstat(paths.output).catch(() => null)).toBeNull();
-    } finally {
-      if (previous === undefined) delete process.env[name];
-      else process.env[name] = previous;
-    }
-  },
-);
+  )
+    return;
+  const paths = await fixture();
+  const repo = await repository(paths.root, "source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
+  );
+  const previous = process.env[name];
+  process.env[name] = join(repo.path, ".git");
+  try {
+    await expect(
+      runMultiscan(options(paths, client(completeRun))),
+    ).rejects.toThrow(`${name} is not supported`);
+    expect(await lstat(paths.output).catch(() => null)).toBeNull();
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+});
