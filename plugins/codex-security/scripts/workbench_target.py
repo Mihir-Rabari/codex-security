@@ -718,6 +718,7 @@ def copy_directory_excluding(
 def restore_directory_junctions(source: Path, destination: Path, junctions: list[Path]) -> None:
     # Recreate links only after patch application can no longer write through them.
     for path in junctions:
+        os.chmod(destination / path, stat.S_IMODE((source / path).lstat().st_mode))
         copy_directory_junction(source / path, destination / path)
 
 

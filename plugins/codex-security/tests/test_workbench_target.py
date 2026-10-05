@@ -6,6 +6,7 @@ import hashlib
 import os
 import runpy
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     if native and os.name != "nt":
         pytest.skip("requires native Windows junctions")
     targets: dict[Path, Path] = {}
+    modes: dict[Path, int] = {}
     if not native:
         real_lstat = Path.lstat
         real_readlink = os.readlink
@@ -42,6 +44,7 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
             if path in targets:
                 fields = {key: getattr(result, key) for key in dir(result) if key.startswith("st_")}
                 fields["st_reparse_tag"] = 0xA0000003
+                fields["st_mode"] = modes.get(path, result.st_mode)
                 return SimpleNamespace(**fields)
             return result
 
@@ -54,8 +57,13 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
             # Emulate the filesystem result, not the native GET/SET implementation.
             if any(destination.iterdir()):
                 raise OSError(errno.ENOTEMPTY, "junction destination is not empty")
+            mode = destination.lstat().st_mode
+            # Windows readonly directories do not impose POSIX child-write permissions.
+            os.chmod(destination, stat.S_IMODE(mode) | stat.S_IWUSR)
             shutil.copytree(source, destination, dirs_exist_ok=True)
+            os.chmod(destination, 0o755)
             targets[destination] = targets[source]
+            modes[destination] = mode
 
         monkeypatch.setattr(Path, "lstat", metadata)
         monkeypatch.setattr(os, "readlink", readlink)
@@ -148,6 +156,42 @@ def test_reviewed_patch_preserves_junction_boundaries(
             workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
     else:
         assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
+
+
+@pytest.mark.parametrize(
+    ("git_repository", "readonly_target"),
+    [(False, False), (True, False), (False, True)],
+    ids=["plain", "git", "readonly-empty-target"],
+)
+def test_reviewed_patch_preserves_readonly_junction(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    git_repository: bool,
+    readonly_target: bool,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    if git_repository:
+        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if readonly_target:
+        os.chmod(outside, stat.S_IREAD | stat.S_IEXEC)
+    else:
+        (outside / "file.txt").write_text("external contents\n")
+    outside_mode = outside.stat().st_mode
+    junction = source / "linked"
+    junction_factory(junction, outside)
+    os.chmod(junction, stat.S_IREAD | stat.S_IEXEC)
+    try:
+        assert not junction.lstat().st_mode & stat.S_IWRITE
+        assert outside.stat().st_mode == outside_mode
+        assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n")
+        assert outside.stat().st_mode == outside_mode
+        if not readonly_target:
+            assert (outside / "file.txt").read_text() == "external contents\n"
+    finally:
+        os.chmod(junction, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
 
 
 @pytest.mark.parametrize(
