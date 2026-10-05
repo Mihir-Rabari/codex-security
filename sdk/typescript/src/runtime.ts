@@ -1564,7 +1564,34 @@ export async function runWorkbench(
     return result.stdout;
   };
   let stdout: string;
-  let legacyArchive: { scanDir: string; archiveDir: string } | undefined;
+  const savedScanIdentities = async (scanDir: string): Promise<string> => {
+    const result: unknown = JSON.parse(
+      await run(["list-scans", "--scan-root", scanDir]),
+    );
+    if (!isRecord(result) || !Array.isArray(result["scans"])) {
+      throw new Error(
+        "The workbench returned an invalid scan history response.",
+      );
+    }
+    return JSON.stringify(
+      result["scans"]
+        .map((scan: unknown) => {
+          if (
+            !isRecord(scan) ||
+            typeof scan["scanId"] !== "string" ||
+            typeof scan["scanDir"] !== "string"
+          ) {
+            throw new Error(
+              "The workbench returned an invalid scan history entry.",
+            );
+          }
+          return JSON.stringify([scan["scanId"], scan["scanDir"]]);
+        })
+        .sort(),
+    );
+  };
+  let legacyArchive:
+    { scanDir: string; archiveDir: string; savedScans: string } | undefined;
   try {
     const arguments_ = [...args];
     if (
@@ -1581,8 +1608,9 @@ export async function runWorkbench(
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
+          const savedScans = await savedScanIdentities(scanDir);
           await rename(scanDir, archiveDir);
-          legacyArchive = { scanDir, archiveDir };
+          legacyArchive = { scanDir, archiveDir, savedScans };
           await mkdir(scanDir, { mode: 0o700 });
           if ((process.umask() & 0o700) !== 0) await chmod(scanDir, 0o700);
           arguments_.push("--archived-scan-dir", archiveDir);
@@ -1622,16 +1650,23 @@ export async function runWorkbench(
   } catch (error) {
     if (legacyArchive !== undefined) {
       try {
-        await rmdir(legacyArchive.scanDir).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code !== "ENOENT") throw error;
-          },
-        );
-        await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
+        // A helper can commit registration and lose its response. Restore only
+        // when saved identities prove that registration did not change them.
+        if (
+          (await savedScanIdentities(legacyArchive.scanDir)) ===
+          legacyArchive.savedScans
+        ) {
+          await rmdir(legacyArchive.scanDir).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code !== "ENOENT") throw error;
+            },
+          );
+          await rename(legacyArchive.archiveDir, legacyArchive.scanDir);
+        }
       } catch (restoreError) {
         throw new AggregateError(
           [error, restoreError],
-          `Scan registration failed and previous output could not be restored from ${legacyArchive.archiveDir}.`,
+          `Scan registration failed: ${processErrorDetail(error)}. Previous output remains at ${legacyArchive.archiveDir}; restoration could not be verified or completed: ${processErrorDetail(restoreError)}`,
           { cause: error },
         );
       }

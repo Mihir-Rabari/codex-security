@@ -61,12 +61,6 @@ export class DeepScanCoordinatorRegistry {
   ): Promise<boolean> {
     const coordinator = this.coordinators.get(scanId);
     if (!coordinator) return false;
-    if (coordinator.snapshot().status === "succeeded") {
-      // Discovery completion leaves the parent scan running until complete-scan.
-      // Let the caller cancel that parent after local cleanup has finished.
-      await coordinator.settled();
-      return false;
-    }
     await coordinator.cancelAfterPersistence(reason, persistCancellation);
     return true;
   }

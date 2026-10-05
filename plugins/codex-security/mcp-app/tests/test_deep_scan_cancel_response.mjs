@@ -91,7 +91,8 @@ try {
     setup: { submitted: true },
     scan: { progress: { status: "running" } },
   };
-  globalThis.cancelResponseFixture.registry.cancelAndWait = async () => false;
+  // Local completion can leave the durable parent running after discovery or a rejected failure write.
+  globalThis.cancelResponseFixture.registry.cancelAndWait = async () => true;
   const parentCanceled = await cancel({ scanId: "fixture-scan" });
   assert.equal(
     parentCanceled.structuredContent.workspace.scan.progress.status,

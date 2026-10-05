@@ -599,6 +599,59 @@ test.each(["active scan", "missing parent"])(
   },
 );
 
+test.each(["response lost", "state unreadable"])(
+  "legacy registration preserves its archive when %s after commit",
+  async (failure) => {
+    const context = await fixture();
+    const pluginPath = await legacyArchivePlugin(context);
+    const options = {
+      ...context.options,
+      config: { ...context.options.config, pluginPath },
+      outputDir: join(context.root, "results"),
+    };
+    const first = completed(await importScan(options, context.dependencies));
+    const manifest = await readFile(first.manifestPath, "utf8");
+    const helper = join(pluginPath, "scripts", "workbench_db.py");
+    const original = await readFile(helper, "utf8");
+    await writeFile(
+      helper,
+      original
+        .replace(
+          "import runpy, sys",
+          [
+            "import contextlib, io, runpy, sys",
+            "from pathlib import Path",
+            "args = sys.argv[1:]",
+            ...(failure === "state unreadable"
+              ? [
+                  'if args and args[0] == "list-scans" and Path(__file__).with_suffix(".committed").exists():',
+                  '    raise SystemExit("Synthetic state read failure")',
+                ]
+              : []),
+          ].join("\n"),
+        )
+        .replace(
+          "runpy.run_path(",
+          'lost_response = args and args[0] == "register-cli-scan"\nwith contextlib.redirect_stdout(io.StringIO()) if lost_response else contextlib.nullcontext():\n    runpy.run_path(',
+        ) +
+        '\nif lost_response:\n    Path(__file__).with_suffix(".committed").touch()\n    raise SystemExit("Synthetic response lost after commit")\n',
+    );
+    await expect(
+      importScan({ ...options, archiveExisting: true }, context.dependencies),
+    ).rejects.toThrow("Synthetic response lost after commit");
+    const scans = await storedScans(context);
+    expect(scans).toHaveLength(2);
+    const archived = scans.find((scan) => scan.id === first.manifest.scan.id)!;
+    expect(archived.scan_dir).not.toBe(first.scanDir);
+    expect(
+      await readFile(join(archived.scan_dir, "scan-manifest.json"), "utf8"),
+    ).toBe(manifest);
+    expect(
+      await stat(join(first.scanDir, "scan-manifest.json")).catch(() => null),
+    ).toBeNull();
+  },
+);
+
 test.each(["failure", "abort"] as const)(
   "an import %s after registration leaves a terminal saved scan",
   async (mode) => {

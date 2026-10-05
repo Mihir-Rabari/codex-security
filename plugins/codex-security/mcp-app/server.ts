@@ -1274,12 +1274,18 @@ export function createCodexSecurityServer(): McpServer {
         workspace = await runWorkbench(args);
       },
     );
-    if (workspace === undefined) {
-      workspace = canceledLocally
-        ? ((await runWorkbench(["get-scan", "--scan-id", scanId]))[
-            "workspace"
-          ] as JsonObject)
-        : await runWorkbench(args);
+    if (workspace === undefined && canceledLocally) {
+      workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+        "workspace"
+      ] as JsonObject;
+    }
+    const scan = workspace?.["scan"];
+    const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+    if (
+      workspace === undefined ||
+      (isJsonObject(progress) && progress["status"] === "running")
+    ) {
+      workspace = await runWorkbench(args);
     }
     return workspaceResult(workspace as unknown as WorkspaceState);
   };
