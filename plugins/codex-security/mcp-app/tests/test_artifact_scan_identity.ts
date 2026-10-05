@@ -1744,3 +1744,103 @@ test("finding precedence excludes archived attempts before comparing a parent re
   assert.deepEqual(result.recovered, result.normal);
   assert.deepEqual(result.warnings, []);
 });
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const reverse of [false, true]) {
+    for (const published of [false, true]) {
+      test(`one-to-one ${layout} unreported revision (published=${published}, reverse=${reverse})`, async (t) => {
+        const normal = await fixture(t, layout),
+          recovered = await fixture(t, layout);
+        const first = finding("First review");
+        const revised = {
+          ...first,
+          summary: "Revised synthetic evidence.",
+          severity: { level: "high" },
+        };
+        const second = finding("Independent review", {
+          extensions: { reportId: "report-2" },
+        });
+        const initial = { ...normal.draft(), findings: [first] };
+        await normal.write(initial);
+        if (published)
+          await recovered.write({ ...recovered.draft(), findings: [first] });
+        else
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            { ...recovered.draft(), findings: [first] },
+            false,
+          );
+        await dateDraftFiles(recovered.root, 100);
+        const rows = reverse ? [second, revised] : [revised, second];
+        await normal.write({ ...normal.draft(), findings: rows });
+        const update = { ...recovered.draft(), findings: rows };
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          update,
+          false,
+        );
+        const { handoffClaimToken: _claim, ...checkpoint } = update;
+        await utimes(
+          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+          200,
+          200,
+        );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 2);
+        assert.equal(result.recovered.length, 2);
+        const ordered = (values: RecoveredFinding[]) =>
+          [...values].sort((a, b) => a.title.localeCompare(b.title));
+        assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+    test(`one-to-one ${layout} historical siblings (reverse=${reverse})`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const first = finding("Synthetic review", {
+        extensions: { candidateId: "candidate-1" },
+      });
+      const second = {
+        ...structuredClone(first),
+        locations: [{ path: "src/example.py", startLine: 2 }],
+      };
+      const finalRows = reverse ? [second, first] : [first, second];
+      for (const [index, rows] of [[first], [second], finalRows].entries()) {
+        await normal.write({ ...normal.draft(), findings: rows });
+        const update = { ...recovered.draft(), findings: rows };
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          update,
+          false,
+        );
+        const { handoffClaimToken: _claim, ...checkpoint } = update;
+        await utimes(
+          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+          (index + 1) * 100,
+          (index + 1) * 100,
+        );
+      }
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, 2);
+      const ordered = (values: RecoveredFinding[]) =>
+        [...values].sort(
+          (a, b) => a.locations[0]!.startLine - b.locations[0]!.startLine,
+        );
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}

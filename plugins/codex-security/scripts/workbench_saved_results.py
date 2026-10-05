@@ -1865,118 +1865,110 @@ def merge_saved_results(
     # Publication chronology spans workers; attempt numbers only order one worker's revisions.
     for source in sorted(all_sources, key=lambda item: finding_source_order(item)[2:]):
         relative, draft, source_owner = source
-        current: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = {}
+        pending = []
         for index, value in enumerate(draft["findings"]):
-            if isinstance(value, dict) and valid_finding(value):
-                current.setdefault(raw_scope(value), []).append((index, value))
-        prior = {scope: dict(groups) for scope, groups in logical_rows.items()}
-        current_groups: list[tuple[int, dict[str, Any]]] = []
-        for scope, siblings in current.items():
-            for index, value in siblings:
-                owner = raw_owner(value, source_owner)
-                candidate = finding_candidate_id(value)
-                scopes = [scope, (scope[0], candidate)] if candidate else [scope]
-                owned_siblings = [
-                    sibling
-                    for _, sibling in siblings
-                    if same_owner(owner, raw_owner(sibling, source_owner))
-                ]
-                matches = [
-                    group
-                    for group in {
-                        key: group
-                        for saved_scope in scopes
-                        for key, group in prior.get(saved_scope, {}).items()
-                    }.values()
-                    if same_owner(owner, group["owner"])
-                    and (
-                        (relative == "parent" and parent_is_canonical)
-                        or group["identity"] is None
-                        or "identity" not in value
-                        or group["identity"] == _finding_identity(value)
-                    )
-                    and all(same_raw_finding(value, previous) for previous in group["rows"])
-                ]
-                exact = [
-                    group
-                    for group in matches
-                    if any(same_raw_content(value, previous) for previous in group["rows"])
-                ]
-                revisions = [
-                    group
-                    for group in matches
-                    if group["latest"].get("title") == value.get("title")
-                    and raw_scope(group["latest"]) == scope
-                    and identifiers(group["latest"]) == identifiers(value)
-                ]
-                related = (
-                    [
-                        sibling
-                        for sibling_scope, rows in current.items()
-                        if sibling_scope[0] == scope[0]
-                        for _, sibling in rows
-                        if same_owner(owner, raw_owner(sibling, source_owner))
-                        and finding_candidate_id(sibling) == candidate
-                    ]
-                    if candidate is not None
-                    else owned_siblings
+            if not isinstance(value, dict) or not valid_finding(value):
+                continue
+            owner = raw_owner(value, source_owner)
+            scope = raw_scope(value)
+            candidate = finding_candidate_id(value)
+            scopes = [scope, (scope[0], candidate)] if candidate else [scope]
+            matches = [
+                group
+                for group in {
+                    key: group
+                    for saved_scope in scopes
+                    for key, group in logical_rows.get(saved_scope, {}).items()
+                }.values()
+                if same_owner(owner, group["owner"])
+                and (
+                    (relative == "parent" and parent_is_canonical)
+                    or group["identity"] is None
+                    or "identity" not in value
+                    or group["identity"] == _finding_identity(value)
                 )
-                match = None
-                if (
-                    len(matches) == 1
-                    and sum(same_raw_finding(sibling, value) for sibling in related) == 1
-                ):
-                    match = matches[0]
+                and all(same_raw_finding(value, previous) for previous in group["rows"])
+            ]
+            ranked = []
+            for group in matches:
+                latest = group["latest"]
+                if same_raw_content(value, latest):
+                    rank = 3
+                elif any(same_raw_content(value, previous) for previous in group["rows"]):
+                    rank = 2
                 elif (
-                    len(exact) == 1
-                    and sum(same_raw_content(sibling, value) for sibling in owned_siblings) == 1
+                    latest.get("title") == value.get("title")
+                    and raw_scope(latest) == scope
+                    and identifiers(latest) == identifiers(value)
                 ):
-                    match = exact[0]
-                elif (
-                    len(revisions) == 1
-                    and sum(
-                        same_raw_finding(sibling, value)
-                        and sibling.get("title") == value.get("title")
-                        and identifiers(sibling) == identifiers(value)
-                        for sibling in owned_siblings
-                    )
-                    == 1
-                ):
-                    match = revisions[0]
-                if match is None:
-                    match = {
-                        "owner": owner,
-                        "rows": [],
-                        "identity": None,
-                        "key": f"raw:{len(row_groups)}",
-                    }
-                for saved_scope in scopes:
-                    logical_rows.setdefault(saved_scope, {})[match["key"]] = match
-                if match["owner"] is None:
-                    match["owner"] = owner
-                if value not in match["rows"]:
-                    match["rows"].append(value)
-                observations = match.setdefault("observations", {})
-                previous = observations.get(source_owner)
-                if previous is None or (
-                    finding_source_order(source, True),
-                    _finding_strength(value),
-                ) > (
-                    finding_source_order(previous[0], True),
-                    _finding_strength(previous[1]),
-                ):
-                    observations[source_owner] = (source, value)
-                    match["latest"] = max(
-                        observations.values(),
-                        key=lambda observation: (
-                            finding_source_order(observation[0]),
-                            _finding_strength(observation[1]),
-                        ),
-                    )[1]
-                if "identity" in value and (match["identity"] is None or relative == "parent"):
-                    match["identity"] = copy.deepcopy(_finding_identity(value))
-                row_groups[(relative, index)] = match
-                current_groups.append((index, match))
+                    rank = 1
+                else:
+                    rank = 0
+                ranked.append((group, rank))
+            pending.append((index, value, owner, scopes, ranked))
+        assigned = {}
+        claimed = set()
+        for rank in (3, 2, 1, 0):
+            while True:
+                options = {
+                    index: [
+                        group
+                        for group, score in matches
+                        if score >= rank and group["key"] not in claimed
+                    ]
+                    for index, _, _, _, matches in pending
+                    if index not in assigned
+                }
+                counts = {}
+                for groups in options.values():
+                    for group in groups:
+                        counts[group["key"]] = counts.get(group["key"], 0) + 1
+                chosen = {
+                    index: groups[0]
+                    for index, groups in options.items()
+                    if len(groups) == 1 and counts[groups[0]["key"]] == 1
+                }
+                if not chosen:
+                    break
+                assigned.update(chosen)
+                claimed.update(group["key"] for group in chosen.values())
+        current_groups: list[tuple[int, dict[str, Any]]] = []
+        for index, value, owner, scopes, _ in pending:
+            match = assigned.get(index)
+            if match is None:
+                match = {
+                    "owner": owner,
+                    "rows": [],
+                    "identity": None,
+                    "key": f"raw:{len(row_groups)}",
+                }
+            for saved_scope in scopes:
+                logical_rows.setdefault(saved_scope, {})[match["key"]] = match
+            if match["owner"] is None:
+                match["owner"] = owner
+            if value not in match["rows"]:
+                match["rows"].append(value)
+            observations = match.setdefault("observations", {})
+            previous = observations.get(source_owner)
+            if previous is None or (
+                finding_source_order(source, True),
+                _finding_strength(value),
+            ) > (
+                finding_source_order(previous[0], True),
+                _finding_strength(previous[1]),
+            ):
+                observations[source_owner] = (source, value)
+                match["latest"] = max(
+                    observations.values(),
+                    key=lambda observation: (
+                        finding_source_order(observation[0]),
+                        _finding_strength(observation[1]),
+                    ),
+                )[1]
+            if "identity" in value and (match["identity"] is None or relative == "parent"):
+                match["identity"] = copy.deepcopy(_finding_identity(value))
+            row_groups[(relative, index)] = match
+            current_groups.append((index, match))
         if source_owner is None:
             current_ordered = [
                 group for _, group in sorted(current_groups, key=lambda item: item[0])
