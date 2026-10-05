@@ -586,7 +586,8 @@ function rawCandidate(overrides = {}) {
   };
 }
 
-async function verifyNormalizerDiagnostics(context) {
+async function verifyNormalizerDiagnostics(context: ArtifactContext) {
+  assert.ok(context.pluginRoot);
   const helper = path.join(context.pluginRoot, "mcp", "helpers.mjs");
   const original = await readFile(helper);
   const detail = `Cannot normalize ${context.repoRoot}; unrelated services${context.repoRoot}/main.py`;
@@ -601,6 +602,7 @@ async function verifyNormalizerDiagnostics(context) {
         context,
       ),
       (error) => {
+        assert.ok(error instanceof Error);
         assert.ok(error.message.includes(detail), error.message);
         return true;
       },
