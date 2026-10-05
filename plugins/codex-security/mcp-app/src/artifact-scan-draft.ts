@@ -2345,26 +2345,34 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
           .filter((finding) => finding.identity !== undefined)
           .map(scanFindingIdentity),
   );
-  const candidateIdentities = new Map<string, JsonObject>();
-  return identified.map((finding, index) => {
-    const key = scanFindingIdentity(finding);
-    const original = findings[index]!;
-    const candidate = findingCandidateId(original);
-    const candidateKey =
-      mode !== "deep" &&
-      original.identity === undefined &&
+  const candidateKeys = findings.map((finding, index) => {
+    const candidate = findingCandidateId(finding);
+    return mode !== "deep" &&
       candidate &&
       !["candidateId", "reportId", "ledgerRowId"].some(
         (key) =>
-          typeof (original.extensions as JsonObject | undefined)?.[key] ===
+          typeof (finding.extensions as JsonObject | undefined)?.[key] ===
           "string",
       )
-        ? JSON.stringify([
-            key,
-            (original.provenance as JsonObject).workerId,
-            candidate,
-          ])
-        : undefined;
+      ? JSON.stringify([
+          finding.ruleId,
+          anchors[index],
+          (finding.provenance as JsonObject).workerId,
+          candidate,
+        ])
+      : undefined;
+  });
+  const candidateIdentities = new Map<string, JsonObject>();
+  for (const [index, finding] of findings.entries()) {
+    const key = candidateKeys[index];
+    if (key && finding.identity !== undefined)
+      candidateIdentities.set(key, finding.identity as JsonObject);
+  }
+  return identified.map((finding, index) => {
+    const key = scanFindingIdentity(finding);
+    const original = findings[index]!;
+    if (mode !== "deep" && original.identity !== undefined) return finding;
+    const candidateKey = candidateKeys[index];
     const previous = candidateKey
       ? candidateIdentities.get(candidateKey)
       : undefined;

@@ -1940,6 +1940,36 @@ for (const layout of ["standard", "diff"]) {
     assert.equal(findings.length, 1);
     assert.equal(findings[0].severity.level, "high");
   });
+  for (const sibling of [false, true]) {
+    test(`${layout}: a stronger successor reuses retained candidate identity, sibling=${sibling}`, async (t) => {
+      const f = await fixture(t, layout);
+      await f.write({
+        ...f.draft({}, true),
+        findings: [
+          ...(sibling ? [findingFor("candidate-other")] : []),
+          findingFor("candidate-a"),
+          { ...findingFor("candidate-a"), severity: { level: "medium" } },
+        ],
+      });
+      const before = await recoverPublishedFindings(f);
+      const originalIdentity = before.find(
+        (row) => row.provenance.candidateId === "candidate-a",
+      ).identity;
+      await f.write({
+        ...f.draft({}, true),
+        findings: [
+          { ...findingFor("candidate-a"), severity: { level: "high" } },
+        ],
+      });
+      const findings = await recoverPublishedFindings(f);
+      assert.equal(findings.length, sibling ? 2 : 1);
+      const successor = findings.find(
+        (row) => row.provenance.candidateId === "candidate-a",
+      );
+      assert.equal(successor.severity.level, "high");
+      assert.deepEqual(successor.identity, originalIdentity);
+    });
+  }
   test(`${layout}: sequential candidates cannot reuse retained sibling identities`, async (t) => {
     const f = await fixture(t, layout);
     const candidates = ["candidate-a", "candidate-b", "candidate-c"];
