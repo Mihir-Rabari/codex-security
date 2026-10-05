@@ -499,6 +499,14 @@ test("forwards scan events with their component identity without letting observe
         event: {},
       });
       options.onCost?.(fakeResult([], "complete", { input_tokens: 100 }).cost!);
+      options.onUsage?.({
+        input_tokens: 100,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 10,
+        reasoning_output_tokens: 0,
+        total_tokens: 110,
+      });
       options.onWorkerStatus?.({
         kind: "dispatch",
         phase: "validation",
@@ -523,6 +531,7 @@ test("forwards scan events with their component identity without letting observe
       "activity",
       "session",
       "cost",
+      "usage",
       "workers",
       "warning",
     ]);

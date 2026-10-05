@@ -103,7 +103,7 @@ export function renderScanHistory(
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
-        ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
+        ? `  ${accent("·")}  ${before?.length ?? 0} → ${after?.length ?? 0}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
     const related = entry["related"] as JsonObject[] | undefined;
@@ -263,6 +263,11 @@ export function renderScanHistory(
       lines.push(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
+          .sort(
+            ([left], [right]) =>
+              Object.keys(SEVERITY_COLORS).indexOf(left.toUpperCase()) -
+              Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
+          )
           .map(([severity, count]) => {
             const label = severity.toUpperCase();
             return paint(

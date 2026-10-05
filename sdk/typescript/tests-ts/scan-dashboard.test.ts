@@ -12,6 +12,7 @@ const STARTED_AT = new Date(2026, 6, 29, 9, 41, 0).getTime();
 function fakeClock(now: () => number = () => STARTED_AT) {
   return {
     now,
+    queueMicrotask: (callback: () => void) => callback(),
     setInterval: () => ({}) as NodeJS.Timeout,
     clearInterval: () => {},
   };
@@ -53,6 +54,155 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test.each(["activity", "details"] as const)(
+    "coalesces %s replay frames while retaining event order and cancellation",
+    (view) => {
+      const input = new DashboardTestInput();
+      const pending: (() => void)[] = [];
+      let frame = "";
+      let frames = 0;
+      let interrupted = false;
+      const dashboard = createDashboard(
+        {
+          columns: 88,
+          rows: 24,
+          write: (text) => {
+            frame = text;
+            frames++;
+          },
+        },
+        {
+          input,
+          clock: {
+            ...fakeClock(),
+            queueMicrotask: (callback: () => void) => pending.push(callback),
+          },
+          onInterrupt: () => {
+            interrupted = true;
+          },
+        },
+      );
+      dashboard.start();
+      if (view === "details") input.emit("data", "d");
+      const initialFrames = frames;
+      for (let i = 0; i < 600; i++) {
+        if (view === "details")
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            event: {
+              type: "event_msg",
+              payload: { type: "agent_message", message: `Replay entry ${i}` },
+            },
+          });
+        else
+          dashboard.record({
+            id: `replay-${i}`,
+            kind: "message",
+            status: "completed",
+            description: `Replay entry ${i}`,
+            paths: [],
+          });
+      }
+      expect(frames).toBe(initialFrames);
+      expect(pending).toHaveLength(1);
+      input.emit("data", "\u0003");
+      expect(interrupted).toBe(true);
+      pending.shift()!();
+      expect(frames).toBe(initialFrames + 1);
+      expect(frame).toContain("Replay entry 599");
+      expect(frame.indexOf("Replay entry 598")).toBeLessThan(
+        frame.indexOf("Replay entry 599"),
+      );
+      dashboard.record({
+        id: "pending-at-stop",
+        kind: "message",
+        status: "completed",
+        description: "Pending at stop",
+        paths: [],
+      });
+      dashboard.stop();
+      const stoppedFrames = frames;
+      pending.shift()!();
+      expect(frames).toBe(stoppedFrames);
+    },
+  );
+
+  test("ignores Delete and function keys when filtering session details", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    input.emit("data", "d");
+    for (const key of ["\u001B[3~", "\u001B[15~"]) {
+      input.emit("data", key);
+      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    }
+    input.emit("data", "3");
+    expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+    dashboard.stop();
+  });
+
+  test("uses the full verification viewport", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 80, rows: 24 },
+      { presentation: "verification" },
+    );
+    dashboard.start();
+    expect(
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!).split(
+        "\n",
+      ),
+    ).toHaveLength(24);
+    dashboard.stop();
+  });
+
+  test("styles inline code without changing generated terminal escapes", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, { color: true });
+    dashboard.start();
+    dashboard.record({
+      id: "inline-ansi",
+      kind: "message",
+      status: "completed",
+      description: "The code is `[2m`.",
+      paths: [],
+    });
+    expect(lastFrame(stderr)).toContain("The code is [2m.");
+    expect(stderr.text()).toContain("The code is \u001B[2m[2m\u001B[22m");
+    expect(lastFrame(stderr)).not.toContain("\u001B");
+    dashboard.stop();
+  });
+
+  test("wraps wide activity text to terminal columns without losing it", () => {
+    const stderr = capture(true);
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 40,
+      rows: 24,
+    });
+    dashboard.start();
+    dashboard.record({
+      id: "wide-text",
+      kind: "message",
+      status: "completed",
+      description: "界".repeat(24),
+      paths: [],
+    });
+    const frame = lastFrame(stderr);
+    expect((frame.match(/界/g) ?? []).length).toBe(24);
+    for (const line of frame.split("\n")) {
+      expect(
+        Array.from(line).reduce(
+          (width, char) => width + (char === "界" ? 2 : 1),
+          0,
+        ),
+      ).toBeLessThanOrEqual(40);
+    }
+    dashboard.stop();
+  });
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
     const dashboard = createDashboard(

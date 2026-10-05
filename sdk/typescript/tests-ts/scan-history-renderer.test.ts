@@ -3,6 +3,61 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("shows zero findings on the absent side of grouped comparisons", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/synthetic/repository",
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        coverage: { afterCompleteness: "complete" },
+        summary: { resolved: 2, new: 2 },
+        findings: [
+          {
+            title: "Resolved group",
+            severity: "high",
+            status: "resolved",
+            path: "before.ts",
+            beforeOccurrenceIds: ["before-one", "before-two"],
+          },
+          {
+            title: "Added group",
+            severity: "medium",
+            status: "new",
+            path: "after.ts",
+            afterOccurrenceIds: ["after-one", "after-two"],
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(text).toContain("2 → 0");
+    expect(text).toContain("0 → 2");
+  });
+
+  test("orders severity totals from critical to informational", () => {
+    const text = renderScanHistory(
+      {
+        scanId: "synthetic-scan",
+        targetPath: "/synthetic/repository",
+        progress: { status: "complete" },
+        findings: [],
+        severityCounts: {
+          low: 4,
+          informational: 5,
+          medium: 3,
+          critical: 1,
+          high: 2,
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).toMatch(
+      /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
+    );
+  });
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

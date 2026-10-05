@@ -3865,6 +3865,35 @@ describe("CodexSecurity orchestration", () => {
     "gpt-daybreak-blue-latest",
     "gpt-daybreak-red-latest",
   ];
+  test("reports unpriced model usage without letting its observer stop the scan", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const usages: unknown[] = [];
+    const observerErrors: string[] = [];
+    const client = new TestClient(
+      { codexOverrides: { model: "synthetic-unpriced-model" } },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: recordingWorkbench([]),
+        createCodex: completedCodex(root, copyCompletedScan),
+      },
+    );
+    try {
+      const result = await client.run(repository, {
+        onUsage: (usage) => {
+          usages.push(usage);
+          throw new Error("synthetic usage observer");
+        },
+        onObserverError: (observer) => observerErrors.push(observer),
+      });
+      expect(result.cost).toBeNull();
+      expect(usages).toEqual([
+        expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
+      ]);
+      expect(observerErrors).toEqual(["onUsage"]);
+    } finally {
+      await client.close();
+    }
+  });
   test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
 

@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import stringWidth from "string-width";
 import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
 import type { ScanModelConfiguration } from "./config.js";
@@ -15,6 +16,8 @@ import {
   formatScanCost,
   formatScanCosts,
   formatScanCostTokens,
+  formatTokenUsage,
+  type ScanTokenUsage,
 } from "./cost-model.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
@@ -41,6 +44,7 @@ interface DashboardStream {
 
 interface DashboardClock {
   now(): number;
+  queueMicrotask?(callback: () => void): void;
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout;
   clearInterval(timer: NodeJS.Timeout): void;
 }
@@ -124,6 +128,10 @@ export class ScanDashboard {
   #showComponent = false;
   #componentResult: ComponentScanResult | null = null;
   readonly #activities: TimedScanActivity[] = [];
+  readonly #activityCache = new WeakMap<
+    TimedScanActivity,
+    { width: number; icon: string | undefined; lines: DashboardActivityLine[] }
+  >();
   readonly #details: (ScanSessionEvent & { recordedAt: number })[] = [];
   #detailsCache: {
     width: number;
@@ -136,6 +144,7 @@ export class ScanDashboard {
   #files: ScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
+  #tokens: string | null = null;
   #budget: {
     request: ScanBudget;
     input: string;
@@ -143,6 +152,7 @@ export class ScanDashboard {
     finish: (limit?: number) => void;
   } | null = null;
   #timer: NodeJS.Timeout | null = null;
+  #refreshPending = false;
   #scrollOffset = 0;
   #view: "activity" | "details" = "activity";
   #source: "all" | "main" | number = "all";
@@ -191,9 +201,7 @@ export class ScanDashboard {
       return;
     }
     let lines = 0;
-    for (const key of input.match(
-      /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
-    ) ?? []) {
+    for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -227,7 +235,7 @@ export class ScanDashboard {
         lines += this.#activityRows();
       } else if (key === "\u001B[6~") {
         lines -= this.#activityRows();
-      } else {
+      } else if (/^\u001B\[(?:[HF]|[14]~)$/u.test(key)) {
         if (lines !== 0) this.scroll(lines);
         this.scroll(
           key === "\u001B[H" || key === "\u001B[1~"
@@ -377,6 +385,9 @@ export class ScanDashboard {
       case "cost":
         dashboard.setCost(event.value);
         break;
+      case "usage":
+        dashboard.setUsage(event.value);
+        break;
       case "workers":
         if (event.value.kind === "dispatch")
           dashboard.setStage(scanPhaseLabel(event.value.phase));
@@ -385,7 +396,7 @@ export class ScanDashboard {
         dashboard.note(event.value);
         break;
     }
-    this.#refresh();
+    this.#scheduleRefresh();
   }
 
   public showComponents(stage: string): void {
@@ -419,7 +430,13 @@ export class ScanDashboard {
     maxCostUsd = this.#options.maxCostUsd,
   ): void {
     this.#cost = cost;
+    this.#tokens = formatScanCostTokens(cost);
     this.#options.maxCostUsd = maxCostUsd;
+    this.#refresh();
+  }
+
+  public setUsage(usage: Readonly<ScanTokenUsage>): void {
+    this.#tokens = formatTokenUsage(usage);
     this.#refresh();
   }
 
@@ -487,7 +504,7 @@ export class ScanDashboard {
         this.#activityLines(this.#width()).length - previousRows,
       );
     }
-    this.#refresh();
+    this.#scheduleRefresh();
   }
 
   public recordDetails(session: ScanSessionEvent): void {
@@ -518,7 +535,7 @@ export class ScanDashboard {
           this.#activityLines(this.#width()).length - previousRows,
         );
       }
-      this.#refresh();
+      this.#scheduleRefresh();
     }
   }
 
@@ -539,6 +556,15 @@ export class ScanDashboard {
     try {
       this.#render();
     } catch {}
+  }
+
+  #scheduleRefresh(): void {
+    if (this.#timer === null || this.#refreshPending) return;
+    this.#refreshPending = true;
+    (this.#options.clock.queueMicrotask ?? queueMicrotask)(() => {
+      this.#refreshPending = false;
+      this.#refresh();
+    });
   }
 
   #render(): void {
@@ -663,9 +689,7 @@ export class ScanDashboard {
   }
 
   #componentInput(input: string): void {
-    for (const key of input.match(
-      /\u001B\[(?:[ABHF]|[1456]~)|[\u0003\u0004\u0015\r\n\u001Bbdam1-9]/gu,
-    ) ?? []) {
+    for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {
@@ -821,7 +845,8 @@ export class ScanDashboard {
         this.#options.presentation === "verification"
           ? 0
           : this.#tokenLines().length - 1 + this.#costLines().length - 1) +
-        (this.#options.presentation === "publication"
+        (this.#options.presentation === "publication" ||
+        this.#options.presentation === "verification"
           ? 2
           : this.#options.mode === "deep"
             ? 2
@@ -830,10 +855,7 @@ export class ScanDashboard {
   }
 
   #tokenLines(): string[] {
-    const tokens =
-      this.#cost === null
-        ? "waiting for usage"
-        : formatScanCostTokens(this.#cost);
+    const tokens = this.#tokens ?? "waiting for usage";
     return wrapActivity("  TOKENS   ", tokens, this.#width());
   }
 
@@ -1013,6 +1035,12 @@ export class ScanDashboard {
           : entry.status === "running"
             ? runningIcon
             : ACTIVITY_MARKERS[kind];
+      const cached = this.#activityCache.get(entry);
+      if (cached?.width === width && cached.icon === icon) {
+        for (const line of cached.lines) lines.push(line);
+        continue;
+      }
+      const first = lines.length;
       const timestamp = `[${formatLocalTime(entry.recordedAt)}]`;
       const worker =
         entry.worker === undefined ? "" : `worker ${entry.worker} · `;
@@ -1021,6 +1049,11 @@ export class ScanDashboard {
       for (const path of entry.paths) {
         append(" ".repeat(prefix.length), path, "path");
       }
+      this.#activityCache.set(entry, {
+        width,
+        icon,
+        lines: lines.slice(first),
+      });
     }
     return lines;
   }
@@ -1090,12 +1123,29 @@ function detailsText(value: unknown): string {
     .join("\n");
 }
 
+function replaceVisibleText(
+  value: string,
+  search: string,
+  replacement: string,
+): string {
+  let replaced = false;
+  return value
+    .split(/(\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][\s\S]*?(?:\u0007|\u001B\\))/gu)
+    .map((part, index) => {
+      if (index % 2 === 1 || replaced || !part.includes(search)) return part;
+      replaced = true;
+      return part.replace(search, () => replacement);
+    })
+    .join("");
+}
+
 function styleInlineCode(value: string, line: DashboardActivityLine): string {
   for (const text of line.bold ?? []) {
-    value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
+    value = replaceVisibleText(value, text, `\u001B[1m${text}\u001B[22m`);
   }
   for (const text of line.code ?? []) {
-    value = value.replace(
+    value = replaceVisibleText(
+      value,
       text,
       `\u001B[2m${text}\u001B[22m${line.kind === "message" ? "\u001B[1m" : ""}`,
     );
@@ -1110,7 +1160,8 @@ function linkActivity(
   for (const { label, target } of links ?? []) {
     const safe = safeHyperlinkTarget(target);
     if (safe !== undefined) {
-      value = value.replace(
+      value = replaceVisibleText(
+        value,
         label,
         `\u001B]8;;${safe}\u0007${label}\u001B]8;;\u0007`,
       );
@@ -1159,7 +1210,7 @@ function formatLocalTime(timestamp: number): string {
 }
 
 function wrapActivity(prefix: string, value: string, width: number): string[] {
-  const available = Math.max(1, width - prefix.length);
+  const available = Math.max(1, width - stringWidth(prefix));
   const continuation = " ".repeat(prefix.length);
   const lines: string[] = [];
   const append = (text: string): void => {
@@ -1172,26 +1223,18 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
       separator = word;
       continue;
     }
-    const characters = Array.from(word);
-    if (characters.length > available) {
+    const wordWidth = stringWidth(word);
+    if (wordWidth > available) {
       if (current !== "") {
         append(current);
         current = "";
       }
-      for (let start = 0; start < characters.length; start += available) {
-        const part = characters.slice(start, start + available).join("");
-        if (start + available < characters.length) {
-          append(part);
-        } else {
-          current = part;
-        }
-      }
+      const parts = columnChunks(word, available);
+      current = parts.pop()!;
+      for (const part of parts) append(part);
     } else if (
       current !== "" &&
-      Array.from(current).length +
-        Array.from(separator).length +
-        characters.length >
-        available
+      stringWidth(current) + stringWidth(separator) + wordWidth > available
     ) {
       append(current);
       current = word;
@@ -1204,15 +1247,30 @@ function wrapActivity(prefix: string, value: string, width: number): string[] {
   return lines;
 }
 
+const graphemes = new Intl.Segmenter();
+
+function columnChunks(value: string, width: number): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let columns = 0;
+  for (const { segment } of graphemes.segment(value)) {
+    const size = stringWidth(segment);
+    if (current !== "" && columns + size > width) {
+      parts.push(current);
+      current = "";
+      columns = 0;
+    }
+    current += segment;
+    columns += size;
+  }
+  if (current !== "" || parts.length === 0) parts.push(current);
+  return parts;
+}
+
 function wrapCode(prefix: string, value: string, width: number): string[] {
-  const characters = Array.from(value);
-  const available = Math.max(1, width - prefix.length);
-  return Array.from(
-    { length: Math.max(1, Math.ceil(characters.length / available)) },
-    (_, index) =>
-      `${index === 0 ? prefix : " ".repeat(prefix.length)}${characters
-        .slice(index * available, (index + 1) * available)
-        .join("")}`,
+  return columnChunks(value, Math.max(1, width - stringWidth(prefix))).map(
+    (part, index) =>
+      `${index === 0 ? prefix : " ".repeat(stringWidth(prefix))}${part}`,
   );
 }
 
@@ -1285,8 +1343,13 @@ function fitLine(value: string, width: number): string {
     /[\u0000-\u001F\u007F]/gu,
     " ",
   );
-  const characters = Array.from(clean);
-  return characters.length <= width
-    ? clean
-    : `${characters.slice(0, Math.max(0, width - 1)).join("")}…`;
+  if (stringWidth(clean) <= width) return clean;
+  let clipped = "";
+  let columns = 0;
+  for (const { segment } of graphemes.segment(clean)) {
+    columns += stringWidth(segment);
+    if (columns > width - 1) break;
+    clipped += segment;
+  }
+  return `${clipped}…`;
 }
