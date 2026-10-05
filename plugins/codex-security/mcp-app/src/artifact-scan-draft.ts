@@ -1546,9 +1546,16 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   if (left.ruleId !== right.ruleId) return false;
   if (left.identity && right.identity)
     return scanFindingIdentity(left) === scanFindingIdentity(right);
+  const leftExplicitCandidate = findingIdentityCandidate(left);
+  const rightExplicitCandidate = findingIdentityCandidate(right);
+  if (
+    leftExplicitCandidate &&
+    rightExplicitCandidate &&
+    leftExplicitCandidate !== rightExplicitCandidate
+  )
+    return false;
   const leftCandidate = findingCandidateId(left);
-  const rightCandidate = findingCandidateId(right);
-  if (leftCandidate && rightCandidate) return leftCandidate === rightCandidate;
+  if (leftCandidate && leftCandidate === findingCandidateId(right)) return true;
   return (
     scanFindingIdentity({ ...left, identity: undefined }) ===
     scanFindingIdentity({ ...right, identity: undefined })
@@ -1792,6 +1799,16 @@ export function scanFindingIdentity(finding: JsonObject): string {
     location.startLine,
     location.endLine ?? null,
   ]);
+}
+
+function findingIdentityCandidate(finding: JsonObject): string | undefined {
+  return [
+    (finding.extensions as JsonObject | undefined)?.candidateId,
+    (finding.provenance as JsonObject | undefined)?.candidateId,
+  ].find(
+    (value): value is string =>
+      typeof value === "string" && Boolean(value.trim()),
+  );
 }
 
 function findingCandidateId(finding: JsonObject): string | undefined {
@@ -2303,13 +2320,8 @@ function buildScope(
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
-    const candidateId =
-      (finding.extensions as JsonObject | undefined)?.candidateId ??
-      findingCandidateId(finding);
     const identitySource =
-      typeof candidateId === "string" && candidateId.trim()
-        ? candidateId
-        : (finding.title as string);
+      findingIdentityCandidate(finding) ?? (finding.title as string);
     const anchor =
       finding.identity === undefined
         ? semanticIdentifier(identitySource, `finding-${index + 1}`)

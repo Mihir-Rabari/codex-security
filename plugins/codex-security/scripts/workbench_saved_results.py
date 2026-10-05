@@ -12,6 +12,8 @@ import re
 import sqlite3
 import stat
 import sys
+import unicodedata
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -611,16 +613,68 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ensure_finding_identity(finding: Any) -> None:
-    if not isinstance(finding, dict) or "identity" in finding:
-        return
-    extensions = finding.get("extensions")
-    source = str(
-        (extensions.get("candidateId") if isinstance(extensions, dict) else None)
-        or finding.get("title")
-        or "finding"
+    _ensure_finding_identities([finding])
+
+
+def _semantic_identifier(value: str, fallback: str) -> str:
+    normalized = re.sub(r"[\u0300-\u036f]", "", unicodedata.normalize("NFKD", value))
+    identifier = re.sub(r"[^a-z0-9._/-]+", "-", normalized.lower())
+    return re.sub(r"^[^a-z0-9]+|-+$", "", identifier) or fallback
+
+
+def _ensure_finding_identities(
+    findings: list[Any], sibling_indices: set[int] | None = None
+) -> None:
+    """Use the same candidate, anchor and sibling rules as draft publication."""
+    anchors: dict[int, Any] = {}
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            continue
+        identity = finding.get("identity")
+        if "identity" in finding:
+            anchors[index] = identity.get("anchor") if isinstance(identity, dict) else None
+            continue
+        candidate = next(
+            (
+                value
+                for section in (finding.get("extensions"), finding.get("provenance"))
+                if isinstance(section, dict)
+                and isinstance(value := section.get("candidateId"), str)
+                and value.strip()
+            ),
+            None,
+        )
+        anchors[index] = _semantic_identifier(
+            candidate or str(finding.get("title") or "finding"), f"finding-{index + 1}"
+        )
+    counts = Counter(
+        _digest([findings[index].get("ruleId"), anchor]) for index, anchor in anchors.items()
     )
-    anchor = re.sub(r"[^a-z0-9._/-]+", "-", source.lower()).strip("._/-") or "finding"
-    finding["identity"] = {"anchor": anchor}
+    for index, anchor in anchors.items():
+        finding = findings[index]
+        if "identity" in finding:
+            continue
+        identity = {"anchor": anchor}
+        extensions = finding.get("extensions")
+        sibling = next(
+            (
+                value
+                for field in ("reportId", "ledgerRowId")
+                if isinstance(extensions, dict)
+                and isinstance(value := extensions.get(field), str)
+                and value.strip()
+            ),
+            None,
+        )
+        if (
+            sibling
+            or (sibling_indices is not None and index in sibling_indices)
+            or counts[_digest([finding.get("ruleId"), anchor])] > 1
+        ):
+            identity["instance"] = _semantic_identifier(
+                sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
+            )
+        finding["identity"] = identity
 
 
 def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -1845,7 +1899,18 @@ def merge_saved_results(
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
-        for value in draft["findings"]:
+        normalized_findings = copy.deepcopy(draft["findings"])
+        _ensure_finding_identities(
+            normalized_findings,
+            {
+                index
+                for index, value in enumerate(draft["findings"])
+                if isinstance(value, dict)
+                and isinstance(value.get("provenance"), dict)
+                and checkpoint_identity_keys(value, worker_id)[1] in ambiguous_checkpoint_candidates
+            },
+        )
+        for value, normalized in zip(draft["findings"], normalized_findings, strict=True):
             if skip_superseded_findings and not (
                 isinstance(value, dict)
                 and (candidate_id := finding_candidate_id(value)) in selected_candidates
@@ -1943,7 +2008,7 @@ def merge_saved_results(
                         if preserved_identity is not None:
                             provenance["preservedIdentity"] = preserved_identity
                         break
-            _ensure_finding_identity(finding)
+            finding.setdefault("identity", normalized["identity"])
             if not valid_finding(finding):
                 findings.append(finding)
                 continue
