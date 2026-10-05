@@ -1548,11 +1548,11 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
-    checkpoint_identities: dict[str, tuple[dict[str, Any], Any] | None] = {}
+    checkpoint_identities: dict[str, tuple[dict[str, Any], Any, tuple[Any, Any]] | None] = {}
 
     def checkpoint_identity_keys(
         finding: dict[str, Any], owner: str | None = None
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, tuple[Any, Any]]:
         provenance = finding.get("provenance", {})
         extensions = finding.get("extensions")
         if not isinstance(extensions, dict):
@@ -1563,17 +1563,11 @@ def merge_saved_results(
                 finding_candidate_id(finding),
                 finding.get("ruleId"),
                 _finding_locations(finding),
-                extensions.get("reportId"),
-                extensions.get("ledgerRowId"),
             ]
         )
-        sibling = _digest(
-            [
-                candidate,
-                finding.get("title"),
-            ]
-        )
-        return sibling, candidate
+        identifiers = (extensions.get("reportId"), extensions.get("ledgerRowId"))
+        sibling = _digest([candidate, finding.get("title"), *identifiers])
+        return sibling, candidate, identifiers
 
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
@@ -1582,8 +1576,13 @@ def merge_saved_results(
             if valid_finding(finding):
                 identity = finding.get("identity")
                 if isinstance(identity, dict) and finding_candidate_id(finding):
-                    saved_identity = (identity, finding["provenance"].get("preservedIdentity"))
-                    for source_key in checkpoint_identity_keys(finding):
+                    sibling, candidate, identifiers = checkpoint_identity_keys(finding)
+                    saved_identity = (
+                        identity,
+                        finding["provenance"].get("preservedIdentity"),
+                        identifiers,
+                    )
+                    for source_key in (sibling, candidate):
                         if source_key not in checkpoint_identities:
                             checkpoint_identities[source_key] = saved_identity
                         elif checkpoint_identities[source_key] != saved_identity:
@@ -1824,7 +1823,7 @@ def merge_saved_results(
         source_siblings: dict[str, set[str]] = {}
         for value in draft["findings"]:
             if isinstance(value, dict) and isinstance(value.get("provenance"), dict):
-                sibling, candidate = checkpoint_identity_keys(value, worker_id)
+                sibling, candidate, _ = checkpoint_identity_keys(value, worker_id)
                 source_siblings.setdefault(candidate, set()).add(sibling)
         for value in draft["findings"]:
             if skip_superseded_findings and not (
@@ -1900,14 +1899,20 @@ def merge_saved_results(
             # Reuse generated identities from the canonical parent, including the
             # original identity retained when distinct source locations collided.
             if "identity" not in finding:
-                sibling, candidate = checkpoint_identity_keys(finding)
+                sibling, candidate, identifiers = checkpoint_identity_keys(finding)
                 source_keys = [sibling]
                 if len(source_siblings.get(candidate, ())) == 1:
                     source_keys.append(candidate)
                 for source_key in source_keys:
                     saved_identity = checkpoint_identities.get(source_key)
                     if saved_identity is not None:
-                        identity, preserved_identity = copy.deepcopy(saved_identity)
+                        # Missing report metadata may be enriched; conflicting IDs name siblings.
+                        if any(
+                            current is not None and saved is not None and current != saved
+                            for current, saved in zip(identifiers, saved_identity[2], strict=True)
+                        ):
+                            continue
+                        identity, preserved_identity, _ = copy.deepcopy(saved_identity)
                         finding["identity"] = identity
                         if preserved_identity is not None:
                             provenance["preservedIdentity"] = preserved_identity

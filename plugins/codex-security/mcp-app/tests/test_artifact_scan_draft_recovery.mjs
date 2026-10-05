@@ -50,6 +50,8 @@ for (const layout of ["standard", "diff", "deep"]) {
     "new-sibling",
     "new-worker-sibling",
     "range-refinement",
+    "report-added",
+    "ledger-added",
     "report-id",
     "ledger-id",
     "worker-report-id",
@@ -103,6 +105,13 @@ for (const layout of ["standard", "diff", "deep"]) {
             { ...f.draft(), findings: findings.slice(1) },
             false,
           );
+        if (variant.endsWith("-added")) {
+          findings[0].extensions = {
+            [variant === "report-added" ? "reportId" : "ledgerRowId"]:
+              "synthetic-report-1",
+          };
+          await f.write({ ...f.draft(), findings });
+        }
         if (variant === "range-refinement") {
           findings[0].locations[0].endLine = 1;
           await f.write({ ...f.draft(), findings });
