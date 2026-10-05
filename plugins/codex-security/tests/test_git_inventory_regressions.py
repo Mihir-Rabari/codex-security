@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sqlite3
 import subprocess
@@ -144,3 +146,33 @@ def test_dirty_submodule_warning_preserves_the_changed_target_detail(tmp_path: P
     assert "Dirty Git submodules" in warning
     assert "child" in warning
     assert "results were saved" in warning
+
+
+def test_committed_binary_detection_agrees_beyond_preview_window(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    base = git(target, "rev-parse", "HEAD").decode()
+    (target / "payload.php").write_bytes(b"<?php\n" + b" " * (70 * 1024) + b"\0payload")
+    (target / "visible.py").write_text("value = 1\n")
+    git(target, "add", ".")
+    git(target, "commit", "-qm", "Add source and binary fixtures")
+    inventory_path = tmp_path / "inventory.txt"
+    rank_path = tmp_path / "rank.jsonl"
+    load_script("generate_in_scope_files").generate_diff_in_scope_files(
+        target, base, "HEAD", "revisions", inventory_path
+    )
+    load_script("generate_rank_input").make_diff_rank_input(
+        argparse.Namespace(
+            repo=str(target),
+            base=base,
+            head="HEAD",
+            mode="revisions",
+            out=str(rank_path),
+            area="fixture",
+            preview_bytes=1024,
+        )
+    )
+    assert inventory_path.read_text().splitlines() == ["visible.py"]
+    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == [
+        "visible.py"
+    ]

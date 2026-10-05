@@ -711,3 +711,21 @@ def test_javascript_division_after_parentheses_keeps_following_methods(expressio
     preview, binary = preview_for_bytes(Path("fixture.js"), source.encode(), DEFAULT_PREVIEW_BYTES)
     assert not binary
     assert "method Fixture.later" in preview
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expression"),
+    [
+        (".js", "4\n / 2"),
+        (".js", "value\n / 2"),
+        (".jsx", "<Widget value={value} />"),
+        (".js", "value\n / [1, /}/.test(value)].length"),
+    ],
+)
+def test_non_regex_slashes_keep_following_methods(suffix: str, expression: str) -> None:
+    source = f"class Fixture {{\n first() {{ return {expression}; }}\n later() {{}}\n}}\n"
+    preview, binary = preview_for_bytes(
+        Path("fixture" + suffix), source.encode(), DEFAULT_PREVIEW_BYTES
+    )
+    assert not binary
+    assert "method Fixture.later" in preview

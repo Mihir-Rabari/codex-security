@@ -741,7 +741,9 @@ export async function gitOutput(
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(args[0] === "rev-parse" || args[0] === "config"),
+    isolatedGitEnvironment(
+      args[0] === "rev-parse" || args[0] === "config" || args[0] === "ls-files",
+    ),
     (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
   );
   if (command === null)

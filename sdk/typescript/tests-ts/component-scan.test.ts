@@ -958,6 +958,55 @@ test("component inventory uses the shared Git runner without fsmonitor callbacks
   expect(await stat(marker).catch(() => null)).toBeNull();
 });
 
+test.each(["inline", "global"])(
+  "component inventory preserves inherited %s Git exclusions",
+  async (configuration) => {
+    const paths = await fixture();
+    execFileSync("git", ["-C", paths.repository, "init", "-q"]);
+    const excludes = join(paths.root, "excludes");
+    const config = join(paths.root, "gitconfig");
+    await writeFile(excludes, "ignored.ts\n");
+    await writeFile(join(paths.repository, "ignored.ts"), "export {};\n");
+    execFileSync("git", [
+      "config",
+      "--file",
+      config,
+      "core.excludesFile",
+      excludes,
+    ]);
+    const previousEnvironment = process.env;
+    process.env = {
+      ...previousEnvironment,
+      ...(configuration === "inline"
+        ? {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.excludesFile",
+            GIT_CONFIG_VALUE_0: excludes,
+          }
+        : { GIT_CONFIG_GLOBAL: config }),
+    };
+    try {
+      const plan = await planComponents(paths.repository, {
+        codex: {
+          startThread: () => ({
+            async run(prompt) {
+              expect(prompt).not.toContain("ignored.ts");
+              return {
+                finalResponse: JSON.stringify({ components: [components[0]] }),
+              };
+            },
+          }),
+        },
+      });
+      expect(plan.components.flatMap(({ paths }) => paths)).not.toContain(
+        "ignored.ts",
+      );
+    } finally {
+      process.env = previousEnvironment;
+    }
+  },
+);
+
 test("component inventory reports broken Git configuration without walking ignored files", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);

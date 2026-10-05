@@ -234,7 +234,10 @@ def python_outline(text: str) -> list[str]:
 
 
 def javascript_regex_end(
-    text: str, start: int, after_control_condition: bool = False
+    text: str,
+    start: int,
+    failed_positions: set[tuple[int, bool]],
+    after_control_condition: bool = False,
 ) -> int | None:
     if start + 1 >= len(text) or text[start + 1] in {"/", "*"}:
         return None
@@ -250,10 +253,15 @@ def javascript_regex_end(
 
     index = start + 1
     in_character_class = False
+    visited: list[tuple[int, bool]] = []
     while index < len(text):
+        position = (index, in_character_class)
+        if position in failed_positions:
+            break
+        visited.append(position)
         char = text[index]
         if char == "\n":
-            return index
+            break
         if char == "\\" and index + 1 < len(text):
             index += 2
             continue
@@ -267,7 +275,9 @@ def javascript_regex_end(
                 index += 1
             return index
         index += 1
-    return len(text)
+    # Failed scans may share a suffix, but they must leave division and JSX text intact.
+    failed_positions.update(visited)
+    return None
 
 
 def mask_c_style_source(text: str, suffix: str) -> str:
@@ -280,6 +290,7 @@ def mask_c_style_source(text: str, suffix: str) -> str:
     heredoc_terminator = ""
     control_parentheses: list[bool] = []
     after_control_condition = False
+    failed_regex_positions: set[tuple[int, bool]] = set()
     while index < len(text):
         char = text[index]
         next_char = text[index + 1] if index + 1 < len(text) else ""
@@ -402,7 +413,9 @@ def mask_c_style_source(text: str, suffix: str) -> str:
                 index += len(token)
                 continue
         if suffix in JAVASCRIPT_EXTENSIONS and char == "/":
-            regex_end = javascript_regex_end(text, index, after_control_condition)
+            regex_end = javascript_regex_end(
+                text, index, failed_regex_positions, after_control_condition
+            )
             if regex_end is not None:
                 masked.extend(" " * (regex_end - index))
                 index = regex_end
