@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -11,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const compiled = await build({
@@ -67,6 +70,7 @@ try {
   await testWorkerStandardLayout();
   await testSafeJsonAndJsonl();
   await testAtomicReplacement();
+  await testInterruptedReplacement();
   await testBoundedPagination();
   await testUnsafeArtifacts();
 } finally {
@@ -448,6 +452,55 @@ async function testAtomicReplacement() {
   assert.deepEqual(await readdir(path.dirname(destination)), [
     "candidate_ledger.jsonl",
   ]);
+}
+
+async function testInterruptedReplacement() {
+  const destination = path.join(context.root, "interrupted.json");
+  await io.replaceArtifactJson(destination, { generation: "previous" });
+  const modulePath = path.join(fixture, "artifact-io.mjs");
+  await writeFile(
+    modulePath,
+    compiled.outputFiles.find(
+      (file) => path.basename(file.path) === "artifact-io.js",
+    ).contents,
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+    import { promises as fs } from "node:fs";
+    const io = await import(${JSON.stringify(pathToFileURL(modulePath).href)});
+    fs.rename = async () => {
+      setInterval(() => {}, 1000);
+      process.send("replacement-ready");
+      await new Promise(() => {});
+    };
+    await io.replaceArtifactJson(${JSON.stringify(destination)}, { generation: "interrupted" });
+  `,
+    ],
+    { stdio: ["ignore", "ignore", "inherit", "ipc"] },
+  );
+  const exited = once(child, "exit");
+  try {
+    const [message] = await once(child, "message", {
+      signal: AbortSignal.timeout(30_000),
+    });
+    assert.equal(message, "replacement-ready");
+    assert.equal(child.kill("SIGKILL"), true);
+    await exited;
+    assert.deepEqual(JSON.parse(await readFile(destination, "utf8")), {
+      generation: "previous",
+    });
+    await io.replaceArtifactJson(destination, { generation: "restarted" });
+    assert.deepEqual(JSON.parse(await readFile(destination, "utf8")), {
+      generation: "restarted",
+    });
+  } finally {
+    child.kill("SIGKILL");
+    await exited;
+  }
 }
 
 async function testBoundedPagination() {
