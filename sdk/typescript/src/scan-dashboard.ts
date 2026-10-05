@@ -158,15 +158,25 @@ export class ScanDashboard {
   #view: "activity" | "details" = "activity";
   #source: "all" | "main" | number = "all";
   #inputWasRaw = false;
+  #inputSuffix = "";
   #noteCount = 0;
   #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      this.#inputSuffix +
+      (typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    const keys: string[] = [];
+    for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]?|[\s\S]/gu) ??
+      []) {
+      if (/^\u001B[\[O][0-?]*[ -/]*$/u.test(key)) this.#inputSuffix = key;
+      else {
+        this.#inputSuffix = "";
+        keys.push(key);
+      }
+    }
     if (this.#budget !== null) {
-      for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-        []) {
+      for (const key of keys) {
         const budget = this.#budget;
         if (budget === null) break;
         if (key === "\u0003" || key === "\u0004") {
@@ -198,12 +208,11 @@ export class ScanDashboard {
       return;
     }
     if (this.#options.presentation === "components") {
-      this.#componentInput(input);
+      this.#componentInput(keys);
       return;
     }
     let lines = 0;
-    for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-      []) {
+    for (const key of keys) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -295,6 +304,7 @@ export class ScanDashboard {
     if (this.#refreshPending) this.#refresh();
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
+    this.#inputSuffix = "";
     this.#budget?.finish();
     const input = this.#options.input;
     try {
@@ -692,9 +702,8 @@ export class ScanDashboard {
     );
   }
 
-  #componentInput(input: string): void {
-    for (const key of input.match(/\u001B[\[O][0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-      []) {
+  #componentInput(keys: readonly string[]): void {
+    for (const key of keys) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {

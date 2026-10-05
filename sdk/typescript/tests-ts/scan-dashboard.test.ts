@@ -73,20 +73,68 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toBe(stopped);
   });
 
-  test("keeps modified SS3 function keys out of worker selection", () => {
+  test("keeps whole and fragmented function keys out of worker selection", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
     const dashboard = createDashboard(stderr.stream, { input });
     dashboard.start();
     input.emit("data", "d");
-    for (const key of ["\u001BO1;5P", "\u001BO1;2Q"]) {
-      input.emit("data", key);
-      expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+    for (const key of ["\u001BO1;5P", "\u001B[1;2Q"]) {
+      for (let split = 2; split <= key.length; split++) {
+        input.emit("data", key.slice(0, split));
+        input.emit("data", key.slice(split));
+        expect(lastFrame(stderr)).not.toContain("DETAILS · worker");
+      }
     }
     input.emit("data", "3");
     expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
     dashboard.stop();
   });
+
+  test("discards incomplete input when the dashboard restarts", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(stderr.stream, { input });
+    dashboard.start();
+    input.emit("data", "d");
+    input.emit("data", "\u001BO");
+    dashboard.stop();
+    dashboard.start();
+    input.emit("data", "3");
+    expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
+    dashboard.stop();
+  });
+
+  test.each(["\u001BO", "\u001B[1;"])(
+    "honors Escape and Ctrl-C after incomplete input %j",
+    async (prefix) => {
+      for (const key of ["\u001B", "\u0003"]) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        const interrupted = mock(() => {});
+        const dashboard = createDashboard(stderr.stream, {
+          input,
+          onInterrupt: interrupted,
+        });
+        dashboard.start();
+        const answer = dashboard.requestBudgetIncrease({
+          maxCostUsd: 20,
+          cost: fakeResult([], "complete", {
+            input_tokens: 100,
+            output_tokens: 1,
+          }).cost!,
+          signal: new AbortController().signal,
+        });
+        input.emit("data", prefix);
+        expect(lastFrame(stderr)).toContain("Raise total USD limit");
+        input.emit("data", key);
+        expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
+        expect(interrupted).toHaveBeenCalledTimes(key === "\u0003" ? 1 : 0);
+        await expect(answer).resolves.toBeUndefined();
+        dashboard.stop();
+      }
+    },
+  );
 
   test("styles numeric inline content without matching its timestamp", () => {
     const stderr = capture(true);
@@ -429,10 +477,12 @@ describe("live scan dashboard", () => {
       cost,
       signal: controller.signal,
     });
-    input.emit("data", "\u001BO1;5P");
-    expect(stderr.text().split("\u001B[H").at(-1)).toContain(
-      "Raise total USD limit",
-    );
+    for (const chunk of ["\u001BO", "1;", "5P", "\u001B[1", ";5P"]) {
+      input.emit("data", chunk);
+      expect(stderr.text().split("\u001B[H").at(-1)).toContain(
+        "Raise total USD limit",
+      );
+    }
     input.emit("data", "-30\r");
     expect(stderr.text()).toContain("Enter a finite total above");
     input.emit("data", "\u00150\r");
@@ -608,13 +658,16 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API only activity");
     expect(frame()).not.toContain("Web only activity");
     expect(frame()).toContain("$1.00");
-    input.emit("data", "\u001BO1;5P");
-    expect(frame()).toContain("API only activity");
+    for (const chunk of ["\u001BO", "1;5P"]) {
+      input.emit("data", chunk);
+      expect(frame()).toContain("API only activity");
+    }
     input.emit("data", "d");
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");
     input.emit("data", "\u001B");
-    input.emit("data", "\u001B[B\r");
+    input.emit("data", "\u001B[");
+    input.emit("data", "B\r");
     expect(frame()).toContain("Web only activity");
     expect(frame()).not.toContain("API only activity");
     dashboard.updateComponent({
