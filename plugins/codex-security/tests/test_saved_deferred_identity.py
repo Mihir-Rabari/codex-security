@@ -801,7 +801,7 @@ def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
 
 @pytest.mark.parametrize("metadata", ["extensions", "provenance"])
 @pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
-def test_worker_report_metadata_enrichment_keeps_first_identity(
+def test_worker_report_metadata_enrichment_matches_published_identity(
     tmp_path, saved_results, metadata, identifier
 ):
     first = {
@@ -824,7 +824,7 @@ def test_worker_report_metadata_enrichment_keeps_first_identity(
     for result in (documents, replay):
         assert len(result[1]["findings"]) == 1
         assert result[1]["findings"][0]["identity"] == {
-            "anchor": "synthetic-report",
+            "anchor": "candidate-1",
             "instance": "report-1",
         }
     assert documents[1] == replay[1]

@@ -551,15 +551,20 @@ def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     return _saved_results_changed(db, connection, scan)
 
 
-def _finding_key(finding: dict[str, Any]) -> str:
-    # Wording and evidence may improve between checkpoints; distinct source locations
-    # must not collide merely because two workers chose the same semantic identity.
+def _finding_identity(finding: dict[str, Any]) -> Any:
     provenance = finding.get("provenance")
-    identity = (
+    return (
         provenance.get("preservedIdentity", finding.get("identity"))
         if isinstance(provenance, dict)
         else finding.get("identity")
     )
+
+
+def _finding_key(finding: dict[str, Any]) -> str:
+    # Wording and evidence may improve between checkpoints; distinct source locations
+    # must not collide merely because two workers chose the same semantic identity.
+    provenance = finding.get("provenance")
+    identity = _finding_identity(finding)
     if not isinstance(identity, dict):
         normalized = dict(finding)
         normalized.pop("identity", None)
@@ -592,12 +597,7 @@ def _worker_candidate_key(
     worker_id: str, candidate_id: str, finding: dict[str, Any]
 ) -> tuple[str, str, Any, Any, Any]:
     """Identify one worker-local candidate without merging unrelated locations."""
-    provenance = finding.get("provenance")
-    identity = (
-        provenance.get("preservedIdentity", finding.get("identity"))
-        if isinstance(provenance, dict)
-        else finding.get("identity")
-    )
+    identity = _finding_identity(finding)
     if not isinstance(identity, dict):
         normalized = dict(finding)
         _ensure_finding_identity(normalized)
@@ -639,9 +639,7 @@ def _semantic_identifier(value: str, fallback: str) -> str:
     return re.sub(r"^[^a-z0-9]+|-+$", "", identifier) or fallback
 
 
-def _ensure_finding_identities(
-    findings: list[Any], sibling_indices: set[int] | None = None
-) -> None:
+def _ensure_finding_identities(findings: list[Any]) -> None:
     """Use the same candidate, anchor and sibling rules as draft publication."""
     anchors: dict[int, Any] = {}
     for index, finding in enumerate(findings):
@@ -674,11 +672,7 @@ def _ensure_finding_identities(
             ),
             None,
         )
-        if (
-            sibling
-            or (sibling_indices is not None and index in sibling_indices)
-            or counts[_digest([finding.get("ruleId"), anchor])] > 1
-        ):
+        if sibling or counts[_digest([finding.get("ruleId"), anchor])] > 1:
             identity["instance"] = _semantic_identifier(
                 sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
             )
@@ -1628,45 +1622,11 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
-    checkpoint_identities: dict[str, tuple[dict[str, Any], Any, tuple[Any, Any]] | None] = {}
-
-    def checkpoint_identity_keys(
-        finding: dict[str, Any], owner: str | None = None
-    ) -> tuple[str, str, tuple[Any, Any]]:
-        provenance = finding.get("provenance", {})
-        extensions = finding.get("extensions")
-        if not isinstance(extensions, dict):
-            extensions = {}
-        candidate = _digest(
-            [
-                provenance.get("workerId", owner),
-                finding_candidate_id(finding),
-                finding.get("ruleId"),
-                _finding_locations(finding),
-            ]
-        )
-        identifiers = (extensions.get("reportId"), extensions.get("ledgerRowId"))
-        sibling = _digest([candidate, finding.get("title"), *identifiers])
-        return sibling, candidate, identifiers
-
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
         for finding in parent["findings"]:
             if valid_finding(finding):
-                identity = finding.get("identity")
-                if isinstance(identity, dict) and finding_candidate_id(finding):
-                    sibling, candidate, identifiers = checkpoint_identity_keys(finding)
-                    saved_identity = (
-                        identity,
-                        finding["provenance"].get("preservedIdentity"),
-                        identifiers,
-                    )
-                    for source_key in (sibling, candidate):
-                        if source_key not in checkpoint_identities:
-                            checkpoint_identities[source_key] = saved_identity
-                        elif checkpoint_identities[source_key] != saved_identity:
-                            checkpoint_identities[source_key] = None
                 canonical_key = _finding_key(finding)
                 for retained in _retained_findings(finding):
                     retained_key = _finding_key(retained)
@@ -1805,57 +1765,114 @@ def merge_saved_results(
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
             )
-    ambiguous_checkpoint_candidates: set[str] = set()
-    for _, draft, owner in all_sources:
-        siblings: dict[str, set[str]] = {}
-        for value in draft["findings"]:
-            if (
-                isinstance(value, dict)
-                and isinstance(value.get("provenance"), dict)
-                and _identity_candidate(value)
-            ):
-                sibling, candidate, _ = checkpoint_identity_keys(value, owner)
-                siblings.setdefault(candidate, set()).add(sibling)
-        ambiguous_checkpoint_candidates.update(
-            candidate for candidate, keys in siblings.items() if len(keys) > 1
+    # Reconcile raw records before generating context-dependent publication IDs.
+    logical_rows: list[dict[str, Any]] = []
+    row_groups: dict[tuple[str, int], dict[str, Any]] = {}
+    published_groups: list[dict[str, Any]] = []
+
+    def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
+        extensions = value.get("extensions")
+        return tuple(
+            extensions.get(field) if isinstance(extensions, dict) else None
+            for field in ("reportId", "ledgerRowId")
         )
 
-    def report_identity_key(finding: Any, owner: str | None) -> str | None:
-        if not isinstance(finding, dict):
-            return None
-        extensions = finding.get("extensions")
-        if not isinstance(extensions, dict) or not any(
-            isinstance(extensions.get(field), str) and extensions[field].strip()
-            for field in ("reportId", "ledgerRowId")
-        ):
-            return None
-        provenance = finding.get("provenance")
-        if isinstance(provenance, dict):
-            owner = provenance.get("workerId", owner)
-        # Adding candidate metadata does not change a saved report. Keep all
-        # other content, typed report/ledger IDs, and worker ownership exact.
-        content = {
-            **finding,
-            "extensions": {key: value for key, value in extensions.items() if key != "candidateId"},
-        }
-        return legacy_identity_key(content, owner)
-
-    report_candidates: dict[str, set[str]] = {}
-    report_identities: dict[str, dict[str, Any]] = {}
-    for relative, draft, owner in sorted(all_sources, key=lambda source: source_order[source[0]]):
-        normalized = copy.deepcopy(draft["findings"])
-        _ensure_finding_identities(normalized)
-        for original, value in zip(draft["findings"], normalized, strict=True):
-            report_key = report_identity_key(original, owner)
-            if report_key is None or not valid_finding(value):
-                continue
-            candidate = _identity_candidate(original)
-            if candidate:
-                report_candidates.setdefault(report_key, set()).add(candidate)
-            if report_key not in report_identities or (
-                relative == "parent" and parent_is_canonical and "identity" in original
+    def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if left.get("ruleId") != right.get("ruleId") or _finding_locations(
+            left
+        ) != _finding_locations(right):
+            return False
+        if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
+            return _finding_identity(left) == _finding_identity(right)
+        candidates = (_identity_candidate(left), _identity_candidate(right))
+        if all(candidates) and candidates[0] != candidates[1]:
+            return False
+        pairs = list(zip(identifiers(left), identifiers(right), strict=True))
+        if any(a is not None for a, _ in pairs) and any(b is not None for _, b in pairs):
+            if not any(a is not None and b is not None for a, b in pairs) or any(
+                a is not None and b is not None and a != b for a, b in pairs
             ):
-                report_identities[report_key] = value["identity"]
+                return False
+        return True
+
+    def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        def content(value: dict[str, Any]) -> dict[str, Any]:
+            result = _finding_content(value)
+            if isinstance(result.get("extensions"), dict):
+                result["extensions"] = {
+                    key: value
+                    for key, value in result["extensions"].items()
+                    if key not in {"candidateId", "reportId", "ledgerRowId"}
+                }
+                if not result["extensions"]:
+                    result.pop("extensions")
+            return result
+
+        return content(left) == content(right)
+
+    for relative, draft, source_owner in sorted(
+        all_sources, key=lambda item: source_order[item[0]]
+    ):
+        current = [
+            (index, value)
+            for index, value in enumerate(draft["findings"])
+            if isinstance(value, dict) and valid_finding(value)
+        ]
+        prior = list(logical_rows)
+        current_groups: list[dict[str, Any]] = []
+        for index, value in current:
+            provenance = value.get("provenance", {})
+            owner = provenance.get("workerId", source_owner)
+            matches = [
+                group
+                for group in prior
+                if group["owner"] == owner
+                and all(same_raw_finding(value, previous) for previous in group["rows"])
+            ]
+            exact = [
+                group
+                for group in matches
+                if any(same_raw_content(value, previous) for previous in group["rows"])
+            ]
+            match = None
+            if (
+                len(matches) == 1
+                and sum(same_raw_finding(sibling, value) for _, sibling in current) == 1
+            ):
+                match = matches[0]
+            elif (
+                len(exact) == 1
+                and sum(same_raw_content(sibling, value) for _, sibling in current) == 1
+            ):
+                match = exact[0]
+            if match is None:
+                match = {
+                    "owner": owner,
+                    "rows": [],
+                    "identity": None,
+                    "key": f"raw:{len(logical_rows)}",
+                }
+                logical_rows.append(match)
+            match["rows"].append(value)
+            match["latest"] = value
+            if "identity" in value and (match["identity"] is None or relative == "parent"):
+                match["identity"] = copy.deepcopy(_finding_identity(value))
+            row_groups[(relative, index)] = match
+            current_groups.append(match)
+        if source_owner is None:
+            ordered = current_groups + [
+                group for group in published_groups if group not in current_groups
+            ]
+            normalized = []
+            for group in ordered:
+                value = copy.deepcopy(group["latest"])
+                if group["identity"] is not None:
+                    value["identity"] = copy.deepcopy(group["identity"])
+                normalized.append(value)
+            _ensure_finding_identities(normalized)
+            for group, value in zip(ordered, normalized, strict=True):
+                group["identity"] = value["identity"]
+            published_groups = ordered
 
     generated_worker_findings: list[dict[str, Any]] = []
     for relative, draft, worker_id in all_sources:
@@ -1954,17 +1971,10 @@ def merge_saved_results(
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
         normalized_findings = copy.deepcopy(draft["findings"])
-        _ensure_finding_identities(
-            normalized_findings,
-            {
-                index
-                for index, value in enumerate(draft["findings"])
-                if isinstance(value, dict)
-                and isinstance(value.get("provenance"), dict)
-                and checkpoint_identity_keys(value, worker_id)[1] in ambiguous_checkpoint_candidates
-            },
-        )
-        for value, normalized in zip(draft["findings"], normalized_findings, strict=True):
+        _ensure_finding_identities(normalized_findings)
+        for index, (value, normalized) in enumerate(
+            zip(draft["findings"], normalized_findings, strict=True)
+        ):
             if skip_superseded_findings and not (
                 isinstance(value, dict)
                 and (candidate_id := finding_candidate_id(value)) in selected_candidates
@@ -2035,46 +2045,20 @@ def merge_saved_results(
                 continue
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
-            # Reuse generated identities from the canonical parent, including the
-            # original identity retained when distinct source locations collided.
-            if "identity" not in finding:
-                sibling, candidate, identifiers = checkpoint_identity_keys(finding)
-                source_keys = [sibling]
-                if candidate not in ambiguous_checkpoint_candidates:
-                    source_keys.append(candidate)
-                for source_key in source_keys:
-                    saved_identity = checkpoint_identities.get(source_key)
-                    if saved_identity is not None:
-                        # Missing metadata may be enriched; disjoint or conflicting IDs name siblings.
-                        saved_ids = saved_identity[2]
-                        if identifiers != (None, None) and saved_ids != (None, None):
-                            pairs = list(zip(identifiers, saved_ids, strict=True))
-                            if not any(
-                                current is not None and saved is not None
-                                for current, saved in pairs
-                            ) or any(
-                                current is not None and saved is not None and current != saved
-                                for current, saved in pairs
-                            ):
-                                continue
-                        identity, preserved_identity, _ = copy.deepcopy(saved_identity)
-                        finding["identity"] = identity
-                        if preserved_identity is not None:
-                            provenance["preservedIdentity"] = preserved_identity
-                        break
-            report_key = report_identity_key(finding, worker_id)
-            if (
-                report_key in report_identities
-                and len(report_candidates.get(report_key, set())) <= 1
-            ):
-                finding.setdefault("identity", copy.deepcopy(report_identities[report_key]))
+            group = row_groups.get((relative, index))
+            if group is not None and group["identity"] is not None:
+                finding.setdefault("identity", copy.deepcopy(group["identity"]))
             if worker_id is not None and "identity" not in finding:
                 generated_worker_findings.append(finding)
             finding.setdefault("identity", normalized["identity"])
             if not valid_finding(finding):
                 findings.append(finding)
                 continue
-            key = _finding_key(finding)
+            key = (
+                group["key"]
+                if group is not None and group["identity"] is None
+                else _finding_key(finding)
+            )
             represented_by_parent = False
             if relative != "parent":
                 history_key = _finding_key(value)
@@ -2102,8 +2086,15 @@ def merge_saved_results(
             if key in finding_positions:
                 retained = findings[finding_positions[key]]
                 if finding != retained:
-                    if not represented_by_parent and _finding_strength(finding) > _finding_strength(
-                        retained
+                    if not represented_by_parent and (
+                        _finding_strength(finding) > _finding_strength(retained)
+                        or (
+                            _finding_strength(finding) == _finding_strength(retained)
+                            and group is not None
+                            and group["identity"] is None
+                            and value is group["latest"]
+                            and same_raw_content(finding, retained)
+                        )
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
