@@ -45,37 +45,48 @@ function copyDirectory(
  * Give Codex a throwaway working directory that contains only the skill files
  * it needs. The label-bearing dataset and Promptfoo harness stay in EVAL_ROOT.
  */
-const promptfooArgs = process.argv.slice(2);
-if (promptfooArgs.length === 0) {
-  throw new Error("Expected Promptfoo arguments");
+export function stageSkillRuntime() {
+  const runtimeRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "codex-security-triage-finding-sastbench-"),
+  );
+  const stagedPluginRoot = path.join(runtimeRoot, "plugins", "codex-security");
+  copyDirectory(
+    TRIAGE_SKILL_ROOT,
+    path.join(stagedPluginRoot, "skills", "triage-finding"),
+    new Set(["evals"]),
+  );
+  for (const sharedDirectory of ["references", "schemas"]) {
+    const sourcePath = path.join(PLUGIN_ROOT, sharedDirectory);
+    if (fs.existsSync(sourcePath)) {
+      copyDirectory(sourcePath, path.join(stagedPluginRoot, sharedDirectory));
+    }
+  }
+  return runtimeRoot;
 }
-const runtimeRoot = fs.mkdtempSync(
-  path.join(os.tmpdir(), "codex-security-triage-finding-sastbench-"),
-);
-const stagedPluginRoot = path.join(runtimeRoot, "plugins", "codex-security");
-copyDirectory(
-  TRIAGE_SKILL_ROOT,
-  path.join(stagedPluginRoot, "skills", "triage-finding"),
-  new Set(["evals"]),
-);
-for (const sharedDirectory of ["references", "schemas"]) {
-  const sourcePath = path.join(PLUGIN_ROOT, sharedDirectory);
-  if (fs.existsSync(sourcePath)) {
-    copyDirectory(sourcePath, path.join(stagedPluginRoot, sharedDirectory));
+
+export function runPromptfoo(promptfooArgs: string[]) {
+  const runtimeRoot = stageSkillRuntime();
+  const env = {
+    ...process.env,
+    SASTBENCH_RUNTIME_ROOT: runtimeRoot,
+    SASTBENCH_TARGET_ROOT: DEFAULT_TARGET_ROOT,
+    SASTBENCH_GIT_CACHE_ROOT: DEFAULT_CACHE_ROOT,
+  };
+  try {
+    childProcess.execFileSync(PROMPTFOO_BIN, promptfooArgs, {
+      cwd: EVAL_ROOT,
+      env,
+      stdio: "inherit",
+    });
+  } finally {
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
   }
 }
-const env = {
-  ...process.env,
-  SASTBENCH_RUNTIME_ROOT: runtimeRoot,
-  SASTBENCH_TARGET_ROOT: DEFAULT_TARGET_ROOT,
-  SASTBENCH_GIT_CACHE_ROOT: DEFAULT_CACHE_ROOT,
-};
-try {
-  childProcess.execFileSync(PROMPTFOO_BIN, promptfooArgs, {
-    cwd: EVAL_ROOT,
-    env,
-    stdio: "inherit",
-  });
-} finally {
-  fs.rmSync(runtimeRoot, { recursive: true, force: true });
+
+if (import.meta.filename === fs.realpathSync(process.argv[1])) {
+  const promptfooArgs = process.argv.slice(2);
+  if (promptfooArgs.length === 0) {
+    throw new Error("Expected Promptfoo arguments");
+  }
+  runPromptfoo(promptfooArgs);
 }

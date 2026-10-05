@@ -5,7 +5,7 @@ const path = require("node:path");
 const { createRequire } = require("node:module");
 const {
   extractTriageResult,
-} = require("../../sastbench/scripts/sastbench-result.js");
+} = require("../../sastbench/scripts/sastbench-result.mts");
 
 const ROOT = path.resolve(__dirname, "../../../..");
 const sdkRequire = createRequire(

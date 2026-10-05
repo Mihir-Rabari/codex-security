@@ -9,7 +9,7 @@ const { pathToFileURL } = require("node:url");
 const childProcess = require("node:child_process");
 const {
   stageSkillRuntime,
-} = require("../../sastbench/scripts/run-sastbench-promptfoo.js");
+} = require("../../sastbench/scripts/run-sastbench-promptfoo.mts");
 const { CORPUS, FIXTURE_ROOT } = require("./sca-result.js");
 
 const EVAL_ROOT = path.resolve(__dirname, "../..");

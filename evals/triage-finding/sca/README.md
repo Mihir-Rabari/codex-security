@@ -66,10 +66,9 @@ authentication and can incur cost. Promptfoo `--no-cache --no-share` is set in
 the provided scripts. Existing provider error rows are retained by the `afterEach`
 hook even when ordinary assertions never run.
 
-The pinned Codex SDK cannot encode MCP server names containing periods in these
-overrides. With such an inherited server, native configuration loading fails
-before the evaluation can start. The runner leaves the saved configuration
-unchanged.
+The runner passes inherited MCP server names as one literal configuration table
+through the existing launcher, preserving names containing periods. The saved
+configuration stays unchanged.
 
 The pinned model is inherited from the existing calibration suite. Record the
 actual model, CLI/SDK versions, prompt digests, token usage, run date, and settings
