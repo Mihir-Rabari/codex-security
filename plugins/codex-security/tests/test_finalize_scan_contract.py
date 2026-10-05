@@ -819,6 +819,7 @@ The extraction root is not enforced.
                             "path",
                             "start_line",
                             "end_line",
+                            "csv_encoding",
                         ],
                     )
                     row = next(reader)
@@ -907,6 +908,7 @@ The extraction root is not enforced.
 
         self.assertEqual(result.returncode, 0, result.stderr)
         row = next(csv.DictReader(io.StringIO(result.stdout, newline="")))
+        self.assertEqual(row["csv_encoding"], "apostrophe-v1")
         self.assertEqual(row["title"], "'\n=1+1")
         self.assertEqual(row["summary"], "'＝1+1")
         self.assertEqual(row["remediation"], "' \t＋1+1")

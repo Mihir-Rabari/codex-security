@@ -709,7 +709,7 @@ codex-security scan import --csv /path/to/findings.csv --dry-run
 
 Supply exactly one of `--csv PATH` or `--json PATH`. CSV uses the existing
 [findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv),
-including the optional `candidate_id` column. JSON accepts a complete
+including the optional `candidate_id` and `csv_encoding` columns. JSON accepts a complete
 `codex-security.findings` document or `{ "findings": [...] }`, with each finding
 matching the existing findings schema. On `scan import`, `--json` selects the
 input file; use `--format json` for JSON output. Other commands retain their
@@ -1344,7 +1344,8 @@ npx @openai/codex-security publish scan --to cloud \
 ```
 
 The [findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv)
-has the required columns; deep-scan exports may add `candidate_id`. `--csv`
+has the required columns; exports add `csv_encoding`, and deep-scan exports may
+also add `candidate_id`. `--csv`
 only supports Cloud and cannot be combined with scan IDs or directories.
 
 For artifacts outside local history, pass a directory or repeat `--scan-dir PATH`.
@@ -1891,6 +1892,10 @@ cancels the export. `export --help` lists the CLI options.
 
 JSON preserves the sealed findings document. CSV marks findings as open,
 omits local triage state, and cannot go to stdout when JSON output is requested.
+New CSV exports include `csv_encoding=apostrophe-v1` so literal leading
+apostrophes and spreadsheet formula prefixes round-trip without ambiguity.
+Imports without that column retain the legacy decoding behavior. Use a current
+CLI to import the new format; older versions reject its additional column.
 
 For CI, save output outside the checkout and set a severity threshold:
 

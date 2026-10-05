@@ -2669,6 +2669,9 @@ def write_sarif_projection(
     _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
 
 
+CSV_ENCODING = "apostrophe-v1"
+
+
 def csv_cell(value: Any) -> Any:
     if isinstance(value, str) and (
         value.startswith(("\t", "\r", "\n", "'"))
@@ -2715,6 +2718,7 @@ def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
         "path",
         "start_line",
         "end_line",
+        "csv_encoding",
     )
 
 
@@ -2756,6 +2760,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
                 csv_cell(location["path"]),
                 location["startLine"],
                 location.get("endLine", location["startLine"]),
+                CSV_ENCODING,
             )
         )
     return output.getvalue().encode("utf-8")

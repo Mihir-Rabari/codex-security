@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from finalize_scan_contract import (
+    CSV_ENCODING,
     ContractError,
     build_threat_model_export,
     csv_cell,
@@ -442,6 +443,7 @@ def write_csv_export(
                 csv_cell(row["relative_path"]),
                 row["start_line"],
                 row["end_line"],
+                CSV_ENCODING,
             )
         )
     try:

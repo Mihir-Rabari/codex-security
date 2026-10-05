@@ -166,33 +166,69 @@ test("CSV imports retain separate occurrences of the same finding", async () => 
   expect(new Set(bound.map((row) => row.occurrenceId)).size).toBe(2);
 });
 
-test("CSV exports round-trip literal apostrophes and spreadsheet formulas", async () => {
+test("legacy CSV keeps literal apostrophes and its original formula decoding", async () => {
+  for (const [encoded, title] of [
+    ["''literal", "''literal"],
+    ["'ordinary", "'ordinary"],
+    ["'=1+1", "=1+1"],
+  ]) {
+    const parsed = await parseImportedFindings(
+      CSV_SOURCE.replace("Reported CSV import issue", encoded!).replace(
+        "src/extract.ts",
+        "''literal.ts",
+      ),
+      "csv",
+      PLUGIN_ROOT,
+    );
+    expect(parsed[0]!.title).toBe(title!);
+    expect(parsed[0]!.locations[0]!.path).toBe("''literal.ts");
+  }
+});
+
+test("versioned CSV exports round-trip literal apostrophes and spreadsheet formulas", async () => {
   const titles = [
     "'--no-verify' skips hooks",
     "'=1+1",
     "'ordinary",
     "=1+1",
     "''-x",
+    "''literal",
   ];
+  const document = await sourceDocument();
+  document.findings[0]!.locations[0]!.path = "''literal.ts";
   const exported = spawnSync(
     await resolvePluginPython({}),
     [
       "-c",
-      "import json,sys; sys.path.insert(0,sys.argv[1]); from finalize_scan_contract import csv_cell; print(json.dumps([csv_cell(value) for value in json.loads(sys.argv[2])]))",
+      `import json,sys
+sys.path.insert(0,sys.argv[1])
+from finalize_scan_contract import build_csv_projection
+document = json.loads(sys.argv[2])
+exports = []
+for title in json.loads(sys.argv[3]):
+    document["findings"][0]["title"] = title
+    exports.append(build_csv_projection(document, {"mode": "repository"}).decode())
+print(json.dumps(exports))`,
       join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(document),
       JSON.stringify(titles),
     ],
     { encoding: "utf8" },
   );
   expect(exported.status, exported.stderr).toBe(0);
-  for (const [index, title] of (
+  for (const [index, csv] of (
     JSON.parse(exported.stdout) as string[]
   ).entries()) {
-    const parsed = await parseImportedFindings(
-      CSV_SOURCE.replace("Reported CSV import issue", title),
-      "csv",
-      PLUGIN_ROOT,
-    );
+    expect(csv.split("\r\n")[0]).toContain("csv_encoding");
+    const parsed = await parseImportedFindings(csv, "csv", PLUGIN_ROOT);
     expect(parsed[0]!.title).toBe(titles[index]!);
+    expect(parsed[0]!.locations[0]!.path).toBe("''literal.ts");
+    await expect(
+      parseImportedFindings(
+        csv.replace("apostrophe-v1", "unknown"),
+        "csv",
+        PLUGIN_ROOT,
+      ),
+    ).rejects.toThrow("csv_encoding");
   }
 });
