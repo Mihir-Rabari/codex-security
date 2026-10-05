@@ -65,6 +65,7 @@ export async function testDeepScanLifecycle({
       persistRelease: PromiseWithResolvers<void>;
       rejectPersistence: boolean;
       calls: string[];
+      readParent?: () => Promise<{ workspace: typeof current.workspace }>;
       workspace: {
         setup: { submitted: boolean };
         results: { progress: { status: string } };
@@ -80,9 +81,18 @@ export async function testDeepScanLifecycle({
         },
         async workbench([command]: string[]) {
           current.calls.push(command);
-          if (command === "get-scan") return { workspace: current.workspace };
+          if (command === "get-scan")
+            return current.readParent
+              ? await current.readParent()
+              : { workspace: structuredClone(current.workspace) };
+          if (command === "fail-scan") {
+            current.store.run.status = "failed";
+            current.store.run.error = "synthetic external failure";
+            current.workspace.results.progress.status = "failed";
+            return { workspace: current.workspace };
+          }
           assert.equal(command, "cancel-scan");
-          if (current.workspace.results.progress.status === "failed")
+          if (current.workspace.results.progress.status !== "running")
             throw new Error("Only a running scan can be canceled.");
           if (
             current.calls.filter((command) => command === "cancel-scan")
@@ -124,6 +134,7 @@ export async function testDeepScanLifecycle({
     const server = createCodexSecurityServer();
     const cancel =
       server._registeredTools.cancel_codex_security_scan_from_app.handler;
+    const fail = server._registeredTools.fail_codex_security_scan.handler;
     const failures = [];
     try {
       for (const stage of [
@@ -142,6 +153,10 @@ export async function testDeepScanLifecycle({
         "unavailable pending-read failure",
         "stale heartbeat failure",
         "observed interrupted",
+        "unpersisted pending-read external failure",
+        "final read completed parent",
+        "final read parent completes during admission",
+        "onComplete external failure during cleanup",
       ]) {
         for (const rejectPersistence of [false, true]) {
           const fixture = await fixtureRun(config);
@@ -170,6 +185,13 @@ export async function testDeepScanLifecycle({
               >
             | undefined;
           let gateHeartbeat = false;
+          const concurrentFailure = stage.endsWith("external failure");
+          const failureDuringCleanup =
+            stage === "onComplete external failure during cleanup";
+          const completedParent = stage.includes("completed parent");
+          const completesDuringAdmission = stage.includes(
+            "completes during admission",
+          );
           const pendingFailureRead = stage.includes("pending-read");
           const unavailableRead = stage.startsWith("unavailable");
           const lostResponse =
@@ -185,7 +207,9 @@ export async function testDeepScanLifecycle({
             observeFailure ||
             publicationGate ||
             lostResponse ||
-            unavailableRead;
+            unavailableRead ||
+            concurrentFailure ||
+            failureDuringCleanup;
           current = {
             store,
             registry,
@@ -195,8 +219,26 @@ export async function testDeepScanLifecycle({
             calls: [],
             workspace: {
               setup: { submitted: true },
-              results: { progress: { status: "running" } },
+              results: {
+                progress: { status: completedParent ? "completed" : "running" },
+              },
             },
+          };
+          let admissionPaused = false;
+          current.readParent = async () => {
+            const workspace = structuredClone(current.workspace);
+            if (pendingFailureRead && !admissionPaused) {
+              admissionPaused = true;
+              admissionEntered.resolve();
+              await admissionRelease.promise;
+              if (unavailableRead)
+                throw new Error("synthetic terminal state unavailable");
+            }
+            if (completesDuringAdmission)
+              queueMicrotask(() => {
+                current.workspace.results.progress.status = "completed";
+              });
+            return { workspace };
           };
           if (
             stage.startsWith("final read") ||
@@ -206,16 +248,12 @@ export async function testDeepScanLifecycle({
           ) {
             const get = store.get.bind(store);
             let paused = false;
-            let admissionPaused = false;
-            let finalReadPending = false;
             store.get = async () => {
               const snapshot = await get();
-              if (pendingFailureRead && finalReadPending && !admissionPaused) {
+              if (concurrentFailure && paused && !admissionPaused) {
                 admissionPaused = true;
                 admissionEntered.resolve();
                 await admissionRelease.promise;
-                if (unavailableRead)
-                  throw new Error("synthetic terminal state unavailable");
               }
               if (gateHeartbeat) {
                 gateHeartbeat = false;
@@ -230,9 +268,7 @@ export async function testDeepScanLifecycle({
               ) {
                 paused = true;
                 entered.resolve();
-                finalReadPending = true;
                 await release.promise;
-                finalReadPending = false;
               }
               return snapshot;
             };
@@ -276,7 +312,7 @@ export async function testDeepScanLifecycle({
                 : "fixture-owner",
             heartbeatIntervalMs: 60_000,
             onComplete: async () => {
-              if (stage === "onComplete") {
+              if (stage.startsWith("onComplete")) {
                 entered.resolve();
                 await release.promise;
               }
@@ -289,6 +325,17 @@ export async function testDeepScanLifecycle({
               }
             },
             log: (event: { event: string }) => {
+              if (
+                failureDuringCleanup &&
+                event.event === "coordinator_cancel_requested"
+              )
+                void fail(
+                  {
+                    scanId: fixture.run.scanId,
+                    message: "synthetic external failure",
+                  },
+                  {},
+                ).then(() => failureSaved.resolve());
               if (
                 stage.endsWith("microtask") &&
                 event.event === "coordinator_cleanup_settled"
@@ -355,24 +402,67 @@ export async function testDeepScanLifecycle({
                 coordinator.wait(undefined, 25).then(() => false),
               ]);
               if (admitted) {
+                if (concurrentFailure)
+                  await fail(
+                    {
+                      scanId: fixture.run.scanId,
+                      message: "synthetic external failure",
+                    },
+                    {},
+                  );
                 repeatedCancellation = cancel({ scanId: fixture.run.scanId });
                 void repeatedCancellation.catch(() => {});
                 assert.equal(await coordinator.wait(undefined, 25), undefined);
                 admissionRelease.resolve();
               }
             }
+            if (failureDuringCleanup) await failureSaved.promise;
             release.resolve();
+            if (completedParent || completesDuringAdmission) {
+              persistRelease.resolve();
+              assert.equal((await terminal).status, "succeeded");
+              if (completesDuringAdmission)
+                await assert.rejects(
+                  cancellation,
+                  /Only a running scan can be canceled/,
+                );
+              else
+                assert.equal(
+                  (await cancellation).structuredContent.workspace.results
+                    .progress.status,
+                  "completed",
+                );
+              assert.equal(store.run.status, "succeeded");
+              assert.equal(
+                current.workspace.results.progress.status,
+                "completed",
+              );
+              assert.equal(
+                current.calls.filter((command) => command === "cancel-scan")
+                  .length,
+                completesDuringAdmission ? 1 : 0,
+              );
+              continue;
+            }
             if (durableFailure) {
               assert.equal((await terminal).status, stoppedStatus);
-              assert.equal(
-                (await cancellation).structuredContent.workspace.results
-                  .progress.status,
-                "failed",
-              );
-              assert.deepEqual(
-                current.calls,
-                repeatedCancellation ? ["get-scan", "get-scan"] : ["get-scan"],
-              );
+              if (unavailableRead)
+                await assert.rejects(
+                  cancellation,
+                  /synthetic terminal state unavailable/,
+                );
+              else
+                assert.equal(
+                  (await cancellation).structuredContent.workspace.results
+                    .progress.status,
+                  "failed",
+                );
+              assert.equal(current.calls.includes("cancel-scan"), false);
+              if (concurrentFailure || failureDuringCleanup)
+                assert.match(
+                  (await terminal).error,
+                  /synthetic external failure/,
+                );
               assert.equal(publications, interrupted ? 0 : 1);
               if (unavailableRead)
                 assert.match(
@@ -451,11 +541,11 @@ export async function testDeepScanLifecycle({
                   "canceled",
                 );
             }
-            assert.deepEqual(
-              current.calls,
-              repeatedCancellation && !rejectPersistence
-                ? ["cancel-scan", "get-scan"]
-                : ["cancel-scan"],
+            assert.equal(current.calls[0], "get-scan");
+            assert.equal(
+              current.calls.filter((command) => command === "cancel-scan")
+                .length,
+              1,
             );
           } catch (error) {
             failures.push(
@@ -631,10 +721,14 @@ export async function testDeepScanLifecycle({
     const terminal = coordinator.settled().catch((error: Error) => error);
     await executor.discoveryStarted.promise;
     await assert.rejects(
-      coordinator.cancelAfterPersistence("fixture cancellation", async () => {
-        store.run.status = "canceled";
-        throw new Error("fixture cancellation response lost");
-      }),
+      coordinator.cancelAfterPersistence(
+        "fixture cancellation",
+        async () => {
+          store.run.status = "canceled";
+          throw new Error("fixture cancellation response lost");
+        },
+        async () => "running",
+      ),
       /response lost/,
     );
     const result = await terminal;
@@ -670,6 +764,7 @@ export async function testDeepScanLifecycle({
       async () => {
         cancellations += 1;
       },
+      async () => "running",
     );
     release.resolve();
     const result = await cancellation;
@@ -712,10 +807,15 @@ export async function testDeepScanLifecycle({
       let persisted = false;
       let resolved = false;
       const cancellation = registry
-        .cancelAndWait(fixture.run.scanId, "cancel parent", async () => {
-          persisted = true;
-          store.run.status = "canceled";
-        })
+        .cancelAndWait(
+          fixture.run.scanId,
+          "cancel parent",
+          async () => {
+            persisted = true;
+            store.run.status = "canceled";
+          },
+          async () => "running",
+        )
         .then((handled: boolean) => {
           resolved = true;
           return handled;

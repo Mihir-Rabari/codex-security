@@ -243,6 +243,7 @@ export class DeepScanCoordinator {
   async cancelAfterPersistence(
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentStatus: () => Promise<string | undefined>,
   ): Promise<DeepScanRunState> {
     if (
       this.terminal ||
@@ -259,36 +260,34 @@ export class DeepScanCoordinator {
     });
     this.cancellationPersistence = { promise, resolve };
     try {
-      // A failed write can commit before losing its response. Reconcile the
-      // durable state before trying to cancel that failure.
-      if (this.state.status === "failed" && this.options.threadId) {
-        try {
-          this.state = await this.options.store.get(
-            this.state.scanId,
-            this.options.threadId,
-          );
-          this.failurePersisted ||= this.state.status === "failed";
-        } catch (error) {
-          this.log({
-            event: "coordinator_terminal_state_read_failed",
-            scanId: this.state.scanId,
-            reason: errorKind(error),
-          });
+      const parentStatus = await readParentStatus();
+      if (
+        parentStatus === "running" &&
+        !this.failurePersisted &&
+        !["canceled", "interrupted"].includes(this.state.status)
+      ) {
+        // Terminal discovery has no active writers to stop. Keep its outcome
+        // until the parent actually accepts cancellation.
+        if (this.state.status === "running") this.cancel(reason);
+        await this.cancellationReady;
+        if (!this.failurePersisted) {
+          try {
+            await persistCancellation();
+            this.cancel(reason);
+          } catch (error) {
+            let completed = false;
+            if (this.state.status === "succeeded") {
+              try {
+                completed = (await readParentStatus()) === "completed";
+              } catch {
+                // Preserve the cancellation diagnostic if reconciliation fails.
+              }
+            }
+            if (!completed) this.cancellationPersistence.failure = { error };
+            throw error;
+          }
         }
       }
-      if (
-        !this.failurePersisted &&
-        (this.state.status !== "failed" || !this.options.threadId) &&
-        this.state.status !== "canceled" &&
-        this.state.status !== "interrupted"
-      ) {
-        this.cancel(reason);
-        await this.cancellationReady;
-        await persistCancellation();
-      }
-    } catch (error) {
-      this.cancellationPersistence.failure = { error };
-      throw error;
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
@@ -499,7 +498,8 @@ export class DeepScanCoordinator {
       if (this.cancellationPersistence?.failure) {
         throw this.cancellationPersistence.failure.error;
       }
-      if (this.canceled) this.state = { ...this.state, status: "canceled" };
+      if (this.canceled && !this.failurePersisted)
+        this.state = { ...this.state, status: "canceled" };
       if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     }
   }

@@ -1273,6 +1273,16 @@ export function createCodexSecurityServer(): McpServer {
       async () => {
         workspace = await runWorkbench(args);
       },
+      async () => {
+        const current = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+          "workspace"
+        ] as JsonObject;
+        const scan = current["results"];
+        const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+        return isJsonObject(progress) && typeof progress["status"] === "string"
+          ? progress["status"]
+          : undefined;
+      },
     );
     if (workspace === undefined && canceledLocally) {
       workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[

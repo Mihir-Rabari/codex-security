@@ -58,10 +58,15 @@ export class DeepScanCoordinatorRegistry {
     scanId: string,
     reason: string,
     persistCancellation: () => Promise<void>,
+    readParentStatus: () => Promise<string | undefined>,
   ): Promise<boolean> {
     const coordinator = this.coordinators.get(scanId);
     if (!coordinator) return false;
-    await coordinator.cancelAfterPersistence(reason, persistCancellation);
+    await coordinator.cancelAfterPersistence(
+      reason,
+      persistCancellation,
+      readParentStatus,
+    );
     return true;
   }
 
