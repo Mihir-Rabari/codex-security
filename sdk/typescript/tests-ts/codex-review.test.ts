@@ -29,7 +29,7 @@ const failureReasons: Record<string, string> = {
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-reported-error":
-    "Required review check could not be completed: Request refused by cybersecurity policy.",
+    "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "server-error": "Provider temporarily unavailable",
@@ -495,6 +495,7 @@ test.each([
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
+  "Request refusal due to the safety policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
   "I'm not able to help with that.",
