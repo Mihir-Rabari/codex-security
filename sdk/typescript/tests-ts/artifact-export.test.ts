@@ -1,4 +1,5 @@
 import * as childProcess from "node:child_process";
+import * as filesystem from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import {
   mkdir,
@@ -18,6 +19,7 @@ import { exportArtifact } from "../src/index.js";
 import {
   resolveArtifactExportOutput,
   readThreatModelPath,
+  runArtifactExport,
   runArtifactHelper,
   writeThreatModel,
 } from "../src/artifact-export.js";
@@ -163,6 +165,58 @@ describe("offline artifact export", () => {
         ),
       ).rejects.toThrow("cannot traverse a repository symlink");
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a repository output ancestor replaced after resolution", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-export-binding-"),
+    );
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const outside = join(root, "outside");
+    const parent = join(repository, "reports");
+    const outsideOutput = join(outside, "result.md");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    await mkdir(outside);
+    await writeFile(join(scanDir, "THREAT_MODEL.md"), "# Synthetic model\n");
+    await writeFile(outsideOutput, "Unrelated file\n");
+    await symlink(outside, parent, "junction");
+    let replaced = false;
+    const originalRealpath = filesystem.realpath;
+    const resolving = spyOn(filesystem, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof originalRealpath>
+    ) => {
+      const canonical = await originalRealpath(...args);
+      if (args[0] === parent && !replaced) {
+        replaced = true;
+        await rm(parent, { recursive: true, force: true });
+        await mkdir(parent);
+      }
+      return canonical;
+    }) as typeof originalRealpath);
+    try {
+      const exporting = async () => {
+        const prepared = await resolveArtifactExportOutput(
+          {
+            scanDir,
+            output: join(parent, "result.md"),
+            artifact: "threat-model",
+            format: "md",
+          },
+          repository,
+        );
+        await runArtifactExport(prepared);
+      };
+      await expect(exporting()).rejects.toThrow(
+        "cannot traverse a repository symlink",
+      );
+      expect(replaced).toBe(true);
+      expect(await readFile(outsideOutput, "utf8")).toBe("Unrelated file\n");
+    } finally {
+      resolving.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });

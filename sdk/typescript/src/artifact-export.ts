@@ -264,6 +264,7 @@ export async function resolveArtifactExportOutput(
   if (arguments_.output !== "-") {
     const outputFromCurrent = relative(currentDirectory, arguments_.output);
     if (outputFromCurrent !== "" && !isOutsidePath(outputFromCurrent)) {
+      let existingParent: string | undefined;
       for (
         let directory = dirname(arguments_.output);
         relative(currentDirectory, directory) !== "";
@@ -280,6 +281,25 @@ export async function resolveArtifactExportOutput(
             "The export output path cannot traverse a repository symlink.",
           );
         }
+        if (metadata !== undefined) existingParent ??= directory;
+      }
+      const canonicalCurrent = await realpath(currentDirectory).catch(
+        () => currentDirectory,
+      );
+      const expectedOutput =
+        existingParent === undefined
+          ? resolve(canonicalCurrent, outputFromCurrent)
+          : resolve(
+              await realpath(existingParent),
+              relative(existingParent, arguments_.output),
+            );
+      if (
+        isOutsidePath(relative(canonicalCurrent, outputPath)) ||
+        relative(expectedOutput, outputPath) !== ""
+      ) {
+        throw new CodexSecurityError(
+          "The export output path cannot traverse a repository symlink.",
+        );
       }
     }
   }
