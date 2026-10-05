@@ -4,7 +4,6 @@ function outputText(output) {
 
 function hasTriageJson(text) {
   return (
-    /```(?:json)?\s*[\s\S]*?```/i.test(text) ||
     /schema_version\s*["']?\s*:\s*["']?triage-finding\/v0/i.test(text) ||
     /["']findings["']\s*:/i.test(text) ||
     /["']verdict["']\s*:/i.test(text)

@@ -249,3 +249,12 @@ assert.throws(
 );
 
 console.log("sastbench dataset and prompt tests passed");
+
+// A locale may reorder accents and punctuation; that must not change the sample.
+const { execFileSync } = require("node:child_process");
+const localeRecords = ["true_positive", "false_positive"].flatMap(ground_truth =>
+  ["a", "ä", "z", "Z", "_", "å"].map(repo_name => benchmarkRecord({ ground_truth, repo_name })),
+);
+const sampleProgram = `const {selectRepresentativeSample} = require(${JSON.stringify(require.resolve("./sastbench-lib"))}); console.log(JSON.stringify(selectRepresentativeSample(${JSON.stringify(localeRecords)}, {profile:'test',seed:'test',labelCounts:{true_positive:2,false_positive:2}}).map(entry => entry.index)));`;
+const localeSample = locale => execFileSync(process.execPath, ["--eval", sampleProgram], { encoding: "utf8", env: { ...process.env, LANG: locale, LC_ALL: locale } });
+assert.equal(localeSample("en_US.UTF-8"), localeSample("sv_SE.UTF-8"));

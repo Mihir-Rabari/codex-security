@@ -103,7 +103,12 @@ function installSastBench(target = DEFAULT_INSTALL_ROOT) {
   const resolvedTarget = path.resolve(target);
   if (!fs.existsSync(resolvedTarget)) {
     fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
-    createInstallation(resolvedTarget);
+    try {
+      createInstallation(resolvedTarget);
+    } catch (error) {
+      fs.rmSync(resolvedTarget, { recursive: true, force: true });
+      throw error;
+    }
   }
   return verifyInstallation(inspectInstallation(resolvedTarget));
 }

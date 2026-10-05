@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
-const { runGit } = require("../sastbench/scripts/hydrate-sastbench-repos");
+const { runGit: gitCommand } = require("../sastbench/scripts/hydrate-sastbench-repos");
 const fs = require("node:fs");
+const { selectedVariants, targetRepoPath } = require("./generate-calibration-tests");
 const path = require("node:path");
 
 const DEFAULT_DATASET = path.join(__dirname, "..", "datasets", "triage-calibration-seed.json");
@@ -42,29 +43,17 @@ function parseArgs(argv) {
 }
 
 function plannedJobs(dataset, args) {
-  const jobs = [];
+  return selectedVariants(dataset, args).map(({ testCase, variant }) => ({
+    caseId: testCase.case_id,
+    variantId: variant.variant_id,
+    repoUrl: testCase.repo.url,
+    checkoutRef: variant.checkout_ref,
+    targetDir: targetRepoPath(args.repoRoot, testCase, variant),
+  }));
+}
 
-  for (const testCase of dataset.cases) {
-    if (args.caseId && testCase.case_id !== args.caseId) {
-      continue;
-    }
-
-    for (const variant of testCase.variants) {
-      if (args.variantId && variant.variant_id !== args.variantId) {
-        continue;
-      }
-
-      jobs.push({
-        caseId: testCase.case_id,
-        variantId: variant.variant_id,
-        repoUrl: testCase.repo.url,
-        checkoutRef: variant.checkout_ref,
-        targetDir: path.join(args.repoRoot, testCase.case_id, variant.variant_id),
-      });
-    }
-  }
-
-  return jobs;
+function runGit(args, directory, stderr) {
+  return gitCommand([`--git-dir=${path.join(directory, ".git")}`, `--work-tree=${directory}`, ...args], directory, stderr);
 }
 
 function gitOutput(args, cwd) {

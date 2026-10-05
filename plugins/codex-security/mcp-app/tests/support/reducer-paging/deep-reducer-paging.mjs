@@ -13,11 +13,26 @@ import {
 const supportDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 /** Run one reducer through real code-mode IPC and the production artifact tools. */
-export async function runReducerPagingEval({
-  root,
-  mode = "deterministic",
-  model,
-}) {
+export async function runReducerPagingEval(options) {
+  const report = {
+    mode: options.mode ?? "deterministic",
+    ...(options.model ? { model: options.model } : {}),
+  };
+  try {
+    Object.assign(report, await runReducer(options));
+    return report;
+  } catch (error) {
+    report.error = error.stack ?? String(error);
+    throw error;
+  } finally {
+    await writeFile(
+      path.join(options.root, "report.json"),
+      JSON.stringify(report, null, 2),
+    );
+  }
+}
+
+async function runReducer({ root, mode = "deterministic", model }) {
   assert.ok(mode === "deterministic" || mode === "model");
   const fixture = await createReducerPagingFixture(root);
   const tracePath = path.join(root, "tool-trace.jsonl");
@@ -114,6 +129,7 @@ export async function runReducerPagingEval({
   const trace = (await readFile(tracePath, "utf8"))
     .trim()
     .split("\n")
+    .filter(Boolean)
     .map((line) => JSON.parse(line));
   const report = {
     mode,
@@ -124,15 +140,13 @@ export async function runReducerPagingEval({
     ...(await gradeReducerPagingResult(fixture)),
     ...(usage ? { usage } : {}),
   };
-  await writeFile(
-    path.join(root, "report.json"),
-    JSON.stringify(report, null, 2),
-  );
+
   return report;
 }
 
 /** Grade the captured I/O independently of model wording or another model run. */
 export function gradeReducerPagingTrace(trace, ipcFrameLimitBytes) {
+  assert.ok(trace.length > 0, "The reducer produced no tool trace.");
   const reads = trace.filter(
     (event) =>
       event.event === "request" &&

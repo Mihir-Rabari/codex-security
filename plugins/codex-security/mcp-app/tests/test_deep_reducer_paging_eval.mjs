@@ -69,3 +69,33 @@ test("a reducer recovers from the real IPC frame limit and records all sources",
     /distinct|independent/,
   );
 });
+
+for (const failure of ["synthetic model failure", "empty trace"]) {
+  test(`retains a diagnostic report for ${failure}`, async (t) => {
+    const { Codex } = await import("@openai/codex-sdk");
+    const root = await mkdtemp(
+      path.join(tmpdir(), "deep-reducer-failed-eval-"),
+    );
+    t.after(() => rm(root, { recursive: true, force: true }));
+    t.mock.method(Codex.prototype, "startThread", () => ({
+      run: async () => {
+        if (failure !== "empty trace") throw new Error(failure);
+        return { finalResponse: "No tools called." };
+      },
+    }));
+    const expected =
+      failure === "empty trace"
+        ? /produced no tool trace/
+        : /synthetic model failure/;
+    await assert.rejects(
+      runReducerPagingEval({ root, mode: "model" }),
+      expected,
+    );
+    const report = JSON.parse(
+      await readFile(path.join(root, "report.json"), "utf8"),
+    );
+    assert.equal(report.mode, "model");
+    assert.match(report.error, expected);
+    assert.equal(report.accountedSourceCount, undefined);
+  });
+}

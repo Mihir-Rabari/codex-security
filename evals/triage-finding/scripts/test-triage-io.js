@@ -72,10 +72,10 @@ const sourceType = "cve";
 
 assertPasses(
   "vulnerable scanbench cases map to confirmed/positive",
-  outputFor({ inputId: "GHSA-example-000-vulnerable", sourceType, verdict: "confirmed" }),
+  outputFor({ inputId: "input-001", sourceType, verdict: "confirmed" }),
   baseContext({
-    caseId: "ghsa-example-vulnerable",
-    inputId: "GHSA-example-000-vulnerable",
+    caseId: "case-001",
+    inputId: "input-001",
     sourceType,
     expectedVerdict: "confirmed",
     expectedBinaryLabel: "positive",
@@ -84,10 +84,10 @@ assertPasses(
 
 assertPasses(
   "fixed scanbench cases map to not_actionable/negative",
-  outputFor({ inputId: "GHSA-example-000-fixed", sourceType, verdict: "not_actionable" }),
+  outputFor({ inputId: "input-002", sourceType, verdict: "not_actionable" }),
   baseContext({
-    caseId: "ghsa-example-fixed",
-    inputId: "GHSA-example-000-fixed",
+    caseId: "case-002",
+    inputId: "input-002",
     sourceType,
     expectedVerdict: "not_actionable",
     expectedBinaryLabel: "negative",
@@ -95,16 +95,22 @@ assertPasses(
 );
 
 assertFails(
-  "fixed scanbench cases cannot be labeled confirmed",
-  outputFor({ inputId: "GHSA-example-000-fixed", sourceType, verdict: "confirmed" }),
+  "negative calibration labels cannot expect confirmed",
+  outputFor({ inputId: "input-002", sourceType, verdict: "confirmed" }),
   baseContext({
-    caseId: "ghsa-example-fixed",
-    inputId: "GHSA-example-000-fixed",
+    caseId: "case-002",
+    inputId: "input-002",
     sourceType,
     expectedVerdict: "confirmed",
-    expectedBinaryLabel: "positive",
+    expectedBinaryLabel: "negative",
   }),
   /fixed.*not_actionable|negative/,
 );
 
+assertFails(
+  "rank queue must match the verdict",
+  outputFor({ inputId: "input-001", sourceType, verdict: "confirmed" }).replace('"rank_queue":"confirmed"', '"rank_queue":"needs_review"'),
+  baseContext({ caseId: "case-001", inputId: "input-001", sourceType, expectedVerdict: "confirmed", expectedBinaryLabel: "positive" }),
+  /rank_queue must match verdict/,
+);
 console.log("triage-io assertion tests passed");

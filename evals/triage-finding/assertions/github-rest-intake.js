@@ -5,7 +5,7 @@ function containsAll(text, patterns) {
 }
 
 function endpointPattern(path, queryParts = []) {
-  const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\{(?:owner|repo)\\\}/g, "[^/\\s?`]+");
   const queryPatterns = queryParts.map((part) => new RegExp(part, "i"));
   return (text) => new RegExp(escapedPath, "i").test(text) && containsAll(text, queryPatterns);
 }
@@ -64,7 +64,7 @@ const checks = {
       ...(!hasEndpoint
         ? ["must use Dependabot alerts endpoint with classification=malware, state=open, and per_page=100"]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!/source_type["']?\s*:\s*[`"']?advisory\b|normalize as [`"']?advisory\b/i.test(text)
         ? ["must say Dependabot malware normalizes as advisory"]
         : []),
     ];
@@ -75,11 +75,11 @@ const checks = {
       "state=open",
       "per_page=100",
     ])(text);
-    const hasInstances = /code-scanning\/alerts\/\{alert_number\}\/instances/i.test(text);
+    const hasInstances = /code-scanning\/alerts\/(?:\{alert_number\}|[0-9]+)\/instances/i.test(text);
     return [
       ...(!hasAlerts ? ["must use code scanning alerts endpoint with state=open and per_page=100"] : []),
       ...(!hasInstances ? ["must fetch code scanning alert instances per alert"] : []),
-      ...(!/source_type:\s*`?sarif`?|normalize as `?sarif`?/i.test(text)
+      ...(!/source_type["']?\s*:\s*[`"']?sarif\b|normalize as [`"']?sarif\b/i.test(text)
         ? ["must say code scanning normalizes as sarif"]
         : []),
     ];
@@ -101,20 +101,25 @@ const checks = {
       ...(!/triage.*private vulnerability reports?|private vulnerability reports?.*triage/is.test(text)
         ? ["must identify state=triage as private vulnerability reports"]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!/source_type["']?\s*:\s*[`"']?advisory\b|normalize as [`"']?advisory\b/i.test(text)
         ? ["must say advisories/private reports normalize as advisory"]
         : []),
     ];
   },
 
-  connector_rest_only: (text) => {
+  connector_selected: (text) => {
     return [
-      ...(!/GitHub Connector.*token|connector.*auth token|token.*GitHub Connector/is.test(text)
-        ? ["must allow GitHub Connector only as an auth token source"]
+      ...(!/GitHub Connector|connector/i.test(text) || !/read.only/i.test(text)
+        ? ["must use the selected connector's read-only tools"]
         : []),
-      ...(!/REST/i.test(text) ? ["must state that finding retrieval uses REST"] : []),
-      ...(!/do not use.*GitHub Connector.*(fetch|retrieve|data|findings)|GitHub Connector.*not.*(fetch|retrieve|data|findings)/is.test(text)
-        ? ["must say not to use the GitHub Connector for finding retrieval"]
+      ...(!/cannot|unavailable|not (?:expose|support|retrieve)|limitation/i.test(text)
+        ? ["must explain unavailable connector capabilities"]
+        : []),
+      ...(!/(?:ask|approval|permission|confirm)[\s\S]*REST|REST[\s\S]*(?:ask|approval|permission|confirm)/i.test(text)
+        ? ["must ask before switching to REST"]
+        : []),
+      ...(/only as an? (?:auth )?token source|do not use.*GitHub Connector.*(?:fetch|retrieve|findings)/i.test(text)
+        ? ["must honor the explicitly selected connector for retrieval"]
         : []),
     ];
   },
@@ -127,7 +132,7 @@ const checks = {
       ...(!/not.*\ball\b|exclude.*\ball\b|do not include.*\ball\b/is.test(text)
         ? ["must say GitHub Issues are not included in all/default source selection"]
         : []),
-      ...(!/source_type:\s*`?freeform`?|normalize as `?freeform`?/i.test(text)
+      ...(!/source_type["']?\s*:\s*[`"']?freeform\b|normalize as [`"']?freeform\b/i.test(text)
         ? ["must say explicit GitHub Issues normalize as freeform"]
         : []),
     ];

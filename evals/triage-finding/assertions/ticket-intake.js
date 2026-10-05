@@ -8,7 +8,7 @@ const expectedPatterns = {
 };
 
 const expectedSubissuePatterns = {
-  direct_confirmation: [/SEC-294/i, /SEC-295/i, /2\s+(?:direct\s+)?sub-issues|two\s+(?:direct\s+)?sub-issues/i, /include|import/i, /ask|would you|do you want/i],
+  direct_confirmation: [/SEC-294/i, /SEC-295/i, /2\s+(?:direct\s+)?(?:sub-issues|children)|two\s+(?:direct\s+)?(?:sub-issues|children)/i, /include|import/i, /ask|would you|do you want/i],
   next_depth: [/SEC-296/i, /next (?:level|depth)|deeper|grandchild/i, /include|import/i, /ask|would you|do you want/i],
   ambiguous_parent: [/parent/i, /independent|standalone|separate/i, /include|triage/i, /ask|would you|do you want/i],
   over_limit: [/250/i, /narrow|smaller|filter|depth|status|label/i, /not.*truncate|cannot.*truncate|stop/i],
@@ -21,6 +21,9 @@ module.exports = (output, context) => {
   const patterns = expectedPatterns[behavior] || [];
   const subissuePatterns = expectedSubissuePatterns[subissueBehavior] || [];
   const failures = [];
+  if (behavior && !expectedPatterns[behavior]) failures.push(`unknown expected_ticket_failure: ${behavior}`);
+  if (subissueBehavior && !expectedSubissuePatterns[subissueBehavior]) failures.push(`unknown expected_linear_subissues: ${subissueBehavior}`);
+  if (!behavior && !subissueBehavior) failures.push("missing expected ticket behavior");
 
   for (const pattern of patterns) {
     if (!pattern.test(text)) failures.push(`missing recovery detail matching ${pattern}`);

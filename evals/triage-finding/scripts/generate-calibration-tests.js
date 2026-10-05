@@ -2,12 +2,12 @@
 "use strict";
 
 const fs = require("node:fs");
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 
 const DEFAULT_DATASET = path.join(__dirname, "..", "datasets", "triage-calibration-seed.json");
 const DEFAULT_OUTPUT = path.join(__dirname, "..", "tests", "calibration-oss.yaml");
-const DEFAULT_REPO_ROOT =
-  "evals/triage-finding/artifacts/calibration-repos";
+const DEFAULT_REPO_ROOT = "{{env.TRIAGE_CALIBRATION_ROOT}}";
 
 function parseArgs(argv) {
   const args = {
@@ -55,16 +55,15 @@ function indentedBlock(value, spaces) {
 }
 
 function variantCaseId(testCase, variant) {
-  return `${testCase.case_id}-${variant.variant_id}`;
+  return `case-${createHash("sha256").update(`${testCase.case_id}\0${variant.checkout_ref}`).digest("hex").slice(0, 16)}`;
 }
 
 function inputId(testCase, variant) {
-  const base = testCase.finding.input_id || testCase.finding.input_id_base || testCase.case_id;
-  return `${base}-${variant.variant_id}`;
+  return variantCaseId(testCase, variant);
 }
 
 function targetRepoPath(repoRoot, testCase, variant) {
-  return path.posix.join(repoRoot, testCase.case_id, variant.variant_id);
+  return path.posix.join(repoRoot, variantCaseId(testCase, variant));
 }
 
 function evidenceTerms(testCase, variant) {
@@ -129,7 +128,8 @@ function testYaml(testCase, variant, args) {
     `    expected_binary_label: ${variant.expected_binary_label}`,
     "  vars:",
     `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${targetRepoPath(args.repoRoot, testCase, variant)}`,
+    `    target_repo: ${quote(targetRepoPath(args.repoRoot, testCase, variant))}`,
+    ...(args.repoRoot === DEFAULT_REPO_ROOT ? [] : [`    target_repo_root: ${quote(args.repoRoot)}`]),
     `    source_type_under_test: ${testCase.source_type}`,
     `    expected_ids: ${inputId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,

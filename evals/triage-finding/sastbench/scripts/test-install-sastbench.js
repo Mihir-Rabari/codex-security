@@ -53,3 +53,32 @@ assert.throws(
 );
 
 console.log("sastbench installer verification tests passed");
+
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const childProcess = require("node:child_process");
+const { installSastBench } = require("./install-sastbench");
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "sastbench-install-"));
+const target = path.join(root, "checkout");
+const originalExec = childProcess.execFileSync;
+let fetches = 0;
+try {
+  childProcess.execFileSync = (_command, args, options) => {
+    if (args[0] === "init") fs.mkdirSync(path.join(options.cwd, ".git"));
+    if (args[0] === "fetch") { fetches++; throw new Error("synthetic fetch failed"); }
+    return "";
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.throws(() => installSastBench(target), /synthetic fetch failed/);
+    assert.equal(fs.existsSync(target), false);
+  }
+  assert.equal(fetches, 2, "a retry must fetch again instead of inspecting an incomplete checkout");
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "keep.txt"), "existing work");
+  assert.throws(() => installSastBench(target), /not a Git checkout/);
+  assert.equal(fs.readFileSync(path.join(target, "keep.txt"), "utf8"), "existing work");
+} finally {
+  childProcess.execFileSync = originalExec;
+  fs.rmSync(root, { recursive: true, force: true });
+}

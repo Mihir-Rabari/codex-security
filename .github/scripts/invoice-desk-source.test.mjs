@@ -108,3 +108,31 @@ test("rejects lossy filename decoding before any source files can collide", (t) 
   );
   assert.equal(existsSync(destination), false);
 });
+
+test(
+  "the source CLI runs through a symlink",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const { symlinkSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { root, repository, git, destination } = fixture(t);
+    const script = join(root, "source.mjs");
+    symlinkSync(
+      fileURLToPath(new URL("./invoice-desk-source.mjs", import.meta.url)),
+      script,
+    );
+    execFileSync(process.execPath, [script], {
+      env: {
+        ...process.env,
+        SOURCE_REPOSITORY: repository,
+        SOURCE_SHA: git("write-tree"),
+        SCAN_SOURCE: destination,
+      },
+      stdio: "pipe",
+    });
+    assert.equal(
+      readFileSync(join(destination, "server.mjs"), "utf8"),
+      'export const version = "$Format:%H$";\n',
+    );
+  },
+);

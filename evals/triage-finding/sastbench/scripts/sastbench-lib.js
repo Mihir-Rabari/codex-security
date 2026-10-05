@@ -276,7 +276,7 @@ function allocateSampleCounts(strata, sampleCount) {
       }))
       .sort(
         (left, right) =>
-          right.deficit - left.deficit || left.stratum.name.localeCompare(right.stratum.name),
+          right.deficit - left.deficit || compareText(left.stratum.name, right.stratum.name),
       );
     if (candidates.length === 0) {
       throw new Error(`Representative sample count ${sampleCount} exceeds the population`);
@@ -286,6 +286,10 @@ function allocateSampleCounts(strata, sampleCount) {
     remaining -= 1;
   }
   return allocations;
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function representativeSortKey(entry) {
@@ -304,7 +308,7 @@ function deterministicSystematicSample(entries, sampleCount, seed, stratumName) 
     return [...entries];
   }
   const sortedEntries = [...entries].sort((left, right) =>
-    representativeSortKey(left).localeCompare(representativeSortKey(right)),
+    compareText(representativeSortKey(left), representativeSortKey(right)),
   );
   const interval = sortedEntries.length / sampleCount;
   const seedValue = crypto
@@ -352,7 +356,7 @@ function selectRepresentativeSample(records, sampleSpec = REPRESENTATIVE_SAMPLE_
     }
     const strata = [...entriesByBucket.entries()]
       .map(([bucket, entries]) => ({ name: `${label}:${bucket}`, entries }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => compareText(left.name, right.name));
     const allocations = allocateSampleCounts(strata, requestedCount);
 
     for (const stratum of strata) {
