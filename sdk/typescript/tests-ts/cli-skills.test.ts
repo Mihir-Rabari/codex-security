@@ -1253,6 +1253,29 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "retains model permission advice from the %s child",
+    async (command) => {
+      const detail =
+        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP";
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "The selected model is unavailable for the current credentials.",
+      );
+      expect(stderr.text()).toContain(detail);
+    },
+  );
+
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
@@ -1284,6 +1307,7 @@ process.stdout.write(JSON.stringify({
   test.each([
     "Failed after 1401 bytes",
     "permission denied opening cache",
+    "permission denied opening model cache",
     "line 1429 could not be parsed",
     "count_tokens_per_minute_limit is undefined",
   ])("does not misclassify an operational skill failure: %s", (detail) => {

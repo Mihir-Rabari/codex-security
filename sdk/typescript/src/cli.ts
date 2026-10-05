@@ -7980,7 +7980,7 @@ export function skillCommandFailure(
     advice = authenticationFailureMessage(authentication);
   } else if (
     classification === "forbidden" &&
-    /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
+    /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b|\bpermissions? to use (?:this |the )?model\b/iu.test(
       detail,
     )
   ) {
