@@ -53,7 +53,7 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, selected-connector retrieval and explicit REST fallback, and explicit-only GitHub Issue handling.
+- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, and explicit-only GitHub Issue handling. The selected-connector case grades a JSON workflow decision with the built-in schema assertion: retrieval transport, read-only access, missing capabilities, and approval before REST fallback.
 
 ## Calibration Dataset
 

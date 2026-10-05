@@ -151,37 +151,6 @@ const checks = {
     ];
   },
 
-  connector_selected: (text: string) => {
-    const fallbackInstructions = text.replace(
-      /\b(?:never|not|cannot|[a-z]+n['’]t)\s+(?:\w+\s+)*(?:switch to|fall back to|use)\s+REST\s+without\s+(?:approval|permission)\b/gi,
-      "",
-    );
-    return [
-      ...(/(?:do not|don't|no need to|need not)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:do not|don't|no need to|need not)\s+(?:ask|seek|request)/i.test(
-        text,
-      ) ||
-      /REST[^.\n]*without (?:approval|permission)/i.test(fallbackInstructions)
-        ? ["must ask before switching to REST"]
-        : []),
-      ...(!/GitHub Connector|connector/i.test(text) || !/read.only/i.test(text)
-        ? ["must use the selected connector's read-only tools"]
-        : []),
-      ...(!/cannot|unavailable|not (?:expose|support|retrieve)/i.test(text)
-        ? ["must explain unavailable connector capabilities"]
-        : []),
-      ...(!/(?:ask|approval|permission|confirm)[\s\S]*REST|REST[\s\S]*(?:ask|approval|permission|confirm)/i.test(
-        text,
-      )
-        ? ["must ask before switching to REST"]
-        : []),
-      ...(/only as an? (?:auth )?token source|do not use.*GitHub Connector.*(?:fetch|retrieve|findings)/i.test(
-        text,
-      )
-        ? ["must honor the explicitly selected connector for retrieval"]
-        : []),
-    ];
-  },
-
   explicit_issue: (text: string) => {
     return [
       ...(!/GitHub Issues?.*(explicit|specific)|specific.*GitHub Issues?/is.test(

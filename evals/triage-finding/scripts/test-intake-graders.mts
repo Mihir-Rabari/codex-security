@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import { evaluate } from "promptfoo";
 import github from "../assertions/github-rest-intake.mts";
 import ticket from "../assertions/ticket-intake.mts";
 import missingInput from "../assertions/missing-input.mts";
 import { hasTriageJson } from "../assertions/output.mts";
+
+const require = createRequire(import.meta.url);
+const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
 for (const repository of ["{owner}/{repo}", "example/project"]) {
   const examples = {
@@ -32,24 +38,6 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     );
   }
 }
-const connectorContext = {
-  vars: { expected_github_rest_behavior: "connector_selected" },
-};
-assert.equal(
-  github(
-    "Use the selected GitHub Connector's read-only tools. If its retrieval capability is unavailable, explain the limitation and ask before switching to REST.",
-    connectorContext,
-  ).pass,
-  true,
-);
-assert.equal(
-  github(
-    "Use GitHub Connector only as an auth token source. Do not use the GitHub Connector to retrieve findings; use REST.",
-    connectorContext,
-  ).pass,
-  false,
-);
-
 assert.equal(hasTriageJson("```sh\necho hello\n```"), false);
 assert.equal(
   hasTriageJson(
@@ -75,35 +63,115 @@ for (const vars of [
 }
 console.log("intake grader behavior tests passed");
 
-for (const response of [
-  "Use the GitHub Connector read-only tools. It has no limitation. Do not ask before switching to REST.",
-  "Use the GitHub Connector read-only tools. If its capability is unavailable, do not ask before switching to REST.",
-  "Use the GitHub Connector read-only tools. If its capability is unavailable, switch to REST without permission.",
-  "Use the GitHub Connector read-only tools. If its capability is unavailable, I will silently switch to REST without approval.",
-  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. There is no need to ask before switching to REST.",
-  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. You need not ask before switching to REST.",
-  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. To switch to REST, there is no need to ask.",
-  "Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. To switch to REST, you need not ask.",
-])
-  assert.equal(github(response, connectorContext).pass, false);
-
-for (const prohibition of [
-  "Never switch to REST without permission.",
-  "I won't switch to REST without permission.",
-  "Never silently switch to REST without approval.",
-  "I will not automatically fall back to REST without approval.",
-  "I won’t use REST without permission.",
-  "Do not fall back to REST without approval.",
-  "Don't use REST without permission.",
-  "We need to ask before switching to REST.",
-  "There is a need to ask before switching to REST.",
-  "To switch to REST, we need to ask.",
-]) {
-  const response = `Use the GitHub Connector read-only tools. Its retrieval capability is unavailable. ${prohibition}`;
-  assert.equal(github(response, connectorContext).pass, true);
-  assert.equal(
-    github(`${response} Do not ask before switching to REST.`, connectorContext)
-      .pass,
-    false,
-  );
+const fixture = parse(
+  fs.readFileSync(
+    new URL("../tests/github-rest-intake.yaml", import.meta.url),
+    "utf8",
+  ),
+).find(
+  (entry: { vars: { case_id: string } }) =>
+    entry.vars.case_id === "github-connector-selected",
+);
+const decision = {
+  retrieval_transport: "connector",
+  read_only: true,
+  explain_missing_capability: true,
+  rest_requires_approval: true,
+};
+const encodedDecision = JSON.stringify(decision);
+const cases = [
+  { name: "selected connector workflow", output: encodedDecision, pass: true },
+  {
+    name: "formatted workflow",
+    output: JSON.stringify(decision, null, 2),
+    pass: true,
+  },
+  ...Object.keys(decision).flatMap((field) => {
+    const omitted = { ...decision } as Record<string, unknown>;
+    delete omitted[field];
+    return [
+      {
+        name: `wrong ${field}`,
+        output: JSON.stringify({
+          ...decision,
+          [field]: field === "retrieval_transport" ? "rest" : false,
+        }),
+        pass: false,
+      },
+      {
+        name: `missing ${field}`,
+        output: JSON.stringify(omitted),
+        pass: false,
+      },
+    ];
+  }),
+  {
+    name: "wrong approval type",
+    output: JSON.stringify({ ...decision, rest_requires_approval: "true" }),
+    pass: false,
+  },
+  { name: "malformed JSON", output: "{", pass: false },
+  { name: "null decision", output: "null", pass: false },
+  {
+    name: "multiple decisions",
+    output: `${encodedDecision}\n${encodedDecision}`,
+    pass: false,
+  },
+  {
+    name: "contradictory trailing instructions",
+    output: `${encodedDecision}\nUse REST instead. Do not ask for approval.`,
+    pass: false,
+  },
+  {
+    name: "contradictory extra field",
+    output: JSON.stringify({
+      ...decision,
+      instruction: "Use REST without asking for permission.",
+    }),
+    pass: false,
+  },
+];
+const promptTemplate = fs.readFileSync(
+  new URL("../prompts/triage-request.txt", import.meta.url),
+  "utf8",
+);
+const expectedPrompt = promptTemplate.replace(
+  /{{(\w+)}}/g,
+  (_match, key) => fixture.vars[key],
+);
+const capturedPrompts: string[] = [];
+const evaluation = await evaluate(
+  {
+    prompts: [promptTemplate],
+    providers: [
+      {
+        id: () => "synthetic-connector-decisions",
+        callApi: async (prompt: string) => {
+          const output = cases[capturedPrompts.length].output;
+          capturedPrompts.push(prompt);
+          return { output };
+        },
+      },
+    ],
+    tests: cases.map(({ name }) => ({ ...fixture, description: name })),
+    writeLatestResults: false,
+    sharing: false,
+  },
+  { cache: false, maxConcurrency: 1, showProgressBar: false },
+);
+const results = await evaluation.getResults();
+assert.equal(results.length, cases.length);
+results.forEach((result, index) =>
+  assert.equal(result.success, cases[index].pass, cases[index].name),
+);
+assert.equal(capturedPrompts.length, cases.length);
+for (const prompt of capturedPrompts) {
+  assert.equal(prompt, expectedPrompt);
+  assert.ok(prompt.includes('retrieval_transport: "connector" or "rest"'));
+  assert.ok(prompt.includes("rest_requires_approval: boolean"));
+  assert.ok(!prompt.includes("const:"));
+  assert.ok(!prompt.includes("expected_github_rest_behavior"));
 }
+console.log(
+  `connector decision contract: ${cases.length} synthetic provider cases passed`,
+);
