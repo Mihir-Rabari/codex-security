@@ -2063,10 +2063,18 @@ def merge_saved_results(
                 if worker_id and candidate_id
                 else None
             )
-            if not represented_by_parent and not (
-                canonical_candidate in canonical_candidates
-                and represented_candidates[canonical_candidate] is not None
-            ):
+            mapped_candidate = (
+                represented_candidates[canonical_candidate]
+                if canonical_candidate in canonical_candidates
+                else None
+            )
+            if mapped_candidate is not None:
+                key = mapped_candidate
+                represented_by_parent = represented_by_parent or (
+                    _digest(_finding_content(value))
+                    in represented_candidate_history.get(canonical_candidate, set())
+                )
+            if not represented_by_parent and mapped_candidate is None:
                 key = candidate_position_key(finding, key)
             if relative == "parent":
                 register_parent_finding(finding, key)

@@ -344,6 +344,75 @@ def test_parent_candidates_keep_their_own_moved_checkpoint_history(tmp_path: Pat
 
 
 @pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("historical", [False, True])
+def test_worker_source_uses_its_disambiguated_parent_position(
+    tmp_path: Path, retry: bool, historical: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    parent_document = json.loads((scan_dir / "findings.json").read_text())
+    template = parent_document["findings"][0]
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    document = json.loads(result_path.read_text())
+    parents = []
+    sources = []
+    for index, candidate in enumerate(("candidate-a", "candidate-b")):
+        parent = json.loads(json.dumps(template))
+        parent["title"] = f"Reviewed {candidate}"
+        parent["identity"] = {"anchor": f"reviewed-{candidate}"}
+        parent["severity"]["level"] = "low" if index == 0 else "medium"
+        parent["provenance"].update(
+            workerId=worker_id,
+            candidateId=candidate,
+            preservedIdentity={"anchor": "shared-source-identity"},
+        )
+        source = json.loads(json.dumps(parent))
+        source["title"] = f"Worker {candidate}"
+        if index == 1:
+            source["severity"]["level"] = "critical"
+        parent["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:{index}", "finding": source}]
+        parents.append(parent)
+        sources.append(source)
+    document["findings"] = parents
+    result_path.write_text(json.dumps(document))
+    committed_standard_reducer(state, home, scan_dir, scan_id, worker_id, result_path)
+    parent_document["findings"] = parents
+    (scan_dir / "findings.json").write_text(json.dumps(parent_document))
+    assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 2
+    observation = json.loads(json.dumps(sources[1]))
+    if not historical:
+        observation["summary"] = "New worker evidence after reducer review."
+    document["findings"] = [observation]
+    result_path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 2
+    by_candidate = {finding["provenance"]["candidateId"]: finding for finding in scan["findings"]}
+    assert by_candidate["candidate-a"]["title"] == parents[0]["title"]
+    expected = parents[1] if historical else observation
+    assert by_candidate["candidate-b"]["title"] == expected["title"]
+    assert by_candidate["candidate-b"]["severity"]["level"] == expected["severity"]["level"]
+    assert not any(
+        previous["provenance"].get("candidateId") == "candidate-b"
+        for previous in by_candidate["candidate-a"]["provenance"].get("previousFindings", [])
+    )
+    retained = next(
+        finding
+        for finding in json.loads((scan_dir / "findings.json").read_text())["findings"]
+        if finding["provenance"]["candidateId"] == "candidate-b"
+    )
+    if not historical:
+        retained = next(
+            previous
+            for previous in retained["provenance"]["previousFindings"]
+            if previous["title"] == parents[1]["title"]
+        )
+    assert retained["provenance"]["sourceFindings"][0]["finding"]["title"] == sources[1]["title"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
 def test_source_reused_identity_keeps_independent_locations(tmp_path: Path, retry: bool):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"
