@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -53,6 +54,29 @@ export async function testDeepScanLifecycle({
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
 
   async function lateCancellationWaitsForPersistence() {
+    const completedParentStatus: string = JSON.parse(
+      execFileSync(
+        process.env.PYTHON || "python3",
+        [
+          "-I",
+          "-B",
+          "-c",
+          `import json, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_test_support import empty_target_scan, run_workbench, write_completed_contract
+with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as root:
+    state, target, scan_id, output = empty_target_scan(Path(root))
+    write_completed_contract(output, scan_id, target)
+    run_workbench(state, "complete-scan", "--scan-id", scan_id)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)
+    print(json.dumps(saved["workspace"]["results"]["progress"]["status"]))
+`,
+          fileURLToPath(new URL("../../tests/", import.meta.url)),
+        ],
+        { encoding: "utf8" },
+      ),
+    );
     const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
     const source = await readFile(
       new URL("../server.ts", import.meta.url),
@@ -220,7 +244,9 @@ export async function testDeepScanLifecycle({
             workspace: {
               setup: { submitted: true },
               results: {
-                progress: { status: completedParent ? "completed" : "running" },
+                progress: {
+                  status: completedParent ? completedParentStatus : "running",
+                },
               },
             },
           };
@@ -236,7 +262,8 @@ export async function testDeepScanLifecycle({
             }
             if (completesDuringAdmission)
               queueMicrotask(() => {
-                current.workspace.results.progress.status = "completed";
+                current.workspace.results.progress.status =
+                  completedParentStatus;
               });
             return { workspace };
           };
@@ -430,12 +457,12 @@ export async function testDeepScanLifecycle({
                 assert.equal(
                   (await cancellation).structuredContent.workspace.results
                     .progress.status,
-                  "completed",
+                  completedParentStatus,
                 );
               assert.equal(store.run.status, "succeeded");
               assert.equal(
                 current.workspace.results.progress.status,
-                "completed",
+                completedParentStatus,
               );
               assert.equal(
                 current.calls.filter((command) => command === "cancel-scan")

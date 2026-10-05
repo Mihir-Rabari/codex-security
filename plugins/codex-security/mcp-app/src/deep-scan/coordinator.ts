@@ -291,7 +291,7 @@ export class DeepScanCoordinator {
             let completed = false;
             if (this.state.status === "succeeded") {
               try {
-                completed = (await readParentStatus()) === "completed";
+                completed = (await readParentStatus()) === "complete";
               } catch {
                 // Preserve the cancellation diagnostic if reconciliation fails.
               }
