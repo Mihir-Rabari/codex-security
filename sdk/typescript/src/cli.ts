@@ -6760,7 +6760,7 @@ async function patchRepositoryRoot(
     directory,
     { trim: false },
   );
-  return output.replace(/\n$/u, "");
+  return resolve(output.replace(/\n$/u, ""));
 }
 
 async function preparePatchPublication(

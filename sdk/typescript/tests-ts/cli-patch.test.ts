@@ -2901,6 +2901,7 @@ function repositoryGit(repository: string) {
     execFileSync("git", args, {
       cwd: repository,
       encoding: "utf8",
+      maxBuffer: Infinity,
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
 }
