@@ -461,9 +461,9 @@ def test_recovery_reserves_every_generated_sibling_identity(tmp_path: Path):
 
 
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan"])
-@pytest.mark.parametrize("candidate_siblings", [False, True])
+@pytest.mark.parametrize("candidate_siblings", [False, True, "saved alias"])
 def test_raw_checkpoint_and_published_rows_reuse_saved_identities(
-    tmp_path: Path, operation: str, candidate_siblings: bool
+    tmp_path: Path, operation: str, candidate_siblings: bool | str
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"
@@ -480,8 +480,12 @@ def test_raw_checkpoint_and_published_rows_reuse_saved_identities(
         second = json.loads(json.dumps(finding))
         second["identity"]["instance"] = "saved-2"
         second["provenance"]["candidateId"] = "candidate-b"
+        if candidate_siblings == "saved alias":
+            second["provenance"]["preservedIdentity"] = {"anchor": expected_anchor}
         document["findings"].append(second)
-        raw = {key: value for key, value in second.items() if key != "identity"}
+        raw = json.loads(json.dumps(second))
+        del raw["identity"]
+        raw["provenance"].pop("preservedIdentity", None)
         write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[raw]))
     else:
         finding["provenance"].pop("candidateId", None)
@@ -507,19 +511,29 @@ def test_raw_checkpoint_and_published_rows_reuse_saved_identities(
         assert {"anchor": expected_anchor, "instance": "saved-2"} in identities
 
 
-@pytest.mark.parametrize("discriminator", ["reportId", "ledgerRowId", "saved anchor"])
+@pytest.mark.parametrize(
+    "discriminator,source",
+    [
+        ("reportId", "worker"),
+        ("ledgerRowId", "worker"),
+        ("saved anchor", "worker"),
+        ("saved anchor", "parent"),
+    ],
+)
 def test_saved_identity_reuse_preserves_independent_worker_findings(
-    tmp_path: Path, discriminator: str
+    tmp_path: Path, discriminator: str, source: str
 ):
-    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=source == "worker")
     first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     first.update(title="Synthetic finding", identity={"anchor": "synthetic-finding"})
     first["provenance"]["candidateId"] = "candidate-a"
     second = json.loads(json.dumps(first))
     del second["identity"]
-    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
-        (scan_dir / name).unlink()
-    _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    result_path = scan_dir / "findings.json"
+    if source == "worker":
+        for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+            (scan_dir / name).unlink()
+        _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
     if discriminator == "saved anchor":
         del first["identity"]
         second["title"] = "Other finding"
@@ -535,7 +549,7 @@ def test_saved_identity_reuse_preserves_independent_worker_findings(
     result_path.write_text(json.dumps(document))
     run_workbench(
         state,
-        "fail-deep-scan",
+        "fail-deep-scan" if source == "worker" else "fail-scan",
         "--scan-id",
         scan_id,
         "--message",
@@ -555,3 +569,33 @@ def test_saved_identity_reuse_preserves_independent_worker_findings(
             "report-a",
             "report-b",
         }
+
+
+def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    reviewed = document["findings"][0]
+    reviewed.update(title="Reviewed finding", identity={"anchor": "reviewed-finding"})
+    reviewed["provenance"]["candidateId"] = "candidate-a"
+    reviewed["severity"]["level"] = "medium"
+    historical = json.loads(json.dumps(reviewed))
+    historical.pop("identity")
+    historical["title"] = "Earlier observation"
+    historical["severity"]["level"] = "critical"
+    reviewed["provenance"]["previousFindings"] = [historical]
+    path.write_text(json.dumps(document))
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical]))
+    run_workbench(
+        state,
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+        environment={"CODEX_HOME": str(home)},
+    )
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert saved["findingCount"] == 1
+    assert saved["findings"][0]["severity"]["level"] == "medium"
+    assert saved["findings"][0]["title"] == "Reviewed finding"

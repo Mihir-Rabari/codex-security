@@ -1382,7 +1382,7 @@ def merge_saved_results(
         )
 
     # Raw checkpoints can omit an identity already assigned in another saved source.
-    saved_identities: dict[str, dict[str, Any] | None] = {}
+    saved_identities: dict[str, tuple[dict[str, Any], Any] | None] = {}
     for _, draft, owner in all_sources:
         for finding in draft["findings"]:
             if not isinstance(finding, dict) or not isinstance(finding.get("identity"), dict):
@@ -1390,9 +1390,10 @@ def merge_saved_results(
             if not valid_finding(finding):
                 continue
             key = saved_identity_key(finding, owner)
+            identity = (finding["identity"], finding.get("provenance", {}).get("preservedIdentity"))
             if key not in saved_identities:
-                saved_identities[key] = finding["identity"]
-            elif saved_identities[key] != finding["identity"]:
+                saved_identities[key] = identity
+            elif saved_identities[key] != identity:
                 saved_identities[key] = None
 
     def ensure_saved_identity(finding: Any, owner: str | None) -> None:
@@ -1400,10 +1401,16 @@ def merge_saved_results(
             isinstance(finding, dict)
             and "identity" not in finding
             and isinstance(finding.get("provenance"), dict)
+            # Retained historical observations must keep their original matching key.
+            and _digest(_finding_content(finding))
+            not in represented_history.get(_finding_key(finding), set())
         ):
-            identity = saved_identities.get(saved_identity_key(finding, owner))
-            if identity is not None:
+            saved_identity = saved_identities.get(saved_identity_key(finding, owner))
+            if saved_identity is not None:
+                identity, preserved = saved_identity
                 finding["identity"] = copy.deepcopy(identity)
+                if preserved is not None:
+                    finding["provenance"].setdefault("preservedIdentity", copy.deepcopy(preserved))
         _ensure_finding_identity(finding)
 
     source_order["parent"] = (0, parent_modified)
@@ -1837,9 +1844,11 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
-                    finding_positions.setdefault(
-                        candidate_position_key(finding, _finding_key(finding)), len(findings)
-                    )
+                    key = _finding_key(finding)
+                    position = candidate_position_key(finding, key)
+                    if "identity" not in value and position != key:
+                        candidate_siblings.add(id(finding))
+                    finding_positions.setdefault(position, len(findings))
                 findings.append(finding)
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
