@@ -2486,3 +2486,69 @@ const publishWithProgress: ReturnType<
 async function successfulPublication<Args extends unknown[]>(..._args: Args) {
   return publicationResult();
 }
+
+for (const [selection, expectedCommand] of [
+  [["--scan", "saved-scan"], "get-scan"],
+  [["--scan", "latest"], "list-scans"],
+  [["--workflow-id", "saved-workflow"], "finding-workflow"],
+  [[], "list-scans"],
+] as const) {
+  for (const [signalName, expectedCode] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const) {
+    test(`publication ${selection.join(" ") || "picker"} cancels lookup on ${signalName}`, async () => {
+      const signals = new FakeSignals();
+      const started = Promise.withResolvers<AbortSignal | undefined>();
+      const cleanup = Promise.withResolvers<void>();
+      let published = false;
+      let command: string | undefined;
+      const deps = dependencies({
+        signals,
+        onWorkbench: async (args, _input, signal) => {
+          command = args[0];
+          started.resolve(signal);
+          await cleanup.promise;
+          signal?.throwIfAborted();
+          throw new Error("Lookup finished without cancellation.");
+        },
+      });
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async () => {
+          throw new Error("Unexpected picker.");
+        },
+      };
+      deps.publishScan = async () => {
+        published = true;
+        throw new Error("Unexpected publication.");
+      };
+      deps.publishScanToCustom = async () => {
+        published = true;
+        throw new Error("Unexpected publication.");
+      };
+      const { runCli, stdout } = createCliTest(main);
+      const destination =
+        selection[0] === "--workflow-id"
+          ? ["--to", "custom", "--findings-url", "https://example.invalid"]
+          : ["--to", "linear", "--linear-team", "synthetic-team"];
+      const running = runCli(
+        ["publish", "scan", ...selection, ...destination, "--json"],
+        deps,
+      );
+      const signal = await started.promise;
+      signals.emit(signalName);
+      const aborted = signal?.aborted;
+      cleanup.resolve();
+      const exitCode = await running;
+      expect(command).toBe(expectedCommand);
+      expect(aborted).toBe(true);
+      expect(signal?.reason).toBe(signalName);
+      expect(exitCode).toBe(expectedCode);
+      expect(published).toBe(false);
+      expect(stdout.text()).toBe("");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    });
+  }
+}

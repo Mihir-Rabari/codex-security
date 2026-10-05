@@ -101,6 +101,7 @@ import {
   resolveCompletedScan,
   resolveWorkflowScan,
   type SavedScan,
+  type SavedScanDependencies,
 } from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
@@ -2762,18 +2763,26 @@ export async function main(
           });
           return { ...result };
         }
+        const scanDependencies: SavedScanDependencies = {
+          currentDirectory: dependencies.currentDirectory,
+          runWorkbench: (args, input) =>
+            dependencies.runWorkbench(args, input, controller.signal),
+        };
         const selectedScans: { scanDir: string; scanId?: string }[] =
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolveCompletedScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(
+            requestedId,
+            scanDependencies,
+          );
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
         }
         if (options.workflowId !== undefined && selectedScans.length === 0) {
           selectedScans.push(
-            await resolveWorkflowScan(options.workflowId, dependencies),
+            await resolveWorkflowScan(options.workflowId, scanDependencies),
           );
         }
         let scanDir = selectedScans[0]?.scanDir;
@@ -2787,7 +2796,7 @@ export async function main(
               `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
-          const saved = await dependencies.runWorkbench([
+          const saved = await scanDependencies.runWorkbench([
             "list-scans",
             "--status",
             "complete",
