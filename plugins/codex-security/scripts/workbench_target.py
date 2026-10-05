@@ -679,6 +679,10 @@ def copy_directory_excluding(
         except ValueError:
             continue
 
+    paths = git_directory_snapshot_paths(source)
+    if paths is None:
+        paths = source_directory_snapshot_paths(source)
+    selected_paths = set(paths)
     copied_junctions: dict[Path, tuple[int, str]] = {}
 
     def ignored(directory: str, names: list[str]) -> list[str]:
@@ -698,7 +702,8 @@ def copy_directory_excluding(
                 and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
             ):
                 # Preserve snapshot leaf identity without recreating or traversing a junction.
-                copied_junctions[relative / name] = (metadata.st_mode, os.readlink(path))
+                if path in selected_paths:
+                    copied_junctions[relative / name] = (metadata.st_mode, os.readlink(path))
                 skipped.append(name)
         return skipped
 
