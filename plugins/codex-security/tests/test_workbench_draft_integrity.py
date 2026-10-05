@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -705,6 +706,88 @@ def test_same_candidate_siblings_do_not_borrow_identities(
             "Alpha": {"anchor": "alpha"},
             "Beta": {"anchor": "beta"},
         }
+
+
+@pytest.mark.parametrize("source", ["parent", "worker"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_restored_identity_does_not_absorb_a_sibling_without_candidate(
+    tmp_path: Path, source: str, reverse: bool
+):
+    for retry in (False, True):
+        root = tmp_path / str(retry)
+        root.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(root, deep=source == "worker")
+        path = scan_dir / "findings.json"
+        document = json.loads(path.read_text())
+        first = document["findings"][0]
+        del first["identity"]
+        first["title"] = "Alpha"
+        first["provenance"]["candidateId"] = "candidate-a"
+        second = json.loads(json.dumps(first))
+        second["title"] = "Beta"
+        second["severity"]["level"] = "high"
+        del second["provenance"]["candidateId"]
+        if source == "worker":
+            for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+                (scan_dir / name).unlink()
+            _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
+            document = json.loads(path.read_text())
+        write_checkpoint(
+            path.parent / "checkpoints",
+            saved_draft(scan_id, findings=[{**first, "identity": {"anchor": "beta"}}]),
+        )
+        document["findings"] = [second, first] if reverse else [first, second]
+        path.write_text(json.dumps(document))
+        stop_draft(root, state, home, scan_id, deep=source == "worker", retry=retry)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert {finding["title"] for finding in findings} == {"Alpha", "Beta"}
+
+
+@pytest.mark.parametrize("worker_history", [False, True])
+def test_identity_restoration_matches_retained_history(tmp_path: Path, worker_history: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=worker_history)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    reviewed = document["findings"][0]
+    reviewed.update(title="Reviewed finding", identity={"anchor": "reviewed"})
+    reviewed["severity"]["level"] = "medium"
+    reviewed["provenance"]["candidateId"] = "candidate-a"
+    historical = json.loads(json.dumps(reviewed))
+    del historical["identity"]
+    historical["title"] = "Historical finding"
+    historical["severity"]["level"] = "critical"
+    checkpoint_dir = scan_dir / "checkpoints"
+    if worker_history:
+        worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+        reviewed["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+        checkpoint_dir = result_path.parent / "checkpoints"
+        worker = json.loads(result_path.read_text())
+        worker["findings"] = [historical]
+        result_path.write_text(json.dumps(worker))
+    else:
+        reviewed["provenance"]["previousFindings"] = [historical]
+    checkpoint = write_checkpoint(
+        checkpoint_dir,
+        saved_draft(
+            scan_id,
+            findings=[
+                {**historical, "identity": {"anchor": "historical-finding", "instance": "saved"}}
+            ],
+        ),
+    )
+    os.utime(checkpoint, (10, 10))
+    path.write_text(json.dumps(document))
+    raw = write_checkpoint(checkpoint_dir, saved_draft(scan_id, findings=[historical]))
+    later = path.stat().st_mtime + 1
+    os.utime(raw, (later, later))
+    if worker_history:
+        stop_draft(tmp_path, state, home, scan_id, deep=True, retry=True)
+    else:
+        run_workbench(state, "complete-scan", "--scan-id", scan_id)
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert [(finding["title"], finding["severity"]["level"]) for finding in findings] == [
+        ("Reviewed finding", "medium")
+    ]
 
 
 @pytest.mark.parametrize("explicit_first", [False, True])

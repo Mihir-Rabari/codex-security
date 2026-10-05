@@ -1520,9 +1520,22 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         { ...f.draft({}, true), findings: added ? [later] : [] },
         false,
       );
-      const result = await f.write(f.draft());
+      const result = await f.write(
+        f.draft({
+          surfaces: [
+            {
+              id: "candidate-a",
+              candidateId: "candidate-a",
+              label: "Late rejection",
+              disposition: "rejected",
+              receiptRefs: [],
+            },
+          ],
+        }),
+      );
       assert.equal(result.findingCount, added ? 2 : 1);
       assert.equal(result.coverage.completeness, "partial");
+      assert.deepEqual(result.coverage.surfaces, []);
       assert.deepEqual(result.coverage.deferred, [pending]);
       assert.deepEqual((await f.read()).deferred, [pending]);
     });
@@ -1931,6 +1944,54 @@ print(json.dumps(findings["findings"]))`,
     ],
   );
   return JSON.parse(stdout);
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const sequence of ["BA", "BAA", "ABA"]) {
+    if (layout === "deep" && sequence !== "BA") continue;
+    test(`${layout}: stopped publication and frozen replay retain candidates from ${sequence}`, async (t) => {
+      const f = await fixture(t, layout);
+      await f.write({
+        ...f.draft({}, true),
+        findings: [...sequence].map((candidate, index) => ({
+          ...findingFor(candidate),
+          severity: { level: index === sequence.length - 1 ? "high" : "low" },
+        })),
+      });
+      const { stdout } = await execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+from finalize_scan_contract import _recover_unsealed_findings
+root=Path(sys.argv[2])
+manifest=json.loads((root/"scan-manifest.json").read_text())
+coverage=json.loads((root/"coverage.json").read_text())
+scan=manifest["scan"]
+binding={"status":"interrupted","target":scan["target"],"scope":scan["scope"],"allowedTargetKinds":[scan["target"]["kind"]],"coverageMode":coverage["mode"]}
+first=merge_saved_results(root,sys.argv[3],binding,[],[],stopped=True,reason="stopped")
+replay=merge_saved_results(root,sys.argv[3],binding,[],[],stopped=True,reason="stopped",frozen_source_digests=first[0]["scan"]["preservedSources"])
+stages=[]
+for manifest,findings,_ in [first,replay]:
+    manifest["scan"]["id"]=findings["scanId"]=sys.argv[3]
+    _recover_unsealed_findings(manifest,findings,Path(sys.argv[1]).parent/"schemas",root,[])
+    stages.append({f["provenance"]["candidateId"]:{"severity":f["severity"]["level"],"identity":f["identity"]} for f in findings["findings"]})
+    assert len(findings["findings"])==2,findings
+print(json.dumps(stages))`,
+          fileURLToPath(new URL("../../scripts", import.meta.url)),
+          f.root,
+          f.context.scanId!,
+        ],
+      );
+      const stages = JSON.parse(stdout);
+      assert.deepEqual(stages[0], stages[1]);
+      assert.equal(stages[0].A.severity, "high");
+      assert.equal(stages[0].B.severity, "low");
+    });
+  }
 }
 
 for (const layout of ["standard", "diff"] as const) {

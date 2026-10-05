@@ -623,27 +623,36 @@ def _ensure_finding_identity(finding: Any) -> None:
     finding["identity"] = {"anchor": anchor}
 
 
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
+def _retained_findings(
+    finding: dict[str, Any], owner: str | None = None
+) -> Iterator[tuple[dict[str, Any], str | None]]:
+    """Yield canonical and historical findings with their saved worker context."""
+    pending = [(finding, owner)]
     seen: set[int] = set()
     while pending:
-        current = pending.pop()
+        current, owner = pending.pop()
         marker = id(current)
         if marker in seen:
             continue
         seen.add(marker)
-        yield current
         provenance = current.get("provenance")
+        if isinstance(provenance, dict):
+            owner = provenance.get("workerId") or owner
+        yield current, owner
         if not isinstance(provenance, dict):
             continue
         previous = provenance.get("previousFindings")
         if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
+            pending.extend((item, owner) for item in reversed(previous) if isinstance(item, dict))
         sources = provenance.get("sourceFindings")
         if isinstance(sources, list):
             pending.extend(
-                source["finding"]
+                (
+                    source["finding"],
+                    source["id"].rsplit(":", 1)[0]
+                    if isinstance(source.get("id"), str) and ":" in source["id"]
+                    else owner,
+                )
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
             )
@@ -1376,37 +1385,41 @@ def merge_saved_results(
             ]
         )
 
-    # Raw checkpoints can omit an identity already assigned in another saved source.
-    saved_identities: dict[str, tuple[dict[str, Any], Any] | None] = {}
+    # Normalize each saved observation and its retained history before indexing it.
+    observations: dict[str, list[dict[str, Any]]] = {}
     for _, draft, owner in all_sources:
         for finding in draft["findings"]:
-            if not isinstance(finding, dict) or not isinstance(finding.get("identity"), dict):
+            if not isinstance(finding, dict):
                 continue
-            if not valid_finding(finding):
-                continue
-            key = saved_identity_key(finding, owner)
-            identity = (finding["identity"], finding.get("provenance", {}).get("preservedIdentity"))
-            if key not in saved_identities:
-                saved_identities[key] = identity
-            elif saved_identities[key] != identity:
-                saved_identities[key] = None
-
-    # Resolve identical saved observations before indexing reviewed history.
-    for _, draft, owner in all_sources:
-        for finding in draft["findings"]:
-            if (
-                not isinstance(finding, dict)
-                or "identity" in finding
-                or not isinstance(finding.get("provenance"), dict)
-            ):
-                continue
-            saved_identity = saved_identities.get(saved_identity_key(finding, owner))
-            if saved_identity is not None:
+            for retained, retained_owner in _retained_findings(finding, owner):
+                if isinstance(retained.get("provenance"), dict):
+                    observations.setdefault(
+                        saved_identity_key(retained, retained_owner), []
+                    ).append(retained)
+    for matches in observations.values():
+        identities = {
+            _encoded([finding["identity"], finding["provenance"].get("preservedIdentity")]): (
+                finding["identity"],
+                finding["provenance"].get("preservedIdentity"),
+            )
+            for finding in matches
+            if isinstance(finding.get("identity"), dict) and valid_finding(finding)
+        }
+        raw = next((finding for finding in matches if "identity" not in finding), None)
+        if len(identities) != 1 or raw is None:
+            continue
+        identity, preserved = next(iter(identities.values()))
+        if preserved is None:
+            normalized = dict(raw)
+            _ensure_finding_identity(normalized)
+            if normalized["identity"] != identity:
+                preserved = normalized["identity"]
+        for finding in matches:
+            if "identity" not in finding:
                 inferred_identities[id(finding)] = finding
-                identity, preserved = saved_identity
                 finding["identity"] = copy.deepcopy(identity)
-                if preserved is not None:
-                    finding["provenance"].setdefault("preservedIdentity", copy.deepcopy(preserved))
+            if preserved is not None:
+                finding["provenance"].setdefault("preservedIdentity", copy.deepcopy(preserved))
 
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
@@ -1584,7 +1597,7 @@ def merge_saved_results(
         for finding in parent["findings"]:
             if valid_finding(finding):
                 canonical_key = _finding_key(finding)
-                for retained in _retained_findings(finding):
+                for retained, _ in _retained_findings(finding):
                     retained_key = _finding_key(retained)
                     if retained is not finding:
                         represented_history.setdefault(retained_key, set()).add(
@@ -1923,20 +1936,9 @@ def merge_saved_results(
                 if worker_id and candidate_id
                 else None
             )
-            if (
-                (
-                    id(finding) in inferred_identities
-                    or (
-                        key not in represented
-                        and key in finding_positions
-                        and id(findings[finding_positions[key]]) in inferred_identities
-                    )
-                )
-                and not represented_by_parent
-                and not (
-                    canonical_candidate in canonical_candidates
-                    and represented_candidates[canonical_candidate] is not None
-                )
+            if not represented_by_parent and not (
+                canonical_candidate in canonical_candidates
+                and represented_candidates[canonical_candidate] is not None
             ):
                 key = candidate_position_key(finding, key)
             if key in finding_positions:
@@ -1974,7 +1976,7 @@ def merge_saved_results(
                         already_retained = any(
                             source_key == _finding_key(historical)
                             and source_content == _finding_content(historical)
-                            for historical in _retained_findings(retained)
+                            for historical, _ in _retained_findings(retained)
                         )
                         if (
                             not already_retained
@@ -2108,12 +2110,16 @@ def merge_saved_results(
         )
         if matching is not None:
             if identity != matching["identity"]:
-                finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
+                finding.setdefault("provenance", {}).setdefault(
+                    "preservedIdentity", copy.deepcopy(identity)
+                )
                 finding["identity"] = copy.deepcopy(matching["identity"])
             continue
         if assigned:
             previous_variant = assigned[0][0]
-            finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
+            finding.setdefault("provenance", {}).setdefault(
+                "preservedIdentity", copy.deepcopy(identity)
+            )
             base_instance = identity.get("instance", "saved")
             prefix = (
                 f"{base_instance}-{variant[:16]}" if previous_variant != variant else base_instance

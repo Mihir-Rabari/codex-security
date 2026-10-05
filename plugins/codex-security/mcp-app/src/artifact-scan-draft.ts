@@ -495,10 +495,17 @@ function reconcileScanDraft(
     input.complete === false
       ? savedSources.find(({ input }) => input.complete !== false)
       : undefined;
+  const retainedIndex = retainedFinal
+    ? savedSources.indexOf(retainedFinal)
+    : -1;
   // A raw terminal checkpoint may still omit unresolved work from saved sources.
   if (retainedFinal)
     // Saved closures are history, not new commands against later reopenings.
-    result = reconcileScanDraft(retainedFinal.input, savedSources, []).input;
+    result = reconcileScanDraft(
+      retainedFinal.input,
+      savedSources.slice(retainedIndex),
+      [],
+    ).input;
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -515,7 +522,7 @@ function reconcileScanDraft(
   const reopenedSurfaces = new Set<JsonObject>();
   let acceptProgress = true;
   if (retainedFinal) {
-    const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
+    const terminalOutcomeIds = completedCandidateIds(result);
     for (const surface of result.coverage.surfaces as JsonObject[]) {
       if (
         terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
@@ -526,7 +533,6 @@ function reconcileScanDraft(
     const closedIds = new Set(
       resolvedDeferred(result.coverage).map((row) => row.id as string),
     );
-    const retainedIndex = savedSources.indexOf(retainedFinal);
     const progressSources = savedSources
       .filter(
         (source, index) =>
@@ -2383,10 +2389,9 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       key,
       previous === null ||
         (previous !== undefined &&
-          scanFindingIdentity({ ...finding, identity: previous }) !==
-            scanFindingIdentity(finding))
+          scanFindingIdentity(previous) !== scanFindingIdentity(finding))
         ? null
-        : (finding.identity as JsonObject),
+        : finding,
     );
   }
   return identified.map((finding, index) => {
@@ -2397,7 +2402,20 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     const previous = candidateKey
       ? candidateIdentities.get(candidateKey)
       : undefined;
-    if (previous) return { ...finding, identity: { ...previous } };
+    if (previous) {
+      const preservedIdentity = (previous.provenance as JsonObject)
+        .preservedIdentity;
+      return {
+        ...finding,
+        identity: { ...(previous.identity as JsonObject) },
+        provenance: {
+          ...(finding.provenance as JsonObject),
+          ...(preservedIdentity === undefined
+            ? {}
+            : { preservedIdentity: structuredClone(preservedIdentity) }),
+        },
+      };
+    }
     if (
       !used.has(key) ||
       (mode !== "deep" &&
@@ -2406,7 +2424,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     ) {
       used.set(key, candidateKey ?? used.get(key));
       if (candidateKey && previous !== null)
-        candidateIdentities.set(candidateKey, finding.identity as JsonObject);
+        candidateIdentities.set(candidateKey, finding);
       return finding;
     }
     const identity = finding.identity as JsonObject;
@@ -2431,7 +2449,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     };
     used.set(scanFindingIdentity(distinct), candidateKey);
     if (candidateKey && previous !== null)
-      candidateIdentities.set(candidateKey, distinct.identity);
+      candidateIdentities.set(candidateKey, distinct);
     return distinct;
   });
 }
