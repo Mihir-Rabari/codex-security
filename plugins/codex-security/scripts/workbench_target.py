@@ -494,6 +494,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
+    junction_prefixes: dict[str, bool] = {}
     listing_args: list[str] = []
     inventory_pathspec = pathspec
     if scope_depth:
@@ -541,12 +542,27 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
             path = scope.joinpath(*relative.parts[scope_depth:])
         try:
+            # Git can list descendants of a junction; snapshots retain the link.
+            prefix = scope
+            for component in path.relative_to(scope).parts[:-1]:
+                prefix /= component
+                key = str(prefix)
+                if key not in junction_prefixes:
+                    junction_prefixes[key] = bool(
+                        getattr(prefix.lstat(), "st_reparse_tag", 0) & 0x20000000
+                    )
+                if junction_prefixes[key]:
+                    path = prefix
+                    break
             metadata = path.lstat()
         except FileNotFoundError:
             # The index can retain a path that was staged and then deleted.
             continue
         paths.append(path)
-        if not stat.S_ISDIR(metadata.st_mode):
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if (
@@ -557,11 +573,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
-        paths.extend(
-            nested_path
-            for nested_path in path.rglob("*")
-            if ".git" not in nested_path.relative_to(path).parts
-        )
+        paths.extend(source_directory_snapshot_paths(path))
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 

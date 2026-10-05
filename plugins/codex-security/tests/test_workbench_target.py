@@ -22,16 +22,28 @@ update_digest_field = cast(
 )
 
 
-@pytest.mark.parametrize("git_exclusion", [None, ".gitignore", ".git/info/exclude"])
+@pytest.mark.parametrize(
+    ("git_repository", "git_exclusion"),
+    [
+        (None, None),
+        ("untracked", None),
+        ("indexed", None),
+        ("untracked", ".gitignore"),
+        ("untracked", ".git/info/exclude"),
+    ],
+    ids=["plain", "git-untracked", "git-indexed", "gitignore", "git-info-exclude"],
+)
 @pytest.mark.parametrize("native_junction", [False, True])
 @pytest.mark.parametrize(
-    "change", ["unchanged", "unrelated_file", "junction_target", "target_contents"]
+    "change",
+    ["unchanged", "unrelated_file", "junction_target", "same_content_target", "target_contents"],
 )
 def test_reviewed_patch_preserves_junction_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     native_junction: bool,
     change: str,
+    git_repository: str | None,
     git_exclusion: str | None,
 ) -> None:
     import workbench_db
@@ -40,10 +52,12 @@ def test_reviewed_patch_preserves_junction_boundaries(
         pytest.skip("requires native Windows junctions")
     source = tmp_path / "source"
     source.mkdir()
-    if git_exclusion is not None:
+    if git_repository:
         subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-        (source / git_exclusion).write_text("linked_directory/\n")
-    junction = source / "linked_directory"
+    if git_exclusion is not None:
+        (source / git_exclusion).write_text("dependencies/linked_directory/\n")
+    (source / "dependencies").mkdir()
+    junction = source / "dependencies" / "linked_directory"
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "source.txt").write_text("original contents\n")
@@ -85,16 +99,22 @@ def test_reviewed_patch_preserves_junction_boundaries(
         "scan_dir": str(scan_dir),
     }
     (source / "app.txt").write_text("before\n")
+    if git_repository == "indexed":
+        subprocess.run(["git", "add", "."], cwd=source, check=True)
     remediation = {
         "base_revision": "unversioned",
         "base_content_digest": workbench_db.directory_content_digest(source),
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
     (source / "app.txt").write_text("after\n")
-    if change == "junction_target":
+    if change in {"junction_target", "same_content_target"}:
         junction_target = tmp_path / "other"
         junction_target.mkdir()
-        (junction_target / "source.txt").write_text("different target contents\n")
+        (junction_target / "source.txt").write_text(
+            "original contents\n"
+            if change == "same_content_target"
+            else "different target contents\n"
+        )
         if native_junction:
             junction.rmdir()
         link_to(junction_target)
@@ -102,7 +122,9 @@ def test_reviewed_patch_preserves_junction_boundaries(
         (junction / "source.txt").write_text("changed outside the snapshot boundary\n")
     elif change == "unrelated_file":
         (source / "unrelated.txt").write_text("outside the reviewed patch\n")
-    if change == "unrelated_file" or (change == "junction_target" and git_exclusion is None):
+    if change == "unrelated_file" or (
+        change in {"junction_target", "same_content_target"} and git_exclusion is None
+    ):
         with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
             workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
     else:
