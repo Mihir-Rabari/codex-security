@@ -14,6 +14,29 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
 describe("CLI diagnostics", () => {
+  test.each([{ flags: [] }, { flags: ["--json"] }])(
+    "reports rerun history failures once: $flags",
+    async ({ flags }) => {
+      for (const lookupFails of [false, true]) {
+        const message = lookupFails
+          ? "Synthetic history failure."
+          : "No completed scans found for the current repository.";
+        const calls: string[] = [];
+        const deps = dependencies({
+          onWorkbench: (args) => {
+            calls.push(args[0]!);
+            if (lookupFails) throw new Error(message);
+            return { scans: [] };
+          },
+        });
+        const { stderr, runCli } = createCliTest(main);
+        expect(await runCli(["scans", "rerun", ...flags], deps)).toBe(2);
+        expect(stderr.text()).toBe(`codex-security: ${message}\n`);
+        expect(calls).toEqual(["list-scans"]);
+      }
+    },
+  );
+
   test("retains local filesystem errors through artifact failure wrappers", async () => {
     // Reading a directory produces a real local errno on the supported platforms.
     const cause = await readFile(import.meta.dir).then(
@@ -68,6 +91,11 @@ describe("CLI diagnostics", () => {
       structured: false,
     },
     {
+      command: "validate",
+      args: ["validate", "Synthetic finding"],
+      structured: false,
+    },
+    {
       command: "verify-fix",
       args: ["verify-fix", "Synthetic finding"],
       structured: false,
@@ -91,7 +119,7 @@ describe("CLI diagnostics", () => {
     "escapes terminal controls in $command failures while preserving details",
     async ({ command, args, structured }) => {
       const message =
-        "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail";
+        "Operation failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued\r\ttail\u009b2J\u009d0;title\u009c";
       const fail = throwing(message);
       const deps = dependencies({ onCodex: fail, onRepositoryCommand: fail });
       deps.classifyScanSeverity = fail;
@@ -104,7 +132,7 @@ describe("CLI diagnostics", () => {
 
       expect(await runCli(args, deps)).toBe(2);
       expect(stderr.text()).toContain(
-        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail\n",
+        "codex-security: Operation failed: token=SYNTHETIC_VALUE [2J continued  tail 2J 0;title \n",
       );
       expect(stderr.text()).not.toContain("\u001b");
       if (structured) {

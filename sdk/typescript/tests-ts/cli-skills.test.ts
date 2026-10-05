@@ -955,7 +955,11 @@ describe("CLI skill commands", () => {
   test.each(["validate", "patch", "verify-fix"] as const)(
     "selects the model and reasoning effort directly for %s",
     async (command) => {
-      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+      for (const [model, effort] of [
+        ["gpt-6-astra", "max"],
+        ["gpt-6.1-sol", "max"],
+        ["synthetic-future-model", "synthetic-future-effort"],
+      ] as const) {
         let invocation: readonly string[] = [];
         const stderr = captureCli(main, "stderr");
         expect(
@@ -967,7 +971,7 @@ describe("CLI skill commands", () => {
                 ? ["--model", model]
                 : [`--model=${model}`]),
               "--effort",
-              "max",
+              effort,
             ],
             dependencies({
               onCodex: (args, output) => {
@@ -992,14 +996,11 @@ describe("CLI skill commands", () => {
           stderr.text(),
         ).toBe(0);
         expect(invocation).toContain(`model="${model}"`);
-        expect(invocation).toContain('model_reasoning_effort="max"');
+        expect(invocation).toContain(`model_reasoning_effort="${effort}"`);
       }
 
       for (const [options, message] of [
-        [
-          ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, xhigh, or max",
-        ],
+        [["--effort="], "--effort must not be empty"],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
           "--effort conflicts with --codex model_reasoning_effort",
@@ -1262,6 +1263,12 @@ process.stdout.write(JSON.stringify({
       ],
       ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
       [
+        "tokens per minute limit exceeded sk-proj-SYNTHETIC_SECRET",
+        "rate limited",
+      ],
+      ["tokens-per-minute limit exceeded", "rate limited"],
+      ["tokens_per_minute limit exceeded", "rate limited"],
+      [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
@@ -1280,6 +1287,7 @@ process.stdout.write(JSON.stringify({
     "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     "permission denied opening cache",
     "line 1429 could not be parsed",
+    "count_tokens_per_minute_limit is undefined",
   ])("does not misclassify an operational skill failure: %s", (detail) => {
     const message = skillCommandFailure("patch", 1, detail);
     expect(message).toContain(detail);
@@ -1368,11 +1376,43 @@ process.stdout.write(JSON.stringify({
     }
   });
 
+  test.each(["turn.failed", "stderr"])(
+    "escapes C1 controls in child %s failures while preserving diagnostic text",
+    async (channel) => {
+      const controls = String.fromCharCode(
+        ...Array.from({ length: 33 }, (_, index) => 0x7f + index),
+      );
+      const prefix = "Synthetic failure token=SYNTHETIC_VALUE Café 🔒 ";
+      const suffix = " retained detail";
+      const detail = `${prefix}${controls}${suffix}`;
+      const source =
+        channel === "turn.failed"
+          ? `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`
+          : `process.stderr.write(${JSON.stringify(detail)});process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        `codex-security: validate failed with exit code 7.\n${prefix}${" ".repeat(33)}${suffix}\n`,
+      );
+    },
+  );
+
   test("runs patching in a saved app-server thread", async () => {
     const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let initialized = false;
 const item = (threadId, turnId, text, phase = "final_answer") =>
   send({ method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text, phase } } });
 const complete = (threadId, id) =>
@@ -1384,7 +1424,10 @@ lines.on("line", (line) => {
   } else if (request.id === 1 && !request.method) {
     assert.equal(request.error.code, -32601);
     send({ id: 1, result: {} });
+  } else if (request.method === "initialized") {
+    initialized = true;
   } else if (request.method === "thread/start") {
+    assert.equal(initialized, true);
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
     assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
     send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });

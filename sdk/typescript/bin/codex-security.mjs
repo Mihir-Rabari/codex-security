@@ -22,7 +22,7 @@ void launch().then(
   (error) => {
     const detail = (
       error instanceof Error ? error.message : String(error)
-    ).replaceAll(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, " ");
+    ).replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
     process.stderr.write(
       `codex-security: Failed to start Codex Security: ${detail}\n`,
     );

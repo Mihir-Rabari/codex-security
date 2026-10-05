@@ -59,6 +59,8 @@ describe("Codex sandbox probe", () => {
           () => null,
           (error: Error) => error,
         );
+        expect(failure).toBeInstanceOf(SandboxUnavailableError);
+        expect(failure?.cause).toBeDefined();
         expect(failure?.message).toContain("timed out");
         expect(failure?.message).not.toContain("user namespaces");
       } finally {

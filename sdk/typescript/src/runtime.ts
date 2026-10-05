@@ -2898,7 +2898,7 @@ export async function probeCodexSandbox(
   } catch (error) {
     signal?.throwIfAborted();
     if (timeout.aborted)
-      throw new Error(
+      throw new SandboxUnavailableError(
         `Codex sandbox probe timed out after ${SANDBOX_PROBE_TIMEOUT_MILLISECONDS / 1000} seconds.`,
         { cause: error },
       );
