@@ -36,14 +36,17 @@ for (const ordering of [
   "failure response last",
   "lost cancellation response",
   "cancellation before admission",
+  "cancellation before admission with active worker",
   "cancellation before failure",
   "lost cancellation before failure",
   "cancellation before failure during publication",
   "lost cancellation before failure during publication",
 ]) {
   await test(ordering, { timeout: 30_000 }, async () => {
-    const canceledBeforeAdmission =
-      ordering === "cancellation before admission";
+    const canceledBeforeAdmission = ordering.startsWith(
+      "cancellation before admission",
+    );
+    const activeBeforeAdmission = ordering.endsWith("active worker");
     const canceledBeforeFailure = ordering.includes(
       "cancellation before failure",
     );
@@ -83,7 +86,9 @@ for (const ordering of [
       await writeFile(
         join(environment.CODEX_HOME, "codex-security", "config.toml"),
         "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n" +
-          (canceledBeforeFailure ? "" : "max_time_hours = 1e-12\n"),
+          (canceledBeforeFailure || activeBeforeAdmission
+            ? ""
+            : "max_time_hours = 1e-12\n"),
         { mode: 0o600 },
       );
       const runWorkbench = async (args: string[]) => {
@@ -100,7 +105,11 @@ for (const ordering of [
           await cancelRelease.promise;
         }
         const result = await runWorkbench(args);
-        if (args[0] === "finish-deep-scan" && canceledBeforeAdmission) {
+        if (
+          args[0] === "finish-deep-scan" &&
+          canceledBeforeAdmission &&
+          !activeBeforeAdmission
+        ) {
           finishCommitted.resolve();
           await finishResponse.promise;
         }
@@ -179,13 +188,14 @@ for (const ordering of [
       const coordinator = registry.start({
         run: claim.run,
         store,
-        executor: canceledBeforeFailure
-          ? executor
-          : {
-              async run() {
-                throw new Error("expired deadline must not launch a worker");
+        executor:
+          canceledBeforeFailure || activeBeforeAdmission
+            ? executor
+            : {
+                async run() {
+                  throw new Error("expired deadline must not launch a worker");
+                },
               },
-            },
         pluginRoot,
         threadId: "fixture-owner",
         heartbeatIntervalMs: 60_000,
@@ -220,16 +230,25 @@ for (const ordering of [
       terminal = coordinator.settled();
       void terminal!.catch(() => {});
       if (canceledBeforeAdmission) {
-        await finishCommitted.promise;
+        if (activeBeforeAdmission) await executor.discoveryStarted.promise;
+        else await finishCommitted.promise;
         await runWorkbench(["cancel-scan", "--scan-id", run.scanId]);
         cancelRelease.resolve();
         cancellation = cancel({ scanId: run.scanId });
         void cancellation!.catch(() => {});
-        await admissionRead.promise;
+        await Promise.race([admissionRead.promise, cancellation]);
+        if (activeBeforeAdmission) {
+          await new Promise(setImmediate);
+          assert.equal(
+            executor.runningDiscovery,
+            0,
+            "accepted cancellation stops the worker before the next heartbeat",
+          );
+        }
         finishResponse.resolve();
         const result = await terminal!;
         assert.equal(result.status, "canceled");
-        assert.equal(result.error, undefined);
+        if (!activeBeforeAdmission) assert.equal(result.error, undefined);
         await cancellation;
         return;
       }
