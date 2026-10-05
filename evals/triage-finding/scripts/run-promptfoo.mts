@@ -1,12 +1,10 @@
 #!/usr/bin/env node
-"use strict";
+import childProcess, { type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const childProcess = require("node:child_process");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-
-const EVAL_ROOT = path.resolve(__dirname, "..");
+const EVAL_ROOT = path.resolve(import.meta.dirname, "..");
 const PLUGIN_ROOT = path.resolve(
   EVAL_ROOT,
   "..",
@@ -24,7 +22,11 @@ const PROMPTFOO_ENTRYPOINT = path.join(
   "entrypoint.js",
 );
 
-function copyDirectory(sourceRoot, targetRoot, excludedNames = new Set()) {
+function copyDirectory(
+  sourceRoot: string,
+  targetRoot: string,
+  excludedNames = new Set<string>(),
+) {
   fs.cpSync(sourceRoot, targetRoot, {
     recursive: true,
     filter: (source) => !excludedNames.has(path.basename(source)),
@@ -68,7 +70,10 @@ function stageSkillRuntime() {
   return fs.realpathSync(runtimeRoot);
 }
 
-async function runPromptfoo(promptfooArgs, environment = {}) {
+async function runPromptfoo(
+  promptfooArgs: string[],
+  environment: NodeJS.ProcessEnv = {},
+) {
   const runtimeRoot = stageSkillRuntime();
   const env = {
     ...process.env,
@@ -81,9 +86,9 @@ async function runPromptfoo(promptfooArgs, environment = {}) {
       "calibration-repos",
     ),
   };
-  let child;
-  let interrupted;
-  const handlers = ["SIGINT", "SIGTERM"].map((signal) => {
+  let child: ChildProcess | undefined;
+  let interrupted: NodeJS.Signals | undefined;
+  const handlers = (["SIGINT", "SIGTERM"] as const).map((signal) => {
     const handler = () => {
       interrupted = signal;
       if (!child?.pid) return;
@@ -93,15 +98,15 @@ async function runPromptfoo(promptfooArgs, environment = {}) {
           process.kill(-child.pid, signal);
         } catch (error) {
           // The process group can exit before Node emits the close event.
-          if (error.code !== "ESRCH") throw error;
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
         }
       }
     };
     process.on(signal, handler);
-    return [signal, handler];
+    return [signal, handler] as const;
   });
-  function runChild(command, args, cwd) {
-    return new Promise((resolve, reject) => {
+  function runChild(command: string, args: string[], cwd: string) {
+    return new Promise<number>((resolve, reject) => {
       child = childProcess.spawn(command, args, {
         cwd,
         env,
@@ -146,7 +151,17 @@ async function runPromptfoo(promptfooArgs, environment = {}) {
   }
 }
 
-if (require.main === module) {
+function invokedAsMain() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === import.meta.filename;
+  } catch {
+    // A virtual entry point imports this module without invoking the runner.
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   runPromptfoo(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;
@@ -157,4 +172,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { runPromptfoo, stageSkillRuntime };
+export { runPromptfoo, stageSkillRuntime };

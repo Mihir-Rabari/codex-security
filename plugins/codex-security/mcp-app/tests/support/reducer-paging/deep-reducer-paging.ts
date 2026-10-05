@@ -21,14 +21,14 @@ import {
   gradeReducerPagingResult,
 } from "./deep-reducer-paging-fixture.ts";
 
-/** Run one reducer through real code-mode IPC and the production artifact tools. */
-interface ReducerPagingOptions {
+interface ReducerPagingEvalOptions {
   root: string;
   mode?: "deterministic" | "model";
   model?: string;
 }
 
-export async function runReducerPagingEval(options: ReducerPagingOptions) {
+/** Run one reducer through real code-mode IPC and the production artifact tools. */
+export async function runReducerPagingEval(options: ReducerPagingEvalOptions) {
   try {
     const result = await runReducer(options);
     await writeJson(path.join(options.root, "report.json"), result.report);
@@ -47,7 +47,7 @@ async function runReducer({
   root,
   mode = "deterministic",
   model,
-}: ReducerPagingOptions) {
+}: ReducerPagingEvalOptions) {
   assert.ok(mode === "deterministic" || mode === "model");
   const fixture = await createReducerPagingFixture(root);
   const tracePath = path.join(root, "tool-trace.jsonl");

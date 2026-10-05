@@ -1,16 +1,16 @@
 import { outputText as textFor, hasTriageJson } from "./output.mts";
 import type { AssertionContext } from "../types.ts";
+function containsAll(text: string, patterns: RegExp[]) {
+  return patterns.every((pattern) => pattern.test(text));
+}
+
 function endpointPattern(path: string, queryParts: string[] = []) {
-  const patterns = [
-    new RegExp(
-      path
-        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-        .replace(/\\\{(?:owner|repo)\\\}/g, "[^/\\s?`]+"),
-      "i",
-    ),
-    ...queryParts.map((part) => new RegExp(part, "i")),
-  ];
-  return (text: string) => patterns.every((pattern) => pattern.test(text));
+  const escapedPath = path
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\\\{(?:owner|repo)\\\}/g, "[^/\\s?`]+");
+  const queryPatterns = queryParts.map((part) => new RegExp(part, "i"));
+  return (text: string) =>
+    new RegExp(escapedPath, "i").test(text) && containsAll(text, queryPatterns);
 }
 
 function escapedLiteralPattern(value: unknown) {
@@ -152,9 +152,13 @@ const checks = {
   },
 
   connector_selected: (text: string) => {
+    const fallbackInstructions = text.replace(
+      /\b(?:never|do not|don't)\s+(?:switch to|fall back to|use)\s+REST\s+without\s+(?:approval|permission)\b/gi,
+      "",
+    );
     return [
       ...(/(?:do not|don't)\s+(?:ask|seek|request)[^.\n]*REST|REST[^.\n]*(?:without (?:approval|permission)|(?:do not|don't)\s+(?:ask|seek|request))/i.test(
-        text,
+        fallbackInstructions,
       )
         ? ["must ask before switching to REST"]
         : []),

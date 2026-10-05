@@ -1,14 +1,21 @@
-const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const { createRequire } = require("node:module");
-const os = require("node:os");
-const path = require("node:path");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+const require = createRequire(import.meta.url);
 const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
-const evalRoot = path.resolve(__dirname, "..");
-const runner = path.join(__dirname, "run-promptfoo.js");
+const evalRoot = path.resolve(import.meta.dirname, "..");
+const runner = path.join(import.meta.dirname, "run-promptfoo.mts");
+interface Capture {
+  cwd: string;
+  policy: string;
+  proxies: Record<string, string>;
+}
+
 const proxies = {
   HTTP_PROXY: "http://http.example.test:8080",
   HTTPS_PROXY: "http://https.example.test:8080",
@@ -16,23 +23,29 @@ const proxies = {
   NO_PROXY: "localhost,.example.test",
 };
 
-function invoke(args, environment) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [runner, ...args], {
-      cwd: evalRoot,
-      env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      output += chunk;
-    });
-    child.once("error", reject);
-    child.once("close", (code) => resolve({ code, output }));
-  });
+function invoke(args: string[], environment: NodeJS.ProcessEnv) {
+  return new Promise<{ code: number | null; output: string }>(
+    (resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        ["--experimental-strip-types", runner, ...args],
+        {
+          cwd: evalRoot,
+          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        output += chunk;
+      });
+      child.once("error", reject);
+      child.once("close", (code) => resolve({ code, output }));
+    },
+  );
 }
 
 // Exercise the pinned provider and Codex SDK subprocess without a model request.
@@ -80,7 +93,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     const provider = parse(
       fs.readFileSync(path.join(evalRoot, "promptfooconfig.yaml"), "utf8"),
     ).providers[0];
-    provider.id = `file://${path.join(__dirname, "triage-provider.js")}`;
+    provider.id = `file://${path.join(import.meta.dirname, "triage-provider.mts")}`;
     provider.config.codex_path_override = fakeCodex;
     fs.writeFileSync(
       configPath,
@@ -108,7 +121,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       .readFileSync(capture, "utf8")
       .trim()
       .split("\n")
-      .map(JSON.parse);
+      .map((line) => JSON.parse(line) as Capture);
     assert.equal(rows.length, 1);
     assert.deepEqual(rows[0].proxies, proxies);
     assert.match(rows[0].policy, /Synthetic policy/);
@@ -125,7 +138,11 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       environment,
     );
     assert.equal(retry.code, 0, retry.output);
-    rows = fs.readFileSync(capture, "utf8").trim().split("\n").map(JSON.parse);
+    rows = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture);
     assert.equal(rows.length, 2);
     assert.notEqual(rows[0].cwd, rows[1].cwd);
     assert.equal(fs.existsSync(rows[1].cwd), false);
@@ -145,7 +162,11 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       environment,
     );
     assert.equal(resumed.code, 0, resumed.output);
-    rows = fs.readFileSync(capture, "utf8").trim().split("\n").map(JSON.parse);
+    rows = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture);
     assert.equal(rows.length, 3);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 3);
     for (const row of rows) {
@@ -196,7 +217,11 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     );
     for (const result of simultaneous)
       assert.equal(result.code, 0, result.output);
-    rows = fs.readFileSync(capture, "utf8").trim().split("\n").map(JSON.parse);
+    rows = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture);
     assert.equal(rows.length, 5);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 5);
     for (const row of rows) {

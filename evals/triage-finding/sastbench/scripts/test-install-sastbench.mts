@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 
-import { verifyInstallation, installSastBench } from "./install-sastbench.mts";
+import { syncBuiltinESMExports } from "node:module";
+import { verifyInstallation } from "./install-sastbench.mts";
 import {
   EXPECTED_CASE_COUNT,
   EXPECTED_LABEL_COUNTS,
@@ -63,7 +64,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import childProcess from "node:child_process";
-
+import { installSastBench } from "./install-sastbench.mts";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "sastbench-install-"));
 const target = path.join(root, "checkout");
 const originalExec = childProcess.execFileSync;
@@ -74,13 +75,14 @@ try {
     args: string[],
     options: { cwd: string },
   ) => {
-    if (args[0] === "init") fs.mkdirSync(path.join(options.cwd, ".git"));
-    if (args[0] === "fetch") {
+    if (args.includes("init")) fs.mkdirSync(path.join(options.cwd, ".git"));
+    if (args.includes("fetch")) {
       fetches++;
       throw new Error("synthetic fetch failed");
     }
     return "";
-  }) as typeof childProcess.execFileSync;
+  }) as typeof originalExec;
+  syncBuiltinESMExports();
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.throws(() => installSastBench(target), /synthetic fetch failed/);
     assert.equal(fs.existsSync(target), false);
@@ -99,6 +101,7 @@ try {
   );
 } finally {
   childProcess.execFileSync = originalExec;
+  syncBuiltinESMExports();
   fs.rmSync(root, { recursive: true, force: true });
 }
 

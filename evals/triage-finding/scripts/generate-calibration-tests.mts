@@ -52,27 +52,30 @@ function quote(value: unknown) {
   return JSON.stringify(String(value));
 }
 
-function indentedBlock(value: unknown) {
-  return `      ${String(value)
-    .replace(/\r\n?/g, "\n")
-    .replace(/\n/g, "\n      ")}`;
+function scalar(value: unknown) {
+  return String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-export function variantCaseId(
+function indentedBlock(value: unknown, spaces: number) {
+  const indent = " ".repeat(spaces);
+  return scalar(value)
+    .split("\n")
+    .map((line) => `${indent}${line}`)
+    .join("\n");
+}
+
+function variantCaseId(
   testCase: Pick<CalibrationCase, "case_id">,
   variant: Pick<CalibrationVariant, "checkout_ref">,
 ) {
   return `case-${createHash("sha256").update(`${testCase.case_id}\0${variant.checkout_ref}`).digest("hex").slice(0, 16)}`;
 }
 
-export function inputId(
-  testCase: CalibrationCase,
-  variant: CalibrationVariant,
-) {
+function inputId(testCase: CalibrationCase, variant: CalibrationVariant) {
   return variantCaseId(testCase, variant);
 }
 
-export function targetRepoPath(
+function targetRepoPath(
   repoRoot: string,
   testCase: Pick<CalibrationCase, "case_id">,
   variant: Pick<CalibrationVariant, "checkout_ref">,
@@ -81,11 +84,13 @@ export function targetRepoPath(
 }
 
 function evidenceTerms(testCase: CalibrationCase, variant: CalibrationVariant) {
-  const terms = (testCase.finding.anchor_locations || []).map(
-    (location) => location.path,
-  );
+  const terms = [];
+  for (const location of testCase.finding.anchor_locations || []) {
+    terms.push(location.path);
+  }
   if (variant.variant_id === "fixed" && testCase.finding.fix_patch_ref) {
-    terms.push(variant.checkout_ref);
+    const fixCommit = variant.checkout_ref;
+    terms.push(fixCommit);
   }
   return [...new Set(terms)];
 }
@@ -129,7 +134,7 @@ function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
 function testYaml(
   testCase: CalibrationCase,
   variant: CalibrationVariant,
-  repoRoot: string,
+  args: { repoRoot: string },
 ) {
   const generatedCaseId = variantCaseId(testCase, variant);
   const terms = evidenceTerms(testCase, variant);
@@ -144,10 +149,10 @@ function testYaml(
     `    expected_binary_label: ${variant.expected_binary_label}`,
     "  vars:",
     `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${quote(targetRepoPath(repoRoot, testCase, variant))}`,
-    ...(repoRoot === DEFAULT_REPO_ROOT
+    `    target_repo: ${quote(targetRepoPath(args.repoRoot, testCase, variant))}`,
+    ...(args.repoRoot === DEFAULT_REPO_ROOT
       ? []
-      : [`    target_repo_root: ${quote(repoRoot)}`]),
+      : [`    target_repo_root: ${quote(args.repoRoot)}`]),
     `    source_type_under_test: ${testCase.source_type}`,
     `    expected_ids: ${inputId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,
@@ -155,21 +160,24 @@ function testYaml(
     `    expected_binary_label: ${variant.expected_binary_label}`,
     `    expected_evidence_terms: ${quote(terms.join(", "))}`,
     "    finding_input: |-",
-    indentedBlock(findingInput(testCase, variant)),
+    indentedBlock(findingInput(testCase, variant), 6),
     "    eval_instructions: |-",
     indentedBlock(
-      `This is an automated OSS calibration eval. Do not ask follow-up questions.
-Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
-Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
-Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
-The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.`,
+      [
+        "This is an automated OSS calibration eval. Do not ask follow-up questions.",
+        "Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.",
+        "Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.",
+        "Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.",
+        'The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.',
+      ].join("\n"),
+      6,
     ),
   ];
 
   return lines.join("\n");
 }
 
-export function selectedVariants(
+function selectedVariants(
   dataset: { cases: CalibrationCase[] },
   args: { caseId?: string | null; variantId?: string | null },
 ) {
@@ -187,10 +195,38 @@ export function selectedVariants(
       variants.push({ testCase, variant });
     }
   }
+  return variants;
+}
+
+function generateFromVariants(
+  variants: ReturnType<typeof selectedVariants>,
+  args: { repoRoot: string },
+) {
   if (variants.length === 0) {
     throw new Error("No calibration variants matched the requested filters.");
   }
-  return variants;
+
+  const tests = variants.map(({ testCase, variant }) =>
+    testYaml(testCase, variant, args),
+  );
+  return `${tests.join("\n\n")}\n`;
+}
+
+function generate(
+  dataset: { cases: CalibrationCase[] },
+  args: { repoRoot: string; caseId?: string | null; variantId?: string | null },
+) {
+  return generateFromVariants(selectedVariants(dataset, args), args);
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
+  const variants = selectedVariants(dataset, args);
+  const output = generateFromVariants(variants, args);
+  fs.mkdirSync(path.dirname(args.output), { recursive: true });
+  fs.writeFileSync(args.output, output);
+  console.log(`wrote ${variants.length} calibration tests to ${args.output}`);
 }
 
 if (
@@ -198,14 +234,7 @@ if (
   fs.existsSync(process.argv[1]) &&
   import.meta.filename === fs.realpathSync(process.argv[1])
 ) {
-  const args = parseArgs(process.argv.slice(2));
-  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
-  const variants = selectedVariants(dataset, args);
-  const tests = variants.map(({ testCase, variant }) =>
-    testYaml(testCase, variant, args.repoRoot),
-  );
-  const output = `${tests.join("\n\n")}\n`;
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, output);
-  console.log(`wrote ${variants.length} calibration tests to ${args.output}`);
+  main();
 }
+
+export { generate, selectedVariants, variantCaseId, inputId, targetRepoPath };

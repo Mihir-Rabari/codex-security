@@ -788,6 +788,7 @@ test(
     childProcess.execFileSync(
       process.execPath,
       [
+        "--experimental-strip-types",
         "--input-type=module",
         "--eval",
         `
@@ -797,7 +798,7 @@ test(
     import { join } from "node:path";
     import { withEvalState } from ${JSON.stringify(runtimeUrl)};
     import { gradeResult } from ${JSON.stringify(new URL("./grade.mts", import.meta.url).href)};
-    await withEvalState(() => mkdtemp(join(tmpdir(), "home-")), tmpdir(), async ({root}) => {
+    await withEvalState(async () => await mkdtemp(join(tmpdir(), "home-")), join(tmpdir(), "missing-synthetic-home"), async ({root}) => {
       assert.equal(root, await realpath(root));
       const result = { findings: [], coverage: { completeness: "complete", explicitExclusions: [{ pattern: await realpath(root) }] } };
       const grade = gradeResult(result, { positives: [], files: { "fixture.txt": "synthetic" } }, root);

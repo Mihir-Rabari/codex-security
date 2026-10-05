@@ -1,6 +1,6 @@
 import { readJson, readJsonLines } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -75,12 +75,13 @@ for (const failure of ["synthetic model failure", "empty trace"]) {
       path.join(tmpdir(), "deep-reducer-failed-eval-"),
     );
     t.after(() => rm(root, { recursive: true, force: true }));
-    t.mock.method(Codex.prototype, "startThread", () => ({
+    const thread = {
       run: async () => {
         if (failure !== "empty trace") throw new Error(failure);
         return { finalResponse: "No tools called." };
       },
-    }));
+    } as unknown as ReturnType<typeof Codex.prototype.startThread>;
+    t.mock.method(Codex.prototype, "startThread", () => thread);
     const expected =
       failure === "empty trace"
         ? /produced no tool trace/

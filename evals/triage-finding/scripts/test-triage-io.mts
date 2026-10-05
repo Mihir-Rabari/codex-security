@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import type { AssertionContext } from "../types.ts";
 import triageIo from "../assertions/triage-io.mts";
+import type { AssertionContext } from "../types.ts";
 
 assert.throws(() => triageIo("no json", { vars: {} }), {
   message: "Could not find a parseable triage-finding/v0 JSON block.",
@@ -78,14 +78,18 @@ function baseContext({
   };
 }
 
-function assertPasses(name: string, output: string, context: AssertionContext) {
+function assertPasses(
+  name: string,
+  output: unknown,
+  context: AssertionContext,
+) {
   const result = triageIo(output, context);
   assert.equal(result.pass, true, `${name}: ${result.reason}`);
 }
 
 function assertFails(
   name: string,
-  output: string,
+  output: unknown,
   context: AssertionContext,
   expectedReason: RegExp,
 ) {

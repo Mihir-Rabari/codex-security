@@ -279,7 +279,7 @@ const localeRecords = ["true_positive", "false_positive"].flatMap(
       benchmarkRecord({ ground_truth, repo_name }),
     ),
 );
-const sampleProgram = `import {selectRepresentativeSample} from ${JSON.stringify(new URL("./sastbench-lib.mts", import.meta.url).href)}; console.log(JSON.stringify(selectRepresentativeSample(${JSON.stringify(localeRecords)}, {profile:'test',seed:'test',labelCounts:{true_positive:2,false_positive:2}}).map(entry => entry.index)));`;
+const sampleProgram = `import { selectRepresentativeSample } from ${JSON.stringify(new URL("./sastbench-lib.mts", import.meta.url).href)}; console.log(JSON.stringify(selectRepresentativeSample(${JSON.stringify(localeRecords)}, {profile:'test',seed:'test',labelCounts:{true_positive:2,false_positive:2}}).map(entry => entry.index)));`;
 const localeSample = (locale: string) =>
   execFileSync(
     process.execPath,

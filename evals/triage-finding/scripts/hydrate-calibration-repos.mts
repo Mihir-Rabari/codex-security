@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 import type { CalibrationCase } from "../types.ts";
-import { runGit as gitCommand } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
 
+import { runGit as gitCommand } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
+import fs from "node:fs";
 import {
   DEFAULT_DATASET,
   selectedVariants,
   targetRepoPath,
 } from "./generate-calibration-tests.mts";
-
-import fs from "node:fs";
 import path from "node:path";
 
 const DEFAULT_REPO_ROOT = path.join(
@@ -30,9 +29,9 @@ function parseArgs(argv: string[]) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dataset") {
-      args.dataset = path.resolve(argv[++index]);
+      args.dataset = argv[++index];
     } else if (arg === "--repo-root") {
-      args.repoRoot = path.resolve(argv[++index]);
+      args.repoRoot = argv[++index];
     } else if (arg === "--case") {
       args.caseId = argv[++index];
     } else if (arg === "--variant") {
@@ -44,10 +43,27 @@ function parseArgs(argv: string[]) {
     }
   }
 
-  return args;
+  return {
+    ...args,
+    dataset: path.resolve(args.dataset),
+    repoRoot: path.resolve(args.repoRoot),
+  };
 }
 
-function runGit(args: string[], directory: string, stderr?: "pipe" | "ignore") {
+function plannedJobs(
+  dataset: { cases: CalibrationCase[] },
+  args: { repoRoot: string; caseId?: string | null; variantId?: string | null },
+) {
+  return selectedVariants(dataset, args).map(({ testCase, variant }) => ({
+    caseId: testCase.case_id,
+    variantId: variant.variant_id,
+    repoUrl: testCase.repo.url,
+    checkoutRef: variant.checkout_ref,
+    targetDir: targetRepoPath(args.repoRoot, testCase, variant),
+  }));
+}
+
+function runGit(args: string[], directory: string, stderr?: "ignore" | "pipe") {
   return gitCommand(
     [
       `--git-dir=${path.join(directory, ".git")}`,
@@ -59,26 +75,16 @@ function runGit(args: string[], directory: string, stderr?: "pipe" | "ignore") {
   );
 }
 
-export function plannedJobs(
-  dataset: { cases: CalibrationCase[] },
-  args: { repoRoot: string; caseId?: string | null; variantId?: string | null },
-) {
-  return selectedVariants(dataset, args).map(({ testCase, variant }) => ({
-    caseId: testCase.case_id,
-    variantId: variant.variant_id,
-    repoUrl: testCase.repo.url,
-    checkoutRef: variant.checkout_ref,
-    targetDir: targetRepoPath(args.repoRoot, testCase, variant),
-    label: `${testCase.case_id}/${variant.variant_id}`,
-  }));
-}
-
 function gitOutput(args: string[], cwd: string) {
   try {
-    return runGit(args, cwd, "ignore");
+    return runGit(args, cwd, "ignore").trim();
   } catch {
     return null;
   }
+}
+
+function isGitCheckout(directory: string) {
+  return fs.existsSync(path.join(directory, ".git"));
 }
 
 function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
@@ -88,7 +94,7 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
     fs.mkdirSync(job.targetDir, { recursive: true });
   }
 
-  if (!fs.existsSync(path.join(job.targetDir, ".git"))) {
+  if (!isGitCheckout(job.targetDir)) {
     const entries = fs.readdirSync(job.targetDir);
     if (entries.length > 0) {
       throw new Error(
@@ -116,25 +122,50 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
   return "hydrated";
 }
 
+function printPlan(jobs: ReturnType<typeof plannedJobs>) {
+  const variantWord = jobs.length === 1 ? "variant" : "variants";
+  console.log(`would hydrate ${jobs.length} calibration ${variantWord}`);
+  for (const job of jobs) {
+    console.log(
+      `${job.caseId}/${job.variantId} <- ${job.repoUrl} @ ${job.checkoutRef}`,
+    );
+    console.log(`  ${job.targetDir}`);
+  }
+}
+
+function hydrate(jobs: ReturnType<typeof plannedJobs>) {
+  const variantWord = jobs.length === 1 ? "variant" : "variants";
+  console.log(`hydrating ${jobs.length} calibration ${variantWord}`);
+  for (const job of jobs) {
+    const status = ensureGitCheckout(job);
+    console.log(
+      `${status}: ${job.caseId}/${job.variantId} @ ${job.checkoutRef}`,
+    );
+  }
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
+  const jobs = plannedJobs(dataset, args);
+
+  if (jobs.length === 0) {
+    throw new Error("No calibration variants matched the requested filters.");
+  }
+
+  if (args.dryRun) {
+    printPlan(jobs);
+  } else {
+    hydrate(jobs);
+  }
+}
+
 if (
   process.argv[1] &&
   fs.existsSync(process.argv[1]) &&
   import.meta.filename === fs.realpathSync(process.argv[1])
 ) {
-  const args = parseArgs(process.argv.slice(2));
-  const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
-  const jobs = plannedJobs(dataset, args);
-  const variantWord = jobs.length === 1 ? "variant" : "variants";
-  console.log(
-    `${args.dryRun ? "would hydrate" : "hydrating"} ${jobs.length} calibration ${variantWord}`,
-  );
-  for (const job of jobs) {
-    if (args.dryRun) {
-      console.log(`${job.label} <- ${job.repoUrl} @ ${job.checkoutRef}`);
-      console.log(`  ${job.targetDir}`);
-    } else {
-      const status = ensureGitCheckout(job);
-      console.log(`${status}: ${job.label} @ ${job.checkoutRef}`);
-    }
-  }
+  main();
 }
+
+export { plannedJobs };

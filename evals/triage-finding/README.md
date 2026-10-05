@@ -10,7 +10,7 @@ Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the re
 
 The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
 
-Install the local eval runner and build the host native helpers with the pinned Rust toolchain from [the native build guide](../../plugins/codex-security/native/README.md). Rerun setup after changing native source or its toolchain:
+Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner, check the TypeScript tooling, and build the host native helpers with the pinned Rust toolchain from [the native build guide](../../plugins/codex-security/native/README.md); rerun setup after changing native source or its toolchain:
 
 ```bash
 pnpm --dir evals/triage-finding run setup

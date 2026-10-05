@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import path from "node:path";
@@ -74,9 +73,9 @@ try {
     cases: [
       {
         case_id: "example",
-        source_type: "freeform",
-        finding: { title: "Synthetic" },
+        source_type: "cve",
         repo: { name: "synthetic", url: root },
+        finding: { title: "Synthetic finding" },
         variants: [
           {
             variant_id: "fixed",

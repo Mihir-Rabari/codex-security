@@ -5,7 +5,7 @@ prompts:
   - file://./prompts/triage-request.txt
 
 providers:
-  - id: file://./scripts/triage-provider.js
+  - id: file://./scripts/triage-provider.mts
     label: "Codex SDK triage-finding calibration"
     config:
       skip_git_repo_check: true
