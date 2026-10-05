@@ -1315,27 +1315,30 @@ def merge_saved_results(
         else set()
     )
     findings: list[dict[str, Any]] = []
-    finding_order: list[tuple[int, int]] = []
+    inferred_identities: dict[int, dict[str, Any]] = {}
     finding_positions: dict[str, int] = {}
-    candidate_siblings: set[int] = set()
 
-    def candidate_position_key(finding: dict[str, Any], key: str) -> str:
-        if key not in finding_positions:
-            return key
-        previous = findings[finding_positions[key]]
+    def distinct_candidates(finding: dict[str, Any], previous: dict[str, Any]) -> bool:
         current_candidate = finding_candidate_id(finding)
         previous_candidate = finding_candidate_id(previous)
         current_owner = finding.get("provenance", {}).get("workerId")
         previous_owner = previous.get("provenance", {}).get("workerId")
-        if (
+        return bool(
             current_candidate
             and previous_candidate
             and (
                 current_candidate != previous_candidate
                 or (current_owner and previous_owner and current_owner != previous_owner)
             )
+        )
+
+    def candidate_position_key(finding: dict[str, Any], key: str) -> str:
+        if key in finding_positions and distinct_candidates(
+            finding, findings[finding_positions[key]]
         ):
-            return _digest([key, current_owner, current_candidate])
+            return _digest(
+                [key, finding.get("provenance", {}).get("workerId"), finding_candidate_id(finding)]
+            )
         return key
 
     represented: dict[str, str | None] = {}
@@ -1735,7 +1738,7 @@ def merge_saved_results(
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
             )
-    for source_index, (relative, draft, worker_id) in enumerate(all_sources):
+    for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
         selected_coverage_superseded = worker_id in selected_terminal_orders and (
             source_order[relative] < selected_terminal_orders[worker_id]
@@ -1830,11 +1833,7 @@ def merge_saved_results(
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
-        # Reserve explicit identities before identityless observations can borrow them.
-        for finding_index, value in sorted(
-            enumerate(draft["findings"]),
-            key=lambda item: not (isinstance(item[1], dict) and "identity" in item[1]),
-        ):
+        for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
                 and (candidate_id := finding_candidate_id(value)) in selected_candidates
@@ -1843,6 +1842,8 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
+                if isinstance(value, dict) and "identity" not in value:
+                    inferred_identities[id(finding)] = finding
                 _ensure_finding_identity(finding)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
@@ -1858,11 +1859,8 @@ def merge_saved_results(
                 if valid_finding(finding):
                     key = _finding_key(finding)
                     position = candidate_position_key(finding, key)
-                    if "identity" not in value and position != key:
-                        candidate_siblings.add(id(finding))
                     finding_positions.setdefault(position, len(findings))
                 findings.append(finding)
-                finding_order.append((source_index, finding_index))
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
                 continue
@@ -1870,6 +1868,8 @@ def merge_saved_results(
                 warnings.append(f"Retained malformed finding evidence in {relative}.")
                 continue
             finding = copy.deepcopy(value)
+            if "identity" not in value:
+                inferred_identities[id(finding)] = finding
             candidate_id = finding_candidate_id(finding)
             if relative != "parent" and resolved.get((worker_id, candidate_id)) in {
                 "rejected",
@@ -1907,14 +1907,12 @@ def merge_saved_results(
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
             if not isinstance(provenance, dict):
                 findings.append(finding)
-                finding_order.append((source_index, finding_index))
                 continue
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             ensure_saved_identity(finding, worker_id)
             if not valid_finding(finding):
                 findings.append(finding)
-                finding_order.append((source_index, finding_index))
                 continue
             key = _finding_key(finding)
             represented_by_parent = False
@@ -1940,22 +1938,23 @@ def merge_saved_results(
                 else None
             )
             if (
-                "identity" not in value
+                (
+                    "identity" not in value
+                    or (
+                        key not in represented
+                        and key in finding_positions
+                        and id(findings[finding_positions[key]]) in inferred_identities
+                    )
+                )
                 and not represented_by_parent
                 and not (
                     canonical_candidate in canonical_candidates
                     and represented_candidates[canonical_candidate] is not None
                 )
             ):
-                candidate_key = candidate_position_key(finding, key)
-                if candidate_key != key:
-                    candidate_siblings.add(id(finding))
-                key = candidate_key
+                key = candidate_position_key(finding, key)
             if key in finding_positions:
                 position = finding_positions[key]
-                finding_order[position] = min(
-                    finding_order[position], (source_index, finding_index)
-                )
                 retained = findings[position]
                 if finding != retained:
                     if not represented_by_parent and _finding_strength(finding) > _finding_strength(
@@ -2000,7 +1999,6 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-            finding_order.append((source_index, finding_index))
         if superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
@@ -2098,13 +2096,14 @@ def merge_saved_results(
                 if item not in output:
                     output.append(copy.deepcopy(item))
 
-    identities: dict[str, str] = {}
+    identities: dict[str, tuple[str, dict[str, Any]]] = {}
     reserved_identities = {
         _encoded([finding.get("ruleId"), finding.get("identity")]).decode()
         for finding in findings
         if isinstance(finding, dict)
     }
-    for finding in findings:
+    # Explicit identities across all sources take priority over inferred identities.
+    for finding in sorted(findings, key=lambda finding: id(finding) in inferred_identities):
         if not valid_finding(finding):
             continue
         identity = finding.get("identity")
@@ -2112,13 +2111,12 @@ def merge_saved_results(
             continue
         key = _encoded([finding.get("ruleId"), identity]).decode()
         variant = _finding_key(finding)
-        if key in identities and (identities[key] != variant or id(finding) in candidate_siblings):
+        previous = identities.get(key)
+        if previous and (previous[0] != variant or distinct_candidates(finding, previous[1])):
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
             base_instance = identity.get("instance", "saved")
-            prefix = (
-                f"{base_instance}-{variant[:16]}" if identities[key] != variant else base_instance
-            )
-            suffix = 1 if identities[key] != variant else 2
+            prefix = f"{base_instance}-{variant[:16]}" if previous[0] != variant else base_instance
+            suffix = 1 if previous[0] != variant else 2
             while True:
                 identity["instance"] = prefix if suffix == 1 else f"{prefix}-{suffix}"
                 instance_key = _encoded([finding.get("ruleId"), identity]).decode()
@@ -2126,11 +2124,7 @@ def merge_saved_results(
                     reserved_identities.add(instance_key)
                     break
                 suffix += 1
-        identities[key] = variant
-    # Identity reservation does not change the published source order.
-    findings = [
-        finding for _, finding in sorted(zip(finding_order, findings), key=lambda row: row[0])
-    ]
+        identities[key] = (variant, finding)
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])

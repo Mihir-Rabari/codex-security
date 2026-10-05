@@ -672,16 +672,22 @@ def test_saved_identity_reuse_preserves_explicit_sibling(
         assert explicit["identity"] == {"anchor": "beta"}
 
 
-def test_stopped_recovery_keeps_first_position_when_an_explicit_duplicate_is_later(tmp_path: Path):
+@pytest.mark.parametrize("same_identity", [False, True])
+@pytest.mark.parametrize("successor_explicit", [False, True])
+def test_stopped_recovery_keeps_first_position_when_a_duplicate_is_later(
+    tmp_path: Path, same_identity: bool, successor_explicit: bool
+):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     first.pop("identity")
     first.update(title="Alpha", provenance={"source": "local_plugin", "candidateId": "candidate-a"})
+    first["severity"]["level"] = "low"
     explicit = json.loads(json.dumps(first))
-    explicit["identity"] = {"anchor": "alpha"}
+    if successor_explicit:
+        explicit["identity"] = {"anchor": "alpha"}
     explicit["severity"]["level"] = "high"
     middle = json.loads(json.dumps(first))
-    middle.update(title="Middle", identity={"anchor": "middle"})
+    middle.update(title="Middle", identity={"anchor": "alpha" if same_identity else "middle"})
     middle["provenance"]["candidateId"] = "candidate-b"
     for name in ("findings.json", "scan-manifest.json", "coverage.json"):
         (scan_dir / name).unlink()
@@ -707,3 +713,60 @@ def test_stopped_recovery_keeps_first_position_when_an_explicit_duplicate_is_lat
             "candidate-b",
         ]
         assert published[0]["severity"]["level"] == "high"
+
+
+@pytest.mark.parametrize("explicit_first", [False, True])
+@pytest.mark.parametrize("same_title", [False, True])
+def test_saved_identity_collision_across_workers_preserves_explicit_sibling(
+    tmp_path: Path, explicit_first: bool, same_title: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    first.pop("identity")
+    first["title"] = "Beta" if same_title else "Alpha"
+    first["provenance"]["candidateId"] = "candidate-a"
+    first["severity"]["level"] = "low"
+    second = json.loads(json.dumps(first))
+    second.update(title="Beta", identity={"anchor": "beta"})
+    second["provenance"]["candidateId"] = "candidate-b"
+    second["severity"]["level"] = "high"
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    observations = [second, first] if explicit_first else [first, second]
+    for index, finding in enumerate(observations):
+        _, result_path = accepted_standard_worker(
+            state, home, scan_dir, scan_id, name=f"worker-{index}"
+        )
+        if "identity" not in finding:
+            write_checkpoint(
+                result_path.parent / "checkpoints",
+                saved_draft(scan_id, findings=[{**finding, "identity": {"anchor": "beta"}}]),
+            )
+        worker = json.loads(result_path.read_text())
+        worker["findings"] = [finding]
+        result_path.write_text(json.dumps(worker))
+    run_workbench(
+        state,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+        environment={"CODEX_HOME": str(home)},
+    )
+    for retry in (False, True):
+        if retry:
+            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        assert not saved["resultsRecoveryNeeded"]
+        assert saved["findingCount"] == 2
+        assert {finding["provenance"]["candidateId"] for finding in saved["findings"]} == {
+            "candidate-a",
+            "candidate-b",
+        }
+        explicit = next(
+            finding
+            for finding in saved["findings"]
+            if finding["provenance"]["candidateId"] == "candidate-b"
+        )
+        assert explicit["identity"] == {"anchor": "beta"}

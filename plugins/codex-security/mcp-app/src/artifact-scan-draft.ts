@@ -423,6 +423,7 @@ async function preserveScanDraft(
 function reconcileScanDraft(
   input: ScanDraftInput,
   savedSources: SavedScanDraft[],
+  requestedClosures = resolvedDeferred(input.coverage),
 ): { input: ScanDraftInput; acceptProgress: boolean } {
   let result = structuredClone(input);
   const sources = savedSources.map(({ input }) => input);
@@ -496,7 +497,8 @@ function reconcileScanDraft(
       : undefined;
   // A raw terminal checkpoint may still omit unresolved work from saved sources.
   if (retainedFinal)
-    result = reconcileScanDraft(retainedFinal.input, savedSources).input;
+    // Saved closures are history, not new commands against later reopenings.
+    result = reconcileScanDraft(retainedFinal.input, savedSources, []).input;
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -584,7 +586,7 @@ function reconcileScanDraft(
   const resolvedCandidateIds = completedCandidateIds(result, sources);
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
     result,
-    resolvedDeferred(input.coverage),
+    requestedClosures,
     sources,
     savedSources,
     resolvedCandidateIds,
@@ -2350,13 +2352,6 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   // Keep generated siblings and independent worker findings when they reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
-  const used = new Set(
-    mode === "deep"
-      ? []
-      : findings
-          .filter((finding) => finding.identity !== undefined)
-          .map(scanFindingIdentity),
-  );
   const candidateKeys = findings.map((finding, index) => {
     const candidate = findingCandidateId(finding);
     return mode !== "deep" &&
@@ -2374,6 +2369,11 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         ])
       : undefined;
   });
+  const used = new Map<string, string | undefined>();
+  if (mode !== "deep")
+    for (const [index, finding] of findings.entries())
+      if (finding.identity !== undefined)
+        used.set(scanFindingIdentity(finding), candidateKeys[index]);
   const candidateIdentities = new Map<string, JsonObject | null>();
   for (const [index, finding] of findings.entries()) {
     const key = candidateKeys[index];
@@ -2398,8 +2398,13 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       ? candidateIdentities.get(candidateKey)
       : undefined;
     if (previous) return { ...finding, identity: { ...previous } };
-    if (!used.has(key) || (mode !== "deep" && !candidateKey)) {
-      used.add(key);
+    if (
+      !used.has(key) ||
+      (mode !== "deep" &&
+        previous !== null &&
+        (!candidateKey || !used.get(key) || used.get(key) === candidateKey))
+    ) {
+      used.set(key, candidateKey ?? used.get(key));
       if (candidateKey && previous !== null)
         candidateIdentities.set(candidateKey, finding.identity as JsonObject);
       return finding;
@@ -2424,7 +2429,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       preservedIdentity:
         provenance.preservedIdentity ?? structuredClone(identity),
     };
-    used.add(scanFindingIdentity(distinct));
+    used.set(scanFindingIdentity(distinct), candidateKey);
     if (candidateKey && previous !== null)
       candidateIdentities.set(candidateKey, distinct.identity);
     return distinct;
