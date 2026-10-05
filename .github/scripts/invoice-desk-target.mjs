@@ -63,6 +63,7 @@ export async function resolveScanTargets(
 
 if (
   process.argv[1] &&
+  process.argv[1] !== "-" &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   const repository = process.env.GITHUB_REPOSITORY;

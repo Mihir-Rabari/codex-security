@@ -136,3 +136,12 @@ test(
     );
   },
 );
+
+test("invoice helpers can be imported from a Node stdin module", () => {
+  const source = new URL("./invoice-desk-source.mjs", import.meta.url).href;
+  const target = new URL("./invoice-desk-target.mjs", import.meta.url).href;
+  execFileSync(process.execPath, ["--input-type=module", "-"], {
+    input: `await import(${JSON.stringify(source)}); await import(${JSON.stringify(target)});`,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+});

@@ -52,6 +52,7 @@ export async function createServer(): Promise<Server> {
 
 if (
   process.argv[1] &&
+  process.argv[1] !== "-" &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   const server = await createServer();
