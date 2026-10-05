@@ -2242,7 +2242,14 @@ export async function main(
           .describe("Print additional scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench([
@@ -2283,21 +2290,49 @@ export async function main(
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
+          if (format === "json" || format === "jsonl") {
+            if (!argv.includes("--full-output"))
+              return {
+                status: "failed",
+                code: "SCAN_RESUME_UNAVAILABLE",
+                message,
+              };
+            scanStructuredError = true;
+          }
           return incurError({
             code: "SCAN_RESUME_UNAVAILABLE",
             message,
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            if (!argv.includes("--full-output"))
+              return {
+                status: "failed",
+                code: "SCAN_FAILED",
+                message: outcome.error,
+              };
+            scanStructuredError = true;
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
             exitCode,
           });
         }
+        if (
+          format === "toon" &&
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
+        )
+          return;
         return outcome.data;
       },
     })
@@ -2338,15 +2373,16 @@ export async function main(
           exitCode = 2;
           return;
         }
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
-          const { recipe } = await dependencies.runWorkbench([
-            "get-scan-recipe",
-            "--scan-id",
-            scanId,
-          ]);
+          const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+          if (scanId === undefined) return;
+          const { recipe, scanId: canonicalScanId } =
+            await dependencies.runWorkbench([
+              "get-scan-recipe",
+              "--scan-id",
+              scanId,
+            ]);
           if (
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
@@ -2366,10 +2402,10 @@ export async function main(
             }
             const imported = recipe["import"];
             const sourcePath = imported["sourcePath"];
-            const format = imported["format"];
+            const importFormat = imported["format"];
             if (
               !isNonEmptyString(sourcePath) ||
-              (format !== "csv" && format !== "json")
+              (importFormat !== "csv" && importFormat !== "json")
             ) {
               throw new CodexSecurityError(
                 "The saved scan recipe contains invalid import settings.",
@@ -2377,22 +2413,36 @@ export async function main(
             }
             const outcome = await runImport({
               sourcePath,
-              format,
-              parentScanId: scanId,
+              format: importFormat,
+              parentScanId: canonicalScanId as string,
             });
             exitCode = outcome.exitCode;
             if (outcome.error !== undefined) {
+              if (format === "json" || format === "jsonl") {
+                if (!argv.includes("--full-output"))
+                  return {
+                    status: "failed",
+                    code: "SCAN_IMPORT_FAILED",
+                    message: outcome.error,
+                  };
+                scanStructuredError = true;
+              }
               return incurError({
                 code: "SCAN_IMPORT_FAILED",
                 message: outcome.error,
                 exitCode,
               });
             }
+            if (
+              format === "toon" &&
+              !argv.some((argument) => OUTPUT_OPTION.test(argument))
+            )
+              return;
             return outcome.data;
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
             recipe,
-            scanId,
+            canonicalScanId as string,
             {
               scanPromptFile:
                 options.scanPromptFile === undefined
@@ -2417,6 +2467,15 @@ export async function main(
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
+          if (format === "json" || format === "jsonl") {
+            if (!argv.includes("--full-output"))
+              return {
+                status: "failed",
+                code: "SCAN_REPLAY_UNAVAILABLE",
+                message,
+              };
+            scanStructuredError = true;
+          }
           return incurError({
             code: "SCAN_REPLAY_UNAVAILABLE",
             message,
@@ -2431,12 +2490,26 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            if (!argv.includes("--full-output"))
+              return {
+                status: "failed",
+                code: "SCAN_FAILED",
+                message: outcome.error,
+              };
+            scanStructuredError = true;
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
             exitCode,
           });
         }
+        if (
+          format === "toon" &&
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
+        )
+          return;
         return outcome.data;
       },
     })
@@ -5794,11 +5867,13 @@ export async function main(
   let notice: UpdateNotice | undefined;
   try {
     await cli.serve(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      argv.flatMap((argument) => {
+        const match =
+          /^(--(?:format|filter-output|token-limit|token-offset))=(.*)$/su.exec(
+            argument,
+          );
+        return match ? [match[1]!, match[2]!] : [argument];
+      }),
       {
         stdout: frameworkCapture.stream.write,
         exit: (code) => {
@@ -6182,6 +6257,8 @@ function validateCliArguments(
       "validate",
       "verify-fix",
       "suggest-owners",
+      "classify-severity",
+      "dedupe",
       "patch",
       "login",
       "logout",
@@ -7870,30 +7947,35 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
+  const classification = classifyConnectionFailure(detail);
+  let advice: string | undefined;
   if (
-    /401|invalid.api.key|token.expired|unauthori[sz]ed|authorizationrequired/iu.test(
+    classification === "unauthorized" ||
+    /\bauthorizationrequired\b/iu.test(detail)
+  ) {
+    advice = authenticationFailureMessage(authentication);
+  } else if (
+    classification === "forbidden" &&
+    /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
       detail,
     )
   ) {
-    return authenticationFailureMessage(authentication);
-  }
-  if (
-    /403|model.not.found|model.*access|access.*model|permission/iu.test(detail)
-  ) {
-    return "The selected model is unavailable for the current credentials.";
-  }
-  if (/429|rate.limit|tokens.per.minute/iu.test(detail)) {
-    return "The request was rate limited. Wait and retry.";
-  }
-  if (
+    advice = "The selected model is unavailable for the current credentials.";
+  } else if (classification === "rate_limited") {
+    advice = "The request was rate limited. Wait and retry.";
+  } else if (
     /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
   ) {
-    return "Codex could not load its model metadata. Update Codex or refresh its model cache.";
+    advice =
+      "Codex could not load its model metadata. Update Codex or refresh its model cache.";
+  } else if (
+    classification === "network_error" ||
+    classification === "timeout"
+  ) {
+    advice =
+      "Codex could not connect to the model service. Check the network and retry.";
   }
-  if (/econn|enotfound|network|timed.out|timeout/iu.test(detail)) {
-    return "Codex could not connect to the model service. Check the network and retry.";
-  }
-  return `${command} failed with exit code ${status}.`;
+  return `${command} failed with exit code ${status}.${advice ? ` ${advice}` : ""}${detail ? `\n${diagnosticValue(detail)}` : ""}`;
 }
 
 function incurErrorMessage(output: string): string {
@@ -8566,6 +8648,8 @@ async function executeScan(
       repository = resolve(dependencies.currentDirectory(), repository);
     }
   } catch (error) {
+    if (error instanceof Error && error.name === "ExitPromptError")
+      requestedSignal ??= "SIGINT";
     failed = true;
     failure = error;
   } finally {
@@ -8751,34 +8835,43 @@ async function executeScan(
     ? (arguments_.patchSeverity ?? "low")
     : undefined;
   let patchSelection: PatchSelection | null = null;
-  if (
-    !arguments_.mock &&
-    actionableFindings.length > 0 &&
-    arguments_.patchSeverity === undefined &&
-    progress?.interactive === true &&
-    (dependencies.patchEditor !== undefined || process.stdin.isTTY === true)
-  ) {
-    const confirmed =
-      arguments_.patch ||
-      (await (
-        dependencies.confirmPatchReview ??
-        createTerminalPrompt(errorOutput).confirm
-      )("Review and patch these findings?"));
-    if (confirmed) {
-      const selectPatches =
-        dependencies.patchEditor ??
-        (async (target: string, candidates: readonly Finding[]) => {
-          const { runPatchTui } = await import("./patch-tui.js");
-          return runPatchTui(target, candidates, {
-            stdout: errorOutput as NodeJS.WriteStream,
-            color:
-              dependencies.environment["NO_COLOR"] === undefined &&
-              dependencies.environment["TERM"] !== "dumb",
+  try {
+    if (
+      !arguments_.mock &&
+      actionableFindings.length > 0 &&
+      arguments_.patchSeverity === undefined &&
+      progress?.interactive === true &&
+      (dependencies.patchEditor !== undefined || process.stdin.isTTY === true)
+    ) {
+      const confirmed =
+        arguments_.patch ||
+        (await (
+          dependencies.confirmPatchReview ??
+          createTerminalPrompt(errorOutput).confirm
+        )("Review and patch these findings?"));
+      if (confirmed) {
+        const selectPatches =
+          dependencies.patchEditor ??
+          (async (target: string, candidates: readonly Finding[]) => {
+            const { runPatchTui } = await import("./patch-tui.js");
+            return runPatchTui(target, candidates, {
+              stdout: errorOutput as NodeJS.WriteStream,
+              color:
+                dependencies.environment["NO_COLOR"] === undefined &&
+                dependencies.environment["TERM"] !== "dumb",
+            });
           });
-        });
-      patchSelection = await selectPatches(repository, actionableFindings);
-      patchThreshold = patchSelection?.severity;
+        patchSelection = await selectPatches(repository, actionableFindings);
+        patchThreshold = patchSelection?.severity;
+      }
     }
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "ExitPromptError"))
+      throw error;
+    errorOutput.write(
+      "codex-security: Patch review canceled by Ctrl-C. Saved scan results were kept.\n",
+    );
+    return completedScan(130);
   }
 
   let patches: FindingPatch[] = [];
@@ -9007,6 +9100,11 @@ function scanFailureMessage(
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
       }
+      if (
+        authentication?.method === "stored_credentials" &&
+        authentication.credentialType === "api_key"
+      )
+        return "The stored API key cannot access the configured model. Use an API key with model access.";
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
@@ -9379,7 +9477,7 @@ export function parseCodexOverrides(
   }
   for (const value of values) {
     const separator = value.indexOf("=");
-    const key = separator < 0 ? "" : value.slice(0, separator);
+    const key = separator < 0 ? "" : value.slice(0, separator).trim();
     const literal = separator < 0 ? "" : value.slice(separator + 1);
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");

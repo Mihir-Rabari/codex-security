@@ -2003,3 +2003,24 @@ def test_merge_rank_outputs_rejects_missing_and_duplicate_results(tmp_path: Path
         check=False,
     )
     assert "duplicate paths" in result.stderr
+
+
+def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(tmp_path: Path) -> None:
+    initialize_repo(tmp_path)
+    (tmp_path / "app.py").write_text("print('synthetic')\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-m", "Synthetic baseline")
+    result = run_cli(
+        "make-diff-rank-input",
+        "--repo",
+        str(tmp_path),
+        "--base",
+        "missing-synthetic-revision",
+        "--out",
+        str(tmp_path / "rank.jsonl"),
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "missing-synthetic-revision" in result.stderr
+    assert "unknown revision" in result.stderr or "bad revision" in result.stderr
+    assert "Traceback" not in result.stderr

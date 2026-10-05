@@ -1565,3 +1565,10 @@ test("CLI rejects ambiguous component selection", async () => {
     expect(result.stderr).toContain("Choose exactly one");
   }
 });
+
+test("explains the component selector requirement when neither is set", async () => {
+  const paths = await fixture();
+  await expect(scan(paths, { components: undefined })).rejects.toThrow(
+    "Choose exactly one",
+  );
+});

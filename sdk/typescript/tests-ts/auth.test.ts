@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import {
   accountStatus,
+  readCodexHomeConfig,
   CodexLoginHandle,
   loginApiKey,
   logout,
@@ -369,4 +370,17 @@ setInterval(() => {}, 1000);
     await expect(handle.wait()).resolves.toMatchObject({ success: false });
     expect(observeSucceeded).not.toHaveBeenCalled();
   });
+});
+
+test("retains the Codex configuration path and parsing error", async () => {
+  const root = await temporaryDirectory();
+  const path = join(root, "config.toml");
+  await writeFile(path, "invalid = [");
+  try {
+    await readCodexHomeConfig({ CODEX_HOME: root });
+    throw new Error("Expected invalid configuration to fail");
+  } catch (error) {
+    expect(String(error)).toContain(path);
+    expect(String(error)).toContain("Invalid TOML");
+  }
 });

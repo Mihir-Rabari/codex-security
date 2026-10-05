@@ -56,7 +56,7 @@ describe("CLI launcher", () => {
     }
   });
 
-  test("maps installed-launcher failures to a fixed startup error", async () => {
+  test("preserves installed-launcher startup failures", async () => {
     const root = await temporaryDirectory("codex-security-cli-bin-failure-");
     try {
       const launcher = join(root, "bin", "codex-security.mjs");
@@ -75,7 +75,7 @@ describe("CLI launcher", () => {
       expect(child.status).toBe(2);
       expect(child.stdout).toBe("");
       expect(child.stderr).toBe(
-        "codex-security: Failed to start Codex Security.\n",
+        `codex-security: Failed to start Codex Security: failed ${SYNTHETIC_CREDENTIALS}\n`,
       );
     } finally {
       await rm(root, { recursive: true, force: true });

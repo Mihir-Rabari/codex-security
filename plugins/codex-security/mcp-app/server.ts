@@ -959,8 +959,7 @@ export function createCodexSecurityServer(): McpServer {
     async ({ targetPath }) => {
       const target = await runWorkbench([
         "inspect-target",
-        "--target-path",
-        targetPath,
+        `--target-path=${targetPath}`,
       ]);
       return {
         content: [
@@ -992,10 +991,8 @@ export function createCodexSecurityServer(): McpServer {
     async ({ targetPath, scope, mode, diffTarget }) => {
       const setup = await runWorkbench([
         "inspect-setup",
-        "--target-path",
-        targetPath,
-        "--scope",
-        scope,
+        `--target-path=${targetPath}`,
+        `--scope=${scope}`,
         "--mode",
         mode,
         ...diffTargetArgs(diffTarget),
@@ -1042,10 +1039,8 @@ export function createCodexSecurityServer(): McpServer {
             "save-workspace",
             "--workspace-id",
             sessionId,
-            "--target-path",
-            targetPath,
-            "--scope",
-            scope,
+            `--target-path=${targetPath}`,
+            `--scope=${scope}`,
             "--mode",
             mode,
             ...definedArg("--target-summary", targetSummary),
@@ -1788,8 +1783,7 @@ export function createCodexSecurityServer(): McpServer {
         "fail-scan",
         "--scan-id",
         scanId,
-        "--message",
-        message,
+        `--message=${message}`,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
       deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
@@ -2194,10 +2188,8 @@ async function startPromptOnlyScan(
       "start-prompt-only-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      targetPath,
-      "--scope",
-      scope,
+      `--target-path=${targetPath}`,
+      `--scope=${scope}`,
       "--mode",
       mode,
       ...optionalArg("--model", modelSettings.model),
@@ -2227,10 +2219,8 @@ async function startHeadlessStandardScan(
       "start-headless-standard-scan",
       "--thread-id",
       threadId,
-      "--target-path",
-      input.targetPath,
-      "--scope",
-      input.scope ?? ".",
+      `--target-path=${input.targetPath}`,
+      `--scope=${input.scope ?? "."}`,
       ...optionalArg("--model", modelSettings.model),
       ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
       ...optionalArg("--target-summary", input.targetSummary),
@@ -2358,6 +2348,12 @@ function buildUserInputElicitation(
           {
             type: "string" as const,
             title: question.header,
+            description: [
+              ...(isSingleQuestion ? [] : [question.question]),
+              ...question.options.map(
+                (option) => `${option.label}: ${option.description}`,
+              ),
+            ].join("\n"),
             oneOf: question.options.map((option) => ({
               const: option.label,
               title: option.label,
@@ -2653,11 +2649,11 @@ function workbenchScriptPath(): string {
 }
 
 function optionalArg(name: string, value: string | undefined): string[] {
-  return value ? [name, value] : [];
+  return value ? [`${name}=${value}`] : [];
 }
 
 function definedArg(name: string, value: string | undefined): string[] {
-  return value === undefined ? [] : [name, value];
+  return value === undefined ? [] : [`${name}=${value}`];
 }
 
 function optionalNumberArg(name: string, value: number | undefined): string[] {

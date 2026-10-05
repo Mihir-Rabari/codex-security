@@ -620,7 +620,8 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         *diff_args,
         text=False,
     )
-    result.check_returncode()
+    if result.returncode:
+        raise SystemExit(f"Git diff failed: {os.fsdecode(result.stderr).strip()}")
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()

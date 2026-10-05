@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import { loadContract, sha256Text as sha256 } from "./contract.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  errorMessage,
+} from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
@@ -203,11 +207,12 @@ async function publishCloudPayload(
       redirect: "error",
       signal,
     });
-  } catch {
+  } catch (error) {
     dependencies.signal?.throwIfAborted();
     // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
-      "Cloud publication was not confirmed. The request was not retried; check whether it was accepted before submitting again.",
+      `Cloud publication was not confirmed: ${errorMessage(error)}. The request was not retried; check whether it was accepted before submitting again.`,
+      { cause: error },
     );
   }
   if (!response.ok) {

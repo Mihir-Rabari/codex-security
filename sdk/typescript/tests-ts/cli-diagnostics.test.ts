@@ -246,3 +246,134 @@ describe("CLI diagnostics", () => {
     expect(stderr.text()).toContain("\u001B[?1049l");
   });
 });
+
+test.each([
+  { args: ["scans", "resume", "saved"] },
+  { args: ["scans", "rerun", "saved"] },
+  { args: ["scans", "rerun"] },
+])("$args emits structured lookup failures", async ({ args }) => {
+  for (const flags of [
+    ["--json"],
+    ["--format", "jsonl"],
+    ["--json", "--full-output"],
+  ]) {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      [...args, ...flags],
+      dependencies({
+        onWorkbench: throwing("Synthetic saved scan lookup failure"),
+      }),
+    );
+    expect(code).toBe(2);
+    const output = JSON.parse(stdout.text());
+    expect(output.error?.message ?? output.message).toBe(
+      "Synthetic saved scan lookup failure",
+    );
+    expect(stderr.text()).toContain("Synthetic saved scan lookup failure");
+  }
+});
+
+test("saved resume rejects Markdown before loading state", async () => {
+  const { stderr, runCli } = createCliTest(main);
+  const code = await runCli(
+    ["scans", "resume", "saved", "--format", "md"],
+    dependencies({
+      onWorkbench: throwing("Must not load state"),
+    }),
+  );
+  expect(code).toBe(2);
+  expect(stderr.text()).toContain("Markdown output is not supported");
+});
+
+test.each([
+  { args: ["classify-severity", "--scan", "--rubric", "rules.md"] },
+  {
+    args: [
+      "dedupe",
+      "--scan",
+      "--findings-url",
+      "https://example.test/findings",
+    ],
+  },
+])("requires values for saved scan selectors in $args", async ({ args }) => {
+  const { stderr, runCli } = createCliTest(main);
+  expect(await runCli(args, dependencies())).toBe(2);
+  expect(stderr.text()).toContain("Missing value for flag: --scan");
+});
+
+test.each(["authentication", "patch review"])(
+  "treats dismissed %s prompts as cancellation",
+  async (stage) => {
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    const error = new Error("User dismissed the prompt");
+    error.name = "ExitPromptError";
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "synthetic-key" },
+    });
+    if (stage === "authentication") {
+      deps.hasStoredChatGPTSignIn = async () => true;
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async () => {
+          throw error;
+        },
+      };
+    } else {
+      deps.createSecurity = () =>
+        fakeSecurity(async () => fakeResult(["high"]));
+      deps.confirmPatchReview = async () => {
+        throw error;
+      };
+      deps.patchEditor = async () => null;
+    }
+    expect(await runCli(["scan", "--format", "toon"], deps)).toBe(130);
+    expect(stderr.text()).toContain("canceled");
+    if (stage === "patch review") expect(stdout.text()).toContain("manifest:");
+  },
+);
+
+test("uses stored API-key advice for a forbidden model request", async () => {
+  const { stderr, runCli } = createCliTest(main);
+  const deps = dependencies();
+  deps.createSecurity = () =>
+    fakeSecurity(async (_repository, options) => {
+      options?.onAuthentication?.({
+        method: "stored_credentials",
+        credentialType: "api_key",
+        verified: false,
+      });
+      throw new Error("403 model access denied");
+    });
+  expect(await runCli(["scan", "--json"], deps)).toBe(2);
+  expect(stderr.text()).toContain("stored API key");
+  expect(stderr.text()).not.toContain("stored ChatGPT credentials");
+});
+
+test.each(["resume", "rerun"])(
+  "saved %s honors structured output on a terminal",
+  async (command) => {
+    for (const flags of [["--json"], ["--format", "jsonl"], []]) {
+      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      const code = await runCli(
+        ["scans", command, "saved", ...flags],
+        dependencies({
+          onWorkbench: () => ({
+            scanId: "saved-canonical",
+            scanDir: "/synthetic/scan-output",
+            recipe: {
+              repository: "/synthetic/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "deep",
+              config: {},
+            },
+          }),
+        }),
+      );
+      expect(code, stderr.text()).toBe(0);
+      if (flags.length > 0) {
+        expect(JSON.parse(stdout.text())).toHaveProperty("manifest");
+        expect(stderr.text()).not.toContain("\u001b[?1049h");
+      } else expect(stdout.text()).toBe("");
+    }
+  },
+);

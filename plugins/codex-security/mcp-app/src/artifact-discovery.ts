@@ -183,14 +183,7 @@ export async function recordCodexSecurityDiscoveryCandidates(
         },
       );
     } catch (error) {
-      throw discoveryNormalizationError(error, [
-        [temporaryInput, "candidate input"],
-        [temporaryDirectory, "private candidate input"],
-        [inventoryPath, "the assigned review inventory"],
-        [destination, "the candidate set"],
-        [context.repoRoot, "the repository"],
-        [pluginRoot, "the plugin runtime"],
-      ]);
+      throw discoveryNormalizationError(error);
     }
 
     const normalized = await readArtifactJsonl(
@@ -225,10 +218,7 @@ export async function listCodexSecurityCandidates(
   return paginateArtifactRows(rows, page, discoveryLabel);
 }
 
-function discoveryNormalizationError(
-  error: unknown,
-  privateValues: Array<readonly [string, string]>,
-): Error {
+function discoveryNormalizationError(error: unknown): Error {
   const stderr =
     error && typeof error === "object" && "stderr" in error
       ? error.stderr
@@ -248,11 +238,6 @@ function discoveryNormalizationError(
     );
   }
 
-  for (const [source, replacement] of [...privateValues].sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    if (source) detail = detail.replaceAll(source, replacement);
-  }
   detail = detail.replace(/^normalize_candidates:\s*/u, "");
   return new Error(`${discoveryLabel}: ${detail}`, { cause: error });
 }

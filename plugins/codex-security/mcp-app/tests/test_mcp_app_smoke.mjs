@@ -1502,6 +1502,13 @@ try {
     code: "ENOENT",
   });
 
+  const dashQuery = await requestAndWait(8999, "tools/call", {
+    name: "list_codex_security_scans",
+    arguments: { query: "--synthetic-query", limit: 50 },
+  });
+  assertNoError(dashQuery);
+  assert.deepEqual(dashQuery.result.structuredContent.scans, []);
+
   const launcher = toolList.result.tools.find(
     (tool) => tool.name === "open_codex_security_workspace",
   );
@@ -1621,12 +1628,10 @@ try {
       },
     ],
   );
-  assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan,
-      "description",
-    ),
-    false,
+  assert.match(
+    elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
+      .description,
+    /Another Deep Security Scan is running.*Stop this new scan before preflight or substantive work/s,
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.preflight_action.oneOf,
@@ -1642,12 +1647,10 @@ try {
       },
     ],
   );
-  assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.preflight_action,
-      "description",
-    ),
-    false,
+  assert.match(
+    elicitationRequest.params.requestedSchema.properties.preflight_action
+      .description,
+    /How should Codex Security handle the blocked preflight.*Keep the scan available for a later retry/s,
   );
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
@@ -2965,10 +2968,14 @@ try {
       occurrenceId,
       status: "closed",
       closeReason: "false_positive",
-      note: "The archive path is normalized before the write.",
+      note: "--synthetic triage note",
     },
   });
   assertNoError(closedFinding);
+  assert.equal(
+    closedFinding.result.structuredContent.scan.findings[0].triage.note,
+    "--synthetic triage note",
+  );
   assert.equal(
     closedFinding.result.structuredContent.scan.findings[0].triage.status,
     "closed",
@@ -3651,11 +3658,15 @@ try {
     name: "fail_codex_security_scan",
     arguments: {
       handoffClaimToken: rotatedFallbackClaimToken,
-      message: "rotated continuation stopped",
+      message: "--synthetic continuation stopped",
       scanId: fallbackScanId,
     },
   });
   assertNoError(rotatedFailure);
+  assert.equal(
+    rotatedFailure.result.structuredContent.scan.failureMessage,
+    "--synthetic continuation stopped",
+  );
   assert.equal(
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",

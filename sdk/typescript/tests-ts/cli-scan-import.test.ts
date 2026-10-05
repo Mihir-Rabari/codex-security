@@ -209,8 +209,9 @@ describe("scan import", () => {
   test("reruns an imported scan from its retained source", async () => {
     const { deps, calls } = importDependencies();
     deps.runWorkbench = async (args) => {
-      expect(args).toEqual(["get-scan-recipe", "--scan-id", "previous-scan"]);
+      expect(args).toEqual(["get-scan-recipe", "--scan-id", "previous"]);
       return {
+        scanId: "previous-scan",
         recipe: {
           import: {
             format: "csv",
@@ -221,7 +222,7 @@ describe("scan import", () => {
     };
     const stdout = captureCli(main, "stdout");
     expect(
-      await stdout.run(["scans", "rerun", "previous-scan", "--json"], deps),
+      await stdout.run(["scans", "rerun", "previous", "--json"], deps),
     ).toBe(0);
     expect(calls[0]).toMatchObject({
       sourcePath: resolve("retained", "source.csv"),

@@ -19,8 +19,13 @@ void launch().then(
   (exitCode) => {
     process.exitCode = exitCode;
   },
-  () => {
-    process.stderr.write("codex-security: Failed to start Codex Security.\n");
+  (error) => {
+    const detail = (
+      error instanceof Error ? error.message : String(error)
+    ).replaceAll(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, " ");
+    process.stderr.write(
+      `codex-security: Failed to start Codex Security: ${detail}\n`,
+    );
     process.exitCode = 2;
   },
 );

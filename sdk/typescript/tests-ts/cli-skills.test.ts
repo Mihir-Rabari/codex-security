@@ -1253,7 +1253,7 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test("summarizes skill failures without echoing credentials or private paths", () => {
+  test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
@@ -1271,9 +1271,20 @@ process.stdout.write(JSON.stringify({
     for (const [detail, expected] of cases) {
       const message = skillCommandFailure("validate", 7, detail!);
       expect(message).toContain(expected!);
-      expect(message).not.toContain("SYNTHETIC_SECRET");
-      expect(message).not.toContain("/private");
+      expect(message).toContain(detail!);
     }
+  });
+
+  test.each([
+    "Failed after 1401 bytes",
+    "permission denied opening cache",
+    "line 1429 could not be parsed",
+  ])("does not misclassify an operational skill failure: %s", (detail) => {
+    const message = skillCommandFailure("patch", 1, detail);
+    expect(message).toContain(detail);
+    expect(message).not.toContain("Authentication failed");
+    expect(message).not.toContain("selected model is unavailable");
+    expect(message).not.toContain("rate limited");
   });
 
   test("keeps unknown credential failures neutral", () => {
@@ -1351,8 +1362,8 @@ process.stdout.write(JSON.stringify({
       } else {
         expect(stderr.text()).toContain(scenario.stderr);
       }
-      expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-      expect(stderr.text()).not.toContain("/private");
+      if (scenario.status === 7)
+        expect(stderr.text()).toContain("401 sk-proj-SYNTHETIC_SECRET");
     }
   });
 
@@ -1600,8 +1611,9 @@ lines.on("line", (line) => {
     ).resolves.toBe(1);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Authentication failed");
-    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-    expect(stderr.text()).not.toContain("/private");
+    expect(stderr.text()).toContain(
+      "401 sk-proj-SYNTHETIC_SECRET /private/repository",
+    );
   });
 
   test.skipIf(process.platform === "win32")(

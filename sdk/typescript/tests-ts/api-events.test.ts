@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -1219,4 +1219,14 @@ describe("one-shot scan events", () => {
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
   });
+});
+
+test("preserves the reason a required scan artifact cannot be read", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const artifact = join(scanDir, "findings.json");
+  await rm(artifact);
+  await mkdir(artifact);
+  await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
+    "expected a regular non-symlink file",
+  );
 });

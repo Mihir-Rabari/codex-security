@@ -125,6 +125,7 @@ try {
   await verifyReaderPreservesSharedPhaseRecords(scan);
   await verifyNormalizerFailuresPreserveOutput(scan);
   await verifyDiffInventoryAllowsDeletedFiles(root, repoRoot);
+  await verifyNormalizerDiagnostics(scan);
   await verifyEmptyReplacement(scan);
   await verifyWorkerContext(root, repoRoot);
   await verifyMalformedLedgerIsNotModified(root, repoRoot);
@@ -350,8 +351,7 @@ async function verifyNormalizerFailuresPreserveOutput(context) {
     (error) =>
       error instanceof Error &&
       /line range/u.test(error.message) &&
-      !error.message.includes(context.root) &&
-      !error.message.includes(context.repoRoot),
+      error.message.includes(context.root),
   );
   assert.equal(await readFile(destination, "utf8"), original);
 
@@ -578,4 +578,28 @@ function rawCandidate(overrides = {}) {
     evidence: "The request parameter is interpolated into the query",
     ...overrides,
   };
+}
+
+async function verifyNormalizerDiagnostics(context) {
+  const helper = path.join(context.pluginRoot, "mcp", "helpers.mjs");
+  const original = await readFile(helper);
+  const detail = `Cannot normalize ${context.repoRoot}; unrelated services${context.repoRoot}/main.py`;
+  try {
+    await writeFile(
+      helper,
+      `process.stderr.write(${JSON.stringify(`normalize_candidates: ${detail}\n`)}); process.exitCode = 2;`,
+    );
+    await assert.rejects(
+      recordCodexSecurityDiscoveryCandidates(
+        { candidates: [rawCandidate()] },
+        context,
+      ),
+      (error) => {
+        assert.ok(error.message.includes(detail), error.message);
+        return true;
+      },
+    );
+  } finally {
+    await writeFile(helper, original);
+  }
 }

@@ -5,7 +5,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import type { JsonObject } from "./config.js";
-import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
+import {
+  CodexSecurityError,
+  PluginBootstrapError,
+  errorMessage,
+} from "./errors.js";
 import {
   executablePathForSpawn,
   expandHome,
@@ -57,9 +61,10 @@ export async function readCodexHomeConfig(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
+  const path = join(configuredCodexHome(environment), "config.toml");
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+      await readFile(path, {
         encoding: "utf8",
         signal,
       }),
@@ -68,7 +73,8 @@ export async function readCodexHomeConfig(
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      "Could not read the configured Codex provider.",
+      `Could not read Codex configuration ${path}: ${errorMessage(error)}`,
+      { cause: error },
     );
   }
 }

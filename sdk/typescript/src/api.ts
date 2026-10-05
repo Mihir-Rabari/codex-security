@@ -4179,7 +4179,15 @@ async function collectResult(
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
-      missing.push(name);
+      const cause = error instanceof Error ? error.cause : undefined;
+      if ((cause as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+        missing.push(name);
+      } else {
+        throw new IncompleteScanError(
+          `Could not read required scan artifact: ${errorMessage(error)}${cause === undefined ? "" : `: ${errorMessage(cause)}`}`,
+          { cause: error },
+        );
+      }
     }
   }
   if (missing.length > 0) {

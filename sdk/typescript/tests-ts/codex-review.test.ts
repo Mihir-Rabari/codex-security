@@ -494,6 +494,7 @@ test.each([
   "I’m sorry, but I can’t assist with your request.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
+  "I'm not able to help with that.",
 ])("recognizes explicit review refusals: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(true);
 });
@@ -512,6 +513,7 @@ test.each([
   "Required source revision could not be read.",
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
+  "git fetch was refused by the remote for the cybersecurity-platform repository",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(false);

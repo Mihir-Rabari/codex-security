@@ -2068,7 +2068,9 @@ inconclusive or couldn't finish.
 The CLI uses [Incur](https://github.com/wevm/incur). Use `--llms` for the
 command manifest, `scan --schema --format json` for a command schema, and
 `completions bash|zsh|fish` for shell completions. Scan output supports
-`--format toon|json|yaml|jsonl` and `--full-output`.
+`--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
+`--filter-output`, `--token-limit`, and `--token-offset` options accept either
+`--option value` or `--option=value`.
 
 `skills add` syncs agent skills; `mcp add` registers the CLI as an MCP server.
 MCP exposes only the read-only `info` command because the transport cannot
