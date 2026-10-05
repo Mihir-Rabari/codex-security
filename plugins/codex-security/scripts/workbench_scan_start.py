@@ -119,6 +119,8 @@ def archive_scan(
         if previous_scan["status"] == "running":
             raise SystemExit("Cannot archive the output of a running scan.")
     has_contents = next(scan_dir.iterdir(), None) is not None
+    if has_contents and (not args.archive_existing or archived_scan_dir is not None):
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
@@ -132,6 +134,11 @@ def archive_scan(
     moved = False
     try:
         if archived_scan_dir is None:
+            database_path = connection.execute("PRAGMA database_list").fetchone()[2]
+            if database_path and scan_dir in Path(database_path).resolve().parents:
+                raise SystemExit(
+                    "The scan artifact directory cannot contain the active workbench database."
+                )
             if artifacts and not has_contents:
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
