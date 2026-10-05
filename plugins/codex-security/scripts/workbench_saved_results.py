@@ -656,6 +656,16 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
     counts = Counter(
         _digest([findings[index].get("ruleId"), anchor]) for index, anchor in anchors.items()
     )
+
+    def identity_key(finding: dict[str, Any]) -> bytes:
+        return _encoded([finding.get("ruleId"), finding.get("identity")])
+
+    used = {
+        identity_key(finding)
+        for finding in findings
+        if isinstance(finding, dict) and "identity" in finding
+    }
+    generated = []
     for index, anchor in anchors.items():
         finding = findings[index]
         if "identity" in finding:
@@ -677,6 +687,23 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
                 sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
             )
         finding["identity"] = identity
+        generated.append(finding)
+
+    reserved = {identity_key(finding) for finding in findings if isinstance(finding, dict)}
+    for finding in generated:
+        key = identity_key(finding)
+        if key in used:
+            identity = finding["identity"]
+            base_instance = identity.get("instance", "saved")
+            suffix = 2
+            while True:
+                identity["instance"] = f"{base_instance}-{suffix}"
+                key = identity_key(finding)
+                if key not in reserved:
+                    reserved.add(key)
+                    break
+                suffix += 1
+        used.add(key)
 
 
 def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -1371,7 +1398,7 @@ def merge_saved_results(
         else set()
     )
     findings: list[dict[str, Any]] = []
-    finding_positions: dict[str, int] = {}
+    finding_positions: dict[str, tuple[int, dict[str, Any] | None]] = {}
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
@@ -1783,8 +1810,11 @@ def merge_saved_results(
         owner = provenance.get("workerId")
         return owner if isinstance(owner, str) else source_owner
 
-    def raw_scope(value: dict[str, Any], source_owner: str | None) -> tuple[Any, ...]:
-        return raw_owner(value, source_owner), value.get("ruleId"), tuple(_finding_locations(value))
+    def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
+        return value.get("ruleId"), tuple(_finding_locations(value))
+
+    def same_owner(left: str | None, right: str | None) -> bool:
+        return left is None or right is None or left == right
 
     def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
@@ -1821,15 +1851,22 @@ def merge_saved_results(
         current: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = {}
         for index, value in enumerate(draft["findings"]):
             if isinstance(value, dict) and valid_finding(value):
-                current.setdefault(raw_scope(value, source_owner), []).append((index, value))
+                current.setdefault(raw_scope(value), []).append((index, value))
         prior = {scope: list(groups) for scope, groups in logical_rows.items()}
         current_groups: list[tuple[int, dict[str, Any]]] = []
         for scope, siblings in current.items():
             for index, value in siblings:
+                owner = raw_owner(value, source_owner)
+                owned_siblings = [
+                    sibling
+                    for _, sibling in siblings
+                    if same_owner(owner, raw_owner(sibling, source_owner))
+                ]
                 matches = [
                     group
                     for group in prior.get(scope, [])
-                    if (
+                    if same_owner(owner, group["owner"])
+                    and (
                         (relative == "parent" and parent_is_canonical)
                         or group["identity"] is None
                         or "identity" not in value
@@ -1842,25 +1879,53 @@ def merge_saved_results(
                     for group in matches
                     if any(same_raw_content(value, previous) for previous in group["rows"])
                 ]
+                revisions = [
+                    group for group in matches if group["latest"].get("title") == value.get("title")
+                ]
+                candidate = _identity_candidate(value)
+                related = (
+                    [
+                        sibling
+                        for sibling_scope, rows in current.items()
+                        if sibling_scope[0] == scope[0]
+                        for _, sibling in rows
+                        if same_owner(owner, raw_owner(sibling, source_owner))
+                        and _identity_candidate(sibling) == candidate
+                    ]
+                    if candidate is not None
+                    else owned_siblings
+                )
                 match = None
                 if (
                     len(matches) == 1
-                    and sum(same_raw_finding(sibling, value) for _, sibling in siblings) == 1
+                    and sum(same_raw_finding(sibling, value) for sibling in related) == 1
                 ):
                     match = matches[0]
                 elif (
                     len(exact) == 1
-                    and sum(same_raw_content(sibling, value) for _, sibling in siblings) == 1
+                    and sum(same_raw_content(sibling, value) for sibling in owned_siblings) == 1
                 ):
                     match = exact[0]
+                elif (
+                    len(revisions) == 1
+                    and sum(
+                        same_raw_finding(sibling, value)
+                        and sibling.get("title") == value.get("title")
+                        for sibling in owned_siblings
+                    )
+                    == 1
+                ):
+                    match = revisions[0]
                 if match is None:
                     match = {
-                        "owner": scope[0],
+                        "owner": owner,
                         "rows": [],
                         "identity": None,
                         "key": f"raw:{len(row_groups)}",
                     }
                     logical_rows.setdefault(scope, []).append(match)
+                if match["owner"] is None:
+                    match["owner"] = owner
                 if value not in match["rows"]:
                     match["rows"].append(value)
                 match["latest"] = value
@@ -2023,7 +2088,9 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
-                    finding_positions.setdefault(_finding_key(finding), len(findings))
+                    finding_positions.setdefault(
+                        _finding_key(finding), (len(findings), row_groups.get((relative, index)))
+                    )
                 findings.append(finding)
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
@@ -2073,6 +2140,8 @@ def merge_saved_results(
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             group = row_groups.get((relative, index))
+            if group is not None and group["owner"] is not None and "parent_key" not in group:
+                provenance.setdefault("workerId", group["owner"])
             if group is not None and group["identity"] is not None:
                 finding.setdefault("identity", copy.deepcopy(group["identity"]))
             if worker_id is not None and "identity" not in finding:
@@ -2114,22 +2183,19 @@ def merge_saved_results(
                     key = mapped_key
                     represented_by_parent = _digest(_finding_content(value)) in historical_contents
             if key in finding_positions:
-                retained = findings[finding_positions[key]]
+                position, retained_group = finding_positions[key]
+                retained = findings[position]
                 if finding != retained:
                     if not represented_by_parent and (
-                        _finding_strength(finding) > _finding_strength(retained)
-                        or (
-                            _finding_strength(finding) == _finding_strength(retained)
-                            and group is not None
-                            and group["identity"] is None
-                            and value is group["latest"]
-                            and same_raw_content(finding, retained)
-                        )
+                        value is group["latest"]
+                        if group is not None and group is retained_group
+                        else _finding_strength(finding) > _finding_strength(retained)
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
                         retained = finding
-                        findings[finding_positions[key]] = retained
+                        findings[position] = retained
+                        finding_positions[key] = (position, group)
                     else:
                         previous = copy.deepcopy(value)
                         previous_history = previous.get("provenance", {}).pop(
@@ -2163,7 +2229,7 @@ def merge_saved_results(
                         ):
                             history.append(original)
                 continue
-            finding_positions[key] = len(findings)
+            finding_positions[key] = (len(findings), group)
             findings.append(finding)
         if superseded and not selected_candidates and not retain_pending:
             continue

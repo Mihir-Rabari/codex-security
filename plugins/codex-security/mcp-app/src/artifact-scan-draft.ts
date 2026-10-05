@@ -674,6 +674,9 @@ async function preserveScanDraft(
       const containing = matches.filter((current) =>
         containsSavedFinding(current, finding),
       );
+      const revisions = matches.filter((current) =>
+        sameSavedRevision(current, finding),
+      );
       if (
         matches.length === 1 &&
         source.findings.filter((current) =>
@@ -684,6 +687,13 @@ async function preserveScanDraft(
       } else if (containing.length === 1) {
         // An unchanged sibling still owns its previously published identity.
         preserveFindingDetails(containing[0]!, finding);
+      } else if (
+        revisions.length === 1 &&
+        source.findings.filter((current) =>
+          sameSavedRevision(current, revisions[0]!),
+        ).length === 1
+      ) {
+        preserveFindingDetails(revisions[0]!, finding);
       } else if (containing.length === 0) {
         result.findings.push(structuredClone(finding));
       }
@@ -1582,6 +1592,14 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   );
 }
 
+function sameSavedRevision(left: JsonObject, right: JsonObject): boolean {
+  return (
+    left.title === right.title &&
+    isDeepStrictEqual(left.locations, right.locations) &&
+    sameSavedFinding(left, right)
+  );
+}
+
 function withoutPreviousFindings(finding: JsonObject): JsonObject {
   const result = structuredClone(finding);
   if (isObject(result.provenance)) delete result.provenance.previousFindings;
@@ -2377,15 +2395,22 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       identity,
     };
   });
-  if (mode !== "deep") return identified;
+  // Keep generated identities distinct without replacing an authored identity.
+  const authored = new Set(
+    findings
+      .filter((finding) => finding.identity !== undefined)
+      .map(scanFindingIdentity),
+  );
 
   // Keep both findings when workers reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
   const used = new Set<string>();
-  return identified.map((finding) => {
+  return identified.map((finding, index) => {
+    const explicit = findings[index]!.identity !== undefined;
+    if (mode !== "deep" && explicit) return finding;
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
+    if (!used.has(key) && (explicit || !authored.has(key))) {
       used.add(key);
       return finding;
     }
@@ -2403,12 +2428,14 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       reserved.has(scanFindingIdentity(distinct)) ||
       used.has(scanFindingIdentity(distinct))
     );
-    const provenance = finding.provenance as JsonObject;
-    distinct.provenance = {
-      ...provenance,
-      preservedIdentity:
-        provenance.preservedIdentity ?? structuredClone(identity),
-    };
+    if (explicit) {
+      const provenance = finding.provenance as JsonObject;
+      distinct.provenance = {
+        ...provenance,
+        preservedIdentity:
+          provenance.preservedIdentity ?? structuredClone(identity),
+      };
+    }
     used.add(scanFindingIdentity(distinct));
     return distinct;
   });

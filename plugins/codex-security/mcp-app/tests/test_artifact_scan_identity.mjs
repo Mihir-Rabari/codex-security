@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -113,7 +114,12 @@ for (const layout of ["standard", "diff", "worker"]) {
   });
 }
 
-async function recoverAndFinalize(normal, recovered, workers = []) {
+async function recoverAndFinalize(
+  normal,
+  recovered,
+  workers = [],
+  details = false,
+) {
   const { stdout } = await execFileAsync(
     process.env.PYTHON?.trim() || "python3",
     [
@@ -136,13 +142,14 @@ for root,documents in [(normal,ordinary),(recovered,recovery)]:
  documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status='failed',startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
  for document in documents[1:]: document['scanId']=scan_id
  prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
- results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'workerMetadata':row.get('provenance',{}).get('workerId')} for row in prepared[3]['findings']])
+ results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared[3]['findings']])
 print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings}))`,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       normal.root,
       recovered.root,
       normal.context.scanId,
       JSON.stringify(workers),
+      JSON.stringify(details),
     ],
   );
   return JSON.parse(stdout);
@@ -212,7 +219,7 @@ for (const layout of ["standard", "diff"]) {
                 () => recovered.write(input),
               );
           }
-          const result = await recoverAndFinalize(normal, recovered);
+          const result = await recoverAndFinalize(normal, recovered, [], true);
           assert.equal(result.normal.length, 1);
           assert.deepEqual(result.recovered, result.normal);
           assert.deepEqual(result.warnings, []);
@@ -536,7 +543,12 @@ for (const layout of ["standard", "diff", "worker"]) {
           })),
         });
       }
-      const result = await recoverAndFinalize(normal, recovered, workers);
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        workers,
+        variant === "metadata enrichment",
+      );
       const count = ["metadata enrichment", "authored identity"].includes(
         variant,
       )
@@ -766,5 +778,356 @@ for (const layout of ["standard", "diff", "deep"]) {
       assert.deepEqual(result.recovered, result.normal);
       assert.deepEqual(result.recovered[0].workerMetadata, metadata);
     });
+  }
+}
+for (const layout of ["standard", "diff", "deep"]) {
+  for (const shape of ["summary revision", "shared ledger"]) {
+    test(`${layout}: report reconciliation ${shape}`, async (t) => {
+      const normal = await fixture(t, layout);
+      const recovered = await fixture(t, layout);
+      const first = finding("First review", {
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+        ...(shape === "shared ledger"
+          ? { extensions: { ledgerRowId: "ledger-1" } }
+          : {}),
+      });
+      const second = { ...structuredClone(first), title: "Second review" };
+      const snapshots =
+        shape === "summary revision"
+          ? [
+              [first, second],
+              [{ ...first, summary: "Revised evidence." }, second],
+            ]
+          : [[first, second]];
+      for (const findings of snapshots) {
+        await normal.write({ ...normal.draft(), findings });
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          { ...recovered.draft(), findings },
+          false,
+        );
+      }
+      const result = await recoverAndFinalize(normal, recovered, [], true);
+
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, result.normal.length);
+      assert.deepEqual(result.warnings, []);
+      const ordered = (rows) =>
+        [...rows].sort((a, b) => a.findingId.localeCompare(b.findingId));
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+    });
+  }
+}
+
+test("deep: refined candidate retains independent cross-location report", async (t) => {
+  const normal = await fixture(t, "deep");
+  const recovered = await fixture(t, "deep");
+  const normalRoot = path.join(normal.root, "reviewer");
+  const recoveredRoot = path.join(recovered.root, "reviewer");
+  await mkdir(normalRoot);
+  await mkdir(recoveredRoot);
+  const normalWorker = draftFixture(normalRoot, "worker");
+  const recoveredWorker = draftFixture(recoveredRoot, "worker");
+  const first = finding("First review", {
+    severity: { level: "high" },
+    provenance: { source: "local_plugin", candidateId: "candidate-1" },
+  });
+  const refined = {
+    ...first,
+    locations: [{ path: "src/example.py", startLine: 2 }],
+  };
+  const second = {
+    ...structuredClone(first),
+    title: "Second review",
+    summary: "Independent evidence.",
+    severity: { level: "low" },
+  };
+  for (const findings of [[first], [refined, second]]) {
+    await normalWorker.write({ ...normalWorker.draft(), findings });
+    await draftApi.saveScanDraftCheckpoint(
+      recoveredWorker.context,
+      { ...recoveredWorker.draft(), findings },
+      false,
+    );
+  }
+  const saved = JSON.parse(
+    await readFile(path.join(normalRoot, "result.json"), "utf8"),
+  );
+  await normal.write({
+    ...normal.draft(),
+    findings: saved.findings.map((row) => ({
+      ...row,
+      provenance: { ...row.provenance, workerId: "reviewer" },
+    })),
+  });
+  const result = await recoverAndFinalize(
+    normal,
+    recovered,
+    [
+      {
+        id: "reviewer",
+        kind: "discovery",
+        artifact_dir: recoveredRoot,
+        result_manifest_path: null,
+        attempt: 1,
+      },
+    ],
+    true,
+  );
+
+  assert.ok(result.recovered.some((row) => row.title === "Second review"));
+  assert.equal(result.normal.length, 3);
+  assert.equal(result.recovered.length, 3);
+  assert.deepEqual(result.warnings, []);
+  const ordered = (rows) =>
+    [...rows].sort((a, b) => a.findingId.localeCompare(b.findingId));
+  assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+});
+for (const layout of ["standard", "diff"]) {
+  test(`${layout}: revised sibling publication completes with unique identities`, async (t) => {
+    const f = await fixture(t, layout);
+    const first = finding("First review", {
+      provenance: { source: "local_plugin", candidateId: "candidate-1" },
+    });
+    const second = { ...structuredClone(first), title: "Second review" };
+    await f.write({ ...f.draft(), findings: [first, second] });
+    await f.write({
+      ...f.draft({}, true),
+      findings: [{ ...first, summary: "Revised evidence." }, second],
+    });
+    const { stdout } = await execFileAsync(
+      process.env.PYTHON?.trim() || "python3",
+      [
+        "-c",
+        `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from finalize_scan_contract import _prepare_scan_finalization
+root=Path(sys.argv[2])
+documents=tuple(json.loads((root/name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json'))
+documents[0]['scan'].update(id=sys.argv[3],status='completed',producer={'name':'test','version':'1'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
+for document in documents[1:]: document['scanId']=sys.argv[3]
+prepared=_prepare_scan_finalization(root,draft_documents=documents)
+print(len(prepared[3]['findings']))`,
+        fileURLToPath(new URL("../../scripts", import.meta.url)),
+        f.root,
+        f.context.scanId,
+      ],
+    );
+    assert.equal(stdout.trim(), "2");
+  });
+}
+for (const layout of ["standard", "diff", "deep"]) {
+  test(`${layout}: repeated shared-ledger publication preserves allocated identities`, async (t) => {
+    const normal = await fixture(t, layout);
+    const recovered = await fixture(t, layout);
+    const first = finding("First review", {
+      provenance: { source: "local_plugin", candidateId: "candidate-1" },
+      extensions: { ledgerRowId: "ledger-1" },
+    });
+    const second = { ...structuredClone(first), title: "Second review" };
+    for (let index = 0; index < 2; index++) {
+      for (const f of [normal, recovered])
+        await f.write({ ...f.draft(), findings: [first, second] });
+    }
+    const result = await recoverAndFinalize(normal, recovered, [], true);
+    assert.equal(result.normal.length, 2);
+    assert.equal(result.recovered.length, 2);
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(result.recovered, result.normal);
+  });
+}
+
+for (const layout of ["standard", "diff", "deep"]) {
+  for (const cut of ["canonical", "raw"]) {
+    test(`${layout}: ownership enrichment preserves publication identity (${cut})`, async (t) => {
+      const normal = await fixture(t, layout);
+      const recovered = await fixture(t, layout);
+      const first = finding("Synthetic ownership review", {
+        identity: { anchor: "authored-review" },
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+      });
+      const second = {
+        ...first,
+        provenance: { ...first.provenance, workerId: "worker-a" },
+      };
+      for (const row of [first, second]) {
+        await normal.write({ ...normal.draft(), findings: [row] });
+        if (cut === "canonical")
+          await recovered.write({ ...recovered.draft(), findings: [row] });
+        else
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            { ...recovered.draft(), findings: [row] },
+            false,
+          );
+      }
+      const result = await recoverAndFinalize(normal, recovered);
+
+      assert.equal(result.normal.length, 1);
+      assert.deepEqual(result.recovered, result.normal);
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep"]) {
+  test(`${layout}: ownership enrichment keeps a newly known independent owner`, async (t) => {
+    const normal = await fixture(t, layout),
+      recovered = await fixture(t, layout);
+    const first = finding("Synthetic ownership review", {
+      identity: { anchor: "authored-first" },
+      provenance: { source: "local_plugin", candidateId: "candidate-1" },
+    });
+    const owned = {
+      ...first,
+      provenance: { ...first.provenance, workerId: "worker-a" },
+    };
+    const independent = {
+      ...first,
+      identity: { anchor: "authored-second" },
+      provenance: { ...first.provenance, workerId: "worker-b" },
+    };
+    for (const findings of [[first], [owned, independent]]) {
+      await normal.write({ ...normal.draft(), findings });
+      await draftApi.saveScanDraftCheckpoint(
+        recovered.context,
+        { ...recovered.draft(), findings },
+        false,
+      );
+    }
+    const result = await recoverAndFinalize(normal, recovered);
+
+    assert.equal(result.normal.length, 2);
+    assert.deepEqual(result.recovered, result.normal);
+  });
+}
+for (const authored of [false, true]) {
+  test(`deep: ownership enrichment cannot bridge bound workers authored=${authored}`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    const workers = [],
+      findings = [];
+    for (const id of ["worker-a", "worker-b"]) {
+      const workerRoot = path.join(recovered.root, id);
+      await mkdir(workerRoot);
+      const worker = draftFixture(workerRoot, "worker");
+      const value = finding("Synthetic bound owner review", {
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+        ...(authored ? { identity: { anchor: "authored-review" } } : {}),
+      });
+      for (const row of [
+        value,
+        { ...value, provenance: { ...value.provenance, workerId: id } },
+      ]) {
+        await draftApi.saveScanDraftCheckpoint(
+          worker.context,
+          { ...worker.draft(), findings: [row] },
+          false,
+        );
+      }
+      findings.push({
+        ...value,
+        provenance: { ...value.provenance, workerId: id },
+      });
+      workers.push({
+        id,
+        kind: "discovery",
+        artifact_dir: workerRoot,
+        result_manifest_path: null,
+        attempt: 1,
+      });
+    }
+    await normal.write({ ...normal.draft(), findings });
+    const result = await recoverAndFinalize(normal, recovered, workers);
+
+    assert.equal(result.normal.length, 2);
+    assert.deepEqual(result.recovered, result.normal);
+  });
+}
+
+const checkpointName = (input) =>
+  createHash("sha256").update(JSON.stringify(input)).digest("hex") + ".json";
+for (const order of ["earlier-first", "later-first"]) {
+  for (const metadata of ["extensions", "provenance"]) {
+    for (const initialLevel of ["low", "high"]) {
+      test(`worker revised raw checkpoint retains ${metadata} enrichment (${order}, ${initialLevel} to low)`, async (t) => {
+        const normal = await fixture(t, "deep"),
+          recovered = await fixture(t, "deep");
+        const normalRoot = path.join(normal.root, "reviewer"),
+          recoveredRoot = path.join(recovered.root, "reviewer");
+        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
+        const worker = draftFixture(normalRoot, "worker"),
+          recoveryWorker = draftFixture(recoveredRoot, "worker");
+        const initial = {
+          ...finding("Synthetic review"),
+          summary: "Initial assessment.",
+          severity: { level: initialLevel },
+        };
+        const revised = {
+          ...initial,
+          summary: "Corrected assessment.",
+          severity: { level: "low" },
+          [metadata]: { ...initial[metadata], candidateId: "candidate-1" },
+        };
+        const oldDraft = { ...worker.draft(), findings: [initial] };
+        let newDraft,
+          suffix = 0;
+        do {
+          newDraft = {
+            ...worker.draft(),
+            findings: [revised],
+            threatModel: { summary: `Synthetic checkpoint ${suffix++}.` },
+          };
+        } while (
+          checkpointName(oldDraft) < checkpointName(newDraft) !==
+          (order === "earlier-first")
+        );
+        for (const [index, draft] of [oldDraft, newDraft].entries()) {
+          await worker.write(draft);
+          await draftApi.saveScanDraftCheckpoint(
+            recoveryWorker.context,
+            draft,
+            false,
+          );
+          await utimes(
+            path.join(recoveredRoot, "checkpoints", checkpointName(draft)),
+            100 + index * 100,
+            100 + index * 100,
+          );
+        }
+        const saved = JSON.parse(
+          await readFile(path.join(normalRoot, "result.json"), "utf8"),
+        );
+        assert.equal(saved.findings.length, 1);
+        assert.equal(saved.findings[0].summary, revised.summary);
+        assert.equal(saved.findings[0].severity.level, "low");
+        assert.equal(saved.findings[0][metadata].candidateId, "candidate-1");
+        await normal.write({
+          ...normal.draft(),
+          findings: saved.findings.map((row) => ({
+            ...row,
+            provenance: { ...row.provenance, workerId: "reviewer" },
+          })),
+        });
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [
+            {
+              id: "reviewer",
+              kind: "discovery",
+              artifact_dir: recoveredRoot,
+              result_manifest_path: null,
+              attempt: 1,
+            },
+          ],
+          true,
+        );
+        assert.deepEqual(result.warnings, []);
+        assert.equal(result.recovered.length, 1);
+        assert.deepEqual(result.recovered, result.normal);
+      });
+    }
   }
 }

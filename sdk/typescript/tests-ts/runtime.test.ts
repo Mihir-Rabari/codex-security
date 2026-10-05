@@ -305,11 +305,16 @@ describe("plugin runtime preparation", () => {
       /function findingIdentityCandidate\(finding\) \{[\s\S]*?\n\}/u.exec(
         runtime,
       )?.[0];
+    const identitySource =
+      /function scanFindingIdentity\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
     expect(source).toBeDefined();
     expect(candidateSource).toBeDefined();
+    expect(identitySource).toBeDefined();
     const buildFindings = new Function(
       "semanticIdentifier",
-      `${candidateSource}\n${source}\nreturn buildFindings;`,
+      `${candidateSource}\n${identitySource}\n${source}\nreturn buildFindings;`,
     )((value: string, fallback: string) => value || fallback) as (
       findings: Array<{
         title: string;
