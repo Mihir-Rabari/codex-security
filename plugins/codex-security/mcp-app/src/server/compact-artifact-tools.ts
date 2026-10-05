@@ -81,8 +81,7 @@ export function registerReviewItemTools(
     description: "Generate the changed-file inventory for a diff scan.",
     inputSchema: prepareReviewItemsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = prepareReviewItemsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return prepareCodexSecurityReviewItems(
         await phaseScanContext(input, options, requestContext, "diff"),
       );
@@ -95,8 +94,7 @@ export function registerReviewItemTools(
     description: "Read one page of the diff or Deep scan discovery inventory.",
     inputSchema: reviewItemsReaderInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = reviewItemsReaderInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return listCodexSecurityReviewItems(
         await phaseScanContext(input, options, requestContext),
         input,
@@ -119,8 +117,7 @@ export function registerDiscoveryCandidateTools(
     description: "Normalize and replace the selected diff scan's candidates.",
     inputSchema: writerSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = writerSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
         { candidates: input.candidates },
         await phaseScanContext(input, options, requestContext, "diff"),
@@ -134,8 +131,7 @@ export function registerDiscoveryCandidateTools(
     description: "Read one page of diff or Deep scan discovery candidates.",
     inputSchema: readerSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = readerSchema.parse(value);
+    handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
         {
           ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
@@ -158,8 +154,7 @@ export function registerCandidateValidationTools(
     description: "Record the diff or Deep scan candidate validation results.",
     inputSchema: candidateValidationsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = candidateValidationsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
         { validations: input.validations },
@@ -179,8 +174,7 @@ export function registerCandidateAttackPathTools(
     description: "Record the diff or Deep scan candidate attack-path results.",
     inputSchema: candidateAttackPathsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = candidateAttackPathsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
         { attackPaths: input.attackPaths },
@@ -201,8 +195,7 @@ export function registerScanDraftTools(
       "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
     inputSchema: scanDraftInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = scanDraftInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityScanDraftViaWorkbench(
         await scanContext(input, options, true, requestContext),
         input,
@@ -219,8 +212,7 @@ export function registerScanDraftTools(
       "Read the selected scan's existing completed, sealed canonical documents.",
     inputSchema: completedScanInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = completedScanInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return getCodexSecurityCompletedScan(
         await scanContext(input, options, false, requestContext),
         input,
@@ -254,8 +246,7 @@ export function registerCompactArtifactTools(
       "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ (or threatmodel.md for a standalone model) and either exact text content or a sourcePath inside the returned temporary directory. Scan threatmodel.md is host-generated from semantic drafts; canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
     inputSchema: saveArtifactInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = saveArtifactInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return saveCodexSecurityArtifact(
         await supplementalContext(input, options, true, requestContext),
         input,
@@ -270,8 +261,7 @@ export function registerCompactArtifactTools(
       "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it. A scan's host-generated model is threatmodel.md; standalone legacy threat_model.md remains readable.",
     inputSchema: readArtifactInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = readArtifactInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return readCodexSecurityArtifact(
         await supplementalContext(input, options, false, requestContext),
         input,
@@ -309,18 +299,18 @@ async function supplementalContext(
   );
 }
 
-interface CompactToolRegistration {
+interface CompactToolRegistration<Input> {
   name: string;
   title: string;
   description: string;
-  inputSchema: ZodType;
+  inputSchema: ZodType<Input>;
   readOnly: boolean;
-  handler: (value: unknown, requestContext: unknown) => Promise<object>;
+  handler: (value: Input, requestContext: unknown) => Promise<object>;
 }
 
-function registerCompactTool(
+function registerCompactTool<Input>(
   server: McpServer,
-  registration: CompactToolRegistration,
+  registration: CompactToolRegistration<Input>,
 ): void {
   server.registerTool(
     registration.name,
@@ -333,7 +323,7 @@ function registerCompactTool(
         : writingAnnotations,
       _meta: modelOnlyMeta,
     },
-    async (input: unknown, requestContext: unknown) => {
+    async (input, requestContext) => {
       const value = await registration.handler(input, requestContext);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(value) }],

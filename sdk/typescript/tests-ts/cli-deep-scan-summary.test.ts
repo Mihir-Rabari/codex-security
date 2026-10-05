@@ -96,7 +96,7 @@ describe("deep scan completion summary", () => {
     await writeFile(
       join(directory, "artifacts/deep-scan/checkpoint.json"),
       JSON.stringify({
-        version: 2,
+        version: 3,
         aggregate: null,
         ...cappedState,
         ...overrides,

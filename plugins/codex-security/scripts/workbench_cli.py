@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import workbench_remediation as remediation
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -379,7 +378,10 @@ def parse_args(description: str) -> argparse.Namespace:
     release_finding_remediation_claim.add_argument("--request-id", required=True)
     release_finding_remediation_claim.add_argument("--action-token", required=True)
 
-    remediation.register_cancel_finding_remediation_request(subparsers)
+    cancel_remediation = subparsers.add_parser("cancel-finding-remediation-request")
+    cancel_remediation.add_argument("--occurrence-id", required=True)
+    cancel_remediation.add_argument("--request-id", required=True)
+    cancel_remediation.add_argument("--action-token", required=True)
 
     set_finding_remediation = subparsers.add_parser("set-finding-remediation")
     set_finding_remediation.add_argument("--occurrence-id", required=True)

@@ -16,9 +16,9 @@ import os
 import re
 import secrets
 import stat
+import struct
 import sys
 import time
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
@@ -2026,7 +2026,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             continue
         canonical_evidence = finding.get("codeEvidence")
         canonical_evidence = canonical_evidence if isinstance(canonical_evidence, list) else []
-        canonical_evidence_ids = {
+        evidence_ids = {
             evidence["id"]
             for evidence in canonical_evidence
             if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
@@ -2034,7 +2034,6 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
             compatible_legacy_evidence = []
-            seen_evidence_ids = set(canonical_evidence_ids)
             for evidence in legacy_evidence:
                 if not isinstance(evidence, dict):
                     continue
@@ -2047,22 +2046,13 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                     or not evidence_code.strip()
                 ):
                     continue
-                if evidence_id in seen_evidence_ids:
+                if evidence_id in evidence_ids:
                     continue
-                seen_evidence_ids.add(evidence_id)
+                evidence_ids.add(evidence_id)
                 compatible_legacy_evidence.append(evidence)
             finding["code_evidence"] = compatible_legacy_evidence
         elif "code_evidence" in finding:
             finding.pop("code_evidence")
-        compatible_legacy_evidence = finding.get("code_evidence")
-        compatible_legacy_evidence = (
-            compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
-        )
-        evidence_ids = canonical_evidence_ids | {
-            evidence["id"]
-            for evidence in compatible_legacy_evidence
-            if isinstance(evidence, dict) and isinstance(evidence.get("id"), str) and evidence["id"]
-        }
         for section_name, list_fields in (
             ("rootCause", ("evidenceRefs", "evidence_refs")),
             ("root_cause", ("evidenceRefs", "evidence_refs")),
@@ -2237,12 +2227,6 @@ def _sarif_finding_message(finding: dict[str, Any]) -> str:
     return "\n\n".join(details)
 
 
-def _utf16_code_units(value: str) -> Iterator[int]:
-    encoded = value.encode("utf-16-le")
-    for index in range(0, len(encoded), 2):
-        yield int.from_bytes(encoded[index : index + 2], "little")
-
-
 def _github_line_hashes(
     handle: TextIO,
     requested_lines: set[int] | None = None,
@@ -2295,7 +2279,7 @@ def _github_line_hashes(
         update_hash(current)
 
     while chunk := handle.read(SOURCE_READ_CHUNK_SIZE):
-        for code_unit in _utf16_code_units(chunk):
+        for (code_unit,) in struct.iter_unpack("<H", chunk.encode("utf-16-le")):
             process_character(code_unit)
     process_character(GITHUB_HASH_EOF)
     for _ in range(GITHUB_HASH_BLOCK_SIZE):
@@ -3021,10 +3005,7 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if was_sealed:
-        _validate_findings(manifest, findings_for_validation)
-        _validate_derived_finding_identities(manifest, findings)
-    elif completion_warnings is not None:
+    if not was_sealed and completion_warnings is not None:
         schema = _read_json(schema_dir / "findings.schema.json")
         discarded_findings = _recover_unsealed_findings(
             manifest, findings, schema, scan_dir, completion_warnings
@@ -3033,9 +3014,11 @@ def _prepare_scan_finalization(
             coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
         )
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
-    else:
+    elif not was_sealed:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings_for_validation)
+    if was_sealed:
+        _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir

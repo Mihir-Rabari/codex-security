@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 
 export interface DeepScanProgress {
   completed: number;
@@ -11,7 +12,6 @@ interface DeepScanProgressTrackerOptions {
   onProgress: (progress: DeepScanProgress) => void;
   onStopped?: () => void;
   onError?: (error: unknown) => void;
-  pollIntervalMs?: number;
 }
 
 const DEEP_PROGRESS_POLL_INTERVAL_MS = 1_000;
@@ -35,10 +35,7 @@ export class DeepScanProgressTracker {
         this.#options.onError?.(error);
       });
     };
-    this.#timer = setInterval(
-      poll,
-      this.#options.pollIntervalMs ?? DEEP_PROGRESS_POLL_INTERVAL_MS,
-    );
+    this.#timer = setInterval(poll, DEEP_PROGRESS_POLL_INTERVAL_MS);
     this.#timer.unref();
     poll();
   }
@@ -99,21 +96,20 @@ export function deepScanProgressFromWorkbench(
   if (!isRecord(progress)) return null;
   const independentReviews = progress["independentReviews"];
   if (independentReviews === undefined) return null;
-  if (
-    !isRecord(independentReviews) ||
-    !isCount(independentReviews["completed"]) ||
-    !isCount(independentReviews["active"]) ||
-    !isPositiveCount(independentReviews["maximum"])
-  ) {
-    throw new Error(
-      "Codex Security workbench returned invalid Deep Scan progress.",
-    );
+  if (isRecord(independentReviews)) {
+    const { completed, active, maximum } = independentReviews;
+    if (
+      isSafeNonNegativeInteger(completed) &&
+      isSafeNonNegativeInteger(active) &&
+      isSafeNonNegativeInteger(maximum) &&
+      maximum > 0
+    ) {
+      return { completed, active, maximum };
+    }
   }
-  return {
-    completed: independentReviews["completed"],
-    active: independentReviews["active"],
-    maximum: independentReviews["maximum"],
-  };
+  throw new Error(
+    "Codex Security workbench returned invalid Deep Scan progress.",
+  );
 }
 
 function sameProgress(
@@ -126,12 +122,4 @@ function sameProgress(
     left.active === right.active &&
     left.maximum === right.maximum
   );
-}
-
-function isCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isPositiveCount(value: unknown): value is number {
-  return isCount(value) && value > 0;
 }

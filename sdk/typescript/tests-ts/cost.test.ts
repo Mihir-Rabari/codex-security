@@ -1,3 +1,4 @@
+import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
@@ -26,9 +27,11 @@ import {
   scanThreadId,
 } from "./support/usage-rollout.js";
 
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories = createTemporaryDirectories();
+const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
+  "codex-security-cost-",
+);
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
 type SessionParentField = (typeof parentFields)[number];
 
@@ -50,12 +53,7 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the cost tracker.");
 }
 
-afterEach(temporaryDirectories.cleanup);
-
-async function codexHome(): Promise<string> {
-  const directory = await temporaryDirectories.create("codex-security-cost-");
-  return directory;
-}
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -1334,7 +1332,7 @@ describe("live scan cost tracking", () => {
 
       await writeFile(
         worker,
-        [
+        jsonLines([
           {
             type: "session_meta",
             payload: {
@@ -1425,9 +1423,7 @@ describe("live scan cost tracking", () => {
               },
             },
           },
-        ]
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
+        ]) + "\n",
       );
 
       const activities: ScanActivity[] = [];
@@ -1509,10 +1505,7 @@ describe("live scan cost tracking", () => {
       scanThreadId,
     );
     const rollout = ownershipRollout(replayedTurnIds);
-    await writeFile(
-      rolloutPath,
-      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
-    );
+    await writeFile(rolloutPath, jsonLines(rollout) + "\n");
 
     const maxCostUsd = 0.001;
     const observedCosts: number[] = [];
@@ -1676,6 +1669,42 @@ describe("live scan cost tracking", () => {
       },
     ]);
   });
+
+  test.each([false, true])(
+    "tracks cost through agent messages with progress observation %p",
+    async (observeProgress) => {
+      const home = await codexHome();
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      const parent = await writeSession(home, "scan-thread", usage);
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        "scan-thread",
+      );
+      for (const path of [parent, worker]) {
+        await appendFile(
+          path,
+          jsonLines([
+            {
+              type: "event_msg",
+              payload: { type: "agent_message", message: "Review complete." },
+            },
+          ]) + "\n",
+        );
+      }
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        ...(observeProgress ? { onProgress() {} } : {}),
+      });
+      tracker.start("scan-thread");
+      expect((await tracker.stop()).cost).toMatchObject({
+        inputTokens: 200,
+        outputTokens: 20,
+      });
+    },
+  );
 
   test("streams worker reasoning and commentary from live session events once", async () => {
     const home = await codexHome();
