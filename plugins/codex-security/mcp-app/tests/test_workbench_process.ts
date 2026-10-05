@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import type { ExecFileOptionsWithStringEncoding } from "node:child_process";
+import { promisify } from "node:util";
 
 type WorkbenchProcessFixture = (
   python: string,
@@ -93,6 +95,24 @@ try {
       assert.equal(error.cause, failure);
       return true;
     },
+  );
+  await assert.rejects(
+    promisify(execFile)(
+      process.execPath,
+      ["-e", 'process.stdout.write("x".repeat(65536))'],
+      { maxBuffer: 1024 },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok("code" in error);
+      assert.equal(error.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+      failure = error;
+      return true;
+    },
+  );
+  await assert.rejects(
+    executeWorkbench("fixture-python", ["cancel-scan"]),
+    (error) => error === failure,
   );
 } finally {
   delete globalThis.workbenchProcessFixture;

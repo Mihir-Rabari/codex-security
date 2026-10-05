@@ -288,15 +288,17 @@ export class DeepScanCoordinator {
             await persistCancellation();
             this.cancel(reason);
           } catch (error) {
-            let completed = false;
+            let parentStopped = false;
             if (this.state.status === "succeeded") {
               try {
-                completed = (await readParentStatus()) === "complete";
+                parentStopped = ["complete", "failed"].includes(
+                  (await readParentStatus()) ?? "",
+                );
               } catch {
                 // Preserve the cancellation diagnostic if reconciliation fails.
               }
             }
-            if (!completed) persistence.failure = { error };
+            if (!parentStopped) persistence.failure = { error };
             throw error;
           }
         }
