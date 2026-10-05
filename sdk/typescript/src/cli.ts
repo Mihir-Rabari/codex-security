@@ -1215,6 +1215,7 @@ interface CliDependencies {
     args: readonly string[],
     repository: string,
     options?: {
+      directory?: string;
       trim?: boolean;
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
@@ -1309,7 +1310,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       );
     }
     const { stdout } = await execFile(executable.executable, [...args], {
-      cwd: repository,
+      cwd: options?.directory ?? repository,
       env: { ...executable.environment, ...options?.environment },
       maxBuffer: options?.maxBuffer,
       windowsHide: true,
@@ -5283,6 +5284,8 @@ export async function main(
             options.assessPatchRisk || options.createPr
               ? await patchRepositoryRoot(repository, dependencies)
               : repository;
+          let commandDirectory = repository;
+          let commandEnvironment: NodeJS.ProcessEnv | undefined;
           const gitDependencies: CliDependencies =
             options.assessPatchRisk || options.createPr
               ? {
@@ -5291,8 +5294,15 @@ export async function main(
                     dependencies.runRepositoryCommand(
                       command,
                       args,
-                      repository,
-                      options,
+                      gitRepository,
+                      {
+                        ...options,
+                        directory: commandDirectory,
+                        environment: {
+                          ...commandEnvironment,
+                          ...options?.environment,
+                        },
+                      },
                     ),
                 }
               : dependencies;
@@ -5318,6 +5328,15 @@ export async function main(
                 gitDependencies,
               )
             : undefined;
+          const relocatedEnvironment =
+            (options.assessPatchRisk || options.createPr) &&
+            existsSync(repository)
+              ? await patchCommandEnvironment(
+                  repository,
+                  gitRepository,
+                  gitDependencies,
+                )
+              : undefined;
           const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
@@ -5334,6 +5353,10 @@ export async function main(
             },
           );
           if (!jsonOutput) output.write(report.text());
+          if (relocatedEnvironment !== undefined && !existsSync(repository)) {
+            commandDirectory = gitRepository;
+            commandEnvironment = relocatedEnvironment;
+          }
           const files = await changedPatchFiles(
             gitRepository,
             patchBase,
@@ -5370,7 +5393,7 @@ export async function main(
             ? await runPatchRiskAssessment(
                 {
                   repository: gitRepository,
-                  directory: repository,
+                  directory: commandDirectory,
                   environment,
                   base: patchGitBase!,
                   files,
@@ -6797,6 +6820,49 @@ async function patchRepositoryRoot(
     { trim: false },
   );
   return resolve(output.replace(/\n$/u, ""));
+}
+
+async function patchCommandEnvironment(
+  directory: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<NodeJS.ProcessEnv> {
+  const gitPath = async (args: string[]) =>
+    (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", ...args],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\n$/u, "");
+  const environment: NodeJS.ProcessEnv = {
+    GIT_DIR: await gitPath(["--absolute-git-dir"]),
+    GIT_WORK_TREE: repository,
+  };
+  // Resolve Git's own path semantics before a patch can remove the caller's cwd.
+  for (const [name, args] of [
+    ["GIT_COMMON_DIR", ["--git-common-dir"]],
+    ["GIT_INDEX_FILE", ["--git-path", "index"]],
+    ["GIT_OBJECT_DIRECTORY", ["--git-path", "objects"]],
+  ] as const) {
+    if (dependencies.environment[name] !== undefined)
+      environment[name] = await gitPath([...args]);
+  }
+  for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
+    const value = dependencies.environment[name];
+    if (value === undefined) continue;
+    const path = `${directory}${sep}${value}`;
+    environment[name] =
+      value === "" || isAbsolute(value)
+        ? value
+        : await realpath(path).catch(async () =>
+            realpath(dirname(path))
+              .then((parent) => join(parent, basename(path)))
+              .catch(() => path),
+          );
+  }
+  return environment;
 }
 
 async function preparePatchPublication(

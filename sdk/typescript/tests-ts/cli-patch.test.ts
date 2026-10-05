@@ -5,9 +5,17 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Writable } from "node:stream";
 import { promisify, stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
@@ -150,12 +158,109 @@ async function runWorkflow(
 
 describe("scan and patch workflow", () => {
   test.each([
+    ["gh", "bin"],
+    ["glab", "node_modules/.bin"],
+  ])(
+    "keeps the full worktree outside the trusted %s PATH",
+    async (provider, path) => {
+      const root = await temporaryDirectory("codex-security-provider-path-");
+      const repository = join(root, "repository");
+      const component = join(repository, "component");
+      const repositoryTools = join(repository, path!);
+      const trustedTools = join(root, "trusted");
+      const marker = join(root, "provider.json");
+      const preload = join(root, "provider.mjs");
+      const node = execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim();
+      const executable = `${provider}${process.platform === "win32" ? ".exe" : ""}`;
+      try {
+        await mkdir(component, { recursive: true });
+        await mkdir(repositoryTools, { recursive: true });
+        await mkdir(trustedTools);
+        for (const directory of [repositoryTools, trustedTools])
+          await copyFile(node, join(directory, executable));
+        await writeFile(
+          preload,
+          `
+import { writeFileSync } from "node:fs";
+import { basename } from "node:path";
+if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
+  writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ executable: process.execPath, credential: process.env.GH_TOKEN === "synthetic-token" }));
+  process.exit(17);
+}
+`,
+        );
+        await writeFile(join(component, "app.ts"), "original\n");
+        await writeFile(
+          join(repository, ".gitignore"),
+          "bin/\nnode_modules/\n",
+        );
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("add", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git(
+          "remote",
+          "add",
+          "origin",
+          `https://${provider === "glab" ? "gitlab.com" : "github.example.test"}/example/repository.git`,
+        );
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            "-e",
+            `import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)}; process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"]);`,
+          ],
+          {
+            cwd: component,
+            env: {
+              PATH: [repositoryTools, trustedTools, process.env["PATH"]].join(
+                delimiter,
+              ),
+              SystemRoot: process.env["SystemRoot"],
+              PATHEXT: process.env["PATHEXT"],
+              HOME: root,
+              USERPROFILE: root,
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+              GH_TOKEN: "synthetic-token",
+              CI: "1",
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        const stderr = await new Response(child.stderr).text();
+        expect(await child.exited, stderr).toBe(2);
+        expect(JSON.parse(await readFile(marker, "utf8"))).toEqual({
+          executable: join(trustedTools, executable),
+          credential: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
     "ordinary",
     "HEAD filename",
     "relative Git environment",
     "absolute symlink Git environment",
     "relative symlink Git environment",
     "relative provider configuration",
+    "removed component",
+    "removed component with relative Git environment",
+    "removed component with relative index",
+    "removed component with relative common directory",
+    "removed component with relative object directory",
+    "removed component with relative symlink Git environment",
+    "removed component with relative provider configuration",
+    "removed component with relative GitLab configuration",
+    "removed component with removed provider configuration",
     ...(process.platform === "win32"
       ? []
       : ["trailing space", "carriage return"]),
@@ -174,21 +279,35 @@ describe("scan and patch workflow", () => {
             : "repository",
       );
       const subdirectory = join(repository, "sub");
+      const removesComponent = kind.startsWith("removed component");
+      const changedFiles = removesComponent
+        ? ["shared.ts", "sub/.codex/config.toml", "sub/app.ts"]
+        : ["shared.ts", "sub/app.ts"];
       const alias = join(directory, "alias");
-      const linkedGitRoot = `${kind === "relative symlink Git environment" ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
-      const gitEnvironment =
-        kind === "relative Git environment"
-          ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
-          : kind.includes("symlink Git environment")
-            ? {
-                GIT_DIR: `${linkedGitRoot}${sep}.git`,
-                GIT_WORK_TREE: linkedGitRoot,
-              }
-            : {};
-      const providerConfiguration = join(directory, "provider-config");
-      const providerEnvironment =
-        kind === "relative provider configuration"
-          ? { GH_CONFIG_DIR: relative(subdirectory, providerConfiguration) }
+      const linkedGitRoot = `${kind.includes("relative symlink Git environment") ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
+      const gitEnvironment = kind.includes("relative Git environment")
+        ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
+        : kind.includes("symlink Git environment")
+          ? {
+              GIT_DIR: `${linkedGitRoot}${sep}.git`,
+              GIT_WORK_TREE: linkedGitRoot,
+            }
+          : kind.includes("relative index")
+            ? { GIT_INDEX_FILE: ".git/custom-index" }
+            : kind.includes("relative common directory")
+              ? { GIT_COMMON_DIR: "../metadata" }
+              : kind.includes("relative object directory")
+                ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
+                : {};
+      const providerConfiguration = kind.includes(
+        "removed provider configuration",
+      )
+        ? join(subdirectory, "provider-config")
+        : join(directory, "provider-config");
+      const providerEnvironment = kind.includes("provider configuration")
+        ? { GH_CONFIG_DIR: relative(subdirectory, providerConfiguration) }
+        : kind.includes("relative GitLab configuration")
+          ? { GLAB_CONFIG_DIR: relative(subdirectory, providerConfiguration) }
           : {};
       const remote = join(directory, "remote.git");
       const git = repositoryGit(repository);
@@ -200,12 +319,18 @@ describe("scan and patch workflow", () => {
             alias,
             process.platform === "win32" ? "junction" : "dir",
           );
-        if (kind === "relative provider configuration") {
+        if (Object.keys(providerEnvironment).length > 0) {
           await mkdir(providerConfiguration);
           await writeFile(
             join(providerConfiguration, "config.yml"),
             "git_protocol: https\n",
           );
+          if (kind.includes("removed provider configuration")) {
+            await writeFile(
+              join(repository, ".gitignore"),
+              "provider-config/\n",
+            );
+          }
         }
         await writeFile(
           join(subdirectory, ".codex", "config.toml"),
@@ -216,12 +341,33 @@ describe("scan and patch workflow", () => {
         git("config", "user.email", "synthetic@example.test");
         git("config", "commit.gpgsign", "false");
         git("config", "diff.relative", "true");
+        if (
+          kind.includes("relative common directory") ||
+          kind.includes("relative object directory")
+        ) {
+          // Git2.43 checks these paths before and after entering the worktree.
+          for (const parent of [directory, repository])
+            await symlink(
+              join(repository, ".git"),
+              join(parent, "metadata"),
+              process.platform === "win32" ? "junction" : "dir",
+            );
+          await writeFile(join(repository, ".gitignore"), "metadata/\n");
+        }
         for (const file of ["sub/app.ts", "shared.ts"])
           await writeFile(join(repository, file), "original\n");
         if (kind === "HEAD filename")
           await writeFile(join(repository, "HEAD"), "ordinary source file\n");
         git("add", ".");
         git("commit", "-m", "Initial synthetic checkout");
+        const originalIndex = kind.includes("relative index")
+          ? await readFile(join(repository, ".git/index"))
+          : undefined;
+        if (kind.includes("relative index"))
+          await copyFile(
+            join(repository, ".git/index"),
+            join(repository, ".git/custom-index"),
+          );
         git("init", "--bare", remote);
         git("remote", "add", "origin", remote);
         const outcome = await runWorkflow(
@@ -240,13 +386,23 @@ describe("scan and patch workflow", () => {
               ...providerEnvironment,
             },
             onCodex: async (_args, output) => {
-              expect(output?.appServer?.directory).toBe(subdirectory);
-              expect(
-                await readFile(
-                  join(output!.appServer!.directory!, ".codex", "config.toml"),
-                  "utf8",
-                ),
-              ).toContain("synthetic-component-server");
+              const assessing = output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              );
+              expect(output?.appServer?.directory).toBe(
+                removesComponent && assessing ? repository : subdirectory,
+              );
+              if (!(removesComponent && assessing))
+                expect(
+                  await readFile(
+                    join(
+                      output!.appServer!.directory!,
+                      ".codex",
+                      "config.toml",
+                    ),
+                    "utf8",
+                  ),
+                ).toContain("synthetic-component-server");
               if (
                 output?.appServer?.prompt.includes(
                   "$codex-security:assess-patch-risk",
@@ -257,30 +413,34 @@ describe("scan and patch workflow", () => {
                     .split("\n")
                     .find((line) => line.startsWith('{"path":'))!,
                 );
-                expect(artifact.changedFiles).toEqual([
-                  "shared.ts",
-                  "sub/app.ts",
-                ]);
+                expect(artifact.changedFiles).toEqual(changedFiles);
                 const patch = await readFile(artifact.path, "utf8");
                 expect(patch).toContain("a/sub/app.ts");
                 expect(patch).toContain("a/shared.ts");
                 output.stdout.write(patchRiskAssessment().report);
               } else {
-                for (const file of ["sub/app.ts", "shared.ts"])
-                  await writeFile(join(repository, file), "fixed\n");
+                if (removesComponent)
+                  await rm(subdirectory, { recursive: true });
+                else await writeFile(join(subdirectory, "app.ts"), "fixed\n");
+                await writeFile(join(repository, "shared.ts"), "fixed\n");
                 output?.stdout.write("Patch complete.");
               }
               return 0;
             },
             onRepositoryCommand: async (command, args, directory, options) => {
-              if (command === "git")
+              if (command === "git") {
+                if (
+                  providerEnvironment.GLAB_CONFIG_DIR !== undefined &&
+                  args[0] === "remote"
+                )
+                  return "https://gitlab.com/example/repository.git";
                 return runGitRepositoryCommand(command, args, directory, {
                   ...options,
                   environment: {
                     ...gitEnvironment,
                     ...options?.environment,
                     // Local Git transport forwards relative paths to its receiver.
-                    ...(kind === "relative symlink Git environment" &&
+                    ...(kind.includes("relative symlink Git environment") &&
                     args[0] === "push"
                       ? {
                           GIT_DIR: join(repository, ".git"),
@@ -289,12 +449,20 @@ describe("scan and patch workflow", () => {
                       : {}),
                   },
                 });
-              if (providerEnvironment.GH_CONFIG_DIR !== undefined)
+              }
+              const configName =
+                providerEnvironment.GH_CONFIG_DIR !== undefined
+                  ? "GH_CONFIG_DIR"
+                  : "GLAB_CONFIG_DIR";
+              const configuration =
+                options?.environment?.[configName] ??
+                providerEnvironment[configName];
+              if (configuration !== undefined)
                 expect(
                   await readFile(
-                    join(
-                      directory,
-                      providerEnvironment.GH_CONFIG_DIR,
+                    resolve(
+                      options?.directory ?? directory,
+                      configuration,
                       "config.yml",
                     ),
                     "utf8",
@@ -306,21 +474,51 @@ describe("scan and patch workflow", () => {
             },
           },
         );
-        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        const missingConfiguration = kind.includes(
+          "removed provider configuration",
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          missingConfiguration ? 2 : 0,
+        );
         const result = JSON.parse(outcome.stdout);
         expect(result.repository).toBe(subdirectory);
-        expect(result.files).toEqual(["../shared.ts", "app.ts"]);
+        expect(result.applied).toBe(true);
+        expect(result.files).toEqual(
+          changedFiles.map((file) =>
+            relative(subdirectory, join(repository, file)).split(sep).join("/"),
+          ),
+        );
         expect(
           result.files.map((file: string) => resolve(result.repository, file)),
-        ).toEqual([
-          join(repository, "shared.ts"),
-          join(subdirectory, "app.ts"),
-        ]);
+        ).toEqual(changedFiles.map((file) => join(repository, file)));
         expect(git("show", "--format=", "--name-only", "HEAD", "--")).toBe(
-          "shared.ts\nsub/app.ts",
+          changedFiles.join("\n"),
         );
-        expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "@{upstream}"));
-        expect(git("status", "--porcelain")).toBe("");
+        if (missingConfiguration) {
+          expect(outcome.stderr).toContain("ENOENT");
+          expect(outcome.stderr).toContain(providerConfiguration);
+        } else
+          expect(git("rev-parse", "HEAD")).toBe(
+            git("rev-parse", "@{upstream}"),
+          );
+        if (removesComponent)
+          await expect(
+            readFile(join(subdirectory, "app.ts")),
+          ).rejects.toThrow();
+        if (originalIndex !== undefined) {
+          expect(await readFile(join(repository, ".git/index"))).toEqual(
+            originalIndex,
+          );
+          expect(
+            gitText(["status", "--porcelain"], {
+              cwd: repository,
+              env: {
+                ...process.env,
+                GIT_INDEX_FILE: join(repository, ".git/custom-index"),
+              },
+            }),
+          ).toBe("");
+        } else expect(git("status", "--porcelain")).toBe("");
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
@@ -1344,7 +1542,9 @@ describe("scan and patch workflow", () => {
             workingDirectory,
             commandOptions,
           ) => {
-            expect(workingDirectory).toBe(join(repository, "src"));
+            expect(commandOptions?.directory ?? workingDirectory).toBe(
+              join(repository, "src"),
+            );
             if (command === "git") {
               return runGitRepositoryCommand(
                 command,
@@ -3308,7 +3508,7 @@ const runGitRepositoryCommand: NonNullable<
 > = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
   const result = gitText(args, {
-    cwd: workingDirectory,
+    cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     stdio: ["ignore", "pipe", "pipe"],
