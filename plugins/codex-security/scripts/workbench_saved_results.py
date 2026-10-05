@@ -1794,7 +1794,7 @@ def merge_saved_results(
                 terminal_worker_orders.get(worker_id, order), order
             )
     # Reconcile raw records before generating context-dependent publication IDs.
-    logical_rows: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    logical_rows: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = {}
     row_groups: dict[tuple[str, int], dict[str, Any]] = {}
     published_groups: list[dict[str, Any]] = []
 
@@ -1842,7 +1842,7 @@ def merge_saved_results(
                 result["extensions"] = {
                     key: value
                     for key, value in result["extensions"].items()
-                    if key not in {"candidateId", "reportId", "ledgerRowId"}
+                    if key != "candidateId"
                 }
                 if not result["extensions"]:
                     result.pop("extensions")
@@ -1869,11 +1869,13 @@ def merge_saved_results(
         for index, value in enumerate(draft["findings"]):
             if isinstance(value, dict) and valid_finding(value):
                 current.setdefault(raw_scope(value), []).append((index, value))
-        prior = {scope: list(groups) for scope, groups in logical_rows.items()}
+        prior = {scope: dict(groups) for scope, groups in logical_rows.items()}
         current_groups: list[tuple[int, dict[str, Any]]] = []
         for scope, siblings in current.items():
             for index, value in siblings:
                 owner = raw_owner(value, source_owner)
+                candidate = finding_candidate_id(value)
+                scopes = [scope, (scope[0], candidate)] if candidate else [scope]
                 owned_siblings = [
                     sibling
                     for _, sibling in siblings
@@ -1881,7 +1883,11 @@ def merge_saved_results(
                 ]
                 matches = [
                     group
-                    for group in prior.get(scope, [])
+                    for group in {
+                        key: group
+                        for saved_scope in scopes
+                        for key, group in prior.get(saved_scope, {}).items()
+                    }.values()
                     if same_owner(owner, group["owner"])
                     and (
                         (relative == "parent" and parent_is_canonical)
@@ -1897,9 +1903,12 @@ def merge_saved_results(
                     if any(same_raw_content(value, previous) for previous in group["rows"])
                 ]
                 revisions = [
-                    group for group in matches if group["latest"].get("title") == value.get("title")
+                    group
+                    for group in matches
+                    if group["latest"].get("title") == value.get("title")
+                    and raw_scope(group["latest"]) == scope
+                    and identifiers(group["latest"]) == identifiers(value)
                 ]
-                candidate = _identity_candidate(value)
                 related = (
                     [
                         sibling
@@ -1907,7 +1916,7 @@ def merge_saved_results(
                         if sibling_scope[0] == scope[0]
                         for _, sibling in rows
                         if same_owner(owner, raw_owner(sibling, source_owner))
-                        and _identity_candidate(sibling) == candidate
+                        and finding_candidate_id(sibling) == candidate
                     ]
                     if candidate is not None
                     else owned_siblings
@@ -1928,6 +1937,7 @@ def merge_saved_results(
                     and sum(
                         same_raw_finding(sibling, value)
                         and sibling.get("title") == value.get("title")
+                        and identifiers(sibling) == identifiers(value)
                         for sibling in owned_siblings
                     )
                     == 1
@@ -1940,7 +1950,8 @@ def merge_saved_results(
                         "identity": None,
                         "key": f"raw:{len(row_groups)}",
                     }
-                    logical_rows.setdefault(scope, []).append(match)
+                for saved_scope in scopes:
+                    logical_rows.setdefault(saved_scope, {})[match["key"]] = match
                 if match["owner"] is None:
                     match["owner"] = owner
                 if value not in match["rows"]:
@@ -1986,7 +1997,7 @@ def merge_saved_results(
 
     # An absorbed source represents every reconciled version of that worker report.
     for groups in logical_rows.values():
-        for group in groups:
+        for group in groups.values():
             destinations = set()
             for value in group["rows"]:
                 history_key = _finding_key(value)
@@ -2121,9 +2132,11 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
-                    finding_positions.setdefault(
-                        _finding_key(finding), (len(findings), row_groups.get((relative, index)))
-                    )
+                    group = row_groups.get((relative, index))
+                    key = _finding_key(finding)
+                    if group is not None:
+                        key = group.setdefault("merge_key", key)
+                    finding_positions.setdefault(key, (len(findings), group))
                 findings.append(finding)
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
@@ -2205,9 +2218,7 @@ def merge_saved_results(
                     historical_contents = represented_history.get(history_key, set())
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
-                    if candidate_key not in represented_candidates:
-                        represented_candidates[candidate_key] = key
-                    mapped_key = represented_candidates[candidate_key]
+                    mapped_key = represented_candidates.get(candidate_key)
                     historical_contents = represented_candidate_history.get(candidate_key, set())
                 else:
                     mapped_key = None
@@ -2248,17 +2259,17 @@ def merge_saved_results(
                         if isinstance(retained_history, list)
                         else []
                     )
-                    retained_provenance["previousFindings"] = history
                     for original in [
                         *(previous_history if isinstance(previous_history, list) else []),
                         previous,
                     ]:
                         if not isinstance(original, dict):
                             continue
-                        source_key = _finding_key(original, worker_id)
+                        owner = retained_provenance.get("workerId", worker_id)
+                        source_key = _finding_key(original, owner)
                         source_content = _finding_content(original)
                         already_retained = any(
-                            source_key == _finding_key(historical, worker_id)
+                            source_key == _finding_key(historical, owner)
                             and source_content == _finding_content(historical)
                             for historical in _retained_findings(retained)
                         )
@@ -2268,6 +2279,8 @@ def merge_saved_results(
                             and original != retained
                         ):
                             history.append(original)
+                    if history or retained_history is not None:
+                        retained_provenance["previousFindings"] = history
                 continue
             finding_positions[key] = (len(findings), group)
             findings.append(finding)
@@ -2372,7 +2385,25 @@ def merge_saved_results(
     # Deep parent does. Authored, restored and canonical identities stay stable.
     for finding in generated_worker_findings:
         finding.pop("identity", None)
-    _ensure_finding_identities(findings)
+
+    def publication_order(item):
+        _, group = item
+        source, value = group["observations"][group["owner"]]
+        return finding_source_order(source, True), -source[1]["findings"].index(value)
+
+    identity_order = list(findings)
+    for owner in {group["owner"] for _, group in finding_positions.values() if group is not None}:
+        positions = [
+            (position, group)
+            for position, group in finding_positions.values()
+            if group is not None and group["owner"] == owner and group["identity"] is None
+        ]
+
+        for (position, _), (published_position, _) in zip(
+            positions, sorted(positions, key=publication_order, reverse=True), strict=True
+        ):
+            identity_order[position] = findings[published_position]
+    _ensure_finding_identities(identity_order)
 
     identities: dict[str, str] = {}
     identity_owners: dict[str, Any] = {}

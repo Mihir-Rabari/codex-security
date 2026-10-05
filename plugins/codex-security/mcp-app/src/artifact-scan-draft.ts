@@ -684,7 +684,12 @@ async function preserveScanDraft(
         ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
-      } else if (containing.length === 1) {
+      } else if (
+        containing.length === 1 &&
+        source.findings.filter((previous) =>
+          containsSavedFinding(containing[0]!, previous),
+        ).length === 1
+      ) {
         // An unchanged sibling still owns its previously published identity.
         preserveFindingDetails(containing[0]!, finding);
       } else if (
