@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, writeFile, mkdir, utimes } from "node:fs/promises";
+import { readFile, writeFile, mkdir, utimes, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -136,10 +136,12 @@ async function recoverAndFinalize(
   recovered: DraftFixture,
   workers: Record<string, unknown>[] = [],
   details = false,
+  replay = false,
 ): Promise<{
   normal: RecoveredFinding[];
   recovered: RecoveredFinding[];
   warnings: unknown[];
+  historySummaries: string[];
 }> {
   const { stdout } = await execFileAsync(
     process.env.PYTHON?.trim() || "python3",
@@ -157,20 +159,24 @@ coverage=json.loads((normal/'coverage.json').read_text())
 binding={'status':'failed','allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
 warnings=[]
 recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption')
+if json.loads(sys.argv[7]):
+ replayed=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),[],stopped=True,reason='Synthetic interruption',frozen_source_digests=recovery[0]['scan']['preservedSources'])
+ assert replayed == recovery, 'Frozen recovery changed the retained documents'
 ordinary=(manifest,json.loads((normal/'findings.json').read_text()),coverage)
 results=[]
 for root,documents in [(normal,ordinary),(recovered,recovery)]:
  documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status='failed',startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
  for document in documents[1:]: document['scanId']=scan_id
  prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
- results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared[3]['findings']])
-print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings}))`,
+ results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'occurrenceId':row['occurrenceId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared[3]['findings']])
+print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings,'historySummaries':[previous.get('summary') for row in recovery[1]['findings'] for previous in row.get('provenance',{}).get('previousFindings',[]) if isinstance(previous,dict)]}))`,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       normal.root,
       recovered.root,
       normal.context.scanId!,
       JSON.stringify(workers),
       JSON.stringify(details),
+      JSON.stringify(replay),
     ],
   );
   return JSON.parse(stdout);
@@ -1306,3 +1312,276 @@ for (const authored of [false, true]) {
     assert.deepEqual(result.warnings, []);
   });
 }
+
+const savedWorker = (root: string) => ({
+  id: "reviewer",
+  kind: "discovery",
+  artifact_dir: root,
+  result_manifest_path: null,
+  attempt: 1,
+});
+async function dateDraftFiles(root: string, time: number): Promise<void> {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const target = path.join(root, entry.name);
+    if (entry.isDirectory()) await dateDraftFiles(target, time);
+    else await utimes(target, time, time);
+  }
+}
+const revisionFinding = (level: string, summary: string) =>
+  finding("Synthetic review", {
+    identity: { anchor: "candidate-1" },
+    severity: { level },
+    summary,
+    provenance: {
+      source: "local_plugin",
+      candidateId: "candidate-1",
+      workerId: "reviewer",
+    },
+  });
+for (const source of ["selected checkpoint", "published result"]) {
+  test(`finding precedence retains ${source} at tied timestamps`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    const output = path.join(recovered.root, "reviewer");
+    await mkdir(output);
+    const worker = draftFixture(output, "worker");
+    const initial = {
+      ...worker.draft({}, true),
+      findings: [revisionFinding("low", "Initial evidence.")],
+    };
+    const latest = {
+      ...worker.draft({}, true),
+      findings: [revisionFinding("high", "Completed evidence.")],
+    };
+    await worker.write(initial);
+    await worker.write(latest);
+    const saved = JSON.parse(
+      await readFile(path.join(output, "result.json"), "utf8"),
+    );
+    await normal.write({ ...normal.draft({}, true), findings: saved.findings });
+    // Valid JSON whitespace controls filename order without changing the evidence.
+    const names = await readdir(path.join(output, "checkpoints"));
+    let contents = JSON.stringify(initial),
+      name = "";
+    do {
+      contents += "\n";
+      name = createHash("sha256").update(contents).digest("hex") + ".json";
+    } while (names.some((existing) => existing > name));
+    await writeFile(path.join(output, "checkpoints", name), contents);
+    if (source === "published result") {
+      const { rm } = await import("node:fs/promises");
+      await rm(path.join(output, "checkpoint-head.json"));
+    }
+    await dateDraftFiles(output, 100);
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      [savedWorker(output)],
+      true,
+      true,
+    );
+    assert.equal(result.normal[0].severity.level, "high");
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
+}
+for (const layout of ["standard", "diff", "worker"] as const) {
+  test(`${layout}: finding precedence retains terminal evidence over later progress`, async (t) => {
+    const parentLayout = layout === "worker" ? "deep" : layout;
+    const normal = await fixture(t, parentLayout),
+      recovered = await fixture(t, parentLayout);
+    const normalRoot =
+      layout === "worker" ? path.join(normal.root, "reviewer") : normal.root;
+    const recoveredRoot =
+      layout === "worker"
+        ? path.join(recovered.root, "reviewer")
+        : recovered.root;
+    if (layout === "worker")
+      for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
+    const writer =
+      layout === "worker" ? draftFixture(normalRoot, "worker") : normal;
+    const interrupted =
+      layout === "worker" ? draftFixture(recoveredRoot, "worker") : recovered;
+    const terminal = {
+      ...writer.draft({}, true),
+      findings: [revisionFinding("high", "Completed evidence.")],
+    };
+    const progress = {
+      ...writer.draft(),
+      findings: [revisionFinding("low", "Incomplete progress.")],
+    };
+    for (const f of [writer, interrupted]) await f.write(terminal);
+    await dateDraftFiles(recoveredRoot, 100);
+    await writer.write(progress);
+    await draftApi.saveScanDraftCheckpoint(
+      interrupted.context,
+      progress,
+      false,
+    );
+    const { handoffClaimToken: _claim, ...rawProgress } = progress;
+    await utimes(
+      path.join(recoveredRoot, "checkpoints", checkpointName(rawProgress)),
+      200,
+      200,
+    );
+    if (layout === "worker") {
+      const saved = JSON.parse(
+        await readFile(path.join(normalRoot, "result.json"), "utf8"),
+      );
+      assert.equal(saved.findings[0].severity.level, "high");
+      await normal.write({
+        ...normal.draft({}, true),
+        findings: saved.findings,
+      });
+    }
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      layout === "worker" ? [savedWorker(recoveredRoot)] : [],
+      true,
+      true,
+    );
+    assert.equal(result.normal[0].severity.level, "high");
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+    assert.ok(result.historySummaries.includes("Incomplete progress."));
+  });
+}
+test("finding precedence compares parent and worker observation times", async (t) => {
+  const normal = await fixture(t, "deep"),
+    recovered = await fixture(t, "deep");
+  const workerRoot = path.join(recovered.root, "reviewer");
+  await mkdir(workerRoot);
+  const worker = draftFixture(workerRoot, "worker");
+  await worker.write({
+    ...worker.draft({}, true),
+    findings: [revisionFinding("low", "Earlier worker evidence.")],
+  });
+  const latest = {
+    ...normal.draft({}, true),
+    findings: [revisionFinding("high", "Newer parent evidence.")],
+  };
+  for (const f of [normal, recovered]) await f.write(latest);
+  await dateDraftFiles(recovered.root, 200);
+  await dateDraftFiles(workerRoot, 100);
+  const result = await recoverAndFinalize(
+    normal,
+    recovered,
+    [savedWorker(workerRoot)],
+    true,
+    true,
+  );
+  assert.deepEqual(result.recovered, result.normal);
+  assert.deepEqual(result.warnings, []);
+});
+for (const revised of [false, true]) {
+  test(`finding revision retains the published collision identity (revised=${revised})`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    const findings = [1, 2].map((line) =>
+      finding(`Synthetic report ${line}`, {
+        identity: { anchor: "shared" },
+        locations: [{ path: "src/example.py", startLine: line }],
+        provenance: {
+          source: "local_plugin",
+          candidateId: "candidate-1",
+          workerId: "reviewer",
+        },
+      }),
+    );
+    const workerRoot = path.join(recovered.root, "reviewer");
+    await mkdir(workerRoot);
+    const worker = draftFixture(workerRoot, "worker");
+    await worker.write({ ...worker.draft({}, true), findings });
+    for (const f of [normal, recovered])
+      await f.write({ ...f.draft({}, true), findings });
+    await dateDraftFiles(recovered.root, 100);
+    const latest = findings.map((row) => ({
+      ...row,
+      summary: revised ? "Updated evidence." : row.summary,
+    }));
+    await worker.write({
+      ...worker.draft({}, true),
+      findings: latest,
+      threatModel: { summary: "New context." },
+    });
+    if (revised)
+      await normal.write({ ...normal.draft({}, true), findings: latest });
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      [savedWorker(workerRoot)],
+      true,
+      true,
+    );
+    assert.equal(result.normal[1].identity.instance, "saved-2");
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
+}
+
+test("finding precedence keeps a resumed worker revision despite newer archive timestamps", async (t) => {
+  const normal = await fixture(t, "deep"),
+    recovered = await fixture(t, "deep");
+  const output = path.join(recovered.root, "reviewer"),
+    archive = path.join(output, "attempts", "attempt-1");
+  await mkdir(archive, { recursive: true });
+  const oldWorker = draftFixture(archive, "worker"),
+    currentWorker = draftFixture(output, "worker");
+  await oldWorker.write({
+    ...oldWorker.draft({}, true),
+    findings: [revisionFinding("high", "Archived assessment.")],
+  });
+  const latest = {
+    ...currentWorker.draft({}, true),
+    findings: [revisionFinding("low", "Corrected resumed assessment.")],
+  };
+  await currentWorker.write(latest);
+  await normal.write({ ...normal.draft({}, true), findings: latest.findings });
+  await dateDraftFiles(output, 100);
+  await dateDraftFiles(archive, 200);
+  const result = await recoverAndFinalize(
+    normal,
+    recovered,
+    [{ ...savedWorker(output), attempt: 2 }],
+    true,
+    true,
+  );
+  assert.deepEqual(result.recovered, result.normal);
+  assert.deepEqual(result.warnings, []);
+});
+
+test("finding precedence excludes archived attempts before comparing a parent revision", async (t) => {
+  const normal = await fixture(t, "deep"),
+    recovered = await fixture(t, "deep");
+  const output = path.join(recovered.root, "reviewer"),
+    archive = path.join(output, "attempts", "attempt-1");
+  await mkdir(archive, { recursive: true });
+  const oldWorker = draftFixture(archive, "worker"),
+    currentWorker = draftFixture(output, "worker");
+  await oldWorker.write({
+    ...oldWorker.draft({}, true),
+    findings: [revisionFinding("low", "Archived assessment.")],
+  });
+  await currentWorker.write({
+    ...currentWorker.draft({}, true),
+    findings: [revisionFinding("low", "Current worker assessment.")],
+  });
+  const latest = {
+    ...normal.draft({}, true),
+    findings: [revisionFinding("high", "Newer parent assessment.")],
+  };
+  for (const f of [normal, recovered]) await f.write(latest);
+  await dateDraftFiles(recovered.root, 150);
+  await dateDraftFiles(output, 100);
+  await dateDraftFiles(archive, 200);
+  const result = await recoverAndFinalize(
+    normal,
+    recovered,
+    [{ ...savedWorker(output), attempt: 2 }],
+    true,
+    true,
+  );
+  assert.deepEqual(result.recovered, result.normal);
+  assert.deepEqual(result.warnings, []);
+});

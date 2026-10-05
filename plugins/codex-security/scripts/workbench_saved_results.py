@@ -1850,9 +1850,21 @@ def merge_saved_results(
 
         return content(left) == content(right)
 
-    for relative, draft, source_owner in sorted(
-        all_sources, key=lambda item: source_order[item[0]]
-    ):
+    def finding_source_order(source, within_worker: bool = False):
+        relative, draft, _ = source
+        attempt, modified = source_order[relative]
+        return (
+            draft.get("complete") is not False,
+            attempt if within_worker else 0,
+            modified,
+            relative in selected_observations,
+            relative in current_results,
+            relative == "parent",
+        )
+
+    # Publication chronology spans workers; attempt numbers only order one worker's revisions.
+    for source in sorted(all_sources, key=lambda item: finding_source_order(item)[2:]):
+        relative, draft, source_owner = source
         current: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = {}
         for index, value in enumerate(draft["findings"]):
             if isinstance(value, dict) and valid_finding(value):
@@ -1933,7 +1945,23 @@ def merge_saved_results(
                     match["owner"] = owner
                 if value not in match["rows"]:
                     match["rows"].append(value)
-                match["latest"] = value
+                observations = match.setdefault("observations", {})
+                previous = observations.get(source_owner)
+                if previous is None or (
+                    finding_source_order(source, True),
+                    _finding_strength(value),
+                ) > (
+                    finding_source_order(previous[0], True),
+                    _finding_strength(previous[1]),
+                ):
+                    observations[source_owner] = (source, value)
+                    match["latest"] = max(
+                        observations.values(),
+                        key=lambda observation: (
+                            finding_source_order(observation[0]),
+                            _finding_strength(observation[1]),
+                        ),
+                    )[1]
                 if "identity" in value and (match["identity"] is None or relative == "parent"):
                     match["identity"] = copy.deepcopy(_finding_identity(value))
                 row_groups[(relative, index)] = match
@@ -2198,6 +2226,13 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
+                        finding["identity"].update(copy.deepcopy(retained["identity"]))
+                        if "instance" not in retained["identity"]:
+                            finding["identity"].pop("instance", None)
+                        if "preservedIdentity" in retained["provenance"]:
+                            finding["provenance"]["preservedIdentity"] = copy.deepcopy(
+                                retained["provenance"]["preservedIdentity"]
+                            )
                         retained = finding
                         findings[position] = retained
                         finding_positions[key] = (position, group)
