@@ -108,9 +108,13 @@ export async function testDeepScanLifecycle({
         "final read repeated cancellation",
         "onComplete",
         "unpersisted failure",
+        "unpersisted unowned failure",
         "persisted failure",
         "observed failure",
         "lost-response failure",
+        "lost-response pending-read failure",
+        "unpersisted pending-read failure",
+        "unavailable pending-read failure",
         "stale heartbeat failure",
         "observed interrupted",
       ]) {
@@ -126,6 +130,8 @@ export async function testDeepScanLifecycle({
           const failureEntered = Promise.withResolvers();
           const failureRelease = Promise.withResolvers();
           const failureSaved = Promise.withResolvers();
+          const admissionEntered = Promise.withResolvers();
+          const admissionRelease = Promise.withResolvers();
           const heartbeatRead = Promise.withResolvers();
           const heartbeatRelease = Promise.withResolvers();
           let publications = 0;
@@ -133,6 +139,10 @@ export async function testDeepScanLifecycle({
           let repeatedCancellation;
           let coordinator;
           let gateHeartbeat = false;
+          const pendingFailureRead = stage.includes("pending-read");
+          const unavailableRead = stage.startsWith("unavailable");
+          const lostResponse =
+            stage.startsWith("lost-response") || unavailableRead;
           const interrupted = stage === "observed interrupted";
           const stoppedStatus = interrupted ? "interrupted" : "failed";
           const observeFailure = stage === "observed failure" || interrupted;
@@ -140,7 +150,11 @@ export async function testDeepScanLifecycle({
             stage === "lost-response failure" ||
             stage === "stale heartbeat failure";
           const durableFailure =
-            stage === "persisted failure" || observeFailure || publicationGate;
+            stage === "persisted failure" ||
+            observeFailure ||
+            publicationGate ||
+            lostResponse ||
+            unavailableRead;
           current = {
             store,
             registry,
@@ -156,12 +170,22 @@ export async function testDeepScanLifecycle({
           if (
             stage.startsWith("final read") ||
             observeFailure ||
-            publicationGate
+            publicationGate ||
+            pendingFailureRead
           ) {
             const get = store.get.bind(store);
             let paused = false;
+            let admissionPaused = false;
+            let finalReadPending = false;
             store.get = async () => {
               const snapshot = await get();
+              if (pendingFailureRead && finalReadPending && !admissionPaused) {
+                admissionPaused = true;
+                admissionEntered.resolve();
+                await admissionRelease.promise;
+                if (unavailableRead)
+                  throw new Error("synthetic terminal state unavailable");
+              }
               if (gateHeartbeat) {
                 gateHeartbeat = false;
                 heartbeatRead.resolve();
@@ -169,22 +193,24 @@ export async function testDeepScanLifecycle({
               }
               if (
                 !paused &&
-                (observeFailure
+                (observeFailure || pendingFailureRead
                   ? coordinator?.snapshot().status === stoppedStatus
                   : snapshot.status === "succeeded")
               ) {
                 paused = true;
                 entered.resolve();
+                finalReadPending = true;
                 await release.promise;
+                finalReadPending = false;
               }
               return snapshot;
             };
           }
-          if (stage === "unpersisted failure")
+          if (stage.startsWith("unpersisted"))
             store.fail = async () => {
               throw new Error("synthetic failure persistence unavailable");
             };
-          if (publicationGate) {
+          if (publicationGate || lostResponse) {
             const fail = store.fail.bind(store);
             store.fail = async (...args) => {
               if (stage === "stale heartbeat failure") {
@@ -193,7 +219,7 @@ export async function testDeepScanLifecycle({
               }
               const result = await fail(...args);
               current.workspace.results.progress.status = "failed";
-              if (stage === "lost-response failure")
+              if (lostResponse)
                 throw new Error("synthetic committed failure response lost");
               return result;
             };
@@ -214,7 +240,10 @@ export async function testDeepScanLifecycle({
             executor,
             pluginRoot: fixture.pluginRoot,
             clock: immediateClock,
-            threadId: "fixture-owner",
+            threadId:
+              stage === "unpersisted unowned failure"
+                ? undefined
+                : "fixture-owner",
             heartbeatIntervalMs: 60_000,
             onComplete: async () => {
               if (stage === "onComplete") {
@@ -243,7 +272,7 @@ export async function testDeepScanLifecycle({
                 event.event !== "coordinator_failed"
               )
                 return;
-              if (publicationGate) {
+              if (publicationGate || pendingFailureRead) {
                 failureSaved.resolve();
                 return;
               }
@@ -285,6 +314,23 @@ export async function testDeepScanLifecycle({
               repeatedCancellation = cancel({ scanId: fixture.run.scanId });
               void repeatedCancellation.catch(() => {});
             }
+            if (pendingFailureRead) {
+              const admitted = await Promise.race([
+                admissionEntered.promise.then(() => true),
+                persistEntered.promise.then(() => false),
+                cancellation.then(
+                  () => false,
+                  () => false,
+                ),
+                coordinator.wait(undefined, 25).then(() => false),
+              ]);
+              if (admitted) {
+                repeatedCancellation = cancel({ scanId: fixture.run.scanId });
+                void repeatedCancellation.catch(() => {});
+                assert.equal(await coordinator.wait(undefined, 25), undefined);
+                admissionRelease.resolve();
+              }
+            }
             release.resolve();
             if (durableFailure) {
               assert.equal((await terminal).status, stoppedStatus);
@@ -293,8 +339,22 @@ export async function testDeepScanLifecycle({
                   .progress.status,
                 "failed",
               );
-              assert.deepEqual(current.calls, ["get-scan"]);
+              assert.deepEqual(
+                current.calls,
+                repeatedCancellation ? ["get-scan", "get-scan"] : ["get-scan"],
+              );
               assert.equal(publications, interrupted ? 0 : 1);
+              if (unavailableRead)
+                assert.match(
+                  (await terminal).error,
+                  /synthetic worker failure/,
+                );
+              if (repeatedCancellation)
+                assert.equal(
+                  (await repeatedCancellation).structuredContent.workspace
+                    .results.progress.status,
+                  "failed",
+                );
               continue;
             }
             await persistEntered.promise;
@@ -350,7 +410,10 @@ export async function testDeepScanLifecycle({
               );
               assert.equal((await terminal).status, "canceled");
               assert.equal(store.run.status, "canceled");
-              assert.equal(publications, 1);
+              assert.equal(
+                publications,
+                stage === "unpersisted unowned failure" ? 0 : 1,
+              );
               if (repeatedCancellation)
                 assert.equal(
                   (await repeatedCancellation).structuredContent.workspace
@@ -376,6 +439,7 @@ export async function testDeepScanLifecycle({
             persistRelease.resolve();
             failureRelease.resolve();
             heartbeatRelease.resolve();
+            admissionRelease.resolve();
             registry.shutdown("fixture cleanup");
             await Promise.allSettled([
               terminal,

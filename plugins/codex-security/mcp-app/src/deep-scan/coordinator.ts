@@ -247,22 +247,45 @@ export class DeepScanCoordinator {
     if (
       this.terminal ||
       this.canceled ||
+      this.cancellationPersistence ||
       this.failurePersisted ||
       this.state.status === "canceled" ||
       this.state.status === "interrupted"
     )
       return await this.settled();
-    if (!this.cancellationPersistence) {
-      let resolve!: () => void;
-      const promise = new Promise<void>((resolvePromise) => {
-        resolve = resolvePromise;
-      });
-      this.cancellationPersistence = { promise, resolve };
-    }
-    this.cancel(reason);
-    await this.cancellationReady;
+    let resolve!: () => void;
+    const promise = new Promise<void>((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    this.cancellationPersistence = { promise, resolve };
     try {
-      await persistCancellation();
+      // A failed write can commit before losing its response. Reconcile the
+      // durable state before trying to cancel that failure.
+      if (this.state.status === "failed" && this.options.threadId) {
+        try {
+          this.state = await this.options.store.get(
+            this.state.scanId,
+            this.options.threadId,
+          );
+          this.failurePersisted ||= this.state.status === "failed";
+        } catch (error) {
+          this.log({
+            event: "coordinator_terminal_state_read_failed",
+            scanId: this.state.scanId,
+            reason: errorKind(error),
+          });
+        }
+      }
+      if (
+        !this.failurePersisted &&
+        (this.state.status !== "failed" || !this.options.threadId) &&
+        this.state.status !== "canceled" &&
+        this.state.status !== "interrupted"
+      ) {
+        this.cancel(reason);
+        await this.cancellationReady;
+        await persistCancellation();
+      }
     } catch (error) {
       this.cancellationPersistence.failure = { error };
       throw error;
