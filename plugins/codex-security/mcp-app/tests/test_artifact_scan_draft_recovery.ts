@@ -1542,6 +1542,56 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   }
 }
 
+for (const explicit of ["neither", "scope", "threatModel", "both"]) {
+  test(`worker: terminal recovery preserves ordered metadata, explicit=${explicit}`, async (t) => {
+    const f = await fixture(t, "worker");
+    const pending = { id: "review", ...generic };
+    const metadata = (name: string) => ({
+      scope: { summary: `${name} scope` },
+      threatModel: { summary: `${name} model` },
+    });
+    await f.write({
+      ...f.draft({ deferred: [pending] }),
+      ...metadata("older"),
+    });
+    const checkpoints = path.join(f.root, "checkpoints");
+    for (const name of await readdir(checkpoints))
+      await utimes(path.join(checkpoints, name), 100, 100);
+    await utimes(path.join(f.root, "result.json"), 100, 100);
+    await utimes(path.join(f.root, "checkpoint-head.json"), 100, 100);
+    const terminal = {
+      ...f.draft({ deferred: [pending] }, true),
+      ...(explicit === "scope" || explicit === "both"
+        ? { scope: metadata("terminal").scope }
+        : {}),
+      ...(explicit === "threatModel" || explicit === "both"
+        ? { threatModel: metadata("terminal").threatModel }
+        : {}),
+    };
+    await saveScanDraftCheckpoint(f.context, terminal, false);
+    for (const name of await readdir(checkpoints)) {
+      const checkpoint = await readJson(checkpoints, name);
+      if (checkpoint.complete)
+        await utimes(path.join(checkpoints, name), 200, 200);
+    }
+    await saveScanDraftCheckpoint(f.context, {
+      ...f.draft({ deferred: [pending] }),
+      ...metadata("newer"),
+    });
+    await utimes(path.join(f.root, "checkpoint-head.json"), 300, 300);
+    for (let replay = 0; replay < 2; replay++) {
+      await f.write(f.draft());
+      const saved = await readJson(f.root, "result.json");
+      assert.deepEqual(saved.scope, terminal.scope ?? metadata("newer").scope);
+      assert.deepEqual(
+        saved.threatModel,
+        terminal.threatModel ?? metadata("newer").threatModel,
+      );
+      assert.deepEqual(saved.coverage.deferred, [pending]);
+    }
+  });
+}
+
 for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: progress survives a raw terminal checkpoint with unresolved saved work`, async (t) => {
     const f = await fixture(t, layout);

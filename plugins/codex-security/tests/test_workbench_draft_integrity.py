@@ -486,6 +486,52 @@ def test_recovery_reserves_every_generated_sibling_identity(tmp_path: Path):
     }
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_restored_identity_keeps_an_independent_identityless_observation(
+    tmp_path: Path, reverse: bool
+):
+    published = []
+    for retry in (False, True):
+        root = tmp_path / str(retry)
+        root.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(root)
+        path = scan_dir / "findings.json"
+        document = json.loads(path.read_text())
+        stronger = document["findings"][0]
+        stronger.update(
+            title="Synthetic finding",
+            summary="Stronger reviewed finding.",
+            identity={"anchor": "reviewed-anchor"},
+        )
+        stronger["severity"]["level"] = "high"
+        stronger["provenance"]["candidateId"] = "candidate-a"
+        weaker = json.loads(json.dumps(stronger))
+        weaker.pop("identity")
+        weaker["summary"] = "Independent weaker observation."
+        weaker["severity"]["level"] = "low"
+        raw = json.loads(json.dumps(stronger))
+        raw.pop("identity")
+        document["findings"] = [weaker, stronger] if reverse else [stronger, weaker]
+        path.write_text(json.dumps(document))
+        write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[raw]))
+        stop_draft(root, state, home, scan_id, retry=retry)
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert len(findings) == 2
+        observed = {
+            finding["identity"]["anchor"]: (
+                finding["summary"],
+                finding["severity"]["level"],
+            )
+            for finding in findings
+        }
+        assert observed == {
+            "reviewed-anchor": ("Stronger reviewed finding.", "high"),
+            "synthetic-finding": ("Independent weaker observation.", "low"),
+        }
+        published.append(observed)
+    assert published[0] == published[1]
+
+
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan"])
 @pytest.mark.parametrize("candidate_siblings", [False, True, "saved alias"])
 def test_raw_checkpoint_and_published_rows_reuse_saved_identities(

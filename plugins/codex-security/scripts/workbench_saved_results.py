@@ -1430,6 +1430,13 @@ def merge_saved_results(
         }
         raw = next((item for item in matches if "identity" not in item[0]), None)
         if len(identities) != 1 or raw is None:
+            for finding, owner in matches:
+                if "identity" not in finding and valid_finding(finding):
+                    normalized = dict(finding)
+                    _ensure_finding_identity(normalized)
+                    explicit_identities.setdefault(_finding_key(normalized), []).append(
+                        (normalized, owner)
+                    )
             continue
         identity, preserved = next(iter(identities.values()))
         normalized = dict(raw[0])
