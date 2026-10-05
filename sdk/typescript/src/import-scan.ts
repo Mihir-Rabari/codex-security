@@ -28,7 +28,7 @@ import {
   codexSecurityStateDirectory,
   expandHome,
   pluginMetadata,
-  prepareOutputDir,
+  prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   requireOutputOutsideRepository,
   requirePrivateOutputDirectory,
@@ -186,7 +186,7 @@ export async function importScan(
       options.outputDir === undefined
         ? await preparePersistentOutputRoot(stateDirectory, "scans", "imports")
         : undefined;
-    scanDir = await prepareOutputDir(
+    scanDir = await prepareScanRegistrationOutput(
       options.outputDir,
       "import",
       outputRoot,

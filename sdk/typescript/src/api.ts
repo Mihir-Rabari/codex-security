@@ -193,6 +193,7 @@ import {
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
+  prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   probeCodexSandbox,
   requireModelSafeOutputDir,
@@ -1344,7 +1345,10 @@ export class CodexSecurity {
       scanDir =
         options.resumeScanId !== undefined
           ? requestedOutput!
-          : await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
+          : await (
+              this.#dependencies.prepareOutputDir ??
+              prepareScanRegistrationOutput
+            )(
               requestedOutput ?? undefined,
               basename(repo),
               scanOutputRoot,
@@ -3116,7 +3120,7 @@ export class CodexSecurity {
               basename(local.repository),
             )
           : undefined;
-      scanDir = await prepareOutputDir(
+      scanDir = await prepareScanRegistrationOutput(
         local.outputDir ?? undefined,
         basename(local.repository),
         outputRoot,
