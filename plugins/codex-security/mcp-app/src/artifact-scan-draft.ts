@@ -386,7 +386,6 @@ async function preserveScanDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  let result = structuredClone(input);
   const current: SavedScanDraft[] = await readSavedCheckpoints(
     context,
     "current",
@@ -404,7 +403,28 @@ async function preserveScanDraft(
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
   );
-  const savedSources = [...current, ...archived];
+  let reconciled: ReturnType<typeof reconcileScanDraft>;
+  try {
+    reconciled = reconcileScanDraft(input, [...current, ...archived]);
+  } catch (error) {
+    return preserveInputOnError(error);
+  }
+  if (saveCheckpoint && reconciled.acceptProgress) {
+    await saveScanDraftCheckpoint(context, input, false);
+    await saveScanDraftCheckpoint(context, reconciled.input);
+  }
+  return {
+    input: reconciled.input,
+    previousDigest: previousState.digest,
+    checkpoint: reconciled.acceptProgress ? undefined : reconciled.input,
+  };
+}
+
+function reconcileScanDraft(
+  input: ScanDraftInput,
+  savedSources: SavedScanDraft[],
+): { input: ScanDraftInput; acceptProgress: boolean } {
+  let result = structuredClone(input);
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
@@ -474,7 +494,9 @@ async function preserveScanDraft(
     input.complete === false
       ? savedSources.find(({ input }) => input.complete !== false)
       : undefined;
-  if (retainedFinal) result = structuredClone(retainedFinal.input);
+  // A raw terminal checkpoint may still omit unresolved work from saved sources.
+  if (retainedFinal)
+    result = reconcileScanDraft(retainedFinal.input, savedSources).input;
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -558,8 +580,6 @@ async function preserveScanDraft(
       sources.unshift(progress);
     }
   }
-  if (acceptProgress && saveCheckpoint && !requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
   const currentCandidateIds = completedCandidateIds(result);
   const resolvedCandidateIds = completedCandidateIds(result, sources);
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
@@ -572,8 +592,6 @@ async function preserveScanDraft(
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (acceptProgress && saveCheckpoint && requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
 
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
@@ -729,13 +747,7 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
-  if (saveCheckpoint && acceptProgress)
-    await saveScanDraftCheckpoint(context, result);
-  return {
-    input: result,
-    previousDigest: previousState.digest,
-    checkpoint: acceptProgress ? undefined : result,
-  };
+  return { input: result, acceptProgress };
 }
 
 function completedCandidateIds(

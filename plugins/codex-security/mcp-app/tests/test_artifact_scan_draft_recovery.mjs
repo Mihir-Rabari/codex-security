@@ -1546,6 +1546,19 @@ for (const layout of ["standard", "diff", "worker"]) {
 }
 
 for (const layout of ["standard", "diff", "worker"]) {
+  test(`${layout}: progress survives a raw terminal checkpoint with unresolved saved work`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write(
+      f.draft({
+        deferred: [{ candidateId: "candidate-a", reason: "Review remains." }],
+      }),
+    );
+    await saveScanDraftCheckpoint(f.context, f.draft({}, true), false);
+    await f.write({ ...f.draft(), findings: [findingFor("candidate-a")] });
+    const retried = await f.write(f.draft({}, true));
+    assert.equal(retried.findingCount, 1);
+  });
+
   test(`${layout}: late progress can explicitly reopen a closed ID by candidate alias`, async (t) => {
     const f = await fixture(t, layout);
     await f.write(f.draft({ deferred: [{ id: "review", ...generic }] }));

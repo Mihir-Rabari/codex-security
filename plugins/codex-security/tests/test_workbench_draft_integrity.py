@@ -571,8 +571,13 @@ def test_saved_identity_reuse_preserves_independent_worker_findings(
         }
 
 
-def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(tmp_path: Path):
-    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+@pytest.mark.parametrize(
+    "history", ["identityless observation", "identified observation", "worker source"]
+)
+def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(
+    tmp_path: Path, history: str
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=history == "worker source")
     path = scan_dir / "findings.json"
     document = json.loads(path.read_text())
     reviewed = document["findings"][0]
@@ -583,12 +588,24 @@ def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(tmp
     historical.pop("identity")
     historical["title"] = "Earlier observation"
     historical["severity"]["level"] = "critical"
-    reviewed["provenance"]["previousFindings"] = [historical]
+    if history != "identityless observation":
+        del reviewed["identity"]
+        historical["identity"] = {"anchor": "earlier-observation"}
+    if history == "worker source":
+        worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+        for finding in (reviewed, historical):
+            finding["provenance"]["workerId"] = worker_id
+        reviewed["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+        worker = json.loads(result_path.read_text())
+        worker["findings"] = [historical]
+        result_path.write_text(json.dumps(worker))
+    else:
+        reviewed["provenance"]["previousFindings"] = [historical]
+        write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical]))
     path.write_text(json.dumps(document))
-    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[historical]))
     run_workbench(
         state,
-        "fail-scan",
+        "fail-deep-scan" if history == "worker source" else "fail-scan",
         "--scan-id",
         scan_id,
         "--message",
@@ -599,3 +616,94 @@ def test_stopped_recovery_keeps_reviewed_outcome_over_historical_observation(tmp
     assert saved["findingCount"] == 1
     assert saved["findings"][0]["severity"]["level"] == "medium"
     assert saved["findings"][0]["title"] == "Reviewed finding"
+
+
+@pytest.mark.parametrize("explicit_first", [False, True])
+@pytest.mark.parametrize("same_title", [False, True])
+@pytest.mark.parametrize("source", ["parent", "worker"])
+def test_saved_identity_reuse_preserves_explicit_sibling(
+    tmp_path: Path, explicit_first: bool, same_title: bool, source: str
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=source == "worker")
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    del first["identity"]
+    first["title"] = "Beta" if same_title else "Alpha"
+    first["provenance"]["candidateId"] = "candidate-a"
+    second = json.loads(json.dumps(first))
+    second.update(title="Beta", identity={"anchor": "beta"})
+    second["provenance"]["candidateId"] = "candidate-b"
+    result_path = scan_dir / "findings.json"
+    if source == "worker":
+        for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+            (scan_dir / name).unlink()
+        _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    write_checkpoint(
+        result_path.parent / "checkpoints",
+        saved_draft(scan_id, findings=[{**first, "identity": {"anchor": "beta"}}]),
+    )
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [second, first] if explicit_first else [first, second]
+    result_path.write_text(json.dumps(worker))
+    run_workbench(
+        state,
+        "fail-deep-scan" if source == "worker" else "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+        environment={"CODEX_HOME": str(home)},
+    )
+    for retry in (False, True):
+        if retry:
+            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        published = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        assert [finding["provenance"]["candidateId"] for finding in published] == (
+            ["candidate-b", "candidate-a"] if explicit_first else ["candidate-a", "candidate-b"]
+        )
+        findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        assert len(findings) == 2
+        assert {finding["provenance"]["candidateId"] for finding in findings} == {
+            "candidate-a",
+            "candidate-b",
+        }
+        explicit = next(
+            finding for finding in findings if finding["provenance"]["candidateId"] == "candidate-b"
+        )
+        assert explicit["identity"] == {"anchor": "beta"}
+
+
+def test_stopped_recovery_keeps_first_position_when_an_explicit_duplicate_is_later(tmp_path: Path):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    first.pop("identity")
+    first.update(title="Alpha", provenance={"source": "local_plugin", "candidateId": "candidate-a"})
+    explicit = json.loads(json.dumps(first))
+    explicit["identity"] = {"anchor": "alpha"}
+    explicit["severity"]["level"] = "high"
+    middle = json.loads(json.dumps(first))
+    middle.update(title="Middle", identity={"anchor": "middle"})
+    middle["provenance"]["candidateId"] = "candidate-b"
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    _, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [first, middle, explicit]
+    result_path.write_text(json.dumps(worker))
+    run_workbench(
+        state,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped for test",
+        environment={"CODEX_HOME": str(home)},
+    )
+    for retry in (False, True):
+        if retry:
+            run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+        published = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        assert [finding["provenance"]["candidateId"] for finding in published] == [
+            "candidate-a",
+            "candidate-b",
+        ]
+        assert published[0]["severity"]["level"] == "high"
