@@ -1740,6 +1740,16 @@ def merge_saved_results(
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
             )
+    ambiguous_checkpoint_candidates: set[str] = set()
+    for _, draft, owner in all_sources:
+        siblings: dict[str, set[str]] = {}
+        for value in draft["findings"]:
+            if isinstance(value, dict) and isinstance(value.get("provenance"), dict):
+                sibling, candidate, _ = checkpoint_identity_keys(value, owner)
+                siblings.setdefault(candidate, set()).add(sibling)
+        ambiguous_checkpoint_candidates.update(
+            candidate for candidate, keys in siblings.items() if len(keys) > 1
+        )
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
         selected_coverage_superseded = worker_id in selected_terminal_orders and (
@@ -1835,11 +1845,6 @@ def merge_saved_results(
                 manifest["scan"]["threatModel"]["origin"] = "recovered"
             if selected_model_source is not None and worker_id is not None:
                 selected_model_source[:] = [model_path]
-        source_siblings: dict[str, set[str]] = {}
-        for value in draft["findings"]:
-            if isinstance(value, dict) and isinstance(value.get("provenance"), dict):
-                sibling, candidate, _ = checkpoint_identity_keys(value, worker_id)
-                source_siblings.setdefault(candidate, set()).add(sibling)
         for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
@@ -1916,7 +1921,7 @@ def merge_saved_results(
             if "identity" not in finding:
                 sibling, candidate, identifiers = checkpoint_identity_keys(finding)
                 source_keys = [sibling]
-                if len(source_siblings.get(candidate, ())) == 1:
+                if candidate not in ambiguous_checkpoint_candidates:
                     source_keys.append(candidate)
                 for source_key in source_keys:
                     saved_identity = checkpoint_identities.get(source_key)

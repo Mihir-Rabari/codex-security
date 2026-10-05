@@ -58,6 +58,9 @@ for (const layout of ["standard", "diff", "deep"]) {
     "worker-ledger-id",
     "cross-field-id",
     "severity-revision",
+    "title-revision",
+    "new-sibling-checkpoints",
+    "new-worker-sibling-checkpoints",
   ]) {
     for (const status of ["failed", "canceled"]) {
       test(`${layout}: stopped ${status} recovery retains ${variant} candidate identities`, async (t) => {
@@ -65,12 +68,7 @@ for (const layout of ["standard", "diff", "deep"]) {
         const count =
           variant === "three"
             ? 3
-            : [
-                  "siblings",
-                  "preserved",
-                  "new-sibling",
-                  "new-worker-sibling",
-                ].includes(variant)
+            : variant.includes("sibling") || variant === "preserved"
               ? 2
               : variant.endsWith("-id")
                 ? 2
@@ -82,7 +80,8 @@ for (const layout of ["standard", "diff", "deep"]) {
               : `review-${index + 1}`,
           );
           if (
-            ["owner", "new-worker-sibling"].includes(variant) ||
+            variant === "owner" ||
+            variant.startsWith("new-worker-") ||
             variant.startsWith("worker-")
           )
             finding.provenance.workerId = "worker-1";
@@ -126,6 +125,10 @@ for (const layout of ["standard", "diff", "deep"]) {
           };
           await f.write({ ...f.draft(), findings });
         }
+        if (variant === "title-revision") {
+          findings[0].title = "Revised synthetic review finding";
+          await f.write({ ...f.draft(), findings });
+        }
         if (variant === "range-refinement") {
           findings[0].locations[0].endLine = 1;
           await f.write({ ...f.draft(), findings });
@@ -135,6 +138,14 @@ for (const layout of ["standard", "diff", "deep"]) {
           const saved = JSON.parse(await readFile(file, "utf8"));
           saved.findings = saved.findings.slice(0, 1);
           await writeFile(file, JSON.stringify(saved));
+        }
+        if (variant.endsWith("-checkpoints")) {
+          findings[1].severity.level = "high";
+          await saveScanDraftCheckpoint(
+            f.context,
+            { ...f.draft(), findings: findings.slice(1) },
+            false,
+          );
         }
         if (variant === "preserved") {
           const file = path.join(f.root, "findings.json");
@@ -170,7 +181,7 @@ documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin',
 for document in documents[1:]: document['scanId']=scan_id
 prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
 published=_write_prepared_scan_finalization(prepared)
-print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'levels':[row['severity']['level'] for row in published[1]['findings']]}))`,
+print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
             fileURLToPath(new URL("../../scripts", import.meta.url)),
             f.root,
             f.context.scanId,
@@ -181,7 +192,9 @@ print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[
           count,
           sealed: true,
           warnings: [],
-          levels: Array(count).fill("low"),
+          assessments: findings
+            .map((finding) => [finding.title, finding.severity.level])
+            .sort(),
         });
       });
     }
