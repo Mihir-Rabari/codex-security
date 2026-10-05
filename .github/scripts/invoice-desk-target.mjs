@@ -1,11 +1,6 @@
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  realpathSync,
-  appendFileSync,
-  readFileSync,
-} from "node:fs";
-import { pathToFileURL } from "node:url";
+import { appendFileSync, readFileSync } from "node:fs";
+import { isMain } from "../../sdk/typescript/scripts/is-main.mjs";
 
 function eligible(pr, repository, sha) {
   return (
@@ -66,12 +61,7 @@ export async function resolveScanTargets(
   return [{ pr: pr.number, sha: sourceSha }];
 }
 
-if (
-  process.argv[1] &&
-  process.argv[1] !== "-" &&
-  existsSync(process.argv[1]) &&
-  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
-) {
+if (isMain(import.meta.url)) {
   const repository = process.env.GITHUB_REPOSITORY;
   const targets = await resolveScanTargets(
     {

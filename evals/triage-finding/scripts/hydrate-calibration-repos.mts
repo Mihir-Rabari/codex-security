@@ -83,10 +83,6 @@ function gitOutput(args: string[], cwd: string) {
   }
 }
 
-function isGitCheckout(directory: string) {
-  return fs.existsSync(path.join(directory, ".git"));
-}
-
 function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
   fs.mkdirSync(path.dirname(job.targetDir), { recursive: true });
 
@@ -94,7 +90,7 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
     fs.mkdirSync(job.targetDir, { recursive: true });
   }
 
-  if (!isGitCheckout(job.targetDir)) {
+  if (gitOutput(["rev-parse", "--show-prefix"], job.targetDir) !== "") {
     const entries = fs.readdirSync(job.targetDir);
     if (entries.length > 0) {
       throw new Error(

@@ -2,6 +2,9 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { targetRepoPath } from "./generate-calibration-tests.mts";
 
 const evalDir = path.join(import.meta.dirname, "..");
 const scriptPath = path.join(
@@ -41,89 +44,114 @@ assert.doesNotMatch(
   /oss-mantisbt-ghsa-73vx-49mv-v8w5\/vulnerable/,
 );
 
-console.log("calibration hydration dry-run tests passed");
-
-import fs from "node:fs";
-import os from "node:os";
-import { plannedJobs } from "./hydrate-calibration-repos.mts";
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "calibration-hydrate-"));
-try {
-  const git = (...args: string[]) =>
-    childProcess
-      .execFileSync("git", args, {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-      .trim();
-  git("init", "--quiet");
+const temporary = fs.mkdtempSync(
+  path.join(os.tmpdir(), "calibration-checkouts-"),
+);
+function git(directory: string, ...args: string[]) {
+  return childProcess
+    .execFileSync("git", args, {
+      cwd: directory,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    .trim();
+}
+function repository(name: string) {
+  const directory = path.join(temporary, name);
+  fs.mkdirSync(directory);
+  git(directory, "init", "-b", "main");
+  fs.writeFileSync(path.join(directory, "fixture.txt"), name);
+  git(directory, "add", "fixture.txt");
   git(
+    directory,
     "-c",
-    "user.name=Synthetic Test",
+    "user.name=Synthetic",
     "-c",
-    "user.email=test@example.test",
+    "user.email=synthetic@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
     "commit",
-    "--allow-empty",
     "-m",
-    "fixture",
+    "Fixture",
   );
-  git("remote", "add", "origin", "https://original.example.test/repo");
-  const head = git("rev-parse", "HEAD");
-  const data = {
-    cases: [
-      {
-        case_id: "example",
-        source_type: "cve",
-        repo: { name: "synthetic", url: root },
-        finding: { title: "Synthetic finding" },
-        variants: [
-          {
-            variant_id: "fixed",
-            checkout_ref: head,
-            expected_verdict: "not_actionable",
-            expected_binary_label: "negative",
-          },
-        ],
-      },
-    ],
-  };
-  const repoRoot = path.join(root, "targets");
-  const [job] = plannedJobs(data, { repoRoot });
-  fs.mkdirSync(path.join(job.targetDir, ".git"), { recursive: true });
-  const dataset = path.join(root, "dataset.json");
-  fs.writeFileSync(dataset, JSON.stringify(data));
-  const args = [
-    "--experimental-strip-types",
-    scriptPath,
-    "--dataset",
+  return directory;
+}
+try {
+  const source = repository("source");
+  const parent = repository("parent");
+  git(
+    parent,
+    "remote",
+    "add",
+    "origin",
+    "https://example.invalid/original.git",
+  );
+  const originalHead = git(parent, "rev-parse", "HEAD");
+  const originalOrigin = git(parent, "remote", "get-url", "origin");
+  const expectedHead = git(source, "rev-parse", "HEAD");
+  const dataset = path.join(temporary, "dataset.json");
+  fs.writeFileSync(
     dataset,
-    "--repo-root",
+    JSON.stringify({
+      cases: [
+        {
+          case_id: "case",
+          repo: { url: source },
+          variants: [{ variant_id: "variant", checkout_ref: expectedHead }],
+        },
+      ],
+    }),
+  );
+  const repoRoot = path.join(parent, "checkouts");
+  const target = targetRepoPath(
     repoRoot,
-  ];
-  const failed = childProcess.spawnSync(process.execPath, args, {
-    encoding: "utf8",
-  });
-  assert.notEqual(failed.status, 0);
-  assert.equal(
-    git("remote", "get-url", "origin"),
-    "https://original.example.test/repo",
+    { case_id: "case" },
+    { checkout_ref: expectedHead },
   );
-  assert.equal(git("rev-parse", "HEAD"), head);
-  fs.rmSync(job.targetDir, { recursive: true });
-  childProcess.execFileSync(process.execPath, args, { stdio: "pipe" });
-  assert.equal(
-    childProcess
-      .execFileSync("git", ["rev-parse", "HEAD"], {
-        cwd: job.targetDir,
-        encoding: "utf8",
-      })
-      .trim(),
-    head,
+  fs.mkdirSync(path.join(target, ".git"), { recursive: true });
+  const rejected = childProcess.spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      scriptPath,
+      "--dataset",
+      dataset,
+      "--repo-root",
+      repoRoot,
+    ],
+    { encoding: "utf8" },
   );
-  assert.equal(
-    git("remote", "get-url", "origin"),
-    "https://original.example.test/repo",
+  assert.equal(git(parent, "remote", "get-url", "origin"), originalOrigin);
+  assert.equal(git(parent, "rev-parse", "HEAD"), originalHead);
+  assert.equal(git(parent, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /non-empty non-git directory/);
+
+  fs.rmdirSync(path.join(target, ".git"));
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", repoRoot]),
+    /hydrated: case\/variant/,
+  );
+  assert.equal(git(target, "rev-parse", "HEAD"), expectedHead);
+  assert.equal(git(parent, "remote", "get-url", "origin"), originalOrigin);
+  assert.equal(git(parent, "rev-parse", "HEAD"), originalHead);
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", repoRoot]),
+    /already current/,
+  );
+
+  const alias = path.join(temporary, " checkout alias ");
+  fs.symlinkSync(
+    repoRoot,
+    alias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", alias]),
+    /already current/,
   );
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(temporary, { recursive: true, force: true });
 }
+
+console.log("calibration hydration tests passed");

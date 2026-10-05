@@ -26,7 +26,9 @@ export default class TriageProvider implements ApiProvider {
         );
       }
       let requestedNode =
-        this.config.cli_env?.CODEX_MCP_NODE_PATH ?? process.execPath;
+        this.config.cli_env?.CODEX_MCP_NODE_PATH ??
+        process.env.CODEX_MCP_NODE_PATH ??
+        process.execPath;
       const environment = { ...process.env, ...this.config.cli_env };
       try {
         accessSync(

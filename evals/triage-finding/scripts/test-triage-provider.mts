@@ -86,8 +86,16 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
 `,
       { mode: 0o755 },
     );
+    const ambientNode = path.join(root, "ambient-node", "bin", "node");
+    fs.mkdirSync(path.dirname(ambientNode), { recursive: true });
+    fs.copyFileSync(
+      process.execPath,
+      ambientNode,
+      fs.constants.COPYFILE_FICLONE,
+    );
     const environment = {
       ...proxies,
+      CODEX_MCP_NODE_PATH: ambientNode,
       OPENAI_API_KEY: "synthetic-test-key",
       PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
       PROMPTFOO_DISABLE_WAL_MODE: "true",
@@ -177,7 +185,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
       assert.equal(fs.existsSync(row.cwd), false);
-      assert.equal(row.nodePath, fs.realpathSync(process.execPath));
+      assert.equal(row.nodePath, ambientNode);
       assert.deepEqual(row.directories, [path.dirname(row.nodePath)]);
     }
 
@@ -204,6 +212,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       path.relative(path.join(os.tmpdir(), "runtime-placeholder"), customNode),
       "node",
       nodeAlias,
+      path.join(root, "missing-node"),
     ];
     const calibrationConfig = path.join(root, "calibration.json");
     fs.mkdirSync(path.join(root, "case"));
@@ -244,6 +253,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
           ],
           {
             ...environment,
+            CODEX_MCP_NODE_PATH: index === 0 ? undefined : ambientNode,
             PROMPTFOO_CONFIG_DIR: path.join(root, `concurrent-${index}`),
           },
         ),
@@ -256,7 +266,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 8);
+    assert.equal(rows.length, 9);
     assert.equal(new Set(rows.map((row) => row.cwd)).size, 5);
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
@@ -270,9 +280,15 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         row.directories,
         row.nodePath === customNode
           ? [path.join(root, "case"), path.dirname(customNode)]
-          : [path.dirname(fs.realpathSync(process.execPath))],
+          : [path.dirname(row.nodePath)],
       );
     }
-    assert.equal(rows.filter((row) => row.nodePath === customNode).length, 4);
+    assert.equal(rows.filter((row) => row.nodePath === customNode).length, 5);
+    assert.equal(rows.filter((row) => row.nodePath === ambientNode).length, 3);
+    assert.equal(
+      rows.filter((row) => row.nodePath === fs.realpathSync(process.execPath))
+        .length,
+      1,
+    );
   },
 );
