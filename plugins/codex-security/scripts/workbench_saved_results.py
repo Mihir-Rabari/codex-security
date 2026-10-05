@@ -1899,7 +1899,8 @@ def merge_saved_results(
             for group in matches:
                 latest = group["latest"]
                 if (
-                    same_raw_content(value, latest)
+                    owner == group["owner"]
+                    and same_raw_content(value, latest)
                     and _identity_candidate(value) == _identity_candidate(latest)
                     and identifiers(value) == identifiers(latest)
                 ):

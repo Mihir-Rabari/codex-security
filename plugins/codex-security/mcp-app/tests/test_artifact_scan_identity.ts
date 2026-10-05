@@ -2696,3 +2696,83 @@ for (const layout of ["standard", "diff", "deep"] as const) {
     assert.deepEqual(finalized.warnings, []);
   });
 }
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const cut of ["raw", "published"]) {
+    for (const reversed of [false, true]) {
+      test(`${layout}: unchanged ownership selects its saved sibling (${cut}, reversed=${reversed})`, async (t) => {
+        const normal = await fixture(t, layout);
+        const recovered = await fixture(t, layout);
+        const initial = finding("Synthetic ownership review", {
+          provenance: { source: "local_plugin", candidateId: "candidate-1" },
+        });
+        const owned = {
+          ...initial,
+          provenance: { ...initial.provenance, workerId: "worker-a" },
+        };
+        await normal.write({ ...normal.draft(), findings: [initial] });
+        const published = JSON.parse(
+          await readFile(path.join(normal.root, "findings.json"), "utf8"),
+        );
+        if (cut === "published") {
+          await recovered.write({ ...recovered.draft(), findings: [initial] });
+        } else {
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            { ...recovered.draft(), findings: [initial] },
+            false,
+          );
+        }
+        const findings = reversed ? [owned, initial] : [initial, owned];
+        await normal.write({ ...normal.draft(), findings });
+        if (cut === "published") {
+          await interruptDraftWrite(
+            path.join(recovered.root, "findings.json"),
+            () => recovered.write({ ...recovered.draft(), findings }),
+          );
+        } else {
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            { ...recovered.draft(), findings },
+            false,
+          );
+        }
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 2);
+        assert.equal(result.recovered.length, 2);
+        const contents = (rows: RecoveredFinding[]) =>
+          rows
+            .map(
+              ({
+                identity: _identity,
+                fingerprints: _fingerprints,
+                findingId: _findingId,
+                occurrenceId: _occurrenceId,
+                ...row
+              }) => row,
+            )
+            .sort((left, right) =>
+              String(left.workerMetadata).localeCompare(
+                String(right.workerMetadata),
+              ),
+            );
+        assert.deepEqual(contents(result.recovered), contents(result.normal));
+        assert.equal(
+          new Set(result.recovered.map((row) => row.occurrenceId)).size,
+          2,
+        );
+        assert.deepEqual(
+          result.recovered.find((row) => row.workerMetadata === null)?.identity,
+          published.findings[0].identity,
+        );
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}
