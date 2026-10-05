@@ -25,8 +25,7 @@ import { VERSION } from "../version.js";
 import {
   DeduplicationReviewError,
   type DeduplicationReviewFailureCategory,
-  type DeduplicationReviewStage,
-  safeErrorMessage,
+  errorMessage,
 } from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import {
@@ -40,18 +39,19 @@ import {
   sourceReviewInstructions,
 } from "./deduplication-prompts.js";
 import { retryDelay, waitForRetry } from "./retry.js";
+import type { DeduplicationReviewRequest } from "./review.js";
 import { isReviewRefusal } from "./refusal.js";
 
 const reviewErrorSchema = z
   .object({ reason: z.string().trim().min(1) })
   .strict();
 
-export interface CodexReview<T> {
-  stage: DeduplicationReviewStage;
-  model: string;
-  effort: string;
-  prompt: string;
-  schema: unknown;
+export interface CodexReview<T> extends Pick<
+  DeduplicationReviewRequest,
+  "stage" | "model" | "effort" | "prompt" | "schema"
+> {
+  /** Exact comparison participants, supplied by the structured reviewer. */
+  findingIds?: readonly string[];
   validate(value: unknown): T;
 }
 
@@ -165,14 +165,14 @@ export class CodexReviewRunner {
         error instanceof ReviewAttemptError
           ? error.supportReason
           : "Codex review transport failed.";
-      const displayReason = safeErrorMessage(error);
+      const displayReason = errorMessage(error);
       throw new DeduplicationReviewError(
         {
           stage: review.stage,
           model: review.model,
           category,
           attempts: state.attempts,
-          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+          reason: supportReason,
         },
         displayReason,
       );

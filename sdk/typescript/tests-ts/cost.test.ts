@@ -1,14 +1,7 @@
+import { jsonLines } from "./support/json.js";
 import { spawnSync } from "node:child_process";
 import * as filesystem from "node:fs/promises";
-import {
-  appendFile,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -29,25 +22,19 @@ import {
   lowerUuid7Turn,
   ownedPythonUsage,
   ownedSdkUsage,
+  parentFields,
+  parentMetadata,
+  writeSession,
   ownershipRollout,
   readPythonRolloutUsage,
   scanThreadId,
 } from "./support/usage-rollout.js";
 
-const temporaryDirectories: string[] = [];
-const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
-type SessionParentField = (typeof parentFields)[number];
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-function parentMetadata(parentThreadId: string, field: SessionParentField) {
-  return field === "source"
-    ? {
-        source: {
-          subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
-        },
-      }
-    : { [field]: parentThreadId };
-}
-
+const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
+  "codex-security-cost-",
+);
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (check()) return;
@@ -56,59 +43,16 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the cost tracker.");
 }
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
-async function codexHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-cost-")),
-  );
-  temporaryDirectories.push(directory);
-  return directory;
-}
-
-async function writeSession(
-  home: string,
-  threadId: string,
-  usage: Record<string, number>,
-  parentThreadId?: string,
-  workingDirectory?: string,
-  timestamp?: string,
-  parentField: SessionParentField = "source",
-): Promise<string> {
-  const directory = join(home, "sessions", "2026", "07", "26");
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, `rollout-${threadId}.jsonl`);
-  await writeFile(
-    path,
-    [
-      JSON.stringify({
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(timestamp === undefined ? {} : { timestamp }),
-          ...(parentThreadId === undefined
-            ? {}
-            : parentMetadata(parentThreadId, parentField)),
-        },
-      }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
-      "",
-    ].join("\n"),
-  );
-  return path;
+async function workerSessionFixture() {
+  const home = await codexHome();
+  const usage = { input_tokens: 100, output_tokens: 10 };
+  const parent = await writeSession(home, "scan-thread", usage);
+  const worker = await writeSession(home, "worker-thread", usage, {
+    parent: "scan-thread",
+  });
+  return { home, usage, parent, worker };
 }
 
 async function appendSessionItem(
@@ -464,7 +408,7 @@ describe("live scan cost tracking", () => {
         cache_write_input_tokens: 50,
         output_tokens: 20,
       },
-      "scan-thread",
+      { parent: "scan-thread" },
     );
     const tracker = new ScanCostTracker({
       codexHome: home,
@@ -550,10 +494,8 @@ describe("live scan cost tracking", () => {
     });
     const errors: string[] = [];
     let traversals = 0;
-    let release: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: blocked, resolve: release } =
+      Promise.withResolvers<void>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -590,10 +532,8 @@ describe("live scan cost tracking", () => {
       cached_input_tokens: 200,
       output_tokens: 30,
     });
-    let reportCost!: (cost: unknown) => void;
-    const reportedCost = new Promise<unknown>((resolve) => {
-      reportCost = resolve;
-    });
+    const { promise: reportedCost, resolve: reportCost } =
+      Promise.withResolvers<unknown>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -633,7 +573,7 @@ describe("live scan cost tracking", () => {
         output_tokens: 5,
         reasoning_output_tokens: 1,
       },
-      "scan-thread",
+      { parent: "scan-thread" },
     );
     await writeSession(home, "unrelated-thread", {
       input_tokens: 1_000_000,
@@ -702,21 +642,14 @@ describe("live scan cost tracking", () => {
       const scanDirectory = join(home, "scan");
       const usage = { input_tokens: 10, output_tokens: 1 };
       const writeMain = () =>
-        writeSession(
-          home,
-          "scan-thread",
-          usage,
-          undefined,
-          scanDirectory,
-          "2026-07-26T12:00:00Z",
-        );
+        writeSession(home, "scan-thread", usage, {
+          cwd: scanDirectory,
+          timestamp: "2026-07-26T12:00:00Z",
+        });
       if (missing === "parent") await writeMain();
-      const worker = await writeSession(
-        home,
-        "worker-thread",
-        usage,
-        missing === "parent" ? "parent-worker" : undefined,
-        join(
+      const worker = await writeSession(home, "worker-thread", usage, {
+        parent: missing === "parent" ? "parent-worker" : undefined,
+        cwd: join(
           scanDirectory,
           "artifacts",
           "deep_discovery",
@@ -724,8 +657,8 @@ describe("live scan cost tracking", () => {
           "one",
           "output",
         ),
-        "2026-07-26T12:01:00Z",
-      );
+        timestamp: "2026-07-26T12:01:00Z",
+      });
       const message = (text: string) => ({
         type: "message",
         role: "assistant",
@@ -748,7 +681,9 @@ describe("live scan cost tracking", () => {
       );
 
       if (missing === "parent") {
-        await writeSession(home, "parent-worker", usage, "scan-thread");
+        await writeSession(home, "parent-worker", usage, {
+          parent: "scan-thread",
+        });
       } else {
         await writeMain();
       }
@@ -789,7 +724,9 @@ describe("live scan cost tracking", () => {
         output_tokens: 0,
       });
       await writeSession(home, "scan-thread", usage(10));
-      const worker = await writeSession(home, "worker", usage(1), "middle");
+      const worker = await writeSession(home, "worker", usage(1), {
+        parent: "middle",
+      });
       let denied = !identified;
       let attempts = 0;
       const opened = filesystem.open;
@@ -826,7 +763,9 @@ describe("live scan cost tracking", () => {
           worker,
           `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
         );
-        await writeSession(home, "middle", usage(20), "scan-thread");
+        await writeSession(home, "middle", usage(20), {
+          parent: "scan-thread",
+        });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
         denied = false;
         const snapshot = await tracker.stop();
@@ -859,74 +798,81 @@ describe("live scan cost tracking", () => {
         home,
         "scan-thread",
         { input_tokens: 1_000, output_tokens: 10 },
-        undefined,
-        scanDirectory,
-        "2026-07-26T12:00:00.900Z",
+        { cwd: scanDirectory, timestamp: "2026-07-26T12:00:00.900Z" },
       );
       await writeSession(
         home,
         "deep-worker",
         { input_tokens: 250, output_tokens: 2 },
-        undefined,
-        process.platform === "win32"
-          ? workerDirectory.toUpperCase()
-          : workerDirectory,
-        "2026-07-26T12:00:00.900Z",
+        {
+          cwd:
+            process.platform === "win32"
+              ? workerDirectory.toUpperCase()
+              : workerDirectory,
+          timestamp: "2026-07-26T12:00:00.900Z",
+        },
       );
       await writeSession(
         home,
         "deep-reducer",
         { input_tokens: 125, output_tokens: 1 },
-        undefined,
-        (process.platform === "win32" ? artifacts.toUpperCase() : artifacts) +
-          sep,
-        "2026-07-26T12:02:00Z",
+        {
+          cwd:
+            (process.platform === "win32"
+              ? artifacts.toUpperCase()
+              : artifacts) + sep,
+          timestamp: "2026-07-26T12:02:00Z",
+        },
       );
       await writeSession(
         home,
         "deep-worker-child",
         { input_tokens: 50, output_tokens: 1 },
-        "deep-worker",
-        undefined,
-        undefined,
-        parentField,
+        { parent: "deep-worker", parentField },
       );
       await writeSession(
         home,
         "unrelated-thread",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        undefined,
-        `${scanDirectory}-other`,
+        { cwd: `${scanDirectory}-other` },
       );
       await writeSession(
         home,
         "previous-scan",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        undefined,
-        join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
-        "2026-07-26T11:59:00Z",
+        {
+          cwd: join(
+            scanDirectory,
+            "artifacts",
+            "deep_discovery",
+            "previous-worker",
+          ),
+          timestamp: "2026-07-26T11:59:00Z",
+        },
       );
       await writeSession(
         home,
         "unknown-start",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        undefined,
-        join(
-          scanDirectory,
-          "artifacts",
-          "deep_discovery",
-          "workers",
-          "stale",
-          "output",
-        ),
+        {
+          cwd: join(
+            scanDirectory,
+            "artifacts",
+            "deep_discovery",
+            "workers",
+            "stale",
+            "output",
+          ),
+        },
       );
       await writeSession(
         home,
         "nested-scan",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        undefined,
-        join(scanDirectory, "nested", "artifacts"),
-        "2026-07-26T12:03:00Z",
+        {
+          cwd: join(scanDirectory, "nested", "artifacts"),
+          timestamp: "2026-07-26T12:03:00Z",
+        },
       );
       const events: ScanSessionEvent[] = [];
       const tracker = new ScanCostTracker({
@@ -1030,39 +976,40 @@ describe("live scan cost tracking", () => {
         home,
         "scan-thread",
         { input_tokens: 1_000, output_tokens: 10 },
-        undefined,
-        scanDirectory,
-        "2026-07-26T12:00:00.900Z",
+        { cwd: scanDirectory, timestamp: "2026-07-26T12:00:00.900Z" },
       );
       await writeSession(
         home,
         "deep-worker",
         { input_tokens: 250, output_tokens: 2 },
-        undefined,
-        join(
-          scanDirectory,
-          "artifacts",
-          "deep_discovery",
-          "workers",
-          "worker",
-          "output",
-        ),
-        "2026-07-26T12:00:00.950Z",
+        {
+          cwd: join(
+            scanDirectory,
+            "artifacts",
+            "deep_discovery",
+            "workers",
+            "worker",
+            "output",
+          ),
+          timestamp: "2026-07-26T12:00:00.950Z",
+        },
       );
       await writeSession(
         home,
         "bystander",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        parentThreadId,
-        workingDirectory(scanDirectory),
-        timestamp,
-        parentField,
+        {
+          parent: parentThreadId,
+          cwd: workingDirectory(scanDirectory),
+          timestamp,
+          parentField,
+        },
       );
       await writeSession(
         home,
         "bystander-child",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        "bystander",
+        { parent: "bystander" },
       );
       const events: ScanSessionEvent[] = [];
       const tracker = new ScanCostTracker({
@@ -1105,23 +1052,22 @@ describe("live scan cost tracking", () => {
         home,
         "scan-thread",
         { input_tokens: 1_000, output_tokens: 10 },
-        undefined,
-        scanDirectory,
-        timestamp,
+        { cwd: scanDirectory, timestamp },
       );
       await writeSession(
         home,
         "independent-worker",
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        undefined,
-        join(scanDirectory, "artifacts"),
-        "2026-07-26T12:01:00Z",
+        {
+          cwd: join(scanDirectory, "artifacts"),
+          timestamp: "2026-07-26T12:01:00Z",
+        },
       );
       await writeSession(
         home,
         "child-worker",
         { input_tokens: 250, output_tokens: 2 },
-        "scan-thread",
+        { parent: "scan-thread" },
       );
       const tracker = new ScanCostTracker({
         codexHome: home,
@@ -1154,7 +1100,7 @@ describe("live scan cost tracking", () => {
 
       await writeFile(
         worker,
-        [
+        jsonLines([
           {
             type: "session_meta",
             payload: {
@@ -1245,9 +1191,7 @@ describe("live scan cost tracking", () => {
               },
             },
           },
-        ]
-          .map((event) => JSON.stringify(event))
-          .join("\n") + "\n",
+        ]) + "\n",
       );
 
       const activities: ScanActivity[] = [];
@@ -1326,13 +1270,10 @@ describe("live scan cost tracking", () => {
       home,
       childUuid7Thread,
       { input_tokens: 1_100, output_tokens: 110 },
-      scanThreadId,
+      { parent: scanThreadId },
     );
     const rollout = ownershipRollout(replayedTurnIds);
-    await writeFile(
-      rolloutPath,
-      rollout.map((event) => JSON.stringify(event)).join("\n") + "\n",
-    );
+    await writeFile(rolloutPath, jsonLines(rollout) + "\n");
 
     const maxCostUsd = 0.001;
     const observedCosts: number[] = [];
@@ -1374,15 +1315,12 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parentPath = await writeSession(home, "scan-thread", usage);
-    const workerPath = await writeSession(
+    const {
       home,
-      "worker-thread",
       usage,
-      "scan-thread",
-    );
+      parent: parentPath,
+      worker: workerPath,
+    } = await workerSessionFixture();
     const unrelatedPath = await writeSession(home, "unrelated-thread", usage);
     const command =
       'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
@@ -1445,15 +1383,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards genuine worker reasoning and transcript text", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const path = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker: path } = await workerSessionFixture();
     await appendSessionItem(path, {
       id: "thinking-1",
       type: "reasoning",
@@ -1498,15 +1428,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("streams worker reasoning and commentary from live session events once", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendFile(
       worker,
       [
@@ -1585,15 +1507,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("expands streamed worker reasoning without duplicating summaries or exposing encrypted content", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const details = `${"The query reaches a privileged tenant boundary. ".repeat(30)}Final authorization check.`;
     const raw = `**The route builds SQL from request parameters.** ${details}`;
     await appendFile(
@@ -1705,15 +1619,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("keeps distinct streamed worker reasoning summaries separate", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const summaries = [
       "**Planning discovery worker tasks**",
       "**Preparing thorough file batch reading**",
@@ -1766,15 +1672,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("splits worker reasoning summaries without streamed events", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendSessionItem(worker, {
       id: "reasoning-1",
       type: "reasoning",
@@ -1820,21 +1718,10 @@ describe("live scan cost tracking", () => {
   });
 
   test("forwards reviewed-file progress from descendant workers only", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parent = await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
-    const descendant = await writeSession(
-      home,
-      "nested-worker-thread",
-      usage,
-      "worker-thread",
-    );
+    const { home, usage, parent, worker } = await workerSessionFixture();
+    const descendant = await writeSession(home, "nested-worker-thread", usage, {
+      parent: "worker-thread",
+    });
     const unrelated = await writeSession(home, "unrelated-thread", usage);
 
     await appendSessionItem(parent, progressMessage(1));
@@ -1861,21 +1748,10 @@ describe("live scan cost tracking", () => {
   });
 
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const parent = await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
-    const otherWorker = await writeSession(
-      home,
-      "other-worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, usage, parent, worker } = await workerSessionFixture();
+    const otherWorker = await writeSession(home, "other-worker-thread", usage, {
+      parent: "scan-thread",
+    });
     const unrelated = await writeSession(home, "unrelated-thread", usage);
     const updates: ScanProgress[] = [];
     const tracker = new ScanCostTracker({
@@ -1936,8 +1812,12 @@ describe("live scan cost tracking", () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
     await writeSession(home, "scan-thread", usage);
-    const first = await writeSession(home, "worker-a", usage, "scan-thread");
-    const second = await writeSession(home, "worker-b", usage, "scan-thread");
+    const first = await writeSession(home, "worker-a", usage, {
+      parent: "scan-thread",
+    });
+    const second = await writeSession(home, "worker-b", usage, {
+      parent: "scan-thread",
+    });
     const unrelated = await writeSession(home, "unrelated-worker", usage);
     const updates: ScanProgress[] = [];
     const tracker = new ScanCostTracker({
@@ -1969,15 +1849,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("counts only explicit successful worker review receipts", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const marker = (filesCompleted: number) =>
       `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
         phase: "discovery",
@@ -2061,21 +1933,11 @@ describe("live scan cost tracking", () => {
   });
 
   test("polls worker file progress without another observer", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     await appendSessionItem(worker, progressMessage(3));
 
-    let reportProgress!: (progress: ScanProgress) => void;
-    const reportedProgress = new Promise<ScanProgress>((resolve) => {
-      reportProgress = resolve;
-    });
+    const { promise: reportedProgress, resolve: reportProgress } =
+      Promise.withResolvers<ScanProgress>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -2096,15 +1958,7 @@ describe("live scan cost tracking", () => {
   });
 
   test("reports newly completed worker batches once per progress update", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    await writeSession(home, "scan-thread", usage);
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      usage,
-      "scan-thread",
-    );
+    const { home, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
@@ -2262,7 +2116,7 @@ describe("live scan cost tracking", () => {
         home,
         "worker-thread",
         { input_tokens: 100, output_tokens: 0 },
-        "scan-thread",
+        { parent: "scan-thread" },
       );
       const tracker = new ScanCostTracker({
         codexHome: home,

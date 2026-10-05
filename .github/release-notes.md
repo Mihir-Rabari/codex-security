@@ -1,31 +1,27 @@
-<!-- release-version: 0.1.29 -->
+<!-- release-version: 0.1.32 -->
 
 <!-- release-section: highlights:start -->
 ## Highlights
 
-- stream large saved scan JSON output ([#932](https://github.com/openai/codex-security/pull/932))
-- prefer complete saved rollout copies ([#933](https://github.com/openai/codex-security/pull/933))
-- support custom patch validation prompts ([#940](https://github.com/openai/codex-security/pull/940))
-- bump @opencode-ai/sdk from 1.18.29 to 1.18.30 in /plugins/codex-security/skills/triage-finding/evals in the third-party group across 1 directory ([#936](https://github.com/openai/codex-security/pull/936))
-- bump @linear/sdk from 93.0.1 to 94.0.0 in /sdk/typescript ([#937](https://github.com/openai/codex-security/pull/937))
-- seal drafts with empty artifact lists ([#941](https://github.com/openai/codex-security/pull/941))
-- include Terraform files in scan inventories ([#944](https://github.com/openai/codex-security/pull/944))
-- run README CLI commands with npx ([#945](https://github.com/openai/codex-security/pull/945))
-- resolve Git metadata outside its config ([#935](https://github.com/openai/codex-security/pull/935))
-- redirect findings service root to dashboard ([#948](https://github.com/openai/codex-security/pull/948))
-- bound source preview reads ([#947](https://github.com/openai/codex-security/pull/947))
-- align filter controls and dropdown carets ([#949](https://github.com/openai/codex-security/pull/949))
-- match filter control borders ([#957](https://github.com/openai/codex-security/pull/957))
-- make dashboard tables sortable ([#958](https://github.com/openai/codex-security/pull/958))
-- bump @linear/sdk from 94.0.0 to 95.0.0 in /sdk/typescript ([#955](https://github.com/openai/codex-security/pull/955))
-- tolerate transient setup failures and slow Windows runners ([#953](https://github.com/openai/codex-security/pull/953))
-- reject line breaks in inventory paths. ([#961](https://github.com/openai/codex-security/pull/961))
-- bump the third-party group across 3 directories with 7 updates ([#954](https://github.com/openai/codex-security/pull/954))
-- keep model-authored runtime status out of finalized reports ([#703](https://github.com/openai/codex-security/pull/703))
-- show progress while patching findings ([#931](https://github.com/openai/codex-security/pull/931))
-- deduplicate string-form openQuestions in merge\_saved\_results ([#951](https://github.com/openai/codex-security/pull/951))
-- emit structured JSON errors for failed scans ([#709](https://github.com/openai/codex-security/pull/709))
-- preserve undecided findings after model refusals ([#960](https://github.com/openai/codex-security/pull/960))
+- return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
+- keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
+- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
+- bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
+- bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
+- patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
+- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
+- include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
+- propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
+- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
+- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
+- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
+- calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
+- preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
+- create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
+- require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
+- bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
+- bump the codex group across 3 directories with 2 updates ([#1076](https://github.com/openai/codex-security/pull/1076))
+- default CLI and SDK to GPT-6 Sol xhigh ([#1078](https://github.com/openai/codex-security/pull/1078))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->

@@ -9,6 +9,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { capture } from "./cli-fixtures.js";
 
 interface WorkflowStep {
   name?: string;
@@ -41,28 +42,12 @@ async function workflow(name: string) {
   };
 }
 
-function capture(): {
-  stream: Pick<NodeJS.WriteStream, "write">;
-  text: () => string;
-} {
-  let value = "";
-  return {
-    stream: {
-      write(chunk: string | Uint8Array): boolean {
-        value += chunk.toString();
-        return true;
-      },
-    },
-    text: () => value,
-  };
-}
-
 describe("TypeScript package skeleton", () => {
   test("pins one Codex version across the CLI, MCP app, and evals", async () => {
     const directories = [
       "sdk/typescript",
       "plugins/codex-security/mcp-app",
-      "plugins/codex-security/skills/triage-finding/evals",
+      "evals/triage-finding",
     ];
     const manifests = await Promise.all(
       directories.map(async (directory) =>
@@ -191,6 +176,7 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["required-test"]?.name).toBe("${{ matrix.os }} / node-22");
     expect(jobs["required-test"]?.needs).toEqual([
       "validate-title",
+      "workflow-quality",
       "static-checks",
       "package",
       "test",
@@ -198,11 +184,13 @@ describe("TypeScript package skeleton", () => {
       "mcp",
       "plugin-host",
       "plugin-source",
+      "container-validate",
     ]);
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
       "static-checks",
       "plugin-host",
+      "plugin-source",
       "windows-test",
       "windows-verify",
     ]);
@@ -233,9 +221,48 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
-        run: "node sdk/typescript/scripts/run-ci-tests.mjs ${{ matrix.shard }}/7",
+        run: "node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts ${{ matrix.shard }}/7",
       }),
     );
+  });
+
+  test("covers the Python runtime floor and native platform paths", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const job = jobs["plugin-source"]!;
+    expect(job.strategy?.matrix["include"]).toEqual([
+      ...["3.10", "3.12", "3.14"].map((python) => ({
+        os: "ubuntu-latest",
+        python,
+        tests: "plugins/codex-security/tests",
+      })),
+      {
+        os: "macos-latest",
+        python: "3.12",
+        tests: "plugins/codex-security/tests/test_workbench_scan_usage.py",
+      },
+      {
+        os: "windows-latest",
+        python: "3.12",
+        tests: "plugins/codex-security/tests/test_windows_scan_local_files.py",
+      },
+    ]);
+    const testStep = job.steps!.find(
+      ({ name }) => name === "Test Python source contracts",
+    )!;
+    expect(testStep.env?.["PYTHON_TEST_PATH"]).toBe("${{ matrix.tests }}");
+    expect(testStep.run).toContain('python -m pytest "$PYTHON_TEST_PATH"');
+    expect(testStep).not.toHaveProperty("if");
+    expect(testStep).not.toHaveProperty("continue-on-error");
+    for (const name of [
+      "Install plugin dependencies",
+      "Build SDK and type-check eval tooling",
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+        "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
+      );
+    }
+    expect(jobs["required-test"]?.needs).toContain("plugin-source");
+    expect(jobs["windows"]?.needs).toContain("plugin-source");
   });
 
   test("checks one archive and restores its plugin before every test shard", async () => {
@@ -308,6 +335,7 @@ describe("TypeScript package skeleton", () => {
       ["Check plugin source boundary", "package"],
       ["Typecheck", "static-checks"],
       ["Check formatting", "static-checks"],
+      ["Check MCP formatting", "static-checks"],
     ] as const) {
       expect(steps.filter((step) => step.name === name)).toHaveLength(1);
       expect(jobs[job]!.steps!.some((step) => step.name === name)).toBe(true);
@@ -330,6 +358,19 @@ describe("TypeScript package skeleton", () => {
     ).toContain(
       "-n 4 --dist worksteal --max-worker-restart 0 --durations=30 --junitxml=reports/python.xml",
     );
+  });
+
+  test("runs Windows native proofs with and without symbolic-link privileges", async () => {
+    const { jobs } = await workflow("native-windows.yml");
+    const job = jobs["primitives"]!;
+    expect(job.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe("required");
+    const restricted = job.steps!.find(
+      (step) => step.name === "Verify Windows proofs without symbolic links",
+    );
+    expect(restricted?.env?.["CODEX_SECURITY_TEST_WINDOWS_SYMLINKS"]).toBe(
+      "disabled",
+    );
+    expect(restricted).not.toHaveProperty("continue-on-error");
   });
 
   test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
@@ -452,7 +493,7 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
-  test("keeps production dependency audits non-blocking in CI and releases", async () => {
+  test("blocks CI and releases when the production dependency audit fails", async () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
       const { jobs } = await workflow(workflowName);
       const audits = Object.values(jobs)
@@ -460,7 +501,7 @@ describe("TypeScript package skeleton", () => {
         .filter((step) => step.name === "Audit production dependencies");
       expect(audits.length).toBeGreaterThan(0);
       for (const audit of audits) {
-        expect(audit["continue-on-error"]).toBe(true);
+        expect(audit).not.toHaveProperty("continue-on-error");
         expect(audit.run).toMatch(
           /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
         );
@@ -485,20 +526,20 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("provides executable help and version behavior", async () => {
-    const stdout = capture();
-    const stderr = capture();
+    const stdout = capture(null);
+    const stderr = capture(null);
     expect(await main([], stdout.stream, stderr.stream)).toBe(0);
     expect(stdout.text()).toContain("Usage: codex-security <command>");
     expect(stdout.text()).toContain("Integrations:");
     expect(stderr.text()).toBe("");
 
-    const versionOutput = capture();
+    const versionOutput = capture(null);
     expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
       0,
     );
     expect(versionOutput.text()).toBe(`${VERSION}\n`);
 
-    const scanHelpOutput = capture();
+    const scanHelpOutput = capture(null);
     expect(
       await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
     ).toBe(0);
