@@ -616,7 +616,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     result = git_command(
         repo,
         "diff",
-        "--name-status",
+        "--raw",
         "-z",
         "--diff-filter=ACMRDT",
         *diff_args,
@@ -630,13 +630,16 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     changed: list[tuple[Path, str]] = []
     index = 0
     while index < len(fields):
-        status = chr(fields[index][0])
+        metadata = fields[index].split()
+        status = chr(metadata[-1][0])
         index += 1
         if status in {"C", "R"}:
             index += 1
         path = repo / os.fsdecode(fields[index])
         index += 1
-        changed.append((path, status))
+        selected_mode = metadata[0].removeprefix(b":") if status == "D" else metadata[1]
+        if selected_mode.startswith(b"100"):
+            changed.append((path, status))
     return changed
 
 
