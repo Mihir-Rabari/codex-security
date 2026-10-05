@@ -50,7 +50,7 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
     ).replaceAll(sep, "/");
     await writeFile(
       environment["GIT_CONFIG_GLOBAL"]!,
-      '[includeIf "gitdir:**/alias/.git"]\npath = identity\n',
+      `[includeIf "gitdir:${kind.startsWith("relative") ? `${repository.replaceAll(sep, "/")}/${environment["GIT_DIR"]}` : "**/alias/.git"}"]\npath = identity\n`,
     );
     await writeFile(
       join(directory, "identity"),
