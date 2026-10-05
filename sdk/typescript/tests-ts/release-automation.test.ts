@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
 
@@ -4836,13 +4836,33 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test("imports maintainer utilities from a Node stdin module", () => {
-  const result = spawnSync("node", ["--input-type=module", "-"], {
-    cwd: resolve(import.meta.dir, ".."),
-    input:
-      'import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from "../../plugins/codex-security/native/check.mjs"; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);',
-    encoding: "utf8",
-  });
-  expect(result.status).toBe(0);
-  expect(result.stdout.trim()).toBe("function function function function");
+test("imports maintainer utilities from a Node stdin module", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
+  const packageRoot = resolve(import.meta.dir, "..");
+  try {
+    const build = await runCommand(
+      "node",
+      [
+        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+        "--project",
+        join(packageRoot, "tsconfig.ci.json"),
+        "--outDir",
+        workspace,
+      ],
+      { timeout: 30_000 },
+    );
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+    const checker = pathToFileURL(
+      join(workspace, "plugins/codex-security/native/check.mjs"),
+    ).href;
+    const result = spawnSync("node", ["--input-type=module", "-"], {
+      cwd: packageRoot,
+      input: `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`,
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("function function function function");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
