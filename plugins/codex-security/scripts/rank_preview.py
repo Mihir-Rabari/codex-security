@@ -320,15 +320,13 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             continue
         if heredoc_terminator:
             if index == 0 or text[index - 1] == "\n":
-                line_end = text.find("\n", index)
-                if line_end < 0:
-                    line_end = len(text)
-                closing = re.match(
-                    rf"[ \t]*{re.escape(heredoc_terminator)}(?!\w)", text[index:line_end]
-                )
-                if closing:
-                    masked.extend(" " * closing.end())
-                    index += closing.end()
+                # PHP identifiers allow every non-ASCII byte, including non-word characters.
+                terminator_match = re.compile(
+                    rf"[ \t]*{heredoc_terminator}(?![A-Za-z0-9_\x80-\U0010ffff])"
+                ).match(text, index)
+                if terminator_match:
+                    masked.extend(" " * (terminator_match.end() - index))
+                    index = terminator_match.end()
                     heredoc_terminator = ""
                     continue
             masked.append(" ")
@@ -397,6 +395,11 @@ def mask_c_style_source(text: str, suffix: str) -> str:
             masked.extend((" ", " "))
             quote = '@"'
             index += 2
+            continue
+        if suffix == ".go" and char == "`":
+            masked.append(" ")
+            raw_terminator = "`"
+            index += 1
             continue
         triple_quote = text[index : index + 3]
         if triple_quote in {'"""', "'''"}:
