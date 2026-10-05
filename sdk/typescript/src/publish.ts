@@ -484,6 +484,13 @@ export async function publishScanInternal(
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+      ...evidence.flatMap((item) =>
+        item.source === "handoff" &&
+        item.status === "invalid" &&
+        item.ownerFindingId === undefined
+          ? [item.error]
+          : [],
+      ),
     ];
     await preserveConnectorEvents();
     if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);

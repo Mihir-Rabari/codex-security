@@ -99,6 +99,42 @@ test("retains indeterminate publication evidence when reading the handoff fails"
   expect(await readFile(`${file}.saved`, "utf8")).toContain("SEC-123");
 });
 
+test("preserves unreadable handoff diagnostics when every connector outcome failed", async () => {
+  const publication = preparedPublication();
+  const receipts: PublishScanResult[] = [];
+  const injected = dependencies(
+    publication,
+    {},
+    {
+      runCodex: async (_command, _args, input) => {
+        const file = publicationData(input).handoffFile;
+        await rename(file, `${file}.saved`);
+        await mkdir(file);
+        return {
+          exitCode: 0,
+          stdout: issueEvent(publication.issues[0]!, {
+            status: "failed",
+            error: "Synthetic connector failure",
+          }),
+          stderr: "",
+        };
+      },
+      writeReceipt: async (receipt) => {
+        receipts.push(structuredClone(receipt));
+      },
+    },
+  );
+  await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
+    "EISDIR",
+  );
+  expect(receipts.length).toBeGreaterThan(0);
+  for (const receipt of receipts) {
+    expect(receipt.indeterminate).toBe(true);
+    expect(receipt.warnings?.join(" ")).toContain("EISDIR");
+    expect(receipt.failed[0]?.error).toBe("Synthetic connector failure");
+  }
+});
+
 function issueMapping(record: Record<string, unknown>) {
   return [record["findingId"], record["issueIdentifier"]];
 }
