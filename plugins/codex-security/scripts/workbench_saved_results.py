@@ -598,7 +598,7 @@ def _worker_candidate_key(
         identity = normalized.get("identity")
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
+    return worker_id, candidate_id, finding.get("ruleId"), _encoded(anchor), _encoded(instance)
 
 
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
@@ -2049,7 +2049,7 @@ def merge_saved_results(
                     )
             canonical_candidate = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
-                if key not in represented and worker_id and candidate_id
+                if worker_id and candidate_id
                 else None
             )
             if not represented_by_parent and not (
