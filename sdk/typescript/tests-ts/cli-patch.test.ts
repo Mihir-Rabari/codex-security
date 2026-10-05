@@ -3850,10 +3850,18 @@ describe("patch publication integrity", () => {
     "nested objects",
     "nested common",
     "nested alternates",
+    "nested relative alternates",
+    "nested component relative alternates",
+    "nested quoted relative alternates",
+    "nested gitfile relative alternates",
     "nested replacements",
     "nested replacement namespace",
   ])("detects local patches in %s Git repositories", async (kind) => {
     const directory = await fixtures.create("patch-git-state-");
+    const selectedDirectory = kind.includes("component")
+      ? join(directory, "component")
+      : directory;
+    if (selectedDirectory !== directory) await mkdir(selectedDirectory);
     const git = repositoryGit(directory);
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
@@ -3864,21 +3872,37 @@ describe("patch publication integrity", () => {
     if (kind.startsWith("nested")) {
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
-      const nested = join(directory, "nested");
+      const nested = join(selectedDirectory, "nested");
       await mkdir(nested);
       const inner = repositoryGit(nested);
-      inner("init", "--initial-branch=main");
+      inner(
+        "init",
+        "--initial-branch=main",
+        ...(kind.includes("gitfile")
+          ? ["--separate-git-dir", join(directory, ".git", "nested-metadata")]
+          : []),
+      );
+      if (kind.includes("gitfile")) inner("config", "core.worktree", nested);
       inner("config", "user.name", "Synthetic User");
       inner("config", "user.email", "synthetic@example.test");
       await writeFile(join(nested, "app.ts"), "unsafe\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic nested baseline");
-      if (kind === "nested alternates") {
-        const pool = await fixtures.create("patch-shared-objects-");
+      if (kind.includes("alternates")) {
+        const pool = await fixtures.create(
+          kind.includes("quoted")
+            ? `patch-shared${delimiter}objects-`
+            : "patch-shared-objects-",
+        );
         alternateObjects = join(pool, "objects");
-        await rename(join(nested, ".git", "objects"), alternateObjects);
-        await mkdir(join(nested, ".git", "objects"));
+        const gitDirectory = inner("rev-parse", "--absolute-git-dir");
+        await rename(join(gitDirectory, "objects"), alternateObjects);
+        await mkdir(join(gitDirectory, "objects"));
         expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
+        if (kind.includes("relative"))
+          alternateObjects = relative(directory, alternateObjects);
+        if (kind.includes("quoted"))
+          alternateObjects = JSON.stringify(alternateObjects);
       }
       if (kind.startsWith("nested replacement")) {
         const original = inner("rev-parse", "HEAD^{tree}");
@@ -3897,7 +3921,7 @@ describe("patch publication integrity", () => {
           ? { GIT_OBJECT_DIRECTORY: join(directory, ".git", "objects") }
           : kind === "nested common"
             ? { GIT_COMMON_DIR: join(directory, ".git") }
-            : kind === "nested alternates"
+            : kind.includes("alternates")
               ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }
               : kind === "nested replacements"
                 ? { GIT_NO_REPLACE_OBJECTS: "1" }
@@ -3905,14 +3929,14 @@ describe("patch publication integrity", () => {
                   ? { GIT_REPLACE_REF_BASE: "refs/synthetic-replacements/" }
                   : {};
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: directory,
+      currentDirectory: selectedDirectory,
       onRepositoryCommand: (command, args, cwd, options) =>
         runGitRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { ...gitEnvironment, ...options?.environment },
         }),
       onCodex: async (_args, output) => {
-        await writeFile(join(directory, path), "fixed\n");
+        await writeFile(join(selectedDirectory, path), "fixed\n");
         output?.stdout.write("Fixed and checked.");
         return 0;
       },

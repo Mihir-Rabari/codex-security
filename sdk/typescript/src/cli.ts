@@ -7373,12 +7373,22 @@ async function nestedPatchGitDependencies(
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
+  // Keep relative alternate-object paths in the selected repository's Git context.
+  const directory = await patchRepositoryRoot(repository, dependencies);
   return {
     ...dependencies,
     runRepositoryCommand: (command, args, checkout, options) =>
       dependencies.runRepositoryCommand(
         command,
-        ["-C", checkout, ...args],
+        [
+          "-C",
+          directory,
+          "--git-dir",
+          join(checkout, ".git"),
+          "--work-tree",
+          checkout,
+          ...args,
+        ],
         root,
         {
           ...options,
