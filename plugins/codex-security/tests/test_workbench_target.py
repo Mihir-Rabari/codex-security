@@ -101,6 +101,31 @@ def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     assert directory_content_digest(target) == original_digest
 
 
+@pytest.mark.parametrize("scope", [".", "component"])
+def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scope: str) -> None:
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    (target / "component").mkdir()
+    (target / "component" / "app.py").write_text("print('fixture')\n")
+    (target / "root.py").write_text("print('root')\n")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    scoped = target / scope
+    selected = alias / scope
+    expected = [
+        selected / path.relative_to(scoped)
+        for path in WORKBENCH_TARGET["git_directory_snapshot_paths"](scoped)
+    ]
+
+    paths = WORKBENCH_TARGET["git_directory_snapshot_paths"](selected)
+    assert [str(path) for path in paths] == [str(path) for path in expected]
+    original_digest = directory_content_digest(selected)
+    assert original_digest == directory_content_digest(scoped)
+    (selected / "changed.py").write_text("print('changed')\n")
+    assert directory_content_digest(selected) == directory_content_digest(scoped)
+    assert directory_content_digest(selected) != original_digest
+
+
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str]
@@ -349,11 +374,14 @@ def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
     assert repository.samefile(target)
     assert pathspec == "."
+    assert directory_content_digest(alias) == directory_content_digest(target)
     scoped = target / "component"
     scoped.mkdir()
+    (scoped / "app.py").write_text("print('fixture')\n")
     repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
     assert repository.samefile(target)
     assert (repository / pathspec).samefile(scoped)
+    assert directory_content_digest(alias / "COMPONENT") == directory_content_digest(scoped)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")

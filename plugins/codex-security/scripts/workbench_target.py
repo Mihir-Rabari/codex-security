@@ -543,7 +543,6 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         relative = Path(os.fsdecode(raw_path))
-        path = repository / relative
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -560,7 +559,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
                 continue
-            path = scope.joinpath(*relative.parts[scope_depth:])
+        path = target.joinpath(*relative.parts[scope_depth:])
         try:
             metadata = path.lstat()
         except FileNotFoundError:
