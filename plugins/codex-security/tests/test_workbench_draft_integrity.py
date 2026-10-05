@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from itertools import permutations
 from pathlib import Path
 
 import pytest
@@ -787,6 +788,115 @@ def test_restored_identity_does_not_absorb_a_sibling_without_candidate(
         stop_draft(root, state, home, scan_id, deep=source == "worker", retry=retry)
         findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
         assert {finding["title"] for finding in findings} == {"Alpha", "Beta"}
+
+
+@pytest.mark.parametrize("same_location", [False, True])
+@pytest.mark.parametrize("normalized_field", ["anchor", "ruleId"])
+def test_restored_history_uses_normalized_identity(
+    tmp_path: Path, same_location: bool, normalized_field: str
+):
+    observed = []
+    for retry in (False, True):
+        root = tmp_path / str(retry)
+        root.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(root, deep=True)
+        template = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan_dir / name).unlink()
+        _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
+        draft = json.loads(path.read_text())
+        first = json.loads(json.dumps(template))
+        first.pop("identity")
+        first["title"] = "Alpha"
+        first["provenance"]["candidateId"] = "candidate-a"
+        if normalized_field == "ruleId":
+            first["ruleId"] = "." + first["ruleId"]
+        historical = json.loads(json.dumps(first))
+        historical["identity"] = {"anchor": ".beta" if normalized_field == "anchor" else "beta"}
+        first["provenance"]["previousFindings"] = [historical]
+        second = json.loads(json.dumps(template))
+        second.update(title="Beta", identity={"anchor": "beta"})
+        second["provenance"]["candidateId"] = "candidate-b"
+        if not same_location:
+            second["locations"][0]["startLine"] += 1
+            second["locations"][0]["endLine"] += 1
+        draft["findings"] = [first, second]
+        path.write_text(json.dumps(draft))
+        stop_draft(root, state, home, scan_id, deep=True, retry=retry)
+        scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        findings = scan["findings"]
+        assert len(findings) == 2
+        assert {finding["title"] for finding in findings} == {"Alpha", "Beta"}
+        if normalized_field == "ruleId":
+            assert any("normalized rule identifier" in warning for warning in scan["warnings"])
+        saved = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        alpha = next(finding for finding in saved if finding["title"] == "Alpha")
+        assert alpha["provenance"]["previousFindings"][0]["identity"] == historical["identity"]
+        assert alpha["provenance"]["previousFindings"][0]["ruleId"] == historical["ruleId"]
+        observed.append({finding["title"]: finding["identity"] for finding in findings})
+    assert observed[0] == observed[1]
+
+
+@pytest.mark.parametrize("candidate_count", [1, 2])
+@pytest.mark.parametrize("candidate_scope", ["candidate", "worker"])
+def test_candidate_less_identity_preserves_ambiguous_candidates(
+    tmp_path: Path, candidate_count: int, candidate_scope: str
+):
+    observed = []
+    for order in permutations(range(candidate_count + 1)):
+        for retry in (False, True):
+            root = tmp_path / f"{order}-{retry}"
+            root.mkdir()
+            state, home, scan_dir, scan_id = draft_fixture(root)
+            path = scan_dir / "findings.json"
+            draft = json.loads(path.read_text())
+            template = draft["findings"][0]
+            template.update(title="Synthetic finding", identity={"anchor": "synthetic-finding"})
+            items = []
+            for index in range(candidate_count + 1):
+                finding = json.loads(json.dumps(template))
+                finding["severity"]["level"] = (
+                    "high" if index == 1 and index < candidate_count else "low"
+                )
+                finding["provenance"].pop("candidateId", None)
+                if index < candidate_count:
+                    finding.pop("identity")
+                    finding["provenance"]["candidateId"] = (
+                        f"candidate-{index}" if candidate_scope == "candidate" else "candidate"
+                    )
+                    if candidate_scope == "worker":
+                        finding["provenance"]["workerId"] = f"worker-{index}"
+                items.append(finding)
+            draft["findings"] = [items[index] for index in order]
+            path.write_text(json.dumps(draft))
+            stop_draft(root, state, home, scan_id, retry=retry)
+            findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+            if candidate_count == 1:
+                assert len(findings) == 1
+                assert findings[0]["identity"] == {"anchor": "synthetic-finding"}
+                continue
+            assert len(findings) == 3
+            current = {
+                (finding["provenance"].get("candidateId"), finding["provenance"].get("workerId")): (
+                    finding["identity"],
+                    finding["severity"]["level"],
+                )
+                for finding in findings
+            }
+            known = (
+                [("candidate-0", None), ("candidate-1", None)]
+                if candidate_scope == "candidate"
+                else [("candidate", "worker-0"), ("candidate", "worker-1")]
+            )
+            assert set(current) == {(None, None), *known}
+            assert current[(None, None)] == ({"anchor": "synthetic-finding"}, "low")
+            assert current[known[0]][1] == "low"
+            assert current[known[1]][1] == "high"
+            assert (
+                len({json.dumps(identity, sort_keys=True) for identity, _ in current.values()}) == 3
+            )
+            observed.append(current)
+    assert all(current == observed[0] for current in observed)
 
 
 @pytest.mark.parametrize("worker_history", [False, True])

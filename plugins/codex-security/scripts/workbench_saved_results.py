@@ -1338,6 +1338,18 @@ def merge_saved_results(
         previous_candidate = finding_candidate_id(previous)
         current_owner = finding.get("provenance", {}).get("workerId") or current_owner
         previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
+        key = _finding_key(recovered_finding(finding) or finding)
+        if bool(current_candidate) != bool(previous_candidate):
+            owner = previous_owner if current_candidate else current_owner
+            owner = owner if isinstance(owner, str) else None
+            return (
+                sum(
+                    (1 if owner else len(owners) or 1)
+                    for (candidate_key, _), owners in candidate_owners.items()
+                    if candidate_key == key and (not owner or not owners or owner in owners)
+                )
+                > 1
+            )
         return bool(
             current_candidate
             and previous_candidate
@@ -1346,8 +1358,7 @@ def merge_saved_results(
                 or (current_owner and previous_owner and current_owner != previous_owner)
                 or (
                     bool(current_owner) != bool(previous_owner)
-                    and len(candidate_owners.get((_finding_key(finding), current_candidate), set()))
-                    > 1
+                    and len(candidate_owners.get((key, current_candidate), set())) > 1
                 )
             )
         )
@@ -1370,7 +1381,7 @@ def merge_saved_results(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
-    def valid_finding(value: Any) -> bool:
+    def recovered_finding(value: Any) -> dict[str, Any] | None:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
@@ -1383,7 +1394,7 @@ def merge_saved_results(
             scan_dir,
             [],
         )
-        return bool(document["findings"])
+        return next(iter(document["findings"]), None)
 
     def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
         provenance = finding.get("provenance", {})
@@ -1408,43 +1419,44 @@ def merge_saved_results(
                     observations.setdefault(
                         saved_identity_key(retained, retained_owner), []
                     ).append((retained, retained_owner))
-                    if valid_finding(retained):
-                        key = _finding_key(retained)
+                    if recovered := recovered_finding(retained):
+                        key = _finding_key(recovered)
                         candidate = finding_candidate_id(retained)
                         finding_owner = retained["provenance"].get("workerId") or retained_owner
-                        if candidate and isinstance(finding_owner, str) and finding_owner:
-                            candidate_owners.setdefault((key, candidate), set()).add(finding_owner)
+                        if candidate:
+                            owners = candidate_owners.setdefault((key, candidate), set())
+                            if isinstance(finding_owner, str) and finding_owner:
+                                owners.add(finding_owner)
                         if isinstance(retained.get("identity"), dict):
                             explicit_identities.setdefault(key, []).append(
-                                (retained, retained_owner)
+                                (recovered, retained_owner)
                             )
     restorations = []
     for matches in observations.values():
         identities = {
-            _encoded([finding["identity"], finding["provenance"].get("preservedIdentity")]): (
-                finding["identity"],
+            _encoded([recovered["identity"], finding["provenance"].get("preservedIdentity")]): (
+                recovered["identity"],
                 finding["provenance"].get("preservedIdentity"),
             )
             for finding, _ in matches
-            if isinstance(finding.get("identity"), dict) and valid_finding(finding)
+            if isinstance(finding.get("identity"), dict)
+            and (recovered := recovered_finding(finding))
         }
         raw = next((item for item in matches if "identity" not in item[0]), None)
         if len(identities) != 1 or raw is None:
             for finding, owner in matches:
-                if "identity" not in finding and valid_finding(finding):
-                    normalized = dict(finding)
-                    _ensure_finding_identity(normalized)
+                if "identity" not in finding and (normalized := recovered_finding(finding)):
                     explicit_identities.setdefault(_finding_key(normalized), []).append(
                         (normalized, owner)
                     )
             continue
         identity, preserved = next(iter(identities.values()))
-        normalized = dict(raw[0])
+        normalized = recovered_finding(raw[0]) or dict(raw[0])
         _ensure_finding_identity(normalized)
         restorations.append((matches, identity, preserved, raw, normalized))
         if preserved is None and normalized["identity"] != identity:
             explicit_identities.setdefault(_finding_key(normalized), []).append(
-                ({**raw[0], "identity": identity}, raw[1])
+                ({**normalized, "identity": identity}, raw[1])
             )
     for matches, identity, preserved, raw, normalized in restorations:
         if (
@@ -1598,7 +1610,7 @@ def merge_saved_results(
         for finding in draft["findings"]:
             if (
                 isinstance(finding, dict)
-                and valid_finding(finding)
+                and recovered_finding(finding)
                 and (candidate_id := finding_candidate_id(finding))
             ):
                 outcomes.append((relative, owner, candidate_id, "reported"))
@@ -1638,7 +1650,7 @@ def merge_saved_results(
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
         for finding in parent["findings"]:
-            if valid_finding(finding):
+            if recovered_finding(finding):
                 canonical_key = _finding_key(finding)
                 for retained, _ in _retained_findings(finding):
                     retained_key = _finding_key(retained)
@@ -1834,7 +1846,9 @@ def merge_saved_results(
         skip_superseded_findings = (
             superseded
             and not stopped
-            and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
+            and all(
+                recovered_finding(finding) for finding in (parent["findings"] if parent else [])
+            )
         )
         if skip_superseded_findings and not selected_candidates and not retain_pending:
             continue
@@ -1898,7 +1912,7 @@ def merge_saved_results(
                 ):
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
-                if valid_finding(finding):
+                if recovered_finding(finding):
                     key = _finding_key(finding)
                     position = candidate_position_key(finding, key)
                     finding_positions.setdefault(position, len(findings))
@@ -1953,7 +1967,7 @@ def merge_saved_results(
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             _ensure_finding_identity(finding)
-            if not valid_finding(finding):
+            if not recovered_finding(finding):
                 findings.append(finding)
                 continue
             key = _finding_key(finding)
@@ -2129,19 +2143,34 @@ def merge_saved_results(
 
     identities: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     reserved_identities = {
-        _encoded([finding.get("ruleId"), finding.get("identity")]).decode()
+        _encoded([recovered["ruleId"], recovered["identity"]]).decode()
         for finding in findings
-        if isinstance(finding, dict)
+        if (recovered := recovered_finding(finding))
     }
     # Explicit identities across all sources take priority over inferred identities.
-    for finding in sorted(findings, key=lambda finding: id(finding) in inferred_identities):
-        if not valid_finding(finding):
+    for finding in sorted(
+        findings,
+        key=lambda finding: (
+            id(finding) in inferred_identities,
+            _encoded(
+                [
+                    _finding_key(recovered),
+                    finding_candidate_id(finding),
+                    finding["provenance"].get("workerId"),
+                ]
+            )
+            if id(finding) in inferred_identities and (recovered := recovered_finding(finding))
+            else b"",
+        ),
+    ):
+        recovered = recovered_finding(finding)
+        if recovered is None:
             continue
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue
-        key = _encoded([finding.get("ruleId"), identity]).decode()
-        variant = _finding_key(finding)
+        key = _encoded([recovered["ruleId"], recovered["identity"]]).decode()
+        variant = _finding_key(recovered)
         assigned = identities.setdefault(key, [])
         matching = next(
             (
@@ -2163,14 +2192,19 @@ def merge_saved_results(
             finding.setdefault("provenance", {}).setdefault(
                 "preservedIdentity", copy.deepcopy(identity)
             )
-            base_instance = identity.get("instance", "saved")
+            base_instance = recovered["identity"].get("instance", "saved")
             prefix = (
                 f"{base_instance}-{variant[:16]}" if previous_variant != variant else base_instance
             )
             suffix = 1 if previous_variant != variant else 2
             while True:
                 identity["instance"] = prefix if suffix == 1 else f"{prefix}-{suffix}"
-                instance_key = _encoded([finding.get("ruleId"), identity]).decode()
+                instance_key = _encoded(
+                    [
+                        recovered["ruleId"],
+                        {**recovered["identity"], "instance": identity["instance"]},
+                    ]
+                ).decode()
                 if instance_key not in reserved_identities:
                     reserved_identities.add(instance_key)
                     break
