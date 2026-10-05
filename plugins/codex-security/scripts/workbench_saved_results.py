@@ -560,7 +560,7 @@ def _finding_identity(finding: dict[str, Any]) -> Any:
     )
 
 
-def _finding_key(finding: dict[str, Any]) -> str:
+def _finding_key(finding: dict[str, Any], owner: str | None = None) -> str:
     # Wording and evidence may improve between checkpoints; distinct source locations
     # must not collide merely because two workers chose the same semantic identity.
     provenance = finding.get("provenance")
@@ -570,7 +570,7 @@ def _finding_key(finding: dict[str, Any]) -> str:
         normalized.pop("identity", None)
         _ensure_finding_identity(normalized)
         identity = normalized["identity"]
-    owner = provenance.get("workerId") if isinstance(provenance, dict) else None
+    owner = provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
     parts = [finding.get("ruleId"), identity, _finding_locations(finding)]
     if owner is not None and finding_candidate_id(finding):
         parts.append(owner)
@@ -1397,14 +1397,10 @@ def merge_saved_results(
                 ],
                 key=_encoded,
             )
-        return _digest([owner, content])
+        return _digest([owner, _identity_candidate(finding), content])
 
     def restore_legacy_identity(finding: Any, normalized: Any = None) -> None:
-        if (
-            isinstance(finding, dict)
-            and "identity" not in finding
-            and not finding_candidate_id(finding)
-        ):
+        if isinstance(finding, dict) and "identity" not in finding:
             provenance = finding.get("provenance")
             owner = provenance.get("workerId") if isinstance(provenance, dict) else None
             identity = legacy_identities.get(legacy_identity_key(finding, owner))
@@ -1436,11 +1432,7 @@ def merge_saved_results(
                 continue
             for saved in _retained_findings(value):
                 identity = saved.get("identity")
-                if (
-                    not isinstance(identity, dict)
-                    or finding_candidate_id(saved)
-                    or not valid_finding(saved)
-                ):
+                if not isinstance(identity, dict) or not valid_finding(saved):
                     continue
                 provenance = saved.get("provenance")
                 saved_owner = (
@@ -1874,6 +1866,20 @@ def merge_saved_results(
                 group["identity"] = value["identity"]
             published_groups = ordered
 
+    # An absorbed source represents every reconciled version of that worker report.
+    for group in logical_rows:
+        destinations = set()
+        for value in group["rows"]:
+            history_key = _finding_key(value)
+            if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
+                destinations.add(represented.get(history_key))
+            elif group["owner"] and (candidate_id := finding_candidate_id(value)):
+                candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
+                if candidate_key in represented_candidates:
+                    destinations.add(represented_candidates[candidate_key])
+        if len(destinations) == 1 and None not in destinations:
+            group["parent_key"] = destinations.pop()
+
     generated_worker_findings: list[dict[str, Any]] = []
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
@@ -2059,6 +2065,9 @@ def merge_saved_results(
                 if group is not None and group["identity"] is None
                 else _finding_key(finding)
             )
+            if group is not None:
+                key = group.setdefault("merge_key", key)
+                key = group.get("parent_key", key)
             represented_by_parent = False
             if relative != "parent":
                 history_key = _finding_key(value)
@@ -2119,10 +2128,10 @@ def merge_saved_results(
                     ]:
                         if not isinstance(original, dict):
                             continue
-                        source_key = _finding_key(original)
+                        source_key = _finding_key(original, worker_id)
                         source_content = _finding_content(original)
                         already_retained = any(
-                            source_key == _finding_key(historical)
+                            source_key == _finding_key(historical, worker_id)
                             and source_content == _finding_content(historical)
                             for historical in _retained_findings(retained)
                         )

@@ -413,3 +413,203 @@ for (const layout of ["standard", "diff"]) {
     assert.deepEqual(result.warnings, []);
   });
 }
+
+test("deep: explicit worker identity survives candidate enrichment", async (t) => {
+  const normal = await fixture(t, "deep"),
+    recovered = await fixture(t, "deep");
+  const nwroot = path.join(normal.root, "reviewer"),
+    rwroot = path.join(recovered.root, "reviewer");
+  await mkdir(nwroot);
+  await mkdir(rwroot);
+  const nw = draftFixture(nwroot, "worker"),
+    rw = draftFixture(rwroot, "worker");
+  const first = finding("First review", {
+    identity: { anchor: "authored-review" },
+  });
+  const second = {
+    ...first,
+    provenance: { ...first.provenance, candidateId: "candidate-1" },
+  };
+  await nw.write({ ...nw.draft(), findings: [first] });
+  await rw.write({ ...rw.draft(), findings: [first] });
+  await nw.write({ ...nw.draft(), findings: [second] });
+  await draftApi.saveScanDraftCheckpoint(
+    rw.context,
+    { ...rw.draft(), findings: [second] },
+    false,
+  );
+  const result = JSON.parse(
+    await readFile(path.join(nwroot, "result.json"), "utf8"),
+  );
+  await normal.write({
+    ...normal.draft(),
+    findings: result.findings.map((row) => ({
+      ...row,
+      provenance: { ...row.provenance, workerId: "reviewer" },
+    })),
+  });
+  const comparison = await recoverAndFinalize(normal, recovered, [
+    {
+      id: "reviewer",
+      kind: "discovery",
+      artifact_dir: rwroot,
+      result_manifest_path: null,
+      attempt: 1,
+    },
+  ]);
+  assert.equal(comparison.normal.length, 1);
+  assert.deepEqual(comparison.recovered, comparison.normal);
+  assert.deepEqual(comparison.warnings, []);
+});
+
+for (const layout of ["standard", "diff", "worker"]) {
+  for (const variant of [
+    "reportId",
+    "ledgerRowId",
+    "metadata enrichment",
+    "authored identity",
+    "retained sibling",
+  ]) {
+    test(`${layout}: checkpoint reconciliation preserves ${variant}`, async (t) => {
+      const normal = await fixture(t, layout === "worker" ? "deep" : layout);
+      const recovered = await fixture(t, layout === "worker" ? "deep" : layout);
+      let normalSource = normal,
+        recoveredSource = recovered;
+      const workers = [];
+      if (layout === "worker") {
+        for (const f of [normal, recovered])
+          await mkdir(path.join(f.root, "reviewer"));
+        normalSource = draftFixture(
+          path.join(normal.root, "reviewer"),
+          "worker",
+        );
+        recoveredSource = draftFixture(
+          path.join(recovered.root, "reviewer"),
+          "worker",
+        );
+        workers.push({
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: recoveredSource.root,
+          result_manifest_path: null,
+          attempt: 1,
+        });
+      }
+      const first = finding("First review", {
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+      });
+      let second = structuredClone(first);
+      if (["reportId", "ledgerRowId", "authored identity"].includes(variant)) {
+        const field = variant === "authored identity" ? "reportId" : variant;
+        first.extensions = { [field]: "report-1" };
+        second.extensions = { [field]: "report-2" };
+      }
+      if (variant === "metadata enrichment")
+        second.extensions = { reportId: "report-1" };
+      if (variant === "authored identity") {
+        first.identity = { anchor: "authored-review" };
+        second.identity = { anchor: "authored-review" };
+      }
+      if (variant === "retained sibling") second.title = "Second review";
+      const initial =
+        variant === "retained sibling" ? [first, second] : [first];
+      for (const f of [normalSource, recoveredSource])
+        await f.write({ ...f.draft(), findings: initial });
+      await normalSource.write({
+        ...normalSource.draft({}, true),
+        findings: [second],
+      });
+      await draftApi.saveScanDraftCheckpoint(
+        recoveredSource.context,
+        { ...recoveredSource.draft({}, true), findings: [second] },
+        false,
+      );
+      if (layout === "worker") {
+        const saved = JSON.parse(
+          await readFile(path.join(normalSource.root, "result.json"), "utf8"),
+        );
+        await normal.write({
+          ...normal.draft(),
+          findings: saved.findings.map((row) => ({
+            ...row,
+            provenance: { ...row.provenance, workerId: "reviewer" },
+          })),
+        });
+      }
+      const result = await recoverAndFinalize(normal, recovered, workers);
+      const count = ["metadata enrichment", "authored identity"].includes(
+        variant,
+      )
+        ? 1
+        : 2;
+      assert.equal(result.normal.length, count);
+      assert.equal(result.recovered.length, count);
+      if (variant === "retained sibling")
+        assert.deepEqual(result.normal.map((row) => row.title).sort(), [
+          "First review",
+          "Second review",
+        ]);
+      const ordered = (rows) =>
+        rows.sort((left, right) =>
+          left.findingId.localeCompare(right.findingId),
+        );
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep"])
+  for (const metadata of ["provenance", "extensions"]) {
+    test(`${layout}: candidate-backed canonical duplicate without identity (${metadata})`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const input = finding("Synthetic review", {
+        [metadata]: {
+          ...(metadata === "provenance" ? { source: "local_plugin" } : {}),
+          candidateId: "candidate-1",
+        },
+      });
+      for (const f of [normal, recovered])
+        await f.write({ ...f.draft(), findings: [input] });
+      const dest = path.join(recovered.root, "findings.json");
+      const doc = JSON.parse(await readFile(dest, "utf8"));
+      const duplicate = structuredClone(doc.findings[0]);
+      delete duplicate.identity;
+      doc.findings.push(duplicate);
+      await writeFile(dest, JSON.stringify(doc));
+      const result = await recoverAndFinalize(normal, recovered);
+      assert.equal(result.normal.length, 1);
+      assert.deepEqual(result.recovered, result.normal);
+    });
+  }
+
+for (const layout of ["standard", "diff", "deep"])
+  for (const metadata of ["provenance", "extensions"]) {
+    test(`${layout}: raw candidate identity remains distinct when content matches (${metadata})`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const one = finding("Synthetic review", {
+        [metadata]: {
+          ...(metadata === "provenance" ? { source: "local_plugin" } : {}),
+          candidateId: "candidate-1",
+        },
+      });
+      const two = {
+        ...one,
+        [metadata]: { ...one[metadata], candidateId: "candidate-2" },
+      };
+      await normal.write({ ...normal.draft(), findings: [one, two] });
+      await recovered.write({ ...recovered.draft(), findings: [one] });
+      const dest = path.join(recovered.root, "findings.json");
+      const doc = JSON.parse(await readFile(dest, "utf8"));
+      const second = structuredClone(doc.findings[0]);
+      delete second.identity;
+      second[metadata].candidateId = "candidate-2";
+      doc.findings.push(second);
+      await writeFile(dest, JSON.stringify(doc));
+      const result = await recoverAndFinalize(normal, recovered);
+      assert.equal(result.normal.length, 2);
+      assert.deepEqual(result.recovered, result.normal);
+    });
+  }

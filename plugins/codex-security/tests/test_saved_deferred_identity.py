@@ -828,3 +828,67 @@ def test_worker_report_metadata_enrichment_matches_published_identity(
             "instance": "report-1",
         }
     assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("metadata", ["provenance", "extensions"])
+def test_parent_represents_worker_versions_before_candidate_enrichment(
+    tmp_path, saved_results, metadata
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    latest = {**first, metadata: {**first.get(metadata, {}), "candidateId": "candidate-1"}}
+    reduced = {
+        **latest,
+        "summary": "Consolidated evidence.",
+        "provenance": {
+            **latest["provenance"],
+            "sourceFindingIds": ["reviewer:0"],
+            "sourceFindings": [{"id": "reviewer:0", "finding": latest}],
+        },
+    }
+    parent = {**reduced, "identity": {"anchor": "candidate-1"}}
+    write_saved_parent(
+        tmp_path, saved_draft("identity-scan", findings=[parent], complete=True), 2000
+    )
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "reviewer",
+        [saved_draft("identity-scan", findings=[first])],
+        saved_draft("identity-scan", findings=[latest], complete=True),
+    )
+    output = tmp_path / "reducer"
+    output.mkdir()
+    draft = {"scanId": "identity-scan", "complete": True, "findings": [reduced]}
+    result = output / "result.json"
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(1500, 1500))
+    checkpoint = write_checkpoint(output / "checkpoints", draft)
+    os.utime(checkpoint, ns=(1500, 1500))
+    reducer = {
+        "id": "reducer",
+        "kind": "dedup",
+        "status": "succeeded",
+        "completed_at": "2026-05-31T18:08:00Z",
+        "artifact_dir": str(output),
+        "result_manifest_path": str(result),
+        "attempt": 1,
+    }
+    documents = recover(tmp_path, saved_results, [worker, reducer])
+    replay = recover(
+        tmp_path, saved_results, [worker, reducer], documents[0]["scan"]["preservedSources"]
+    )
+    for recovered in (documents, replay):
+        assert len(recovered[1]["findings"]) == 1
+        assert recovered[1]["findings"][0]["summary"] == "Consolidated evidence."
+        assert recovered[1]["findings"][0]["identity"] == {"anchor": "candidate-1"}
+    assert documents[1] == replay[1]

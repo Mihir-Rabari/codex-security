@@ -301,10 +301,15 @@ describe("plugin runtime preparation", () => {
       /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
         runtime,
       )?.[0];
+    const candidateSource =
+      /function findingIdentityCandidate\(finding\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
     expect(source).toBeDefined();
+    expect(candidateSource).toBeDefined();
     const buildFindings = new Function(
       "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
+      `${candidateSource}\n${source}\nreturn buildFindings;`,
     )((value: string, fallback: string) => value || fallback) as (
       findings: Array<{
         title: string;

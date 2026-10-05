@@ -676,8 +676,9 @@ async function preserveScanDraft(
       );
       if (
         matches.length === 1 &&
-        source.findings.filter((current) => sameSavedFinding(current, finding))
-          .length === 1
+        source.findings.filter((current) =>
+          sameSavedFinding(current, matches[0]!),
+        ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
       } else if (containing.length === 1) {
@@ -1557,6 +1558,20 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
     leftExplicitCandidate &&
     rightExplicitCandidate &&
     leftExplicitCandidate !== rightExplicitCandidate
+  )
+    return false;
+  // Report identifiers distinguish siblings that share the same candidate.
+  const reportIds = ["reportId", "ledgerRowId"].map((field) =>
+    [left, right].map((finding) => {
+      const value = (finding.extensions as JsonObject | undefined)?.[field];
+      return typeof value === "string" && value.trim() ? value : undefined;
+    }),
+  );
+  if (
+    reportIds.some(([left]) => left) &&
+    reportIds.some(([, right]) => right) &&
+    (!reportIds.some(([left, right]) => left && right) ||
+      reportIds.some(([left, right]) => left && right && left !== right))
   )
     return false;
   const leftCandidate = findingCandidateId(left);
