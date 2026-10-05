@@ -1276,6 +1276,8 @@ def _reconcile_stopped_diff_sources(
         project(parent, None) if parent else None,
         [(relative, project(draft, owner), owner) for relative, draft, owner in sources],
     )
+
+
 def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
     rows = coverage.get("deferred", [])
     return rows if isinstance(rows, list) else []
@@ -2086,10 +2088,15 @@ def merge_saved_results(
             if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
                 ambiguous_deferred.add((owner, identity))
             by_id[identity] = row
-    current_drafts = [(relative, draft, None) for relative, draft, owner in sources
-                      if draft in decision_drafts] + ([("parent", parent, None)] if parent else []) + [
-        source for source in sources if source[0] in current_results | selected_observations.keys()
-    ]
+    current_drafts = (
+        [(relative, draft, None) for relative, draft, owner in sources if draft in decision_drafts]
+        + ([("parent", parent, None)] if parent else [])
+        + [
+            source
+            for source in sources
+            if source[0] in current_results | selected_observations.keys()
+        ]
+    )
     # Generic closures belong to one logical scan or worker, just like candidates.
     # Keep them when recovering a terminal checkpoint without its canonical write.
     closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
@@ -2550,7 +2557,7 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             if worker_id:
-                _bind_finding_worker(finding, worker_id, source_value)
+                _bind_finding_worker(finding, worker_id, value)
             _ensure_finding_identity(finding)
             if not valid_finding(finding):
                 findings.append(finding)
@@ -2732,7 +2739,8 @@ def merge_saved_results(
                             if field == "deferred"
                             else None,
                         )
-                    ) in pending_resolved
+                    )
+                    in pending_resolved
                     and (
                         field == "deferred"
                         or (
