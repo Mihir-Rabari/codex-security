@@ -7501,6 +7501,7 @@ async function snapshotGitPatchState(
       }
       await enclosingGitWorktreeRoot(checkout, undefined, {
         requireIfPresent: true,
+        protectedRoot: repository,
       });
     }
     const gitDependencies = directory
