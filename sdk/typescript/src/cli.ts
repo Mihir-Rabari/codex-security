@@ -7971,14 +7971,14 @@ export function skillCommandFailure(
     advice = authenticationFailureMessage(authentication);
   } else if (
     classification === "forbidden" &&
-    /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b|\bpermissions? to use (?:this |the )?model\b/iu.test(
+    /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b|\bpermissions? to use (?:this |the )?model\b/iu.test(
       detail,
     )
   ) {
     advice = "The selected model is unavailable for the current credentials.";
   } else if (
     classification === "rate_limited" ||
-    /\btokens[ _-]per[ _-]minute\b/iu.test(detail)
+    /\btokens[ ._-]per[ ._-]minute\b/iu.test(detail)
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (

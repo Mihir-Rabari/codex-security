@@ -3,6 +3,11 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout] = process.argv.slice(2);
+const refusalMessages = {
+  "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-prefix-text": "Safety policy: request refused.",
+  "policy-suffix-text": "Request refused: safety policy.",
+};
 const turnFailures = {
   "policy-turn-code": {
     message: "Request blocked.",
@@ -167,7 +172,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
-      scenario === "refusal-text" ||
+      Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -182,10 +187,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           turnId,
           item: {
             type: "agentMessage",
-            text:
-              scenario === "refusal-text"
-                ? "I'm sorry, but I can't assist with that request."
-                : '{"decision":"SAME"}',
+            text: refusalMessages[scenario] ?? '{"decision":"SAME"}',
           },
         },
       });

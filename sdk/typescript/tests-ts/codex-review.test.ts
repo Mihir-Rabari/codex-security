@@ -28,6 +28,8 @@ const failureReasons: Record<string, string> = {
   "policy-turn": "Request flagged for possible cybersecurity risk.",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-prefix-text": "Safety policy: request refused.",
+  "policy-suffix-text": "Request refused: safety policy.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -518,6 +520,8 @@ test.each([
   "Required source revision could not be read.",
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
+  "Ordinary safety policy documentation",
+  "Network request failed due to connectivity policy.",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {

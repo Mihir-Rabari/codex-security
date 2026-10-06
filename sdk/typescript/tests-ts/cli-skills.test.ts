@@ -1282,6 +1282,8 @@ process.stdout.write(JSON.stringify({
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       ["invalid.api.key", "Authentication failed"],
       ["token.expired", "Authentication failed"],
+      ["model.not.found", "selected model is unavailable"],
+      ["model.access", "selected model is unavailable"],
       [
         "403 model access denied /private/repository",
         "selected model is unavailable",
@@ -1293,12 +1295,14 @@ process.stdout.write(JSON.stringify({
       ],
       ["tokens-per-minute limit exceeded", "rate limited"],
       ["tokens_per_minute limit exceeded", "rate limited"],
+      ["tokens.per.minute", "rate limited"],
       [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
       ["ENOTFOUND /private/repository", "could not connect"],
       ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
+      ["timed_out", "could not connect"],
       ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
     ];
     for (const [detail, expected] of cases) {

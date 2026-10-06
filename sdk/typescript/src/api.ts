@@ -4485,7 +4485,7 @@ export function classifyConnectionFailure(
     return "unauthorized";
   }
   if (
-    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel(?:[._ -]?not[._ -]?found|[._ -]access)\b/iu.test(
       message,
     )
   ) {
@@ -4498,7 +4498,7 @@ export function classifyConnectionFailure(
   ) {
     return "network_error";
   }
-  if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
+  if (/\b(?:timed?[._ -]out|timeout)\b/iu.test(message)) return "timeout";
   return "unknown";
 }
 
