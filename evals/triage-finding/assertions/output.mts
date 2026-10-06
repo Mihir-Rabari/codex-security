@@ -42,12 +42,33 @@ export function extractJson(
       : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
   if (requireSingle) {
     candidates.length = 0;
+    const fences: Array<{ start: number; end: number }> = [];
+    let opening: { start: number; marker: string } | undefined;
+    for (const line of text.matchAll(/^.*$/gm)) {
+      if (opening) {
+        const closing = new RegExp(
+          `^ {0,3}${opening.marker[0]}{${opening.marker.length},}[ \\t]*\\r?$`,
+        );
+        if (closing.test(line[0])) {
+          fences.push({
+            start: opening.start,
+            end: line.index + line[0].length,
+          });
+          opening = undefined;
+        }
+      } else {
+        const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line[0]);
+        if (marker) opening = { start: line.index, marker: marker[1] };
+      }
+    }
+    if (opening) fences.push({ start: opening.start, end: text.length });
+    const inFence = (index: number) =>
+      fences.some((fence) => index >= fence.start && index < fence.end);
     const references = new Set(
-      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*\S+/gm)].map(
-        (match) => match[1],
-      ),
+      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*\S+/gm)]
+        .filter((match) => !inFence(match.index))
+        .map((match) => match[1]),
     );
-    const fences = [...text.matchAll(/```(?:json)?\s*[\s\S]*?```/gi)];
     let citationEnd = 0;
     let depth = 0;
     let start = 0;
@@ -57,15 +78,7 @@ export function extractJson(
       if (match.index < citationEnd) continue;
       if (depth === 0 && match[0] === "[") {
         const shortcut = /^\[(\d+)\]/u.exec(text.slice(match.index));
-        if (
-          shortcut &&
-          references.has(shortcut[1]) &&
-          !fences.some(
-            (fence) =>
-              match.index >= fence.index &&
-              match.index < fence.index + fence[0].length,
-          )
-        ) {
+        if (shortcut && references.has(shortcut[1]) && !inFence(match.index)) {
           citationEnd = match.index + shortcut[0].length;
           continue;
         }

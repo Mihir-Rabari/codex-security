@@ -140,6 +140,8 @@ for (const answer of [
   `\`\`\`json\n${JSON.stringify([connectorDecision])}\n\`\`\``,
   `${JSON.stringify(connectorDecision)}\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}`,
   `${JSON.stringify(connectorDecision)}\n[1]`,
+  `${JSON.stringify(connectorDecision)}\n[1]\n\`\`\`text\n[1]: references/github-rest-intake.md\n\`\`\``,
+  `${JSON.stringify(connectorDecision)}\n[1]: references/github-rest-intake.md\n~~~json\n[1]\n~~~`,
   `Use the connector [1].\n[1]: references/github-rest-intake.md\n${JSON.stringify(connectorDecision)}\n\`\`\`json\n[1]\n\`\`\``,
   `\`\`\`json\n${JSON.stringify(connectorDecision)}\n\`\`\`\n\`\`\`json\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}\n\`\`\``,
 ]) {
