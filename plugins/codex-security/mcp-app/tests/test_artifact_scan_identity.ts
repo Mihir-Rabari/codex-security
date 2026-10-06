@@ -150,6 +150,7 @@ async function recoverAndFinalize(
   recovered: RecoveredFinding[];
   warnings: unknown[];
   historySummaries: string[];
+  preservedIdentities: unknown[][];
 }> {
   const { stdout } = await execFileAsync(
     process.env.PYTHON?.trim() || "python3",
@@ -172,12 +173,14 @@ if json.loads(sys.argv[7]):
  assert replayed == recovery, 'Frozen recovery changed the retained documents'
 ordinary=(manifest,json.loads((normal/'findings.json').read_text()),coverage)
 results=[]
+preserved_identities=[]
 for root,documents in [(normal,ordinary),(recovered,recovery)]:
  documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status='failed',startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
  for document in documents[1:]: document['scanId']=scan_id
  prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
+ preserved_identities.append([row.get('provenance',{}).get('preservedIdentity') for row in prepared[3]['findings']])
  results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'occurrenceId':row['occurrenceId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'evidenceProvenance':{key:row.get('provenance',{}).get(key,[]) for key in ['sourceFindingIds','sourceFindings','previousFindings','originalCandidates']}} if json.loads(sys.argv[8]) else {}),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared[3]['findings']])
-print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings,'historySummaries':[previous.get('summary') for row in recovery[1]['findings'] for previous in row.get('provenance',{}).get('previousFindings',[]) if isinstance(previous,dict)]}))`,
+print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings,'preservedIdentities':preserved_identities,'historySummaries':[previous.get('summary') for row in recovery[1]['findings'] for previous in row.get('provenance',{}).get('previousFindings',[]) if isinstance(previous,dict)]}))`,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       normal.root,
       recovered.root,
@@ -2904,5 +2907,98 @@ for (const evidence of ["identical", "distinct", "reordered"] as const) {
       assert.deepEqual(ordered(result.recovered), ordered(result.normal));
       assert.deepEqual(result.warnings, []);
     });
+  }
+}
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const cut of ["raw", "result"]) {
+    for (const [metadata, preservedIdentity] of Object.entries({
+      note: "Synthetic annotation",
+      incomplete: { description: "Synthetic annotation" },
+      valid: {
+        anchor: "authored",
+        description: "Synthetic identity annotation",
+      },
+    })) {
+      test(`${layout}: preserved identity metadata ${metadata} survives ${cut} interruption`, async (t) => {
+        const normal = await fixture(t, layout === "worker" ? "deep" : layout);
+        const recovered = await fixture(
+          t,
+          layout === "worker" ? "deep" : layout,
+        );
+        let writer: DraftFixture = normal,
+          recoveryWriter: DraftFixture = recovered;
+        if (layout === "worker") {
+          for (const f of [normal, recovered])
+            await mkdir(path.join(f.root, "reviewer"));
+          writer = draftFixture(path.join(normal.root, "reviewer"), "worker");
+          recoveryWriter = draftFixture(
+            path.join(recovered.root, "reviewer"),
+            "worker",
+          );
+        }
+        const initial = finding("Synthetic preserved identity review", {
+          identity:
+            metadata === "valid" ? preservedIdentity : { anchor: "authored" },
+          provenance: {
+            source: "local_plugin",
+            candidateId: "candidate-1",
+            preservedIdentity,
+            ...(layout === "worker" ? { workerId: "reviewer" } : {}),
+          },
+        });
+        for (const f of [writer, recoveryWriter])
+          await f.write({ ...f.draft(), findings: [initial] });
+        await dateDraftFiles(recoveryWriter.root, 100);
+        const revised = {
+          ...initial,
+          summary: "Revised synthetic assessment.",
+          severity: { level: "high" },
+        };
+        delete revised.identity;
+        await writer.write({ ...writer.draft(), findings: [revised] });
+        const filename = layout === "worker" ? "result.json" : "findings.json";
+        if (cut === "raw")
+          await draftApi.saveScanDraftCheckpoint(
+            recoveryWriter.context,
+            { ...recoveryWriter.draft(), findings: [revised] },
+            false,
+          );
+        else
+          await interruptDraftWrite(
+            path.join(recoveryWriter.root, filename),
+            () =>
+              recoveryWriter.write({
+                ...recoveryWriter.draft(),
+                findings: [revised],
+              }),
+          );
+        const saved = JSON.parse(
+          await readFile(path.join(writer.root, filename), "utf8"),
+        );
+        assert.equal(saved.findings.length, 1);
+        assert.equal(saved.findings[0].severity.level, "high");
+        assert.deepEqual(
+          saved.findings[0].provenance.preservedIdentity,
+          preservedIdentity,
+        );
+        if (layout === "worker")
+          await normal.write({ ...normal.draft(), findings: saved.findings });
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          layout === "worker" ? [savedWorker(recoveryWriter.root)] : [],
+          true,
+          true,
+        );
+        assert.deepEqual(result.preservedIdentities, [
+          [preservedIdentity],
+          [preservedIdentity],
+        ]);
+        assert.equal(result.normal.length, 1);
+        assert.deepEqual(result.recovered, result.normal);
+        assert.deepEqual(result.warnings, []);
+      });
+    }
   }
 }

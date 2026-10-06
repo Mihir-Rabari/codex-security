@@ -63,6 +63,9 @@ _PUBLICATION_FOLLOW_UP_WARNING = (
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
+_FINDING_IDENTITY_SCHEMA = _read_json(
+    Path(__file__).resolve().parent.parent / "schemas" / "findings.schema.json"
+)["properties"]["findings"]["items"]["properties"]["identity"]
 
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
@@ -553,11 +556,16 @@ def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
 
 def _finding_identity(finding: dict[str, Any]) -> Any:
     provenance = finding.get("provenance")
-    return (
-        provenance.get("preservedIdentity", finding.get("identity"))
-        if isinstance(provenance, dict)
-        else finding.get("identity")
-    )
+    if isinstance(provenance, dict) and "preservedIdentity" in provenance:
+        try:
+            _validate_schema_node(
+                provenance["preservedIdentity"], _FINDING_IDENTITY_SCHEMA, "finding.identity"
+            )
+        except ContractError:
+            pass
+        else:
+            return provenance["preservedIdentity"]
+    return finding.get("identity")
 
 
 def _finding_key(finding: dict[str, Any], owner: str | None = None) -> str:
