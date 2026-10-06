@@ -2188,3 +2188,90 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     });
   }
 }
+
+for (const additional of ["none", "surface", "task", "completed-surface"]) {
+  test(`worker: resolved linked candidate replay preserves completion (${additional})`, async (t) => {
+    const f = await fixture(t, "worker");
+    const surface = {
+      id: "api",
+      label: "API",
+      disposition: "needs_follow_up",
+      receiptRefs: [],
+    };
+    const progress = f.draft({
+      surfaces: [surface],
+      deferred: [
+        {
+          id: "review",
+          candidateId: "candidate-review",
+          surfaceIds: [surface.id],
+          reason: "Review candidate.",
+        },
+      ],
+    });
+    await f.write(progress);
+    await f.write({
+      ...f.draft({}, true),
+      findings: [findingFor("candidate-review")],
+    });
+    const { importSource } = await import("./import-module.ts");
+    const { validateDiscoveryArtifacts } = await importSource(
+      "../src/deep-scan/artifact-validation.ts",
+      { absWorkingDir: import.meta.dirname },
+    );
+    const validate = () =>
+      validateDiscoveryArtifacts(
+        { workersRoot: f.root },
+        path.join(f.root, "result.json"),
+        f.context.scanId,
+      );
+    await validate();
+    if (additional === "surface")
+      (progress.coverage.surfaces as Record<string, unknown>[]).push({
+        id: "independent",
+        label: "Independent review",
+        disposition: "needs_follow_up",
+      });
+    if (additional === "task")
+      (progress.coverage.deferred as Record<string, unknown>[]).push({
+        id: "independent",
+        surfaceIds: [surface.id],
+        reason: "Independent review remains.",
+      });
+    if (additional === "completed-surface") {
+      Object.assign(
+        (progress.coverage.surfaces as Record<string, unknown>[])[0],
+        {
+          disposition: "no_issue_found",
+          notes: "Additional completed surface evidence.",
+        },
+      );
+      (progress.coverage.deferred as Record<string, unknown>[]).push({
+        id: "other-task",
+        reason: "Independent review remains.",
+      });
+    }
+    await f.write(progress);
+    const saved = await readJson(f.root, "result.json");
+    assert.equal(saved.complete, additional === "none");
+    assert.equal(saved.findings.length, 1);
+    if (additional === "completed-surface")
+      assert.deepEqual(saved.coverage.surfaces, progress.coverage.surfaces);
+    if (additional === "none") {
+      await validate();
+      assert.ok(
+        !saved.coverage.surfaces.some(
+          (row: Record<string, unknown>) => row.id === surface.id,
+        ),
+      );
+    } else {
+      await assert.rejects(validate(), /only a checkpoint/);
+      assert.ok(
+        saved.coverage.surfaces.some(
+          (row: Record<string, unknown>) =>
+            row.id === (additional === "surface" ? "independent" : surface.id),
+        ),
+      );
+    }
+  });
+}

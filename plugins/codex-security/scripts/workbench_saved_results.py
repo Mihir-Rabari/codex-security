@@ -1666,7 +1666,9 @@ def merge_saved_results(
     if parent:
         for finding in parent["findings"]:
             if valid_finding(finding):
-                canonical_key = _finding_key(finding)
+                canonical = copy.deepcopy(finding)
+                restore_legacy_identity(canonical)
+                canonical_key = _finding_key(canonical)
                 for retained in _retained_findings(finding):
                     retained_key = _finding_key(retained)
                     if retained is not finding:

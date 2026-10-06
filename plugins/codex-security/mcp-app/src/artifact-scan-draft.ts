@@ -540,6 +540,22 @@ async function preserveScanDraft(
           keepsGenericWork(row) ||
           !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
       );
+      const pending = new Set(deferred);
+      const linked = (row: JsonObject, surface: JsonObject) =>
+        row.id === surface.id ||
+        ((row.surfaceIds as string[] | undefined) ?? []).includes(
+          surface.id as string,
+        );
+      progress.coverage.surfaces = (
+        progress.coverage.surfaces as JsonObject[]
+      ).filter(
+        (surface) =>
+          surface.disposition !== "needs_follow_up" ||
+          !(progress.coverage.deferred as JsonObject[]).some(
+            (row) => !pending.has(row) && linked(row, surface),
+          ) ||
+          deferred.some((row) => linked(row, surface)),
+      );
       const reopenedIds = new Set(
         deferred.flatMap((row) =>
           [row.id, row.candidateId].filter(
@@ -585,13 +601,7 @@ async function preserveScanDraft(
                 reopenedIds.has(
                   (surface.candidateId ?? surface.id) as string,
                 ) ||
-                deferred.some(
-                  (row) =>
-                    row.id === surface.id ||
-                    ((row.surfaceIds as string[] | undefined) ?? []).includes(
-                      surface.id as string,
-                    ),
-                )),
+                deferred.some((row) => linked(row, surface))),
           ),
         },
         [result.coverage],

@@ -3226,3 +3226,51 @@ for (const reversed of [false, true]) {
     );
   });
 }
+
+for (const missing of [false, true]) {
+  test(`standard: restored parent absorbs worker with missing identity=${missing}`, async (t) => {
+    const normal = await fixture(t, "standard"),
+      recovered = await fixture(t, "standard");
+    const source = finding("Synthetic worker review", {
+      provenance: { source: "local_plugin", candidateId: "worker-candidate" },
+    });
+    const parent = finding("Consolidated review", {
+      identity: { anchor: "consolidated-review" },
+      provenance: {
+        source: "local_plugin",
+        candidateId: "parent-candidate",
+        sourceFindingIds: ["reviewer:0"],
+        sourceFindings: [{ id: "reviewer:0", finding: source }],
+      },
+    });
+    for (const f of [normal, recovered])
+      await f.write({ ...f.draft({}, true), findings: [parent] });
+    if (missing) {
+      const file = path.join(recovered.root, "findings.json");
+      const saved = JSON.parse(await readFile(file, "utf8"));
+      delete saved.findings[0].identity;
+      await writeFile(file, JSON.stringify(saved));
+    }
+    const workerRoot = path.join(recovered.root, "reviewer");
+    await mkdir(workerRoot);
+    const worker = draftFixture(workerRoot, "worker");
+    await worker.write({ ...worker.draft({}, true), findings: [source] });
+    for (const name of ["scan-manifest.json", "findings.json", "coverage.json"])
+      await utimes(path.join(recovered.root, name), 2, 2);
+    for (const name of await readdir(path.join(recovered.root, "checkpoints")))
+      await utimes(path.join(recovered.root, "checkpoints", name), 1.5, 1.5);
+    await utimes(path.join(workerRoot, "result.json"), 1, 1);
+    const result = await recoverAndFinalize(normal, recovered, [
+      {
+        id: "reviewer",
+        kind: "discovery",
+        artifact_dir: workerRoot,
+        result_manifest_path: null,
+        attempt: 1,
+      },
+    ]);
+    assert.equal(result.normal.length, 1);
+    assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(result.warnings, []);
+  });
+}
