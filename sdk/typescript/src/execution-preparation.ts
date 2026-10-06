@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { accountStatus, configuredCodexHome } from "./auth.js";
+import {
+  accountStatus,
+  configuredCodexHome,
+  readCodexHomeConfig,
+} from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { isRecord } from "./record.js";
 import {
@@ -19,6 +22,7 @@ import {
   bedrockProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
+  writeCodexConfigContents,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
@@ -41,8 +45,6 @@ import {
 import {
   codexSecurityStateDirectory,
   acquireCodexSecurityCredentialHomeLock,
-  acquireCodexHomeConfigurationLock,
-  readCodexHomeConfiguration,
   environmentWithGit,
   executablePathForSpawn,
   pluginExecutionEnvironment,
@@ -56,6 +58,7 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
 } from "./runtime.js";
+import { createExecutionProfileCodex } from "./execution-profile.js";
 import { createPermissionCheckedCodex } from "./permission-profile.js";
 import type { ScanAuthMode } from "./scan-settings.js";
 import type { InspectedExecutable } from "./trusted-executable.js";
@@ -182,32 +185,17 @@ export interface PreparedExecution {
   releaseCredentialHome: (() => Promise<void>) | null;
 }
 
-/** Hold the shared home until native startup reads this scan's config, then restore it. */
+/** Coordinate the managed credential home during its existing startup preflight. */
 export async function lockExecutionConfiguration(
   codexHome: string,
   config: JsonObject,
   signal?: AbortSignal,
-  preserveExistingConfiguration = false,
 ): Promise<() => Promise<void>> {
-  const release = await (
-    preserveExistingConfiguration
-      ? acquireCodexHomeConfigurationLock
-      : acquireCodexSecurityCredentialHomeLock
-  )(codexHome, signal);
-  const path = join(codexHome, "config.toml");
-  const originalEntry = join(
+  const release = await acquireCodexSecurityCredentialHomeLock(
     codexHome,
-    `.${randomUUID()}.original-config.toml`,
+    signal,
   );
-  let savedEntry = false;
-  const restore = async () => {
-    if (savedEntry) {
-      await rename(originalEntry, path);
-      savedEntry = false;
-    } else {
-      await rm(path, { force: true });
-    }
-  };
+  const path = join(codexHome, "config.toml");
   try {
     const previous = await readFile(path).catch(
       (error: NodeJS.ErrnoException) => {
@@ -215,29 +203,13 @@ export async function lockExecutionConfiguration(
         throw error;
       },
     );
-    if (previous !== null) {
-      await rename(path, originalEntry);
-      savedEntry = true;
-    }
-    try {
-      await writeCodexConfig(
-        path,
-        preserveExistingConfiguration && previous !== null
-          ? deepMerge(
-              parseToml(previous.toString("utf8")) as JsonObject,
-              config,
-            )
-          : config,
-      );
-    } catch (error) {
-      await restore();
-      throw error;
-    }
+    await writeCodexConfig(path, config);
     let restoration: Promise<void> | undefined;
     return () =>
       (restoration ??= (async () => {
         try {
-          await restore();
+          if (previous === null) await rm(path, { force: true });
+          else await writeCodexConfigContents(path, previous);
         } finally {
           await release();
         }
@@ -291,15 +263,17 @@ export function createExecutionCodex(
   ) {
     launchConfig["model_providers"] = sessionConfig["model_providers"]!;
   }
-  const launch = runtime.preserveCodexHomeConfig
+  const nativeTransport =
+    client.createCodex === undefined || runtime.preserveCodexHomeConfig;
+  const launch = nativeTransport
     ? providerProcessConfiguration(launchConfig, environment)
     : { config: launchConfig, environment };
   const sdkCodexConfig = { ...launch.config };
   Object.assign(environment, launch.environment);
-  const mcpLaunch = runtime.preserveCodexHomeConfig
+  const mcpLaunch = nativeTransport
     ? mcpProcessConfiguration(sdkCodexConfig)
     : { config: sdkCodexConfig, requiresConfigFile: false };
-  const providerLaunch = runtime.preserveCodexHomeConfig
+  const providerLaunch = nativeTransport
     ? bedrockProcessConfiguration(mcpLaunch.config)
     : { config: mcpLaunch.config, requiresConfigFile: false };
   const processConfig = { ...providerLaunch.config };
@@ -357,16 +331,24 @@ export function createExecutionCodex(
   }
   const createCodex =
     client.createCodex ??
-    (checkPermissions
-      ? createPermissionCheckedCodex
-      : ({ config, configOverrides, ...options }: CodexOptions) =>
-          new Codex({
-            ...options,
-            configOverrides: [
-              ...codexConfigOverrides((config ?? {}) as JsonObject),
-              ...(configOverrides ?? []),
-            ],
-          }));
+    ((options: CodexOptions) => {
+      if (requiresConfigFile && runtime.preserveCodexHomeConfig)
+        return createExecutionProfileCodex(
+          options,
+          runtime.codexHome,
+          sdkCodexConfig,
+          checkPermissions,
+        );
+      if (checkPermissions) return createPermissionCheckedCodex(options);
+      const { config, configOverrides, ...settings } = options;
+      return new Codex({
+        ...settings,
+        configOverrides: [
+          ...codexConfigOverrides((config ?? {}) as JsonObject),
+          ...(configOverrides ?? []),
+        ],
+      });
+    });
   const codex = createCodex({
     ...(codexPathOverride === undefined
       ? {}
@@ -395,14 +377,14 @@ export function createExecutionCodex(
     async runStreamed(input, options) {
       return {
         events: (async function* () {
-          let release: (() => Promise<void>) | undefined = !requiresConfigFile
-            ? undefined
-            : await lockExecutionConfiguration(
-                runtime.codexHome,
-                sdkCodexConfig,
-                options.signal,
-                runtime.preserveCodexHomeConfig,
-              );
+          let release =
+            requiresConfigFile && !runtime.preserveCodexHomeConfig
+              ? await lockExecutionConfiguration(
+                  runtime.codexHome,
+                  sdkCodexConfig,
+                  options.signal,
+                )
+              : undefined;
           const controller = deepWorker ? new AbortController() : undefined;
           const forwardAbort = () => controller?.abort(options.signal?.reason);
           const detach = () =>
@@ -586,9 +568,7 @@ export async function nativeScanConfiguration(
   },
   subagents: number,
 ): Promise<JsonObject> {
-  const ambient = await readCodexHomeConfiguration(
-    environment["CODEX_HOME"] || configuredCodexHome(environment),
-  );
+  const ambient = await readCodexHomeConfig(environment);
   const selected = environment["CODEX_SECURITY_CONFIG_PATH"]
     ? parseToml(
         await readFile(environment["CODEX_SECURITY_CONFIG_PATH"], "utf8"),
@@ -596,9 +576,7 @@ export async function nativeScanConfiguration(
     : {};
   const config = scanCompositionOverrides(
     deepMerge(
-      resolveCodexProfile(
-        deepMerge(parseToml(ambient) as JsonObject, selected as JsonObject),
-      ),
+      resolveCodexProfile(deepMerge(ambient, selected as JsonObject)),
       (input.recipe?.["config"] as JsonObject | undefined) ?? {},
     ),
     subagents,

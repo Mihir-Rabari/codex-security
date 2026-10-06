@@ -1,5 +1,4 @@
 import * as childProcess from "node:child_process";
-import { Database } from "bun:sqlite";
 import {
   chmod,
   lstat,
@@ -25,7 +24,6 @@ import {
   prepareMergeExecution,
   prepareExecutionSource,
   nativeScanConfiguration,
-  lockExecutionConfiguration,
   type PreparedExecution,
 } from "../src/execution-preparation.js";
 import { disabledMcpServers } from "../src/scan-comparison.js";
@@ -41,6 +39,7 @@ afterEach(cleanup);
 
 test.each([
   { entry: "regular", mode: 0o700, configMode: 0o600 },
+  { entry: "regular", mode: 0o700, configMode: 0o600, replay: true },
   { entry: "regular", mode: 0o700, configMode: 0o400 },
   { entry: "regular", mode: 0o755, configMode: 0o600 },
   ...(process.platform === "win32"
@@ -48,7 +47,7 @@ test.each([
     : [{ entry: "linked", mode: 0o700, configMode: 0o600 }]),
 ])(
   "native credentials retain private transport across worker roles, resumes, and concurrent scans: %j",
-  async ({ entry, mode, configMode }) => {
+  async ({ entry, mode, configMode, replay = false }) => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home, { mode });
@@ -93,12 +92,13 @@ const fs = require("node:fs");
 const {parse} = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
 const args = process.argv.slice(2), config = parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,"config.toml"),"utf8"));
 const merge = (target,value) => { for(const [key,child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {},child) : child; return target; };
+if(args.includes("--profile")) merge(config,parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,args[args.indexOf("--profile")+1]+".config.toml"),"utf8")));
 for(let i=0;i<args.length;i++) if(["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
 if(args.includes("mcp")) { fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n"); console.log("[]"); process.exit(0); }
 const provider = config["model_providers"].synthetic;
 const headers = {...provider["http_headers"]};
 for(const [key,name] of Object.entries(provider["env_http_headers"] ?? {})) { const value=process.env[name]; if(value?.trim()) headers[key]=value; }
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,config,headers,mcpServers:config.mcp_servers,bearer:process.env[provider["env_key"]],unused:process.env[config["model_providers"].unused["env_key"]],privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,ambientContents:fs.readFileSync(${JSON.stringify(configEntry)},"utf8"),config,headers,mcpServers:config.mcp_servers,bearer:process.env[provider["env_key"]],unused:process.env[config["model_providers"].unused["env_key"]],privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
 if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
  const request=JSON.parse(line); if(request.id===undefined)return;
  const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};
@@ -110,6 +110,9 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
     const spawn = spyOn(childProcess, "spawn").mockImplementation(
       fixtureSpawn(executablePathForSpawn(executable), script, () => {}),
     );
+    const managedHome = join(root, "managed-home");
+    if (replay) await mkdir(managedHome, { mode: 0o700 });
+    const runtimeHome = replay ? managedHome : home;
     const snapshots: JsonObject[] = [];
     try {
       const sessions = ["first", "second"].map((name) => {
@@ -160,13 +163,17 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           policy: "ordinary",
           source,
           inheritedPermissions: permissions,
-          runtime: { ...preparedRuntime(home), preserveCodexHomeConfig: true },
-          runtimeHome: home,
+          runtime: {
+            ...preparedRuntime(runtimeHome),
+            preserveCodexHomeConfig: !replay,
+          },
+          runtimeConfig: replay ? {} : undefined,
+          runtimeHome,
           effectiveConfig: configuration,
           preflightConfig: {},
           sessionConfig: scanRuntimeCodexConfig(
             configuration,
-            home,
+            runtimeHome,
             permissions,
           ),
           authentication: source.authentication,
@@ -244,6 +251,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
         );
         expect(selected).toHaveLength(8);
         for (const row of selected) {
+          expect(row.ambientContents).toBe(originalContents);
           expect(row.args.join("\n")).not.toContain("synthetic-first-");
           expect(row.args.join("\n")).not.toContain("synthetic-second-");
           expect(row.unused).toBe(`synthetic-${name}-unused`);
@@ -413,6 +421,7 @@ test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
 const fs=require("node:fs"), {parse}=require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
 const args=process.argv.slice(2), config=parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,"config.toml"),"utf8"));
 const merge=(target,value)=>{for(const [key,child]of Object.entries(value)) target[key]=child&&typeof child==="object"&&!Array.isArray(child)?merge(target[key]??{},child):child;return target;};
+if(args.includes("--profile")) merge(config,parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,args[args.indexOf("--profile")+1]+".config.toml"),"utf8")));
 for(let i=0;i<args.length;i++) if(["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
 fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,provider:config.model_providers[config.model_provider]})+"\\n");
 if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{const request=JSON.parse(line);if(request.id===undefined)return; const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null}; console.log(JSON.stringify({id:request.id,result}));});
@@ -494,58 +503,3 @@ else { process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.strin
     }
   },
 );
-
-test("native configuration snapshots retain the caller provider during another launch", async () => {
-  const root = await temporaryDirectory();
-  const home = join(root, "home");
-  await mkdir(home, { mode: 0o700 });
-  const original: JsonObject = {
-    model_provider: "synthetic",
-    model_providers: {
-      synthetic: { experimental_bearer_token: "synthetic-original-provider" },
-    },
-    mcp_servers: {
-      synthetic: {
-        command: "synthetic-mcp",
-        env: { TOKEN: "synthetic-mcp-token" },
-      },
-    },
-  };
-  const contents = stringify(original);
-  await writeFile(join(home, "config.toml"), contents, { mode: 0o600 });
-  const launch = providerProcessConfiguration(original, {});
-  let release: (() => Promise<void>) | undefined =
-    await lockExecutionConfiguration(home, launch.config, undefined, true);
-  const waiting = Promise.withResolvers<void>();
-  const originalExec = Database.prototype.exec;
-  const exec = spyOn(Database.prototype, "exec").mockImplementation(function (
-    this: Database,
-    query: string,
-  ) {
-    if (query === "BEGIN EXCLUSIVE") waiting.resolve();
-    return originalExec.call(this, query);
-  });
-  try {
-    const snapshot = nativeScanConfiguration({ CODEX_HOME: home }, {}, 2);
-    // SQLite observation is a deterministic scheduling barrier, not an assertion.
-    // A lock-free reader completes here; a coordinated reader waits for restoration.
-    const early = await Promise.race([
-      snapshot.then((value) => ({ value })),
-      waiting.promise.then(() => undefined),
-    ]);
-    await release();
-    release = undefined;
-    const configuration = early?.value ?? (await snapshot);
-    expect(configuration["model_providers"]).toEqual(
-      original["model_providers"],
-    );
-    expect(configuration["mcp_servers"]).toEqual(original["mcp_servers"]);
-    expect(JSON.stringify(configuration)).not.toContain(
-      "CODEX_SECURITY_INTERNAL_",
-    );
-    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(contents);
-  } finally {
-    exec.mockRestore();
-    await release?.();
-  }
-});

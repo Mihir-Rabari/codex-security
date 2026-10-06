@@ -760,7 +760,10 @@ appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
   openai: process.env.OPENAI_API_KEY ?? null,
   codex: process.env.CODEX_API_KEY ?? null,
   providerKey: process.env.SYNTHETIC_PROVIDER_KEY ?? null,
-  configContents: readFileSync(process.env.CODEX_HOME + "/config.toml", "utf8"),
+  ambientConfigContents: readFileSync(process.env.CODEX_HOME + "/config.toml", "utf8"),
+  configContents: readFileSync(process.argv.includes("--profile")
+    ? process.env.CODEX_HOME + "/" + process.argv[process.argv.indexOf("--profile") + 1] + ".config.toml"
+    : process.env.CODEX_HOME + "/config.toml", "utf8"),
   argv: process.argv.slice(1),
   internal: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("CODEX_SECURITY_INTERNAL_"))),
 }) + "\\n");
@@ -790,6 +793,21 @@ process.exit(0);
           ? undefined
           : "synthetic-custom-provider-key",
       };
+      const originalSpawn = childProcess.spawn;
+      const profileSpawn = fixtureSpawn(
+        runtime.executablePathForSpawn(
+          resolveCodexCommand(environment).command,
+        ),
+        preload,
+        () => {},
+      );
+      const nativeProfileSpawn = spyOn(
+        childProcess,
+        "spawn",
+      ).mockImplementation(((...args: Parameters<typeof childProcess.spawn>) =>
+        Array.isArray(args[1]) && args[1].includes("--profile")
+          ? profileSpawn(...args)
+          : originalSpawn(...args)) as typeof childProcess.spawn);
       const originalStartThread = Codex.prototype.startThread;
       const startThread = spyOn(
         Codex.prototype,
@@ -850,6 +868,8 @@ process.exit(0);
           .map((line) => JSON.parse(line));
         if (literalCredentials) {
           expect(enumerations).toHaveLength(2);
+          for (const capture of [native, ordinary])
+            expect(capture.ambientConfigContents).toBe(homeConfig);
           for (const launch of [
             ...[native, ordinary].map((capture) => ({
               argv: capture.argv,
@@ -971,6 +991,7 @@ process.exit(0);
           homeConfig,
         );
       } finally {
+        nativeProfileSpawn.mockRestore();
         startThread.mockRestore();
         mcpCommand?.mockRestore();
       }

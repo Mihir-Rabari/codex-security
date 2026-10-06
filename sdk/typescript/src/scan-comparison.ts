@@ -34,11 +34,9 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import {
-  lockExecutionConfiguration,
-  prepareReadOnlyExecution,
-} from "./execution-preparation.js";
+import { prepareReadOnlyExecution } from "./execution-preparation.js";
 import { definedEnvironment } from "./execution-auth.js";
+import { createExecutionProfileCodex } from "./execution-profile.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   compactFinding,
@@ -671,35 +669,21 @@ async function startReadOnlyCodexThread(
       const provider = bedrockProcessConfiguration(
         mcpProcessConfiguration(launch.config).config,
       );
-      const codex = new Codex({
+      const settingsWithOverrides = {
         ...settings,
         env: definedEnvironment(launch.environment),
         configOverrides: [
           ...codexConfigOverrides(provider.config),
           ...(configOverrides ?? []),
         ],
-      });
-      if (!provider.requiresConfigFile) return codex;
-      return {
-        startThread(threadOptions: ThreadOptions) {
-          const thread = codex.startThread(threadOptions);
-          return {
-            async run(input: string, options: TurnOptions) {
-              const release = await lockExecutionConfiguration(
-                configuredCodexHome(launch.environment),
-                launch.config,
-                options.signal,
-                true,
-              );
-              try {
-                return await thread.run(input, options);
-              } finally {
-                await release();
-              }
-            },
-          };
-        },
       };
+      return provider.requiresConfigFile
+        ? createExecutionProfileCodex(
+            settingsWithOverrides,
+            configuredCodexHome(launch.environment),
+            launch.config,
+          )
+        : new Codex(settingsWithOverrides);
     });
   const codex = await createCodex({
     ...(command === undefined

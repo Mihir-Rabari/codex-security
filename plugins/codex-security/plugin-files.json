@@ -1,8 +1,5 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
@@ -60,6 +57,7 @@
     "schemas/tools/discovery-candidates.schema.json",
     "schemas/tools/review-items.schema.json",
     "schemas/tools/scan-draft.schema.json",
+    "scripts/codex_profile.mjs",
     "scripts/config_preflight.py",
     "scripts/deep_scan_config.py",
     "scripts/deep_scan_defaults.json",

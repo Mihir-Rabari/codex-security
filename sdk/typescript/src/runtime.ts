@@ -1150,79 +1150,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   signal?: AbortSignal,
   securityOptions: Parameters<typeof requirePrivateDirectory>[3] = {},
 ): Promise<() => Promise<void>> {
-  return acquireCodexHomeLock(
-    codexHome,
-    signal,
-    securityOptions,
-    requireSecureCredentialHome,
-  );
-}
-
-/** @internal Coordinate ambient configuration without changing its home permissions. */
-export async function acquireCodexHomeConfigurationLock(
-  codexHome: string,
-  signal?: AbortSignal,
-): Promise<() => Promise<void>> {
-  return acquireCodexHomeLock(
-    await realpath(codexHome),
-    signal,
-    {},
-    async (path, options = {}) => {
-      const metadata = await lstat(path, { bigint: true });
-      if (
-        !metadata.isDirectory() ||
-        (options.expectedDevice !== undefined &&
-          options.expectedInode !== undefined &&
-          (metadata.dev !== options.expectedDevice ||
-            metadata.ino !== options.expectedInode))
-      ) {
-        throw new OutputDirectoryError(
-          `The configured Codex home changed while using it: ${path}`,
-        );
-      }
-      return metadata;
-    },
-  );
-}
-
-/** @internal Return original ambient bytes when another scan has a startup overlay. */
-export async function readCodexHomeConfiguration(
-  codexHome: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const read = () =>
-    readFile(join(codexHome, "config.toml"), {
-      encoding: "utf8",
-      signal,
-    }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-  const contents = await read();
-  // Writers create this durable guard before changing config.toml. Check after
-  // reading so a concurrent first writer also forces a coordinated fresh read.
-  if (
-    (await lstat(join(codexHome, CREDENTIAL_LOCK_DATABASE)).catch(
-      nullIfMissingFileError,
-    )) === null
-  )
-    return contents;
-  const release = await acquireCodexHomeConfigurationLock(codexHome, signal);
-  try {
-    return await read();
-  } finally {
-    await release();
-  }
-}
-
-async function acquireCodexHomeLock(
-  codexHome: string,
-  signal: AbortSignal | undefined,
-  securityOptions: Parameters<typeof requirePrivateDirectory>[3],
-  requireHome: typeof requireSecureCredentialHome,
-): Promise<() => Promise<void>> {
   throwIfSignalAborted(signal);
-  const homeMetadata = await requireHome(codexHome, securityOptions);
+  const homeMetadata = await requireSecureCredentialHome(
+    codexHome,
+    securityOptions,
+  );
   const expectedDevice = homeMetadata.dev;
   const expectedInode = homeMetadata.ino;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
@@ -1274,7 +1206,7 @@ async function acquireCodexHomeLock(
     database.exec("PRAGMA busy_timeout = 0");
     while (true) {
       throwIfSignalAborted(signal);
-      await requireHome(codexHome, {
+      await requireSecureCredentialHome(codexHome, {
         ...securityOptions,
         expectedDevice,
         expectedInode,
@@ -1309,7 +1241,7 @@ async function acquireCodexHomeLock(
         await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
         continue;
       }
-      await requireHome(codexHome, {
+      await requireSecureCredentialHome(codexHome, {
         ...securityOptions,
         expectedDevice,
         expectedInode,
@@ -1348,7 +1280,7 @@ async function acquireCodexHomeLock(
         if (released) return;
         released = true;
         try {
-          await requireHome(codexHome, {
+          await requireSecureCredentialHome(codexHome, {
             ...securityOptions,
             expectedDevice,
             expectedInode,
