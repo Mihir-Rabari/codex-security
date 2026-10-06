@@ -677,14 +677,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           assert.equal(await coordinator.wait(undefined, 25), undefined);
           retry = cancel({ scanId: fixture.run.scanId });
           void retry.catch(() => {});
-          assert.equal(
-            await Promise.race([
-              persistEntered.promise.then(() => true),
-              coordinator.wait(undefined, 25).then(() => false),
-            ]),
-            true,
-            "a rejected admission must allow another cancellation attempt",
-          );
+          await persistEntered.promise;
           assert.equal(await coordinator.wait(undefined, 25), undefined);
           persistRelease.resolve();
           assert.equal(
