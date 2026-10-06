@@ -49,7 +49,13 @@ test("finding helper help exits without reading stdin", async () => {
       import.meta.url,
     ),
   );
-  const commands = ["store-findings", "list-stored-findings"];
+  const commands = [
+    "store-findings",
+    "list-stored-findings",
+    "find-potential-duplicates",
+    "store-dedupe-groups",
+    "list-dedupe-groups",
+  ];
   for (const command of commands) {
     // execFile leaves stdin open; help must exit without waiting for JSON.
     const { stdout } = await promisify(execFile)(

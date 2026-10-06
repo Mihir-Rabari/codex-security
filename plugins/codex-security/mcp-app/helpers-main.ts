@@ -43,6 +43,12 @@ const workbenchUsage: Record<string, string> = {
     "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
   "list-stored-findings":
     "Usage: list-stored-findings\nReads a JSON object from stdin with an absolute stateDirectory, positive payload.limit and non-negative payload.offset.",
+  "find-potential-duplicates":
+    "Usage: find-potential-duplicates\nReads a JSON object from stdin with an absolute stateDirectory, payload.findingId and payload.scope containing either repositoryId or allRepositories: true.",
+  "store-dedupe-groups":
+    "Usage: store-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.groups containing arrays of finding IDs.",
+  "list-dedupe-groups":
+    "Usage: list-dedupe-groups\nReads a JSON object from stdin with an absolute stateDirectory and payload.findingId.",
 };
 if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);

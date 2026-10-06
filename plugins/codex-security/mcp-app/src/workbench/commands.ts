@@ -5,6 +5,11 @@ import {
   storeFindings,
   type EmbeddedFinding,
 } from "./findings";
+import {
+  findPotentialDuplicates,
+  listDedupeGroups,
+  storeDedupeGroups,
+} from "./duplicates";
 
 export async function findingsCommand(
   command: string,
@@ -26,9 +31,35 @@ export async function findingsCommand(
     throw new Error(
       "limit must be a positive integer and offset a non-negative integer.",
     );
+  const selection = payload as {
+    findingId: string;
+    scope?: { repositoryId?: string; allRepositories?: true };
+  };
+  if (
+    (command === "find-potential-duplicates" ||
+      command === "list-dedupe-groups") &&
+    typeof selection?.findingId !== "string"
+  )
+    throw new Error("findingId must be a string.");
+  if (command === "find-potential-duplicates") {
+    const scope = selection.scope;
+    if (
+      !(
+        typeof scope?.repositoryId === "string" &&
+        scope.allRepositories === undefined
+      ) &&
+      !(scope?.allRepositories === true && scope.repositoryId === undefined)
+    )
+      throw new Error(
+        "scope must specify either repositoryId or allRepositories: true.",
+      );
+  }
   const database = await openWorkbenchDatabase(
     workbenchDatabasePath(stateDirectory),
-    { deferred: command === "list-stored-findings" },
+    {
+      deferred:
+        command !== "store-findings" && command !== "store-dedupe-groups",
+    },
   );
   try {
     if (command === "store-findings") {
@@ -43,6 +74,20 @@ export async function findingsCommand(
         repositoryId,
       );
     }
+    if (command === "store-dedupe-groups")
+      return storeDedupeGroups(
+        database,
+        (payload as { groups: string[][] }).groups,
+        new Date().toISOString(),
+      );
+    if (command === "list-dedupe-groups")
+      return listDedupeGroups(database, selection.findingId);
+    if (command === "find-potential-duplicates")
+      return findPotentialDuplicates(
+        database,
+        selection.findingId,
+        selection.scope!.repositoryId,
+      );
     return listStoredFindings(database, page);
   } finally {
     database.close();
