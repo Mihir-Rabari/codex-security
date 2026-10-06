@@ -2,8 +2,10 @@ import * as childProcess from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import {
+  cp,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   stat,
@@ -12,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, spyOn, test } from "bun:test";
 import { exportArtifact } from "../src/index.js";
@@ -224,18 +226,24 @@ describe("offline artifact export", () => {
   test("only exposes a document matching the current canonical model", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-current-model-"));
     const modelPath = join(root, "threatmodel.md");
-    const options = { pythonPath: PYTHON, pluginRoot: PLUGIN_ROOT };
+    const options = { pythonPath: PYTHON, pluginRoot: join(root, "plugin") };
+    const scripts = join(options.pluginRoot, "scripts");
     const manifest = {
       documentType: "codex-security.policy-draft",
       status: "completed",
       threatModel: { format: "markdown", content: "# Original model\n" },
     };
     try {
+      await cp(join(PLUGIN_ROOT, "scripts"), scripts, {
+        recursive: true,
+        filter: (path) => basename(path) !== "__pycache__",
+      });
       await writeFile(
         join(root, "policy-draft.json"),
         JSON.stringify(manifest),
       );
       await writeThreatModel(root, options);
+      expect(await readdir(scripts)).not.toContain("__pycache__");
       expect(await readThreatModelPath(root, options)).toBe(modelPath);
       manifest.threatModel.content = "# Updated model\n";
       await writeFile(
