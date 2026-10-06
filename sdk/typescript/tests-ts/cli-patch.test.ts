@@ -4606,6 +4606,7 @@ describe("patch change tracking", () => {
   }
   test.each([
     "regular",
+    "gitlink",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),
   ])(
     "preserves a newly ignored %s while publishing the ignore rule",
@@ -4618,8 +4619,11 @@ describe("patch change tracking", () => {
       await writeFile(join(root, ".gitignore"), "# baseline\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
+      const head = git("rev-parse", "HEAD");
       if (kind === "regular")
         await writeFile(join(root, "local.env"), "synthetic local file\n");
+      else if (kind === "gitlink")
+        git("clone", "--local", root, join(root, "local.env"));
       else await symlink("absent-synthetic-target", join(root, "local.env"));
       const remote = await fixtures.create("synthetic-ignore-remote-");
       git("init", "--bare", remote);
@@ -4650,7 +4654,14 @@ describe("patch change tracking", () => {
         expect(await readFile(join(root, "local.env"), "utf8")).toBe(
           "synthetic local file\n",
         );
-      else
+      else if (kind === "gitlink") {
+        expect(
+          repositoryGit(join(root, "local.env"))("rev-parse", "HEAD"),
+        ).toBe(head);
+        expect(await readFile(join(root, "local.env/.gitignore"), "utf8")).toBe(
+          "# baseline\n",
+        );
+      } else
         expect(await readlink(join(root, "local.env"))).toBe(
           "absent-synthetic-target",
         );

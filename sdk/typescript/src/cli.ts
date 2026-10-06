@@ -7171,7 +7171,7 @@ async function createPatchPullRequest(
           "git",
           [
             "diff",
-            "--name-only",
+            "--raw",
             "--no-renames",
             "--diff-filter=D",
             "-z",
@@ -7187,13 +7187,17 @@ async function createPatchPullRequest(
       ...files,
       ...deleted
         .split("\0")
-        .filter(Boolean)
-        .filter((file) => {
+        .filter((file, index, entries) => {
+          if (index % 2 === 0) return false;
           try {
             const metadata = lstatSync(resolve(root, file), {
               throwIfNoEntry: false,
             });
-            return !metadata || metadata.isDirectory();
+            return (
+              !metadata ||
+              (metadata.isDirectory() &&
+                !entries[index - 1]!.startsWith(":160000 "))
+            );
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code === "ENOTDIR")
               return true;
