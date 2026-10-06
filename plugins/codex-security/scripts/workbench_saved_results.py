@@ -2216,7 +2216,9 @@ def merge_saved_results(
             if isinstance(reviews, list) and review not in reviews:
                 reviews.append(review)
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
-            if field == "reviews" and worker is not None:
+            if field == "reviews" and (
+                worker is not None or (relative in reducer_paths and relative != accepted_reducer)
+            ):
                 continue
             if (
                 superseded

@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import subprocess
 import uuid
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from test_deep_scan_successful_publication import add_worker
@@ -956,3 +958,116 @@ def test_reopened_pending_rows_use_the_existing_host_projection(
     ] == projected_tasks
     assert coverage["surfaces"] == [projected_surface]
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("interrupted_reducer", [False, True], ids=["accepted", "interrupted"])
+@pytest.mark.parametrize("retry_publication", [False, True], ids=["direct", "failed-retry"])
+def test_recovery_excludes_unaccepted_reducer_review_summaries(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    interrupted_reducer,
+    retry_publication,
+):
+    scan = publication_scan()
+    discovery = add_worker(workbench_db, scan)
+    worker_id = discovery.parent.name
+    discovery.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": scan.findings,
+                "coverage": scan.coverage,
+            }
+        )
+    )
+    reducer = add_worker(
+        workbench_db, scan, status="failed" if interrupted_reducer else "succeeded"
+    )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+            (reducer.parent.name,),
+        )
+    imported_review = {
+        "workerId": "synthetic-unaccepted-review",
+        "attempt": 99,
+        "completeness": "complete",
+    }
+    exclusion = {"pattern": "synthetic-vendor/**", "reason": "Retained reducer evidence."}
+    reducer.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": scan.findings,
+                "coverage": {
+                    **scan.coverage,
+                    "reviews": [imported_review],
+                    "explicitExclusions": [exclusion],
+                },
+            }
+        )
+    )
+    original = reducer.read_bytes()
+    helper = (
+        Path(__file__).resolve().parents[1]
+        / "mcp-app"
+        / "tests"
+        / "interrupted_reducer_fixture.mjs"
+    )
+    subprocess.run(
+        [
+            "node",
+            "--experimental-strip-types",
+            str(helper),
+            str(scan.scan_dir),
+            str(discovery),
+            str(reducer),
+            str(interrupted_reducer).lower(),
+        ],
+        check=True,
+    )
+    if interrupted_reducer:
+        assert reducer.read_bytes() == original
+    else:
+        assert json.loads(reducer.read_text())["sourceCoverage"]["reviews"] == [
+            {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
+        ]
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication failure.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        stopped = saved.fail_scan(
+            context,
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    assert stopped["scan"]["resultsRecoveryNeeded"] is retry_publication
+    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert recovered["scan"]["resultsRecoveryNeeded"] is False
+    published = (scan.scan_dir / "coverage.json").read_bytes()
+    coverage = json.loads(published)
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["summary"] == scan.findings[0]["summary"]
+    if interrupted_reducer:
+        assert any(
+            all(row.get(key) == value for key, value in exclusion.items())
+            for row in coverage["explicitExclusions"]
+        )
+        assert reducer.read_bytes() == original
+    assert coverage["reviews"] == [
+        {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
+    ]
+    assert imported_review not in coverage["reviews"]
+    assert imported_review["workerId"] not in (scan.scan_dir / "report.md").read_text()
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert (scan.scan_dir / "coverage.json").read_bytes() == published
