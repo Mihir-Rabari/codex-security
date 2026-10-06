@@ -5161,7 +5161,11 @@ export async function main(
                   )
                 : undefined;
             const patchRiskBase = options.assessPatchRisk
-              ? await snapshotGitPatchState(selected.repository, dependencies)
+              ? await snapshotGitPatchState(
+                  await patchRepositoryRoot(selected.repository, dependencies),
+                  dependencies,
+                  selected.repository,
+                )
               : undefined;
             const patchBase =
               patchRiskBase ??
@@ -5209,14 +5213,23 @@ export async function main(
               if (files.length > 0) {
                 patchRisk = await runPatchRiskAssessment(
                   {
-                    repository: selected.repository,
+                    repository: patchRiskBase.root,
+                    directory: selected.repository,
                     base: patchRiskBase.tree,
-                    files,
+                    files: files.map((file) =>
+                      relative(
+                        patchRiskBase.root,
+                        resolve(patchRiskBase.context.directory, file),
+                      )
+                        .split(sep)
+                        .join("/"),
+                    ),
                     configuration: options,
                     auth: options.auth,
                   },
                   errorOutput,
                   dependencies,
+                  patchRiskBase.context,
                 );
               }
             }
@@ -5258,7 +5271,7 @@ export async function main(
             filesChanged: 0,
             files: [],
           };
-          const gitRepository =
+          let gitRepository =
             options.assessPatchRisk || options.createPr
               ? await patchRepositoryRoot(repository, dependencies)
               : repository;
@@ -5283,33 +5296,30 @@ export async function main(
               : withoutLinearCredentials(dependencies.environment);
           let commandDirectory = repository;
           let commandEnvironment: NodeJS.ProcessEnv | undefined;
-          const gitDependencies: CliDependencies =
-            options.assessPatchRisk || options.createPr
-              ? {
-                  ...dependencies,
-                  runRepositoryCommand: (command, args, _directory, options) =>
-                    dependencies.runRepositoryCommand(
-                      command,
-                      args,
-                      gitRepository,
-                      {
-                        ...options,
-                        directory: commandDirectory,
-                        environment: {
-                          ...commandEnvironment,
-                          ...options?.environment,
-                        },
-                      },
-                    ),
-                }
-              : dependencies;
+          const gitDependencies: CliDependencies = {
+            ...dependencies,
+            runRepositoryCommand: (command, args, _directory, options) =>
+              dependencies.runRepositoryCommand(command, args, gitRepository, {
+                ...options,
+                directory: commandDirectory,
+                environment: {
+                  ...commandEnvironment,
+                  ...options?.environment,
+                },
+              }),
+          };
           const patchGitBase =
             options.assessPatchRisk || options.createPr
-              ? await snapshotGitPatchState(gitRepository, gitDependencies)
+              ? await snapshotGitPatchState(
+                  gitRepository,
+                  gitDependencies,
+                  repository,
+                )
               : undefined;
           const patchBase =
             patchGitBase ??
             (await snapshotPatchState(repository, dependencies));
+          if (!(patchBase instanceof Map)) gitRepository = patchBase.root;
           if (options.createPr) {
             await requireCleanPatchPullRequestBase(
               gitRepository,
@@ -5326,14 +5336,7 @@ export async function main(
               )
             : undefined;
           const commandContext =
-            (options.assessPatchRisk || options.createPr) &&
-            existsSync(repository)
-              ? await patchCommandContext(
-                  repository,
-                  gitRepository,
-                  gitDependencies,
-                )
-              : undefined;
+            patchBase instanceof Map ? undefined : patchBase.context;
           const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
@@ -5377,12 +5380,7 @@ export async function main(
             commandEnvironment = commandContext.environment;
           }
           const { files, rootFiles: publicationFiles } =
-            await changedPatchFiles(
-              gitRepository,
-              patchBase,
-              gitDependencies,
-              options.assessPatchRisk || options.createPr,
-            );
+            await changedPatchFiles(repository, patchBase, gitDependencies);
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -5414,25 +5412,15 @@ export async function main(
                 {
                   repository: gitRepository,
                   directory: commandDirectory,
-                  environment:
-                    commandEnvironment === undefined
-                      ? environment
-                      : {
-                          ...(environment ?? dependencies.environment),
-                          ...Object.fromEntries(
-                            Object.entries(commandEnvironment).filter(
-                              ([name]) =>
-                                dependencies.environment[name] !== undefined,
-                            ),
-                          ),
-                        },
+                  environment,
                   base: patchGitBase!.tree,
                   files,
                   configuration: options,
                   auth: options.auth,
                 },
                 errorOutput,
-                gitDependencies,
+                dependencies,
+                patchGitBase!.context,
               )
             : undefined;
           if (publication) {
@@ -6884,7 +6872,7 @@ async function patchPublicationDestination(
     const pushRemotes = remotes.filter(isNetwork);
     let hosted = false;
     for (const pushRemote of pushRemotes.length ? pushRemotes : [fetchRemote]) {
-      let identityRemote = pushRemote;
+      let identityRemote = pushRemote.replace(/^ssh\+git:/u, "ssh:");
       if (isNetwork(pushRemote)) {
         const url = new URL(
           pushRemote.includes("://")
@@ -6907,38 +6895,31 @@ async function patchPublicationDestination(
                 throw error;
               },
             ));
-          if (
-            sshCommand !== undefined ||
-            dependencies.environment["GIT_SSH"] !== undefined ||
-            url.username ||
-            url.port
-          ) {
-            const settings = await run("git", [
-              "-c",
-              `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
-              "codex-security-ssh-config",
-              ...(url.port ? ["-p", url.port] : []),
-              url.username
-                ? `${decodeURIComponent(url.username)}@${url.hostname}`
-                : url.hostname,
-            ]).catch((error: unknown) => {
-              if (isJsonObject(error) && typeof error["code"] === "number")
-                return "";
-              throw error;
-            });
-            const resolved =
-              /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
-            const host =
-              resolved.toLowerCase() === "ssh.github.com"
-                ? "github.com"
-                : resolved.toLowerCase().replace(/^www\./u, "");
-            if (host === requestUrl.hostname)
-              identityRemote = `${requestUrl.origin}/${decodeURIComponent(
-                url.pathname,
-              )
-                .replace(/^\/+|\/+$/gu, "")
-                .replace(/\.git$/u, "")}`;
-          }
+          const settings = await run("git", [
+            "-c",
+            `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
+            "codex-security-ssh-config",
+            ...(url.port ? ["-p", url.port] : []),
+            url.username
+              ? `${decodeURIComponent(url.username)}@${url.hostname}`
+              : url.hostname,
+          ]).catch((error: unknown) => {
+            if (isJsonObject(error) && typeof error["code"] === "number")
+              return "";
+            throw error;
+          });
+          const resolved =
+            /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
+          const host =
+            resolved.toLowerCase() === "ssh.github.com"
+              ? "github.com"
+              : resolved.toLowerCase().replace(/^www\./u, "");
+          if (host === requestUrl.hostname)
+            identityRemote = `${requestUrl.origin}/${decodeURIComponent(
+              url.pathname,
+            )
+              .replace(/^\/+|\/+$/gu, "")
+              .replace(/\.git$/u, "")}`;
         }
       }
       const config = await run("git", [
@@ -6958,25 +6939,30 @@ async function patchPublicationDestination(
             .filter(Boolean)
             .join(" "),
           GH_REPO: "",
-          GH_HOST: requestUrl.host,
+          GH_HOST: requestUrl.hostname,
         },
       };
-      if (
-        !(await dependencies.runRepositoryCommand(
-          "gh",
-          ["repo", "set-default", "--view"],
-          repository,
-          options,
-        ))
-      ) {
-        continue;
-      }
+      const selected = await dependencies.runRepositoryCommand(
+        "gh",
+        ["repo", "set-default", "--view"],
+        repository,
+        options,
+      );
+      if (!selected) continue;
       hosted = true;
       let repositoryJson: string;
       try {
         repositoryJson = await dependencies.runRepositoryCommand(
           "gh",
-          ["repo", "view", "--json", "id,url", "--jq", "tojson"],
+          [
+            "repo",
+            "view",
+            ...(requestUrl.port ? [`${requestUrl.host}/${selected}`] : []),
+            "--json",
+            "id,url",
+            "--jq",
+            "tojson",
+          ],
           repository,
           options,
         );
@@ -7081,6 +7067,32 @@ async function patchCommandContext(
     directory: await realpath(directory),
     gitDirectory: await realpath(environment["GIT_DIR"]!),
     environment,
+  };
+}
+
+async function bindPatchCommandContext(
+  directory: string,
+  repository: string,
+  context: GitPatchState["context"],
+  dependencies: CliDependencies,
+): Promise<{ directory: string; dependencies: CliDependencies }> {
+  const currentDirectory = await realpath(directory)
+    .then(async (path) =>
+      (await lstat(path)).isDirectory() ? path : undefined,
+    )
+    .catch(() => undefined);
+  if (currentDirectory !== context.directory) directory = repository;
+  return {
+    directory,
+    dependencies: {
+      ...dependencies,
+      runRepositoryCommand: (command, args, root, options) =>
+        dependencies.runRepositoryCommand(command, args, root, {
+          ...options,
+          directory,
+          environment: { ...context.environment, ...options?.environment },
+        }),
+    },
   };
 }
 
@@ -7500,6 +7512,7 @@ const NESTED_PATCH_GIT_ENVIRONMENT = {
 
 interface GitPatchState {
   root: string;
+  context: Awaited<ReturnType<typeof patchCommandContext>>;
   tree: string;
   files: Map<string, string>;
   gitlinks: Map<
@@ -7516,7 +7529,6 @@ async function changedPatchFiles(
   repository: string,
   base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
-  rootRelative = false,
   dirtyFiles?: Set<string>,
 ): Promise<{ files: string[]; rootFiles: string[] }> {
   if (base instanceof Map) {
@@ -7527,7 +7539,14 @@ async function changedPatchFiles(
     return { files, rootFiles: files };
   }
   const root = base.root;
-  const head = await snapshotGitPatchState(root, dependencies, repository);
+  const bound = await bindPatchCommandContext(
+    repository,
+    root,
+    base.context,
+    dependencies,
+  );
+  dependencies = bound.dependencies;
+  const head = await snapshotGitPatchState(root, dependencies, bound.directory);
   if (dirtyFiles?.size) {
     const renamed = (
       await dependencies.runRepositoryCommand(
@@ -7557,7 +7576,7 @@ async function changedPatchFiles(
     [
       "--literal-pathspecs",
       "diff",
-      ...(rootRelative ? ["--no-relative"] : []),
+      "--no-relative",
       "--name-only",
       "-z",
       base.tree,
@@ -7751,7 +7770,13 @@ async function snapshotGitPatchState(
     }
   };
   await visit("", tree, [repositoryRoot]);
-  return { root: repository, tree, files, gitlinks };
+  return {
+    root: repository,
+    context: await patchCommandContext(directory, repository, dependencies),
+    tree,
+    files,
+    gitlinks,
+  };
 }
 
 // Literal patch inputs also work in directories without Git metadata.
@@ -7829,7 +7854,36 @@ async function runPatchRiskAssessment(
   request: PatchRiskRequest,
   stderr: Writable,
   dependencies: CliDependencies,
+  context: GitPatchState["context"],
 ): Promise<PatchRiskAssessment> {
+  const bound = await bindPatchCommandContext(
+    request.directory ?? request.repository,
+    request.repository,
+    context,
+    dependencies,
+  );
+  const environment: NodeJS.ProcessEnv = {
+    ...(request.environment ?? dependencies.environment),
+    ...Object.fromEntries(
+      Object.entries(context.environment).filter(
+        ([name]) => dependencies.environment[name] !== undefined,
+      ),
+    ),
+  };
+  if (
+    (await dependencies
+      .runRepositoryCommand(
+        "git",
+        ["rev-parse", "--absolute-git-dir"],
+        request.repository,
+        { directory: bound.directory, environment, trim: false },
+      )
+      .then((path) => realpath(path.replace(/\n$/u, "")))
+      .catch(() => undefined)) !== context.gitDirectory
+  )
+    environment["GIT_DIR"] = context.environment["GIT_DIR"];
+  request = { ...request, directory: bound.directory, environment };
+  dependencies = bound.dependencies;
   stderr.write("\nAssessing the completed patch...\n");
   const result = await (
     dependencies.assessPatchRisk ??
@@ -8053,7 +8107,6 @@ async function runFindingPatches(
         selected.repository,
         base,
         dependencies,
-        false,
         dirtyFiles,
       ));
     } finally {
