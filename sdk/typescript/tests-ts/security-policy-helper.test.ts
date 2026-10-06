@@ -13,6 +13,7 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { writeSource as write } from "./support/shell.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const temporaryDirectories: string[] = [];
@@ -24,12 +25,6 @@ function fixture(name = "repository") {
   const output = join(directory, "output");
   mkdirSync(root);
   return { root, output };
-}
-
-function write(root: string, path: string, content: string | Buffer): void {
-  const target = join(root, path);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, content);
 }
 
 function run(args: string[], env = process.env, cwd?: string) {

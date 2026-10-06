@@ -115,7 +115,7 @@ def test_inventory_matches_the_existing_standard_command(tmp_path: Path, scope: 
 
     assert result.returncode == 0, result.stderr
     assert output.read_bytes() == standard_inventory(repository, scope)
-    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+    assert list(output.parent.glob(".*.tmp")) == []
     if scope == ".":
         rows = set(output.read_text(encoding="utf-8").splitlines())
         assert {
@@ -129,6 +129,19 @@ def test_inventory_matches_the_existing_standard_command(tmp_path: Path, scope: 
             "./app/évidence.py",
         } <= rows
         assert {"./ignored/secret.py", "./app/ignored.skip"}.isdisjoint(rows)
+
+
+@pytest.mark.parametrize("name", [f"{'a' * 251}.txt", f"{'文' * 83}.txt"])
+def test_inventory_replaces_outputs_with_long_filenames(tmp_path: Path, name: str) -> None:
+    repository = make_repository(tmp_path)
+    output = tmp_path / name
+    output.write_text("previous.py\n", encoding="utf-8")
+
+    result = run_inventory(repository, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == standard_inventory(repository, ".")
+    assert list(output.parent.glob(".*.tmp")) == []
 
 
 def test_absolute_scope_still_produces_repository_relative_paths(tmp_path: Path) -> None:
@@ -278,7 +291,7 @@ def test_inventory_rejects_line_breaks_before_serializing_paths(
     assert "path that cannot fit in the file inventory" in result.stderr
     assert result.stdout == ""
     assert output.read_bytes() == previous
-    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+    assert list(output.parent.glob(".*.tmp")) == []
 
 
 def test_diff_inventory_includes_power_shell_files(
@@ -623,6 +636,29 @@ def test_diff_inventory_includes_changed_solidity(tmp_path: Path, mode: str) -> 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8") == "contracts/Vault.sol\n"
+
+
+@pytest.mark.parametrize("mode", ["revisions", "local-patch"])
+def test_diff_inventory_includes_changed_vyper(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    source = b"stored: public(uint256)\n"
+    write_file(repository, "contracts/Vault.vy", source)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    write_file(repository, "contracts/Vault.vy", source + b"# Changed.\n")
+    arguments = ["--diff-base", base, "--diff-mode", mode]
+    if mode == "revisions":
+        git(repository, "add", ".")
+        git(repository, "commit", "-qm", "change")
+        arguments.extend(["--diff-head", git(repository, "rev-parse", "HEAD")])
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "contracts/Vault.vy\n"
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])

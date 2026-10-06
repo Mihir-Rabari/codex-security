@@ -36,13 +36,11 @@ import {
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const { temporaryDirectory, cleanup } = createApiTestFixtures();
+const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
 
 function scanner(outputDir: string, matched = true): OsvScanResult {
@@ -194,7 +192,7 @@ async function fixture(
     advisoryDetails?: string;
   } = {},
 ) {
-  const root = await temporaryDirectory();
+  const root = await temporaryDirectory("codex-security-sca-");
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
   const ambientHome = join(root, "ambient-codex-home");

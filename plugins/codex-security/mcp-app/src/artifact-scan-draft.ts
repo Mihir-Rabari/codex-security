@@ -1,3 +1,4 @@
+import type { JsonObject } from "./types.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -19,8 +20,7 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-
-type JsonObject = Record<string, unknown>;
+import { saveThreatModelDocument } from "./threat-model-document.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -44,6 +44,7 @@ export interface ScanDraftResult {
   coverage: JsonObject;
   operation: "replace";
   status: "draft_written";
+  warnings?: string[];
 }
 
 export interface CompletedScanResult extends PreparedScanDraft {
@@ -67,7 +68,7 @@ type PublishScanDraft = (
   draft: PreparedScanDraft,
   expectedDigest: string | undefined,
   checkpoint: ScanDraftInput,
-) => Promise<void>;
+) => Promise<string[] | void>;
 
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
 
@@ -103,12 +104,14 @@ export async function recordCodexSecurityScanDraft(
 
   for (;;) {
     signal?.throwIfAborted();
-    // Deep results are ready to save. Do not merge older drafts or
-    // checkpoints into them.
+    // Deep results replace findings and coverage while retaining an omitted model.
+    // Do not merge older review work into them.
     const preserved = finalDeepDraft
-      ? { input: parsed, previousDigest: undefined }
+      ? await preserveDeepThreatModel(context, parsed)
       : await preserveScanDraft(context, parsed, !publishDraft);
     const reconciled = preserved.input;
+    if (finalDeepDraft && !publishDraft && reconciled !== parsed)
+      await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -148,8 +151,13 @@ export async function recordCodexSecurityScanDraft(
         coverage,
         manifest: { scan: manifestScan },
       };
+      let documentWarnings: string[] | void = undefined;
       if (publishDraft) {
-        await publishDraft(draft, preserved.previousDigest, parsed);
+        documentWarnings = await publishDraft(
+          draft,
+          preserved.previousDigest,
+          finalDeepDraft ? reconciled : parsed,
+        );
       } else {
         const destinations = await Promise.all([
           artifactDestination(
@@ -171,6 +179,11 @@ export async function recordCodexSecurityScanDraft(
         await replaceArtifactJson(destinations[0], { findings });
         await replaceArtifactJson(destinations[1], coverage);
         await replaceArtifactJson(destinations[2], { scan: manifestScan });
+        const warning = await saveThreatModelDocument(
+          context,
+          reconciled.threatModel,
+        );
+        if (warning !== undefined) documentWarnings = [warning];
       }
       return {
         scanId: reconciled.scanId,
@@ -179,6 +192,7 @@ export async function recordCodexSecurityScanDraft(
         coverage,
         operation: "replace",
         status: "draft_written",
+        ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
       };
     } catch (error) {
       if (!isScanDraftConflict(error)) throw error;
@@ -230,7 +244,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           arguments_.push("--claim-token", context.handoffClaimToken);
         }
         try {
-          await runWorkbench(arguments_);
+          const result = await runWorkbench(arguments_);
+          return Array.isArray(result?.warnings)
+            ? result.warnings.filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : undefined;
         } catch (error) {
           if (!workbenchScanDraftConflict(error)) throw error;
           throw Object.assign(
@@ -288,6 +307,10 @@ export async function recordCodexSecurityWorkerScanDraft(
     "worker scan draft",
   );
   await replaceArtifactJson(destination, scoped);
+  const documentWarning = await saveThreatModelDocument(
+    context,
+    scoped.threatModel,
+  );
 
   return {
     scanId: parsed.scanId,
@@ -296,6 +319,7 @@ export async function recordCodexSecurityWorkerScanDraft(
     coverage: scoped.coverage,
     operation: "replace",
     status: "draft_written",
+    ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
   };
 }
 
@@ -1101,10 +1125,7 @@ async function readSavedCheckpoints(
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
-  if (
-    checkpointRootMetadata.isSymbolicLink() ||
-    !checkpointRootMetadata.isDirectory()
-  ) {
+  if (!checkpointRootMetadata.isDirectory()) {
     throw new Error(
       `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
     );
@@ -1140,7 +1161,7 @@ async function readSavedCheckpoints(
   for (const entry of entries) {
     const checkpointPath = join(checkpointRoot, entry.name);
     const checkpointMetadata = await fs.lstat(checkpointPath);
-    if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
+    if (!checkpointMetadata.isFile()) {
       throw new Error(
         `scan checkpoint: ${kind} checkpoint is not a safe file.`,
       );
@@ -1215,18 +1236,7 @@ async function readPreviousScanDraft(
       modifiedMs: saved?.modifiedMs ?? 0,
     };
   }
-  const names = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-  ] as const;
-  const saved = await Promise.all(
-    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
-  );
-  const contents = saved.map((record) => record?.contents);
-  const digest = draftDigest(
-    names.map((name, index) => [name, contents[index]]),
-  );
+  const { saved, contents, digest } = await readPreviousScanDocuments(context);
   if (contents.every((value) => value === undefined))
     return { digest, modifiedMs: 0 };
   if (contents.some((value) => value === undefined)) {
@@ -1263,6 +1273,48 @@ async function readPreviousScanDraft(
   };
 }
 
+async function readPreviousScanDocuments(context: ArtifactContext) {
+  const names = [
+    "scan-manifest.json",
+    "findings.json",
+    "coverage.json",
+  ] as const;
+  const saved = await Promise.all(
+    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
+  );
+  const contents = saved.map((record) => record?.contents);
+  return {
+    saved,
+    contents,
+    digest: draftDigest(names.map((name, index) => [name, contents[index]])),
+  };
+}
+
+async function preserveDeepThreatModel(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+  if (input.threatModel !== undefined) return { input };
+  const { contents, digest } = await readPreviousScanDocuments(context);
+  const previous =
+    contents[0] === undefined
+      ? undefined
+      : requireObject(
+          parseJsonObject(contents[0], "previous scan draft manifest").scan,
+          "previous scan draft.scan",
+        );
+  return {
+    input:
+      previous?.threatModel === undefined
+        ? input
+        : scanDraftInputSchema.parse({
+            ...input,
+            threatModel: previous.threatModel,
+          }),
+    previousDigest: digest,
+  };
+}
+
 async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
 ): Promise<SavedScanDraft[]> {
@@ -1270,7 +1322,7 @@ async function readArchivedWorkerCheckpoints(
   const attemptsRoot = join(workerRoot, "attempts");
   const attemptsMetadata = await lstatIfExists(attemptsRoot);
   if (attemptsMetadata === undefined) return [];
-  if (attemptsMetadata.isSymbolicLink() || !attemptsMetadata.isDirectory()) {
+  if (!attemptsMetadata.isDirectory()) {
     throw new Error(
       "scan checkpoint: archived attempts are not a safe directory.",
     );
@@ -1289,10 +1341,11 @@ async function readArchivedWorkerCheckpoints(
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .filter((entry) => entry.isDirectory())
     .sort(
       (left, right) =>
-        archivedAttemptNumber(right.name) - archivedAttemptNumber(left.name) ||
+        Number(/^attempt-(\d+)$/.exec(right.name)?.[1] ?? -1) -
+          Number(/^attempt-(\d+)$/.exec(left.name)?.[1] ?? -1) ||
         right.name.localeCompare(left.name),
     );
   for (const attempt of attempts) {
@@ -1326,7 +1379,7 @@ async function readArchivedWorkerCheckpoints(
       join(attemptRoot, "result.json"),
     );
     if (resultMetadata !== undefined) {
-      if (resultMetadata.isSymbolicLink() || !resultMetadata.isFile()) {
+      if (!resultMetadata.isFile()) {
         throw new Error("scan checkpoint: archived result is not a safe file.");
       }
       const saved = await readArtifactTextWithMetadata(
@@ -1378,11 +1431,6 @@ async function readArchivedWorkerCheckpoints(
     );
   }
   return archived;
-}
-
-function archivedAttemptNumber(name: string): number {
-  const match = /^attempt-(\d+)$/.exec(name);
-  return match ? Number(match[1]) : -1;
 }
 
 async function lstatIfExists(
@@ -2185,29 +2233,27 @@ function buildScope(
 ): JsonObject {
   const includePaths = trustedScope.requiredIncludePaths;
   const excludePaths = trustedScope.requiredExcludePaths;
-  const resolvedIncludePaths =
-    includePaths === undefined
-      ? [
-          typeof trustedScope.requestedPath === "string"
-            ? trustedScope.requestedPath
-            : (context.scope ?? "."),
-        ]
-      : requireTextArray(
-          includePaths,
-          "scan draft: authoritative included scope",
-        );
-  const resolvedExcludePaths =
-    excludePaths === undefined
-      ? []
-      : requireTextArray(
-          excludePaths,
-          "scan draft: authoritative excluded scope",
-        );
 
   return {
     ...semanticScope,
-    includePaths: resolvedIncludePaths,
-    excludePaths: resolvedExcludePaths,
+    includePaths:
+      includePaths === undefined
+        ? [
+            typeof trustedScope.requestedPath === "string"
+              ? trustedScope.requestedPath
+              : (context.scope ?? "."),
+          ]
+        : requireTextArray(
+            includePaths,
+            "scan draft: authoritative included scope",
+          ),
+    excludePaths:
+      excludePaths === undefined
+        ? []
+        : requireTextArray(
+            excludePaths,
+            "scan draft: authoritative excluded scope",
+          ),
   };
 }
 

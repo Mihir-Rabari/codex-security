@@ -7,17 +7,22 @@ import csv
 import io
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    build_threat_model_export,
     csv_cell,
     finalize_scan,
     finding_candidate_id,
     finding_csv_columns,
+    write_export_output,
     write_sarif_projection,
     write_scan_local_bytes,
 )
@@ -189,17 +194,13 @@ def prepare_linear_publication(
 ) -> dict[str, Any]:
     payload, destination, findings = linear_publication_input(db, args, recording=False)
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         result = {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
         }
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 
@@ -244,7 +245,7 @@ def record_linear_publications(
         external_ids.add(issue_identifier)
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
         timestamp = db.now()
         for publication in publications:
@@ -329,10 +330,6 @@ def record_linear_publications(
                 }
             )
         result = {"scanId": scan["id"], "destination": destination, "created": created}
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return result
 
 
@@ -342,15 +339,39 @@ def export_findings(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     scan = db.require_scan(connection, args.scan_id)
-    if scan["status"] != "complete" and not (
-        scan["status"] == "failed" and scan["seal_manifest_digest"]
-    ):
-        raise SystemExit(
-            "Findings can be exported after the scan completes or preserves stopped results."
-        )
+    artifact = getattr(args, "artifact", "findings")
+    args.format = args.format or ("md" if artifact == "threat-model" else "csv")
+    if artifact == "threat-model":
+        if args.format != "md":
+            raise SystemExit("Threat models can only be exported as Markdown (md).")
+    else:
+        if args.format == "md":
+            raise SystemExit("Markdown export requires --artifact threat-model.")
+        if scan["status"] != "complete" and not (
+            scan["status"] == "failed" and scan["seal_manifest_digest"]
+        ):
+            raise SystemExit(
+                "Findings can be exported after the scan completes or preserves stopped results."
+            )
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
-    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    manifest_path = scan_dir / db.ARTIFACTS["manifest"]
+    db.verify_manifest_binding(scan, db.read_json_object(manifest_path))
+    if getattr(args, "validate_only", False):
+        # SDK/CLI exports use their requested destination without modifying saved artifacts.
+        return {"scan": {"scanId": scan["id"], "scanDir": str(scan_dir)}}
+    if artifact == "threat-model":
+        path = scan_dir / "exports" / "threatmodel.md"
+        try:
+            contents = build_threat_model_export(scan_dir)
+            write_export_output(scan_dir, path, "md", contents)
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
+        return {
+            "export": {"artifact": artifact, "format": "md", "path": str(path)},
+            "scan": db.scan_result(connection, scan),
+            "workspace": db.workspace_state(connection, scan["workspace_id"]),
+        }
     try:
         manifest, _, _ = finalize_scan(
             scan_dir,

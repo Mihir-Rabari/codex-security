@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { discoverScaInputs, normalizeOsvOutput } from "../src/sca-osv.js";
-import { createApiTestFixtures } from "./support/api-events.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   compareScaResults,
   createScaUpdateHandoff,
@@ -14,7 +14,7 @@ import type {
   TriageFinding,
 } from "../src/sca-types.js";
 
-const { temporaryDirectory, cleanup } = createApiTestFixtures();
+const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
 
 function fixture(): ScaResult {
@@ -329,7 +329,7 @@ describe("SCA comparison", () => {
   test.skipIf(process.platform === "win32")(
     "preserves distinct drive-like POSIX inventory paths in saved comparisons",
     async () => {
-      const repository = await temporaryDirectory();
+      const repository = await temporaryDirectory("codex-security-sca-");
       const paths = [
         "C:\\folder/package-lock.json",
         "C:/folder/package-lock.json",
