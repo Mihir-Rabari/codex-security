@@ -522,6 +522,23 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test.each([
+    ["unknown-model", false],
+    ["gpt-5.6-cyber", true],
+  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(stderr.stream, {
+      model: { model, reasoningEffort: "xhigh" },
+      showCost: true,
+    });
+    dashboard.start();
+    const frame = lastFrame(stderr);
+    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+    expect(frame).not.toContain("model pricing missing");
+    dashboard.stop();
+  });
+
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
     const dashboard = createDashboard(
