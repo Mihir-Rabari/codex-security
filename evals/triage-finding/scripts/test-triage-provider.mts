@@ -6,6 +6,7 @@ import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 const require = createRequire(import.meta.url);
 const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
@@ -163,11 +164,9 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
 
     // Delete the stored result to make a completed evaluation resumable, retaining
     // the original persisted provider configuration and prompt.
-    const Database = createRequire(require.resolve("promptfoo"))(
-      "better-sqlite3",
-    );
-    const database = new Database(
+    const database = new DatabaseSync(
       path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+      { enableForeignKeyConstraints: false },
     );
     database.prepare("DELETE FROM eval_results").run();
     database.close();
@@ -386,8 +385,9 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       templatedEnvironment,
     );
     assert.equal(templatedRetry.code, 0, templatedRetry.output);
-    const templatedDatabase = new Database(
+    const templatedDatabase = new DatabaseSync(
       path.join(templatedEnvironment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+      { enableForeignKeyConstraints: false },
     );
     templatedDatabase.prepare("DELETE FROM eval_results").run();
     templatedDatabase.close();
@@ -694,15 +694,14 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       environment,
     );
     assert.equal(retry.code, 0, retry.output);
-    const Database = createRequire(require.resolve("promptfoo"))(
-      "better-sqlite3",
-    );
-    const database = new Database(
+    const database = new DatabaseSync(
       path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+      { enableForeignKeyConstraints: false },
     );
     const stored = database
       .prepare("SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1")
       .get();
+    assert.ok(stored && typeof stored.config === "string");
     assert.equal(
       JSON.parse(stored.config).providers[0].id,
       `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
