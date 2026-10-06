@@ -2066,6 +2066,16 @@ export class CodexSecurity {
       let result = await runScanEvents({
         savedCompletion: savedCompletion ?? undefined,
         recoverCompletion: recoverSelectedCompletion,
+        reconcileCheckpoint:
+          mode === "deep"
+            ? undefined
+            : async () => {
+                await workbench(workbenchOptions, [
+                  "prepare-scan-completion",
+                  "--scan-id",
+                  scanId,
+                ]);
+              },
         thread,
         events,
         signal,
@@ -3816,6 +3826,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   recoverCompletion?: () => Promise<Awaited<
     ReturnType<typeof readCodexTurn>
   > | null>;
+  reconcileCheckpoint?: () => Promise<void>;
   thread: Pick<CodexThreadLike, "id"> &
     Partial<Pick<CodexThreadLike, "runStreamed">>;
   events: AsyncGenerator<ScanEvent>;
@@ -3960,16 +3971,27 @@ export async function runScanEvents(
     };
     const accept = async () => {
       // Matching, custom validation and the canonical seal remain with the caller.
-      const [manifest, findings, coverage] = await Promise.all(
-        ["scan-manifest.json", "findings.json", "coverage.json"].map(
-          async (name) =>
-            JSON.parse(
-              (
-                await readScanFile(options.scanDir, name, name, options.signal)
-              ).toString("utf8"),
-            ),
-        ),
-      );
+      const readDocuments = () =>
+        Promise.all(
+          ["scan-manifest.json", "findings.json", "coverage.json"].map(
+            async (name) =>
+              JSON.parse(
+                (
+                  await readScanFile(
+                    options.scanDir,
+                    name,
+                    name,
+                    options.signal,
+                  )
+                ).toString("utf8"),
+              ),
+          ),
+        );
+      let [manifest, findings, coverage] = await readDocuments();
+      if (manifest?.scan?.complete === false && options.reconcileCheckpoint) {
+        await options.reconcileCheckpoint();
+        [manifest, findings, coverage] = await readDocuments();
+      }
       const helper = (
         await import(
           pathToFileURL(join(options.pluginRoot, "mcp/helpers.mjs")).href

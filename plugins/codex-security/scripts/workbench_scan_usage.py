@@ -861,6 +861,16 @@ def _read_rollout_usage(
 
     if counter_total["totalTokens"] > total["totalTokens"]:
         remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
+        remainder["cachedInputTokens"] = min(
+            remainder["cachedInputTokens"], remainder["inputTokens"]
+        )
+        remainder["cacheWriteInputTokens"] = min(
+            remainder["cacheWriteInputTokens"],
+            remainder["inputTokens"] - remainder["cachedInputTokens"],
+        )
+        remainder["reasoningOutputTokens"] = min(
+            remainder["reasoningOutputTokens"], remainder["outputTokens"]
+        )
         remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
         _add_token_usage(total, remainder)
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)

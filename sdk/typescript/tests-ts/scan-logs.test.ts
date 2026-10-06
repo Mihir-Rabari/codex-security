@@ -58,6 +58,41 @@ function commandEvent(command: string, id: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test.each(["standard", "deep"])(
+    "ignores model-owned log homes without host ownership for %s scans",
+    async (mode) => {
+      const configured = await temporaryHome();
+      const foreign = await temporaryHome();
+      const scanDir = await temporaryHome();
+      const settings = join(scanDir, "artifacts", "deep_discovery");
+      await mkdir(settings, { recursive: true });
+      await writeFile(
+        join(settings, "execution-settings.json"),
+        JSON.stringify({ version: 1, settings: { codexHome: foreign } }),
+      );
+      const configuredEvent = commandEvent(
+        "configured owner",
+        "configured-call",
+      );
+      await writeSession(configured, "owner", [configuredEvent]);
+      await writeSession(foreign, "owner", [
+        configuredEvent,
+        commandEvent("foreign suffix", "foreign-call"),
+      ]);
+      const result = await readSavedScanLogs(
+        { scanId: "scan-1", mode, scanDir, continuationThreadId: "owner" },
+        configured,
+      );
+      expect(result.events.map(({ event }) => event)).toEqual([
+        { type: "session_meta", payload: { id: "owner" } },
+        configuredEvent,
+      ]);
+      expect(result.sessions.map(({ path }) => path)).toEqual([
+        join(configured, "sessions", "2026", "08", "11", "rollout-owner.jsonl"),
+      ]);
+    },
+  );
+
   test.each(
     ["sessions", "archived_sessions"].flatMap((directory) =>
       ["prefix only", "unrelated owner turn"].map((tail) => [directory, tail]),
@@ -127,6 +162,7 @@ describe("saved scan logs", () => {
           continuationThreadId: "owner",
           executionAttribution: {
             formatVersion: 1,
+            workerCodexHome: original,
             executionThreadIds: [],
             owner: {
               threadId: "owner",

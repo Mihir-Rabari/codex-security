@@ -240,7 +240,7 @@ export class ScanCostTracker {
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
     if (
-      this.#readAttribution ||
+      this.#attribution !== null ||
       this.#receipts.size > 0 ||
       this.#snapshot.usage !== null
     )
@@ -256,9 +256,8 @@ export class ScanCostTracker {
     let recordedAttribution = this.#attribution;
     if (this.#readAttribution) {
       const record = await this.#readAttribution();
-      if (record === null) return;
       recordedAttribution = record ?? null;
-      const attribution = record === undefined || record.legacy ? null : record;
+      const attribution = record == null || record.legacy ? null : record;
       if (
         attribution &&
         (!this.#attribution ||
@@ -434,7 +433,10 @@ export class ScanCostTracker {
       if (
         previous === undefined ||
         (session.usage?.total_tokens ?? -1) >
-          (previous.usage?.total_tokens ?? -1)
+          (previous.usage?.total_tokens ?? -1) ||
+        (session.usage?.total_tokens === previous.usage?.total_tokens &&
+          session.pendingLineBytes === 0 &&
+          previous.pendingLineBytes > 0)
       ) {
         usageSessions.set(threadId, session);
       }
@@ -464,6 +466,19 @@ export class ScanCostTracker {
       if (!usages.has(threadId)) usages.set(threadId, null);
     }
     for (const [threadId, session] of usageSessions) {
+      const selected = usages.get(threadId);
+      if (
+        selected &&
+        session.usage &&
+        selected.total_tokens > session.usage.total_tokens
+      )
+        usages.set(
+          threadId,
+          addTokenUsage(
+            session.usage,
+            tokenUsageRemainder(selected, session.usage),
+          ),
+        );
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
         session.expectedResponseTokens > session.responseTokens
@@ -1219,4 +1234,41 @@ function subtractTokenUsage(
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function tokenUsageRemainder(
+  usage: ScanTokenUsage,
+  inherited: ScanTokenUsage,
+): ScanTokenUsage {
+  const input = Math.max(0, usage.input_tokens - inherited.input_tokens);
+  const cached = Math.min(
+    input,
+    Math.max(0, usage.cached_input_tokens - inherited.cached_input_tokens),
+  );
+  const writes = Math.min(
+    input - cached,
+    Math.max(
+      0,
+      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ),
+  );
+  const output = Math.max(0, usage.output_tokens - inherited.output_tokens);
+  return {
+    input_tokens: input,
+    cached_input_tokens: cached,
+    cache_write_input_tokens: writes,
+    output_tokens: output,
+    reasoning_output_tokens: Math.min(
+      output,
+      Math.max(
+        0,
+        usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
+      ),
+    ),
+    total_tokens: input + output,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
+  };
 }

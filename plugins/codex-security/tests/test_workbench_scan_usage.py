@@ -1315,3 +1315,42 @@ def test_completion_retains_receipt_and_counter_categories(tmp_path, receipt, co
     for category in ("inputTokens", "outputTokens", "totalTokens"):
         assert sum(row[category] for row in usage["modelUsage"]) == usage[category]
     assert usage["coverage"] == ("complete" if receipt == counter else "partial")
+
+
+@pytest.mark.parametrize("counter_input,expected_cached", [(100, 20), (250, 90)])
+def test_completion_keeps_cached_subsets_valid_when_categories_diverge(
+    tmp_path, counter_input, expected_cached
+):
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    response = _event(
+        counted,
+        "token_usage_record",
+        {
+            "response_id": "cache-response",
+            "thread_id": "scan-parent",
+            "model": "gpt-5.6-sol",
+            "usage": {
+                "input_tokens": 150,
+                "cached_input_tokens": 20,
+                "output_tokens": 15,
+                "total_tokens": 165,
+            },
+        },
+    )
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [response, _token_event(counted, counter_input, 200, cached_input_tokens=90)],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (usage["inputTokens"], usage["cachedInputTokens"], usage["outputTokens"]) == (
+        max(150, counter_input),
+        expected_cached,
+        200,
+    )
+    for row in usage["modelUsage"]:
+        assert row["cachedInputTokens"] + row["cacheWriteInputTokens"] <= row["inputTokens"]
+    for key in ("inputTokens", "cachedInputTokens", "outputTokens", "totalTokens"):
+        assert sum(row[key] for row in usage["modelUsage"]) == usage[key]

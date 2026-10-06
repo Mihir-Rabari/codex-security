@@ -110,21 +110,19 @@ async function fixture(attributedOwner = false) {
     mode: "deep",
     scanDir,
     executionThreadIds: ["worker"],
-    ...(attributedOwner
-      ? {
-          executionAttribution: {
-            formatVersion: 1 as const,
-            executionThreadIds: ["worker"],
-            owner: {
-              threadId: "thread-1",
-              turnId: "scan-turn",
-              startedAt: timestamp,
-            },
-            startedAt: timestamp,
-            completedAt: timestamp,
-          },
-        }
-      : {}),
+    executionAttribution: {
+      formatVersion: 1 as const,
+      ...(attributedOwner ? {} : { legacy: true as const }),
+      workerCodexHome: originalHome,
+      executionThreadIds: ["worker"],
+      owner: {
+        threadId: "thread-1",
+        turnId: attributedOwner ? "scan-turn" : null,
+        startedAt: timestamp,
+      },
+      startedAt: timestamp,
+      completedAt: timestamp,
+    },
   };
   const logs = await readSavedScanLogs(scan, [home, originalHome]);
   const deps = dependencies({

@@ -4,6 +4,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { runScanEvents } from "../src/api.js";
+import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import { TestClient } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { runNodePython } from "./support/python-probe.js";
 import type { ScanDraftInput } from "../src/accepted-audit.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
@@ -36,6 +40,7 @@ await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
 const {
   createDeepScanArtifacts,
   recordCodexSecurityScanDraft,
+  recordCodexSecurityScanDraftViaWorkbench,
   readDiscoveryAuditDraft,
   DeepScanWorkerRunner,
 } = await import(pathToFileURL(bundlePath).href);
@@ -392,4 +397,208 @@ function mutateDraft(
       limitations: "Legacy persisted limitation.",
     };
   return draft;
+}
+
+for (const scenario of ["published", "interrupted", "unfinished"] as const) {
+  test(`Standard admission reconciles its committed terminal checkpoint: ${scenario}`, async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await writeFile(join(repository, "extract.py"), "# Synthetic source\n");
+    await mkdir(home);
+    await mkdir(scanDir, { mode: 0o700 });
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const python = process.env["PYTHON"] ?? Bun.which("python3")!;
+    let registration: Record<string, unknown>;
+    let savedOptions: WorkbenchCommandOptions;
+    const commands: string[] = [];
+    const runtime = preparedRuntime(home);
+    runtime.plugin.version = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf8"),
+    ).version;
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({ ...runtime, environment }),
+        resolvePluginPython: async () => python,
+        prepareOutputDir: async () => scanDir,
+        runWorkbench: async (options, args, input) => {
+          savedOptions = options;
+          commands.push(args[0]!);
+          const value = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan") registration = value;
+          return value;
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              const id = String(registration!["scanId"]);
+              const context = {
+                root: scanDir,
+                repoRoot: repository,
+                layout: "scan",
+                scanId: id,
+                mode: "standard",
+                status: "running",
+                scope: ".",
+                targetContract: registration!["contract"],
+              };
+              const draft: ScanDraftInput = {
+                scanId: id,
+                complete: false,
+                scope: { summary: "Archive extraction." },
+                threatModel: {
+                  summary: "An untrusted caller supplies archive entries.",
+                },
+                findings: [
+                  {
+                    ruleId: "path-traversal.archive",
+                    title: "Unsafe archive extraction",
+                    summary: "An archive entry reaches a filesystem write.",
+                    severity: { level: "high" },
+                    confidence: { level: "high", rationale: "Source review." },
+                    taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+                    locations: [
+                      { path: "extract.py", startLine: 1, endLine: 1 },
+                    ],
+                    remediation:
+                      "Validate the resolved output path before writing.",
+                    provenance: {
+                      source: "local_plugin",
+                      candidateId: "archive-entry",
+                    },
+                  },
+                ],
+                coverage: {
+                  completeness: "partial",
+                  surfaces: [
+                    {
+                      id: "archive",
+                      label: "Archive extraction",
+                      disposition: "reported",
+                    },
+                  ],
+                  explicitExclusions: [],
+                  deferred: [
+                    {
+                      id: "deployment",
+                      reason: "Deployment controls remain unverified.",
+                    },
+                  ],
+                },
+              };
+              const publish = (args: readonly string[]) =>
+                runWorkbench(savedOptions!, args);
+              await recordCodexSecurityScanDraftViaWorkbench(
+                context,
+                draft,
+                publish,
+              );
+              if (scenario !== "unfinished") {
+                const terminal = { ...draft, complete: true };
+                if (scenario === "interrupted") {
+                  await expect(
+                    recordCodexSecurityScanDraftViaWorkbench(
+                      context,
+                      terminal,
+                      async (args: readonly string[]) => {
+                        const result = runNodePython(
+                          python,
+                          [
+                            "-c",
+                            [
+                              "import sys",
+                              "sys.path.insert(0, sys.argv[1])",
+                              "import workbench_db as db",
+                              "original = db.saved_results.write_scan_local_bytes",
+                              "def fail_manifest(root, relative, contents):",
+                              "    if relative == 'scan-manifest.json': raise OSError('Synthetic interrupted canonical manifest publication')",
+                              "    return original(root, relative, contents)",
+                              "db.saved_results.write_scan_local_bytes = fail_manifest",
+                              "sys.argv = ['workbench_db.py', *sys.argv[2:]]",
+                              "db.main()",
+                            ].join("\n"),
+                            join(PLUGIN_ROOT, "scripts"),
+                            ...args,
+                          ],
+                          {
+                            env: {
+                              ...process.env,
+                              ...savedOptions!.environment,
+                            },
+                          },
+                        );
+                        expect(result.status).toBe(1);
+                        expect(result.stderr).toContain(
+                          "Synthetic interrupted canonical manifest publication",
+                        );
+                        throw new Error(
+                          "Synthetic interrupted canonical manifest publication",
+                        );
+                      },
+                    ),
+                  ).rejects.toThrow(
+                    "Synthetic interrupted canonical manifest publication",
+                  );
+                  const head = JSON.parse(
+                    await readFile(
+                      join(scanDir, "checkpoint-head.json"),
+                      "utf8",
+                    ),
+                  );
+                  const checkpoint = JSON.parse(
+                    await readFile(
+                      join(scanDir, "checkpoints", head.checkpoint),
+                      "utf8",
+                    ),
+                  );
+                  expect(checkpoint.complete).not.toBe(false);
+                  expect(
+                    JSON.parse(
+                      await readFile(
+                        join(scanDir, "scan-manifest.json"),
+                        "utf8",
+                      ),
+                    ).scan.complete,
+                  ).toBe(false);
+                } else
+                  await recordCodexSecurityScanDraftViaWorkbench(
+                    context,
+                    terminal,
+                    publish,
+                  );
+              }
+              return { events: completedEvents("standard-checkpoint-thread") };
+            },
+          }),
+        }),
+      },
+    );
+    try {
+      const pending = client.run(repository);
+      if (scenario === "unfinished") {
+        await expect(pending).rejects.toThrow();
+        expect(commands).not.toContain("complete-scan");
+      } else {
+        const result = await pending;
+        expect(result.findings.findings).toHaveLength(1);
+        expect(result.findings.findings[0]!.title).toBe(
+          "Unsafe archive extraction",
+        );
+        expect(commands).toContain("prepare-scan-completion");
+        expect(commands).toContain("complete-scan");
+        expect(commands).not.toContain("fail-scan");
+      }
+    } finally {
+      await client.close();
+    }
+  });
 }

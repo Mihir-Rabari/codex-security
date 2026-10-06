@@ -1,37 +1,11 @@
-import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
 
 export async function recordedScanCodexHome(
-  scanDirectory: string,
+  _scanDirectory: string,
   attribution?: ScanExecutionAttribution | null,
 ): Promise<string | undefined> {
-  if (attribution && "workerCodexHome" in attribution)
-    return attribution.workerCodexHome ?? undefined;
-  try {
-    const saved: unknown = JSON.parse(
-      await readFile(
-        join(
-          scanDirectory,
-          "artifacts",
-          "deep_discovery",
-          "execution-settings.json",
-        ),
-        "utf8",
-      ),
-    );
-    if (
-      isRecord(saved) &&
-      saved["version"] === 1 &&
-      isRecord(saved["settings"])
-    ) {
-      const home = saved["settings"]["codexHome"];
-      if (typeof home === "string" && home !== "") return home;
-    }
-  } catch (error) {
-    if (!isRecord(error) || error["code"] !== "ENOENT") throw error;
-  }
-  return undefined;
+  return attribution?.workerCodexHome ?? undefined;
 }
 
 export interface ScanExecutionAttribution {
