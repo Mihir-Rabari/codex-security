@@ -1,5 +1,6 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { parseJson } from "../helpers/json";
+import { requireSqliteText } from "./database";
 import { listDedupeGroups } from "./duplicates";
 import { transaction } from "./findings";
 
@@ -104,6 +105,7 @@ function detail(
 
 /** Read one snapshot without loading artifacts or modifying stored data. */
 export function dashboard(database: DatabaseSync, query: DashboardQuery) {
+  requireSqliteText([query.query, query.repository, query.id]);
   // JSON preserves text across Node 22 SQLite result and callback boundaries.
   database.function("dashboard_lower", { deterministic: true }, (value) =>
     (JSON.parse(value as string) as string).toLowerCase(),

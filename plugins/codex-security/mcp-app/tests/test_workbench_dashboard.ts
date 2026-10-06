@@ -156,6 +156,29 @@ test("dashboard preserves NUL text through display, filters, search, and sorting
   assert.deepEqual(groups.detail?.group?.findingIds, [first, second]);
 });
 
+test("dashboard rejects malformed Unicode query keys without aliasing stored values", (t) => {
+  const db = database(t);
+  const stored = insert(db, "record-\ufffd", "scope-\ufffd", "Title\ufffd");
+  const query = {
+    view: "findings",
+    sort: "title",
+    limit: 50,
+    offset: 0,
+  } as const;
+  assert.deepEqual(
+    dashboard(db, { ...query, repository: "scope-\ufffd", id: "record-\ufffd" })
+      .detail?.finding,
+    stored,
+  );
+  for (const filter of [
+    { query: "Title\ud800" },
+    { repository: "scope-\ud800" },
+    { id: "record-\ud800" },
+  ]) {
+    assert.throws(() => dashboard(db, { ...query, ...filter }));
+  }
+});
+
 test("dashboard reads its counts and rows from one WAL snapshot", async (t) => {
   const path = join(
     await temporary.create("workbench-dashboard-"),
