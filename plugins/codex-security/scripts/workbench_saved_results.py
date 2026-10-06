@@ -1377,7 +1377,7 @@ def merge_saved_results(
 
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
-    canonical_candidates: dict[tuple[str, str, Any, Any, Any], dict[str, Any]] = {}
+    canonical_candidates: set[tuple[str, str, Any, Any, Any]] = set()
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1650,47 +1650,6 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
-    # Only the current parent may claim that another worker finding was absorbed.
-    # A superseded checkpoint must not suppress a newer independent result.
-    if parent:
-        for finding in parent["findings"]:
-            if recovered_finding(finding):
-                canonical_key = _finding_key(finding)
-                for retained, _ in _retained_findings(finding):
-                    retained_key = _finding_key(retained)
-                    if retained is not finding:
-                        represented_history.setdefault(retained_key, set()).add(
-                            _digest(_finding_content(retained))
-                        )
-                    previous_key = represented.get(retained_key)
-                    if retained_key not in represented:
-                        represented[retained_key] = canonical_key
-                    elif previous_key != canonical_key:
-                        # Ambiguous history cannot suppress an independent source.
-                        represented[retained_key] = None
-                originals = finding["provenance"].get("sourceFindings", [])
-                for original in originals if isinstance(originals, list) else []:
-                    if isinstance(original, dict) and isinstance(original.get("finding"), dict):
-                        source_id = original.get("id")
-                        candidate_id = finding_candidate_id(original["finding"])
-                        if isinstance(source_id, str) and ":" in source_id and candidate_id:
-                            candidate_key = _worker_candidate_key(
-                                source_id.rsplit(":", 1)[0],
-                                candidate_id,
-                                original["finding"],
-                            )
-                            previous_key = represented_candidates.get(candidate_key)
-                            if candidate_key not in represented_candidates:
-                                represented_candidates[candidate_key] = canonical_key
-                                canonical_candidates[candidate_key] = finding
-                            elif previous_key != canonical_key:
-                                # Candidate ids are only authoritative within one
-                                # logical worker. Multiple canonical owners make
-                                # that worker-local identity ambiguous.
-                                represented_candidates[candidate_key] = None
-                            represented_candidate_history.setdefault(candidate_key, set()).add(
-                                _digest(_finding_content(original["finding"]))
-                            )
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -1898,7 +1857,8 @@ def merge_saved_results(
                 and resolved.get((worker_id, candidate_id)) == "reported"
             ):
                 continue
-            if relative == "parent" and parent_is_canonical:
+            # Keep parent row order identical for publication and frozen replay.
+            if relative == "parent":
                 finding = copy.deepcopy(value)
                 if isinstance(value, dict) and (
                     "identity" not in value or id(value) in inferred_identities
@@ -1975,44 +1935,39 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             key = _finding_key(finding)
-            represented_by_parent = False
-            if relative != "parent":
-                if key in represented:
-                    mapped_key = represented[key]
-                    historical_contents = represented_history.get(key, set())
-                elif worker_id and candidate_id:
-                    candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
-                    if candidate_key not in represented_candidates:
-                        represented_candidates[candidate_key] = key
-                    mapped_key = represented_candidates[candidate_key]
-                    historical_contents = represented_candidate_history.get(candidate_key, set())
-                else:
-                    mapped_key = None
-                    historical_contents = set()
-                if mapped_key is not None:
-                    key = mapped_key
-                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
-            canonical_candidate = (
+            candidate_key = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
                 if worker_id and candidate_id
                 else None
             )
             if (
-                canonical_candidate in canonical_candidates
-                and represented_candidates[canonical_candidate] is not None
+                candidate_key in canonical_candidates
+                and represented_candidates[candidate_key] is not None
             ):
-                key = represented_candidates[canonical_candidate]
-            elif not represented_by_parent:
-                key = candidate_position_key(finding, key)
+                mapped_key = represented_candidates[candidate_key]
+                historical_contents = represented_candidate_history.get(candidate_key, set())
+            elif key in represented:
+                mapped_key = represented[key]
+                historical_contents = represented_history.get(key, set())
+                if mapped_key is not None and key not in represented_history:
+                    mapped_key = candidate_position_key(finding, mapped_key)
+            elif candidate_key is not None:
+                if candidate_key not in represented_candidates:
+                    represented_candidates[candidate_key] = key
+                mapped_key = represented_candidates[candidate_key]
+                historical_contents = represented_candidate_history.get(candidate_key, set())
+                if mapped_key is not None:
+                    mapped_key = candidate_position_key(finding, mapped_key)
+            else:
+                mapped_key = None
+                historical_contents = set()
+            represented_by_parent = (
+                mapped_key is not None and _digest(_finding_content(value)) in historical_contents
+            )
+            key = mapped_key if mapped_key is not None else candidate_position_key(finding, key)
             if key in finding_positions:
                 position = finding_positions[key]
                 retained = findings[position]
-                if (
-                    id(finding) not in inferred_identities
-                    or id(retained) not in inferred_identities
-                ):
-                    inferred_identities.pop(id(finding), None)
-                    inferred_identities.pop(id(retained), None)
                 if finding != retained:
                     if not represented_by_parent and _finding_strength(finding) > _finding_strength(
                         retained
@@ -2056,12 +2011,47 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
+        # Only the current parent may claim that another worker finding was absorbed.
+        # A superseded checkpoint must not suppress a newer independent result.
         if relative == "parent":
-            for candidate, canonical in canonical_candidates.items():
-                if represented_candidates[candidate] is not None:
-                    represented_candidates[candidate] = candidate_position_key(
-                        canonical, represented_candidates[candidate]
-                    )
+            for finding in parent["findings"]:
+                if recovered_finding(finding):
+                    canonical_key = candidate_position_key(finding, _finding_key(finding))
+                    for retained, _ in _retained_findings(finding):
+                        retained_key = _finding_key(retained)
+                        if retained is not finding:
+                            represented_history.setdefault(retained_key, set()).add(
+                                _digest(_finding_content(retained))
+                            )
+                        previous_key = represented.get(retained_key)
+                        if retained_key not in represented:
+                            represented[retained_key] = canonical_key
+                        elif previous_key != canonical_key:
+                            # Ambiguous history cannot suppress an independent source.
+                            represented[retained_key] = None
+                    originals = finding["provenance"].get("sourceFindings", [])
+                    for original in originals if isinstance(originals, list) else []:
+                        if isinstance(original, dict) and isinstance(original.get("finding"), dict):
+                            source_id = original.get("id")
+                            candidate_id = finding_candidate_id(original["finding"])
+                            if isinstance(source_id, str) and ":" in source_id and candidate_id:
+                                candidate_key = _worker_candidate_key(
+                                    source_id.rsplit(":", 1)[0],
+                                    candidate_id,
+                                    original["finding"],
+                                )
+                                previous_key = represented_candidates.get(candidate_key)
+                                if candidate_key not in represented_candidates:
+                                    represented_candidates[candidate_key] = canonical_key
+                                    canonical_candidates.add(candidate_key)
+                                elif previous_key != canonical_key:
+                                    # Candidate ids are only authoritative within one
+                                    # logical worker. Multiple canonical owners make
+                                    # that worker-local identity ambiguous.
+                                    represented_candidates[candidate_key] = None
+                                represented_candidate_history.setdefault(candidate_key, set()).add(
+                                    _digest(_finding_content(original["finding"]))
+                                )
         if superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):

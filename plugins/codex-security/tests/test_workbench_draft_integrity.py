@@ -463,8 +463,9 @@ def test_canonical_worker_update_keeps_independent_alias_sibling(
 
 @pytest.mark.parametrize("renamed", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("history", ["sourceFindings", "previousFindings"])
 def test_canonical_worker_slot_survives_a_stronger_replacement(
-    tmp_path: Path, renamed: bool, retry: bool
+    tmp_path: Path, renamed: bool, retry: bool, history: str
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     finding_path = scan_dir / "findings.json"
@@ -477,17 +478,23 @@ def test_canonical_worker_slot_survives_a_stronger_replacement(
     historical = json.loads(json.dumps(original))
     if renamed:
         original["provenance"]["candidateId"] = "canonical-candidate"
-    original["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+    original["provenance"][history] = (
+        [{"id": f"{worker_id}:0", "finding": historical}]
+        if history == "sourceFindings"
+        else [historical]
+    )
     finding_path.write_text(json.dumps(parent))
     worker = json.loads(result_path.read_text())
-    write_checkpoint(
-        result_path.parent / "checkpoints",
-        {**worker, "complete": False, "findings": [historical]},
-    )
+    if history == "sourceFindings":
+        write_checkpoint(
+            result_path.parent / "checkpoints",
+            {**worker, "complete": False, "findings": [historical]},
+        )
     current = json.loads(json.dumps(historical))
     current["severity"]["level"] = "high"
     current["summary"] = "Stronger current worker observation."
-    current["locations"][0].update(startLine=2, endLine=2)
+    if history == "sourceFindings":
+        current["locations"][0].update(startLine=2, endLine=2)
     worker["findings"] = [current]
     result_path.write_text(json.dumps(worker))
 
@@ -496,12 +503,19 @@ def test_canonical_worker_slot_survives_a_stronger_replacement(
     findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
     assert len(findings) == 1
     assert findings[0]["summary"] == current["summary"]
-    assert findings[0]["locations"][0]["startLine"] == 2
+    assert findings[0]["locations"][0]["startLine"] == current["locations"][0]["startLine"]
 
 
 @pytest.mark.parametrize(
     "case",
-    ["foreign-owner", "split-owners", "explicit-priority", "raw-stronger", "explicit-stronger"],
+    [
+        "foreign-owner",
+        "split-owners",
+        "explicit-priority",
+        "interleaved-explicit",
+        "raw-stronger",
+        "explicit-stronger",
+    ],
 )
 def test_frozen_recovery_preserves_worker_ownership_and_explicit_identity_priority(
     tmp_path: Path, case: str
@@ -545,6 +559,8 @@ def test_frozen_recovery_preserves_worker_ownership_and_explicit_identity_priori
             elif index == 0:
                 finding.pop("identity")
             findings.append(finding)
+        if case == "interleaved-explicit":
+            findings[1], findings[2] = findings[2], findings[1]
         document["findings"] = findings
         finding_path.write_text(json.dumps(document))
         stop_draft(directory, state, home, scan_id, retry=retry)
@@ -561,6 +577,8 @@ def test_frozen_recovery_preserves_worker_ownership_and_explicit_identity_priori
             }
         )
     assert snapshots[0] == snapshots[1]
+    if case == "interleaved-explicit":
+        assert snapshots[0][None, "B"] == {"anchor": "finding"}
 
 
 def test_recovered_identity_does_not_depend_on_worker_assignment(tmp_path: Path):
