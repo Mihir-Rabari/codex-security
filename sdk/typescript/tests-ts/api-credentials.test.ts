@@ -58,11 +58,16 @@ describe("CodexSecurity orchestration", () => {
       };
       if (nativeProfile) {
         await writeFile(
+          join(home, "compact.md"),
+          "Synthetic compact prompt.\n",
+        );
+        await writeFile(
           join(home, "review.config.toml"),
           stringify({
             model: "native-model",
             model_reasoning_effort: "high",
             model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: "compact.md",
             model_provider: "synthetic.provider",
             features: { shell_tool: false, unified_exec: false },
             model_providers: { "synthetic.provider": providerConfig },
@@ -210,6 +215,7 @@ describe("CodexSecurity orchestration", () => {
             model: "native-model",
             model_reasoning_effort: "high",
             model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: join(home, "compact.md"),
           });
         }
         if (!profile || nativeProfile) {
@@ -218,6 +224,11 @@ describe("CodexSecurity orchestration", () => {
           );
           expect(saved).not.toHaveProperty("profile");
           expect(saved).not.toHaveProperty("profiles");
+          if (nativeProfile) {
+            expect(saved["experimental_compact_prompt_file"]).toBe(
+              join(home, "compact.md"),
+            );
+          }
           expect(saved["model_providers"]).toEqual({
             "synthetic.provider": provider,
           });

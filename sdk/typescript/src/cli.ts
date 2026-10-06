@@ -126,6 +126,7 @@ import {
   resolveCommandAuthConfig,
   resolveCodexProfile,
   mergedCodexConfig,
+  readCodexFileProfile,
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
@@ -3331,6 +3332,14 @@ export async function main(
         try {
           if (argumentError !== undefined) return fail(argumentError, 2);
           const directory = dependencies.currentDirectory();
+          const codexOverrides = await parseScanCodexOverrides(
+            options.codex,
+            options.model,
+            options.effort,
+            options.provider,
+            undefined,
+            configuredCodexHome(dependencies.environment),
+          );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
@@ -3338,12 +3347,7 @@ export async function main(
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
-                  codexOverrides: parseCodexOverrides(
-                    options.codex,
-                    options.model,
-                    options.effort,
-                    options.provider,
-                  ),
+                  codexOverrides,
                 },
                 generation: {
                   auth: options.auth,
@@ -3607,12 +3611,13 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: await parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
                 options.provider,
                 project?.input.codex,
+                configuredCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4159,12 +4164,13 @@ export async function main(
               ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: await parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
                 options.provider,
                 project?.input.codex,
+                configuredCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4495,12 +4501,13 @@ export async function main(
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
-                parseCodexOverrides(
+                await parseScanCodexOverrides(
                   options.codex,
                   options.model,
                   options.effort,
                   options.provider,
                   project?.input.codex,
+                  configuredCodexHome(dependencies.environment),
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -9399,6 +9406,31 @@ function resolveCliScope(
     ...(changed ? { target: projectScopeTarget(scope) ?? "repository" } : {}),
     sources,
   };
+}
+
+async function parseScanCodexOverrides(
+  values: readonly string[],
+  model: string | undefined,
+  effort: ModelCliOptions["effort"],
+  provider: "openai" | "amazon-bedrock" | ExternalModelProvider | undefined,
+  defaults: JsonObject | undefined,
+  profileHome: string,
+): Promise<JsonObject> {
+  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
+    return parseCodexOverrides(values, model, effort, provider, defaults);
+  }
+  const overrides = mergeCodexOverrides(
+    defaults ?? {},
+    parseCodexOverrides(values, model, effort),
+  );
+  const profile = await readCodexFileProfile(overrides, profileHome);
+  return parseCodexOverrides(
+    values,
+    model,
+    effort,
+    provider,
+    mergeCodexOverrides(profile, defaults ?? {}),
+  );
 }
 
 export function parseCodexOverrides(

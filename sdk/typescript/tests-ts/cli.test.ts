@@ -3033,6 +3033,67 @@ describe("CLI", () => {
     }
   });
 
+  test.each(["amazon-bedrock", "openrouter", "fireworks"])(
+    "uses the selected file-profile model before validating --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-provider-profile-");
+      const stderr = capture();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "file-profile-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      for (const model of [undefined, "explicit-model"]) {
+        const selected = model ?? "file-profile-model";
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--verbose",
+          "--json",
+          ...(model === undefined ? [] : ["--model", model]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({ environment: { CODEX_HOME: home } }),
+          ),
+        ).toBe(0);
+        expect(stderr.text()).toContain(`model=${JSON.stringify(selected)}`);
+      }
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_reasoning_effort = "high"\n',
+      );
+      for (const profile of ["review", "missing"]) {
+        const missingModel = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              `profile="${profile}"`,
+              "--json",
+            ],
+            capture().stream,
+            missingModel.stream,
+            dependencies({ environment: { CODEX_HOME: home } }),
+          ),
+        ).toBe(2);
+        expect(missingModel.text()).toContain(
+          `--model is required when using --provider ${provider}`,
+        );
+      }
+    },
+  );
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 

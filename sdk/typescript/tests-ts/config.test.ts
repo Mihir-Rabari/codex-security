@@ -195,32 +195,31 @@ describe("Codex configuration", () => {
     expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
   });
 
-  test.each([undefined, "explicit.md"])(
-    "resolves file-profile instructions before explicit overrides: %s",
-    async (explicit) => {
+  test.each(
+    ["model_instructions_file", "experimental_compact_prompt_file"].flatMap(
+      (key) =>
+        [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+    ),
+  )(
+    "resolves file-profile paths before explicit overrides: %j",
+    async ({ key, explicit }) => {
       const home = await temporaryDirectory();
       await writeFile(
         join(home, "review.config.toml"),
-        'model_instructions_file = "instructions.md"\n',
+        `${key} = "instructions.md"\n`,
       );
       const overrides = {
         profile: "review",
-        ...(explicit === undefined
-          ? {}
-          : { model_instructions_file: explicit }),
+        ...(explicit === undefined ? {} : { [key]: explicit }),
       };
       const config = await mergedCodexConfig(
         { codexOverrides: overrides },
         home,
       );
-      expect(config["model_instructions_file"]).toBe(
-        explicit ?? join(home, "instructions.md"),
-      );
+      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
       expect(overrides).toEqual({
         profile: "review",
-        ...(explicit === undefined
-          ? {}
-          : { model_instructions_file: explicit }),
+        ...(explicit === undefined ? {} : { [key]: explicit }),
       });
     },
   );

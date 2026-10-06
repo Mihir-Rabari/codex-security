@@ -233,17 +233,11 @@ export function scanCyberAccessConfig(
   };
 }
 
-export async function mergedCodexConfig(
-  config: CodexSecurityConfig,
+/** @internal Read file-profile settings before wrapper defaults or CLI model validation. */
+export async function readCodexFileProfile(
+  overrides: JsonObject,
   profileHome?: string,
 ): Promise<JsonObject> {
-  if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
-    throw new ConfigurationError("codexOverrides must be an object.");
-  }
-  validateOverrideKeys(config.codexOverrides ?? {});
-  const overrides = structuredClone(config.codexOverrides ?? {});
-  validateOverrides(overrides);
-  normalizeLegacyWindowsSandboxOverride(overrides);
   let nativeProfile: JsonObject = {};
   const profileName = overrides["profile"];
   if (profileName !== undefined && typeof profileName !== "string") {
@@ -279,18 +273,32 @@ export async function mergedCodexConfig(
     validateOverrideKeys(nativeProfile);
     validateOverrides(nativeProfile);
     // CLI overrides otherwise resolve this file against the scan directory.
-    const instructions = nativeProfile["model_instructions_file"];
-    if (
-      typeof instructions === "string" &&
-      !/^~(?:[/\\]|$)/u.test(instructions)
-    ) {
-      nativeProfile["model_instructions_file"] = resolve(
-        profileHome,
-        instructions,
-      );
+    for (const key of [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+    ]) {
+      const path = nativeProfile[key];
+      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+        nativeProfile[key] = resolve(profileHome, path);
+      }
     }
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
+  return nativeProfile;
+}
+
+export async function mergedCodexConfig(
+  config: CodexSecurityConfig,
+  profileHome?: string,
+): Promise<JsonObject> {
+  if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
+    throw new ConfigurationError("codexOverrides must be an object.");
+  }
+  validateOverrideKeys(config.codexOverrides ?? {});
+  const overrides = structuredClone(config.codexOverrides ?? {});
+  validateOverrides(overrides);
+  normalizeLegacyWindowsSandboxOverride(overrides);
+  const nativeProfile = await readCodexFileProfile(overrides, profileHome);
   const profiles = overrides["profiles"];
   if (isObject(profiles)) {
     for (const profile of Object.values(profiles)) {

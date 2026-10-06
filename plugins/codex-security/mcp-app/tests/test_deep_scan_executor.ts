@@ -1173,9 +1173,12 @@ async function testWorkerRuntimeSettings() {
       const codexHome = path.join(fixture.root, "scan home");
       const promptPath = path.join(fixture.root, "prompt.md");
       await mkdir(codexHome);
+      const compactPrompt = path.join(fixture.root, "compact-prompt.md");
+      await writeFile(compactPrompt, "Synthetic compact prompt.\n");
       await writeFile(
         path.join(codexHome, "config.toml"),
-        `model = "fixture-inherited-model"
+        `experimental_compact_prompt_file = ${JSON.stringify(compactPrompt)}
+model = "fixture-inherited-model"
 model_reasoning_effort = "medium"
 model_provider = "synthetic"
 [model_providers.synthetic]
