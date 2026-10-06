@@ -2959,18 +2959,20 @@ def finding_result(
         """,
         (occurrence["id"], FINDING_LOCATIONS_LIMIT),
     ):
-        excerpt_locations.append(
-            {
-                "endLine": row["end_line"],
-                "path": row["relative_path"],
-                "role": row["role"],
-                "startLine": row["start_line"],
-            }
-        )
+        display_path = bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES)
+        if display_path == row["relative_path"]:
+            excerpt_locations.append(
+                {
+                    "endLine": row["end_line"],
+                    "path": row["relative_path"],
+                    "role": row["role"],
+                    "startLine": row["start_line"],
+                }
+            )
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
             "endLine": row["end_line"],
-            "path": bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES),
+            "path": display_path,
             "role": (
                 bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
                 if row["role"] is not None
