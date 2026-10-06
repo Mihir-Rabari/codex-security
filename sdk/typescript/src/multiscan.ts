@@ -4,6 +4,7 @@ import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -394,17 +395,7 @@ async function runCampaign(
         pending.push(task);
         continue;
       }
-      if (receipt.status !== "failed" && receipt.warnings?.length) {
-        warnings.push({ repository: task.id, warnings: receipt.warnings });
-        for (const warning of receipt.warnings) {
-          notifyProgress(options, {
-            repository: task.id,
-            status: receipt.status,
-            attempt: receipt.attempt,
-            warning,
-          });
-        }
-      }
+
       if (
         relative(
           join(output, "artifacts", task.id, attemptName),
@@ -427,6 +418,17 @@ async function runCampaign(
         options.githubHost,
       );
       if (resumed !== undefined) {
+        if (receipt.status !== "failed" && receipt.warnings?.length) {
+          warnings.push({ repository: task.id, warnings: receipt.warnings });
+          for (const warning of receipt.warnings) {
+            notifyProgress(options, {
+              repository: task.id,
+              status: receipt.status,
+              attempt: receipt.attempt,
+              warning,
+            });
+          }
+        }
         if (!resumed.reportSealed) {
           await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
         }
@@ -621,7 +623,7 @@ async function runCampaign(
           if (task.scope !== undefined)
             resolvedScope ??=
               result.manifest?.scan.scope.includePaths[0] ??
-              receipts.get(task.id)?.resolvedScope;
+              receipts.get(task.id.toLowerCase())?.resolvedScope;
           targetId = result.manifest?.scan.target.targetId;
           snapshotDigest = result.manifest?.scan.target.snapshotDigest;
           const failureSeverity = scanSettings?.failureSeverity;
@@ -1225,15 +1227,17 @@ async function loadResumableScan(
       return undefined;
     let expectedPaths = ["."];
     if (requestedPaths !== undefined) {
+      const scopeCheckout = await mkdtemp(
+        join(campaignRoot, "scope-validation-"),
+      );
       try {
-        await rm(checkout, { recursive: true, force: true });
-        await mkdir(checkout, { mode: 0o700 });
-        await checkoutRevision(receipt, checkout, signal, githubHost);
+        await checkoutRevision(receipt, scopeCheckout, signal, githubHost);
         expectedPaths = [
-          ...(await normalizeTarget(checkout, requestedPaths, signal)).paths,
+          ...(await normalizeTarget(scopeCheckout, requestedPaths, signal))
+            .paths,
         ];
       } finally {
-        await rm(checkout, { recursive: true, force: true });
+        await rm(scopeCheckout, { recursive: true, force: true });
       }
       if (
         receipt.scope !== undefined &&
@@ -1296,11 +1300,11 @@ async function loadResumableScan(
         return undefined;
       }
       const evidenceIds = new Set<string>();
-      for (const evidence of [
-        ...(finding.codeEvidence ?? []),
-        ...(finding.code_evidence ?? []),
-      ]) {
+      for (const evidence of finding.codeEvidence ?? []) {
         if (evidenceIds.has(evidence.id)) return undefined;
+        evidenceIds.add(evidence.id);
+      }
+      for (const evidence of finding.code_evidence ?? []) {
         evidenceIds.add(evidence.id);
       }
       for (const section of [
