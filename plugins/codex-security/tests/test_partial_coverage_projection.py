@@ -548,7 +548,8 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
         workbench_db.execute(
             "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
         )
-    (scan.scan_dir / "coverage.json").write_text(
+    parent_path = scan.scan_dir / "coverage.json"
+    parent_path.write_text(
         json.dumps(
             {
                 **scan.coverage,
@@ -570,6 +571,9 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
             }
         )
     )
+    # This parent disposition follows the worker result; tied observations stay pending.
+    observed = result.stat().st_mtime_ns + 1
+    os.utime(parent_path, ns=(observed, observed))
     with monkeypatch.context() as interrupted:
         if retry_publication:
 
