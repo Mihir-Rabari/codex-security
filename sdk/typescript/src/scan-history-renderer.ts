@@ -2,12 +2,7 @@ import { basename, join, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
-  | "list"
-  | "show"
-  | "compare"
-  | "match-all"
-  | "findings"
-  | "finding";
+  "list" | "show" | "compare" | "match-all" | "findings" | "finding";
 export type HistoryRendererOptions = {
   columns?: number;
   color?: boolean;
@@ -149,7 +144,7 @@ export function renderScanHistory(
       const closeReason = triage?.["closeReason"];
       const statusLabel =
         status === "closed" && typeof closeReason === "string"
-          ? CLOSE_REASON_LABELS[closeReason] ?? clean(status)
+          ? (CLOSE_REASON_LABELS[closeReason] ?? clean(status))
           : clean(status);
       const scanId = entry["scanId"];
       const occurrenceCount = entry["occurrenceCount"];
@@ -375,7 +370,9 @@ export function renderScanHistory(
       ["ATTACK PATH", "attackPath"],
     ] as const) {
       const value =
-        key === "rootCause" ? result[key] ?? result["root_cause"] : result[key];
+        key === "rootCause"
+          ? (result[key] ?? result["root_cause"])
+          : result[key];
       const detail = description(value);
       const sections = detail === undefined ? [] : [detail];
       if (
@@ -559,7 +556,7 @@ export function renderScanHistory(
         if (typeof details?.[key] === "string" && details[key]) {
           const value =
             key === "closeReason"
-              ? CLOSE_REASON_LABELS[details[key]] ?? details[key]
+              ? (CLOSE_REASON_LABELS[details[key]] ?? details[key])
               : details[key];
           wrap(`${label}: ${value}`, 4);
         }
@@ -682,16 +679,13 @@ export function renderScanHistory(
       lines.push(
         `  ${strong("CONFIGURATION")}  ${Object.entries(config)
           .map(([key, value]) => {
-            const rendered =
-              typeof value === "object" ? JSON.stringify(value) : value;
-            return `${clean(key)}=${clean(rendered)}`;
+            return `${clean(key)}=${clean(typeof value === "object" ? JSON.stringify(value) : value)}`;
           })
           .join(`  ${accent("·")}  `)}`,
       );
     }
     const coverage = (result["progress"] as JsonObject)["coverage"] as
-      | JsonObject
-      | undefined;
+      JsonObject | undefined;
     if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null
@@ -710,8 +704,7 @@ export function renderScanHistory(
       }
     }
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
-      | string[]
-      | undefined;
+      string[] | undefined;
     if (knowledgeBase?.length) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
@@ -859,6 +852,13 @@ export function renderScanHistory(
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );
+    if (result["relatedPairs"] || result["uncertainPairs"]) {
+      const related = result["relatedPairs"] ?? 0;
+      const uncertain = result["uncertainPairs"] ?? 0;
+      lines.push(
+        `  ${clean(related)} related pair${related === 1 ? "" : "s"} recorded    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
+      );
+    }
     if (result["unavailableScans"]) {
       lines.push(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,
