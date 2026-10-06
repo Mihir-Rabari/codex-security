@@ -22,6 +22,18 @@ const { plainTarEntries } = (await import(
 const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
 
+function paxRecords(attributes: Record<string, string>): Buffer {
+  return Buffer.concat(
+    Object.entries(attributes).map(([key, value]) => {
+      const record = ` ${key}=${value}\n`;
+      let length = Buffer.byteLength(record) + 1;
+      while (length !== Buffer.byteLength(record) + String(length).length)
+        length = Buffer.byteLength(record) + String(length).length;
+      return Buffer.from(`${length}${record}`);
+    }),
+  );
+}
+
 describe("plain npm tar entries", () => {
   test.each([" ", " \0", "\0"])(
     "accepts package size fields ending in %j",
@@ -58,7 +70,7 @@ describe("plain npm tar entries", () => {
     },
   );
 
-  test("rejects every unsupported tar entry type", () => {
+  test("rejects unsupported entry types and malformed extended headers", () => {
     for (const type of [
       0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78,
     ]) {
@@ -73,6 +85,76 @@ describe("plain npm tar entries", () => {
         ),
       ).toThrow(invalidTarEntryError);
     }
+  });
+
+  test.each([0x78, 0x67])("accepts POSIX pax metadata typeflag %i", (type) => {
+    const attributes = paxRecords({ ctime: "0.123456789" });
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(attributes, { name: "package/PaxHeaders/README.md", type }),
+          tarRecord(Buffer.from("readme"), { name: "package/README.md" }),
+        ),
+      ),
+    ).toEqual([{ path: "package/README.md", size: 6 }]);
+  });
+
+  test("uses local pax paths and sizes and clears them after their member", () => {
+    const path = `package/${"nested/".repeat(16)}README.md`;
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(paxRecords({ path, size: "6" }), {
+            name: "package/PaxHeaders/README.md",
+            type: 0x78,
+          }),
+          tarRecord(Buffer.from("readme"), {
+            name: "placeholder",
+            sizeField: octal(0, 12),
+          }),
+          tarRecord(Buffer.from("license"), { name: "package/LICENSE" }),
+        ),
+      ),
+    ).toEqual([
+      { path, size: 6 },
+      { path: "package/LICENSE", size: 7 },
+    ]);
+  });
+
+  test("retains global pax attributes and honors local overrides", () => {
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(paxRecords({ path: "package/README.md" }), {
+            name: "GlobalHead",
+            type: 0x67,
+          }),
+          tarRecord(Buffer.from("readme"), { name: "placeholder" }),
+          tarRecord(paxRecords({ path: "package/LICENSE" }), {
+            name: "package/PaxHeaders/LICENSE",
+            type: 0x78,
+          }),
+          tarRecord(Buffer.from("license"), { name: "placeholder" }),
+        ),
+      ),
+    ).toEqual([
+      { path: "package/README.md", size: 6 },
+      { path: "package/LICENSE", size: 7 },
+    ]);
+  });
+
+  test("scans the complete pax metadata payload", () => {
+    expect(() =>
+      plainTarEntries(
+        archive(
+          tarRecord(paxRecords({ comment: "go/example" }), {
+            name: "package/PaxHeaders/README.md",
+            type: 0x78,
+          }),
+          tarRecord(Buffer.from("readme"), { name: "package/README.md" }),
+        ),
+      ),
+    ).toThrow(internalReferenceError);
   });
 
   test("accepts an empty size field for an empty file", () => {
