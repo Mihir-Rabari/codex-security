@@ -145,6 +145,7 @@ async function recoverAndFinalize(
   details = false,
   replay = false,
   provenanceDetails = false,
+  source: "saved" | "published" = "saved",
 ): Promise<{
   normal: RecoveredFinding[];
   recovered: RecoveredFinding[];
@@ -167,7 +168,7 @@ manifest=json.loads((normal/'scan-manifest.json').read_text())
 coverage=json.loads((normal/'coverage.json').read_text())
 binding={'status':'failed','allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
 warnings=[]
-recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption')
+recovery=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),warnings,stopped=True,reason='Synthetic interruption') if sys.argv[9]=='saved' else tuple(json.loads((recovered/name).read_text()) for name in ['scan-manifest.json','findings.json','coverage.json'])
 if json.loads(sys.argv[7]):
  replayed=merge_saved_results(recovered,scan_id,binding,json.loads(sys.argv[5]),[],stopped=True,reason='Synthetic interruption',frozen_source_digests=recovery[0]['scan']['preservedSources'])
  assert replayed == recovery, 'Frozen recovery changed the retained documents'
@@ -189,6 +190,7 @@ print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings
       JSON.stringify(details),
       JSON.stringify(replay),
       JSON.stringify(provenanceDetails),
+      source,
     ],
   );
   return JSON.parse(stdout);
@@ -3059,4 +3061,168 @@ for (const layout of ["standard", "diff", "deep"] as const) {
       assert.deepEqual(replay.recovered, result.recovered);
     });
   }
+}
+
+for (const layout of ["standard", "diff", "deep"] as const)
+  for (const reversed of [false, true]) {
+    for (const historical of [false, true])
+      test(`${layout}: explicit sibling assignment preserves revised identity (reverse=${reversed}, history=${historical})`, async (t) => {
+        const normal = await fixture(t, layout),
+          recovered = await fixture(t, layout);
+        const first = finding("First review", {
+          identity: { anchor: "saved-a" },
+          provenance: {
+            source: "local_plugin",
+            candidateId: "shared-candidate",
+          },
+        });
+        const second = {
+          ...structuredClone(first),
+          identity: { anchor: "saved-b" },
+          title: "Second review",
+        };
+        const ordered = (rows: FixtureFinding[]) =>
+          reversed ? rows.toReversed() : rows;
+        for (const f of [normal, recovered])
+          await f.write({ ...f.draft(), findings: ordered([first, second]) });
+        const revised = {
+          ...structuredClone(first),
+          title: "Revised first review",
+          summary: "Updated first evidence.",
+        };
+        if (historical)
+          revised.provenance.previousFindings = [structuredClone(first)];
+        await normal.write({
+          ...normal.draft(),
+          findings: ordered([revised, second]),
+        });
+        delete revised.identity;
+        await recovered.write({
+          ...recovered.draft(),
+          findings: ordered([revised, second]),
+        });
+        const rows = JSON.parse(
+          await readFile(path.join(recovered.root, "findings.json"), "utf8"),
+        ).findings;
+        assert.equal(rows.length, 2);
+        assert.deepEqual(
+          rows.find((row: FixtureFinding) => row.title === revised.title)
+            .identity,
+          first.identity,
+        );
+        assert.deepEqual(
+          rows.find((row: FixtureFinding) => row.title === second.title)
+            .identity,
+          second.identity,
+        );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          false,
+          false,
+          "published",
+        );
+        assert.equal(result.normal.length, 2);
+        assert.deepEqual(result.recovered, result.normal);
+        assert.deepEqual(result.warnings, []);
+      });
+    test(`${layout}: truly ambiguous revised siblings retain independent reports (reverse=${reversed})`, async (t) => {
+      const normal = await fixture(t, layout),
+        recovered = await fixture(t, layout);
+      const first = finding("First review", {
+        identity: { anchor: "saved-a" },
+        provenance: { source: "local_plugin", candidateId: "shared-candidate" },
+      });
+      const second = {
+        ...structuredClone(first),
+        identity: { anchor: "saved-b" },
+        title: "Second review",
+      };
+      const revised = [
+        {
+          ...structuredClone(first),
+          title: "New first review",
+          summary: "New first evidence.",
+        },
+        {
+          ...structuredClone(second),
+          title: "New second review",
+          summary: "New second evidence.",
+        },
+      ];
+      for (const row of revised) delete row.identity;
+      for (const f of [normal, recovered]) {
+        await f.write({
+          ...f.draft(),
+          findings: reversed ? [second, first] : [first, second],
+        });
+        await f.write({
+          ...f.draft(),
+          findings: reversed ? revised.toReversed() : revised,
+        });
+      }
+      const rows = JSON.parse(
+        await readFile(path.join(normal.root, "findings.json"), "utf8"),
+      ).findings;
+      assert.equal(rows.length, 4);
+      assert.deepEqual(
+        rows.find((row: FixtureFinding) => row.title === first.title).identity,
+        first.identity,
+      );
+      assert.deepEqual(
+        rows.find((row: FixtureFinding) => row.title === second.title).identity,
+        second.identity,
+      );
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 4);
+      assert.deepEqual(result.recovered, result.normal);
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+
+for (const reversed of [false, true]) {
+  test(`an explicit revision cannot absorb an unidentified worker sibling (reverse=${reversed})`, async (t) => {
+    const f = await fixture(t, "worker");
+    const first = finding("First review", {
+      provenance: { source: "local_plugin", candidateId: "shared-candidate" },
+    });
+    const second = {
+      ...structuredClone(first),
+      title: "Second review",
+      summary: "Second evidence.",
+    };
+    await f.write({
+      ...f.draft(),
+      findings: reversed ? [second, first] : [first, second],
+    });
+    const revised = {
+      ...structuredClone(first),
+      identity: { anchor: "saved-a" },
+      summary: "Revised first evidence.",
+    };
+    await f.write({ ...f.draft(), findings: [revised] });
+    const { findings } = JSON.parse(
+      await readFile(path.join(f.root, "result.json"), "utf8"),
+    );
+    assert.equal(findings.length, 2);
+    assert.deepEqual(
+      findings.find((row: FixtureFinding) => row.title === first.title),
+      {
+        ...revised,
+        provenance: { ...revised.provenance, previousFindings: [first] },
+      },
+    );
+    assert.deepEqual(
+      findings.find((row: FixtureFinding) => row.title === second.title),
+      second,
+    );
+  });
 }

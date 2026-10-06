@@ -675,6 +675,17 @@ async function preserveScanDraft(
         }
       }
     }
+    const unmatchedFindings = new Set(
+      source.findings.filter(
+        (previous) =>
+          !result.findings.some(
+            (current) =>
+              current.identity !== undefined &&
+              previous.identity !== undefined &&
+              sameSavedFinding(current, previous),
+          ),
+      ),
+    );
     for (const finding of source.findings) {
       const candidateId = findingCandidateId(finding);
       const disposition =
@@ -699,8 +710,10 @@ async function preserveScanDraft(
       );
       if (
         matches.length === 1 &&
-        source.findings.filter((current) =>
-          sameSavedFinding(current, matches[0]!),
+        source.findings.filter(
+          (current) =>
+            (current === finding || unmatchedFindings.has(current)) &&
+            sameSavedFinding(current, matches[0]!),
         ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
