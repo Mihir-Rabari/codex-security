@@ -13,7 +13,7 @@ def state_dir(*, canonical: bool = True) -> Path:
     else:
         codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
         path = codex_home / "state" / "plugins" / "codex-security"
-    return path.resolve() if canonical else Path(os.path.abspath(path))
+    return path.resolve() if canonical else path.absolute()
 
 
 def resolve_scan_root(scan_root: str | None) -> Path:

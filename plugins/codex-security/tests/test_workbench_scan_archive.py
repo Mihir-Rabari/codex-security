@@ -245,7 +245,8 @@ def test_nonempty_output_is_rejected_before_parsing_the_recipe(
 
 
 @pytest.mark.parametrize(
-    "state_subdirectory", [".", "state", "linked-state", "aliased-state", "aliased-state-child"]
+    "state_subdirectory",
+    [".", "state", "linked-state", "aliased-state", "aliased-state-child", "linked-parent"],
 )
 def test_archive_cannot_move_the_active_workbench_database(
     tmp_path: Path, state_subdirectory: str
@@ -257,11 +258,22 @@ def test_archive_cannot_move_the_active_workbench_database(
     repository.mkdir()
     scan_dir.mkdir(mode=0o700)
     previous_dir.mkdir(mode=0o700)
-    if state_subdirectory in {"linked-state", "aliased-state", "aliased-state-child"}:
+    if state_subdirectory in {
+        "linked-state",
+        "aliased-state",
+        "aliased-state-child",
+        "linked-parent",
+    }:
         external_state = tmp_path / "external-state"
         external_state.mkdir(mode=0o700)
         state_dir.symlink_to(external_state, target_is_directory=True)
-        if state_subdirectory.startswith("aliased-state"):
+        if state_subdirectory == "linked-parent":
+            child = scan_dir / "child"
+            child.mkdir(mode=0o700)
+            alias = tmp_path / "alias"
+            alias.symlink_to(child, target_is_directory=True)
+            state_dir = alias / ".." / state_subdirectory
+        elif state_subdirectory.startswith("aliased-state"):
             alias = tmp_path / "alias"
             alias.symlink_to(tmp_path, target_is_directory=True)
             state_dir = alias / "scan" / state_subdirectory
