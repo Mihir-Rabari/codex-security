@@ -6879,6 +6879,7 @@ interface PatchPublication {
   branch: string;
   directory: string;
   dirtyFiles: Set<string>;
+  ignoredFiles: Set<string>;
   tree: string;
   root: string;
 }
@@ -7116,7 +7117,13 @@ async function preparePatchPublication(
   const directory = await realpath(repository);
   const status = await dependencies.runRepositoryCommand(
     "git",
-    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--ignored=traditional",
+    ],
     repository,
     { trim: false, maxBuffer: Infinity },
   );
@@ -7138,6 +7145,7 @@ async function preparePatchPublication(
     { trim: false, maxBuffer: Infinity },
   );
   const paths = status.split("\0");
+  const ignoredFiles = new Set<string>();
   const dirtyFiles = new Set(
     worktreeChanges
       .split("\0")
@@ -7149,7 +7157,7 @@ async function preparePatchPublication(
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
-    dirtyFiles.add(
+    (entry.startsWith("!! ") ? ignoredFiles : dirtyFiles).add(
       relative(directory, resolve(root, entry.slice(3))).replaceAll(sep, "/"),
     );
     if (/[RC]/u.test(entry.slice(0, 2)))
@@ -7160,7 +7168,7 @@ async function preparePatchPublication(
         ),
       );
   }
-  return { branch, directory, dirtyFiles, tree, root };
+  return { branch, directory, dirtyFiles, ignoredFiles, tree, root };
 }
 
 async function publishPatchBranch(
@@ -7327,7 +7335,23 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, directory, dirtyFiles, tree, root } = publication;
+  const { branch, directory, dirtyFiles, ignoredFiles, tree, root } = publication;
+  if (ignoredFiles.size > 0) {
+    const included = await dependencies.runRepositoryCommand(
+      "git",
+      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      root,
+      { trim: false, maxBuffer: Infinity },
+    );
+    const publishable = new Set(
+      included
+        .split("\0")
+        .map((file) => relative(directory, resolve(root, file)).replaceAll(sep, "/")),
+    );
+    for (const file of ignoredFiles) {
+      if (publishable.has(file)) dirtyFiles.add(file);
+    }
+  }
   const deleted =
     dirtyFiles.size === 0
       ? ""
