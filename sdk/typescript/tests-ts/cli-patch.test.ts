@@ -1146,6 +1146,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (_command, args) => {
+          if (args.includes("--absolute-git-dir")) return CURRENT_REPOSITORY;
           if (args.includes("add") && !modelStarted) {
             snapshotHadProgress = stderr
               .text()
@@ -1716,7 +1717,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
-            if (args.includes("--show-toplevel")) return directory;
+            if (
+              args.includes("--show-toplevel") ||
+              args.includes("--absolute-git-dir")
+            )
+              return directory;
             if (args[0] === "diff" && args.includes("--cached")) return "";
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
@@ -2665,6 +2670,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             return 0;
           },
           onRepositoryCommand: (command, args) => {
+            if (command === "git" && args.includes("--absolute-git-dir"))
+              return directory;
             commandStarted ||=
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
@@ -2993,7 +3000,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           result: resultWithFindings(["high"]),
           onRepositoryCommand: (command, args) => {
             published ||= command === "gh" && args[1] === "create";
-            if (args.includes("--show-toplevel")) return directory;
+            if (
+              args.includes("--show-toplevel") ||
+              args.includes("--absolute-git-dir")
+            )
+              return directory;
             if (args.includes("--cached")) return "";
             return command === "gh" && args[1] === "create"
               ? url
@@ -3107,7 +3118,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           onRepositoryCommand: (command, args, target) => {
             expect(target).toBe(directory);
             if (command === "git") {
-              if (args.includes("--show-toplevel")) return directory;
+              if (
+                args.includes("--show-toplevel") ||
+                args.includes("--absolute-git-dir")
+              )
+                return directory;
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
@@ -9060,4 +9075,300 @@ describe("verified patch caller identity", () => {
       expect(git("show", "HEAD:unrelated.ts")).toBe("unrelated original");
     }
   });
+});
+
+test.each(["absolute", "relative", "parent primary pool"])(
+  "preserves %s nested alternates from an outside invocation",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-outside-alternate-");
+    const repository = join(root, "repository");
+    const invocation = join(root, "invocation");
+    const nested = join(repository, "nested");
+    const pool =
+      kind === "parent primary pool"
+        ? join(repository, ".git", "objects")
+        : join(invocation, "pool", "objects");
+    try {
+      await mkdir(repository);
+      await mkdir(invocation);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      if (kind === "parent primary pool") {
+        await cp(join(nested, ".git", "objects"), pool, {
+          recursive: true,
+          force: false,
+        });
+        await rm(join(nested, ".git", "objects"), { recursive: true });
+      } else {
+        await mkdir(dirname(pool));
+        await rename(join(nested, ".git", "objects"), pool);
+      }
+      await mkdir(join(nested, ".git", "objects"));
+      expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
+      const gitEnvironment = {
+        GIT_DIR: join(repository, ".git"),
+        GIT_WORK_TREE: repository,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES:
+          kind === "relative" ? relative(invocation, pool) : pool,
+      };
+      expect(
+        gitText(
+          [
+            "--git-dir",
+            join(nested, ".git"),
+            "--work-tree",
+            nested,
+            "rev-parse",
+            "HEAD^{tree}",
+          ],
+          { cwd: invocation, env: { ...process.env, ...gitEnvironment } },
+        ).trim(),
+      ).toMatch(/^[0-9a-f]+$/);
+      let calls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: invocation,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              await writeFile(join(nested, "app.ts"), "fixed\n");
+              output?.stdout.write("Fixed and checked.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: ["app.ts", "nested/app.ts"].map((file) =>
+          relative(invocation, join(repository, file)).split(sep).join("/"),
+        ),
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(["absolute", "relative", "quoted relative"])(
+  "preserves %s nested alternates after removing an outside invocation",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-outside-alternate-");
+    const repository = join(root, "repository");
+    const invocation = join(root, "temporary", "invocation");
+    const nested = join(repository, "nested");
+    const pool = join(root, "pool with space", "objects");
+    try {
+      await mkdir(repository);
+      await mkdir(invocation, { recursive: true });
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      await mkdir(dirname(pool));
+      await rename(join(nested, ".git", "objects"), pool);
+      await mkdir(join(nested, ".git", "objects"));
+      expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
+      const gitEnvironment = {
+        GIT_DIR: join(repository, ".git"),
+        GIT_WORK_TREE: repository,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES:
+          kind === "absolute"
+            ? pool
+            : kind === "relative"
+              ? relative(invocation, pool)
+              : JSON.stringify(relative(invocation, pool)),
+      };
+      expect(
+        gitText(
+          [
+            "--git-dir",
+            join(nested, ".git"),
+            "--work-tree",
+            nested,
+            "rev-parse",
+            "HEAD^{tree}",
+          ],
+          { cwd: invocation, env: { ...process.env, ...gitEnvironment } },
+        ).trim(),
+      ).toMatch(/^[0-9a-f]+$/);
+      let calls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: invocation,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              await writeFile(join(nested, "app.ts"), "fixed\n");
+              await rm(invocation, { recursive: true });
+              output?.stdout.write("Fixed and checked.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: ["app.ts", "nested/app.ts"].map((file) =>
+          relative(invocation, join(repository, file)).split(sep).join("/"),
+        ),
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+describe("patch Git metadata identity", () => {
+  test.each(["stable", "retargeted"])(
+    "preserves foreign objects for a %s caller alias",
+    async (kind) => {
+      const root = await temporaryDirectory("patch-metadata-binding-");
+      const repository = join(root, "repository");
+      const foreign = join(root, "foreign");
+      const destination = join(repository, "ignored");
+      const alias = join(repository, "alias");
+      try {
+        for (const checkout of [repository, foreign]) {
+          await mkdir(checkout, { recursive: true });
+          const git = repositoryGit(checkout);
+          git("init", "--initial-branch=main");
+          git("config", "user.name", "Synthetic User");
+          git("config", "user.email", "synthetic@example.test");
+          await writeFile(join(checkout, "app.ts"), "original\n");
+          await writeFile(join(checkout, ".gitignore"), "alias\nignored/\n");
+          git("add", ".");
+          git("commit", "-m", "Synthetic baseline");
+        }
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        const outside = repositoryGit(foreign);
+        const foreignHead = outside("rev-parse", "HEAD");
+        const foreignIndex = await readFile(join(foreign, ".git", "index"));
+        const foreignObjects = outside(
+          "cat-file",
+          "--batch-all-objects",
+          "--batch-check=%(objectname)",
+        );
+        let modelCalls = 0;
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--json"],
+          {
+            currentDirectory: alias,
+            onRepositoryCommand: runGitRepositoryCommand,
+            onCodex: async (_args, output) => {
+              modelCalls++;
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              if (kind === "retargeted") {
+                await mkdir(destination);
+                await writeFile(
+                  join(destination, ".git"),
+                  `gitdir: ${join(foreign, ".git")}\n`,
+                );
+                await rm(alias, { recursive: true });
+                await symlink(
+                  destination,
+                  alias,
+                  process.platform === "win32" ? "junction" : "dir",
+                );
+              }
+              output?.stdout.write("Fixed and checked.");
+              return 0;
+            },
+          },
+        );
+        expect(modelCalls, outcome.stderr).toBe(1);
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          kind === "retargeted" ? 2 : 0,
+        );
+        if (kind === "retargeted")
+          expect(outcome.stderr).toContain(
+            "Git directory changed during patching",
+          );
+        else
+          expect(JSON.parse(outcome.stdout)).toMatchObject({
+            applied: true,
+            files: ["app.ts"],
+          });
+        expect(
+          outside(
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+          ),
+        ).toBe(foreignObjects);
+        expect(outside("rev-parse", "HEAD")).toBe(foreignHead);
+        expect(await readFile(join(foreign, ".git", "index"))).toEqual(
+          foreignIndex,
+        );
+        expect(await readFile(join(foreign, "app.ts"), "utf8")).toBe(
+          "original\n",
+        );
+        expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+          "fixed\n",
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

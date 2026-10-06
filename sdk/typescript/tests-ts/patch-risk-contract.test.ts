@@ -669,6 +669,56 @@ describe("patch risk assessment contract", () => {
     }
   });
 
+  test.each([
+    [
+      "top-level",
+      '"recommendation":"merge"',
+      '"recommendation":"block","recommendation":"merge"',
+      "recommendation",
+    ],
+    [
+      "nested validation",
+      '"status":"passed"',
+      '"status":"failed","status":"passed"',
+      "status",
+    ],
+    [
+      "escaped key",
+      '"status":"passed"',
+      '"status":"failed","\\u0073tatus":"passed"',
+      "status",
+    ],
+    [
+      "prototype member",
+      '"schemaVersion":1',
+      '"__proto__":{},"__proto__":{},"schemaVersion":1',
+      "__proto__",
+    ],
+  ])("rejects %s duplicate object keys", (_label, original, duplicate, key) => {
+    const result = validateText(
+      JSON.stringify(assessment()).replace(original, duplicate),
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`duplicate JSON object key: ${key}`);
+  });
+
+  test("preserves decoded duplicate-key diagnostic text", () => {
+    const key = "field\u001b";
+    const encoded = JSON.stringify(key);
+    const result = validateText(`{${encoded}:1,${encoded}:2}`);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(`duplicate JSON object key: ${key}\n`);
+  });
+
+  test("allows repeated names in separate objects and key-like string contents", () => {
+    const payload = assessment();
+    payload.impact.rationale = '{"status":"failed","status":"passed"} \\"';
+    const result = validate(payload);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
   test("rejects malformed JSON with a useful diagnostic", () => {
     for (const text of [
       "\ufeff{}",
