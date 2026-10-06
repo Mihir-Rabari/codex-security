@@ -4217,7 +4217,7 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
     assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}
 
 
-def test_patch_preview_parses_large_zero_padded_hunk_counts(tmp_path: Path) -> None:
+def test_patch_preview_accepts_padded_hunk_counts(tmp_path: Path) -> None:
     namespace = runpy.run_path(str(SCRIPT))
     count = b"0" * 5000 + b"1"
     patch = (
@@ -4227,11 +4227,12 @@ def test_patch_preview_parses_large_zero_padded_hunk_counts(tmp_path: Path) -> N
     (tmp_path / "patch.diff").write_bytes(patch)
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     subprocess.run(["git", "apply", "--check", "patch.diff"], cwd=tmp_path, check=True)
-    preview, stats = namespace["patch_artifact_preview"](
+    assert namespace["patch_artifact_preview"](
         tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    ) == (
+        patch.decode(),
+        {"additions": 1, "deletions": 1, "fileCount": 1, "previewTruncated": False},
     )
-    assert preview == patch.decode()
-    assert stats == {"additions": 1, "deletions": 1, "fileCount": 1, "previewTruncated": False}
 
 
 @pytest.mark.parametrize("padded", [False, True])
