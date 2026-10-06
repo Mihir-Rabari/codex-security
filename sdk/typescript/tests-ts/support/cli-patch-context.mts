@@ -1,15 +1,25 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
 import { main } from "../../src/cli.js";
 import { capture, dependencies } from "../cli-fixtures.js";
 
 const root = process.argv[2]!;
 const outcomes = [];
-for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
+for (const kind of [
+  "absolute Git alias",
+  "relative Git alias",
+  "gh",
+  "glab",
+  "gh selected alias",
+  "glab selected alias",
+]) {
   const directory = join(root, kind);
-  const repository = join(directory, "repository");
+  const selectedAlias = kind.endsWith("selected alias");
+  const repository = selectedAlias
+    ? join(directory, "physical", "repository")
+    : join(directory, "repository");
   const remote = join(directory, "remote.git");
   const alias = join(directory, "alias");
   await mkdir(repository, { recursive: true });
@@ -64,23 +74,30 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
       ),
     );
   } else {
-    await mkdir(join(directory, "elsewhere", "target"), { recursive: true });
+    const selectedParent = selectedAlias
+      ? join(directory, "physical")
+      : directory;
+    const otherParent = selectedAlias
+      ? directory
+      : join(directory, "elsewhere");
+    if (!selectedAlias)
+      await mkdir(join(otherParent, "target"), { recursive: true });
     await symlink(
-      join(directory, "elsewhere", "target"),
+      selectedAlias ? repository : join(otherParent, "target"),
       alias,
       process.platform === "win32" ? "junction" : "dir",
     );
-    for (const parent of [directory, join(directory, "elsewhere")]) {
+    for (const parent of [selectedParent, otherParent]) {
       await mkdir(join(parent, "config"));
       await writeFile(
         join(parent, "config", "config.yml"),
-        parent === directory
+        parent === selectedParent
           ? "selected configuration\n"
           : "different configuration\n",
       );
     }
-    environment[kind === "gh" ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR"] =
-      `${relative(repository, alias)}/../config`;
+    environment[kind.startsWith("gh") ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR"] =
+      selectedAlias ? "../config" : `${relative(repository, alias)}/../config`;
   }
   const output = capture();
   const error = capture();
@@ -89,7 +106,7 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
     output.stream,
     error.stream,
     dependencies({
-      currentDirectory: repository,
+      currentDirectory: selectedAlias ? alias : repository,
       environment,
       onCodex: async (_args, output) => {
         await writeFile(join(repository, "app.ts"), "fixed\n");
@@ -99,12 +116,9 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
       onRepositoryCommand: async (command, args, cwd, options) => {
         const selectedEnvironment = { ...environment, ...options?.environment };
         if (command === "git") {
-          if (kind === "glab" && args[0] === "remote")
+          if (kind.startsWith("glab") && args[0] === "remote")
             return "https://gitlab.com/example/repository.git";
-          if (
-            args[0] === "ls-remote" &&
-            args[3]?.startsWith("https://gitlab.com/")
-          )
+          if (kind.startsWith("glab") && args[0] === "ls-remote")
             args = [...args.slice(0, 3), remote, ...args.slice(4)];
           const result = git(
             args,
@@ -114,13 +128,20 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
           return options?.trim === false ? result : result.trim();
         }
         if (!kind.includes("Git alias")) {
-          const selected =
-            selectedEnvironment[
-              kind === "gh" ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR"
-            ]!;
-          const contents = await readFile(
-            resolve(options?.directory ?? cwd, selected, "config.yml"),
-            "utf8",
+          const contents = execFileSync(
+            process.execPath,
+            [
+              "--input-type=commonjs",
+              "--eval",
+              'process.stdout.write(require("node:fs").readFileSync(require("node:path").resolve(process.env[process.argv[1]], "config.yml"), "utf8"))',
+              kind.startsWith("gh") ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR",
+            ],
+            {
+              cwd: options?.directory ?? cwd,
+              env: selectedEnvironment,
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "pipe"],
+            },
           );
           if (contents !== "selected configuration\n")
             throw new Error("Provider configuration changed after patching");
