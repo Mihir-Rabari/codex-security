@@ -195,6 +195,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -2074,10 +2075,7 @@ export async function main(
             if (target === undefined) {
               for (const entry of repositories) {
                 const storedPath = entry["targetPath"] as string;
-                if (
-                  (await realpath(storedPath).catch(() => storedPath)) ===
-                  repository
-                ) {
+                if (await sameFile(storedPath, requestedRepository)) {
                   target = entry;
                   break;
                 }

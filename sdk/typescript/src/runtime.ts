@@ -3135,7 +3135,8 @@ async function hasPluginManifest(root: string): Promise<boolean> {
   );
 }
 
-function sameFile(left: string, right: string): Promise<boolean> {
+/** @internal Compare filesystem identity without depending on path spelling. */
+export function sameFile(left: string, right: string): Promise<boolean> {
   // NTFS file IDs can exceed JavaScript's safe integer range.
   return Promise.all([
     stat(left, { bigint: true }),
