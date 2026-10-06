@@ -28,6 +28,10 @@ const turnFailures = {
     message: "Provider temporarily unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
+  "service-unavailable": {
+    message: "Connection refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "connection-error": {
     message: "Provider stream disconnected",
     codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
