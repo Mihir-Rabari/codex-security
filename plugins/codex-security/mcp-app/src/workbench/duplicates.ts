@@ -11,18 +11,8 @@ export interface DedupeGroup {
 }
 
 function normalizedVector(vector: number[]): number[] {
-  let maximum = 0;
-  for (const value of vector) {
-    if (!Number.isFinite(value))
-      throw new RangeError("A stored embedding cannot be compared.");
-    maximum = Math.max(maximum, Math.abs(value));
-  }
-  // Binary scaling is exact, avoiding extra rounding at the cosine cutoff.
-  const scale = 2 ** Math.min(1023, Math.floor(Math.log2(maximum)));
-  let squares = 0;
-  for (const value of vector) squares += (value / scale) ** 2;
-  const norm = scale * Math.sqrt(squares);
-  if (norm === 0 || !Number.isFinite(norm))
+  const norm = vector.reduce((norm, value) => Math.hypot(norm, value), 0);
+  if (!vector.every(Number.isFinite) || norm === 0 || !Number.isFinite(norm))
     throw new RangeError("A stored embedding cannot be compared.");
   return vector.map((value) => value / norm);
 }
@@ -81,21 +71,14 @@ export function findPotentialDuplicates(
     // Stable sorting keeps insertion-time / finding-ID order for ties.
     ranked.sort((a, b) => b.similarity - a.similarity);
     const selected = [findingId, ...ranked.slice(0, 50).map(({ id }) => id)];
-    const documents = new Map(
-      database
-        .prepare(
-          `SELECT json_quote(id) AS id_json, details_json FROM findings WHERE id IN (${selected.map(() => "?").join(",")})`,
-        )
-        .all(...selected)
-        .map((row) => [
-          JSON.parse(row.id_json as string) as string,
-          parseJson(row.details_json as string),
-        ]),
-    );
-    return {
-      finding: documents.get(findingId),
-      potentialDuplicates: selected.slice(1).map((id) => documents.get(id)),
-    };
+    const [finding, ...potentialDuplicates] = database
+      .prepare(
+        `SELECT findings.details_json FROM json_each(?) AS selected
+         JOIN findings ON findings.id = selected.value ORDER BY selected.key`,
+      )
+      .all(JSON.stringify(selected))
+      .map((row) => parseJson(row.details_json as string));
+    return { finding, potentialDuplicates };
   });
 }
 
@@ -153,24 +136,18 @@ export function storeDedupeGroups(
 
 export function listDedupeGroups(database: DatabaseSync, findingId: string) {
   requireSqliteText([findingId]);
-  const groups = new Map<string, DedupeGroup>();
   const rows = database.prepare(`
-    SELECT groups.id, groups.created_at, json_quote(members.finding_id) AS finding_id_json
+    SELECT json_object('groupId', groups.id, 'createdAt', groups.created_at,
+      'findingIds', json_group_array(members.finding_id ORDER BY members.finding_id)) AS document
     FROM finding_dedupe_group_members AS matched
     JOIN finding_dedupe_groups AS groups ON groups.id = matched.group_id
     JOIN finding_dedupe_group_members AS members ON members.group_id = groups.id
     WHERE matched.finding_id = ?
-    ORDER BY groups.created_at, groups.id, members.finding_id
+    GROUP BY groups.id ORDER BY groups.created_at, groups.id
   `);
-  for (const row of rows.iterate(findingId)) {
-    const id = row.id as string;
-    if (!groups.has(id))
-      groups.set(id, {
-        groupId: id,
-        findingIds: [],
-        createdAt: row.created_at as string,
-      });
-    groups.get(id)!.findingIds.push(JSON.parse(row.finding_id_json as string));
-  }
-  return { groups: [...groups.values()] };
+  return {
+    groups: rows
+      .all(findingId)
+      .map((row) => JSON.parse(row.document as string) as DedupeGroup),
+  };
 }

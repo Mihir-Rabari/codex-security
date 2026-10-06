@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -56,6 +57,50 @@ function finding(
     .run(repository, findingId);
   return document;
 }
+
+test("duplicate helper requires an explicit JSON scope before accessing state", async () => {
+  const stateDirectory = join(
+    await temporary.create("duplicate-scope-"),
+    "state",
+  );
+  const helper = fileURLToPath(
+    new URL(
+      "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+      import.meta.url,
+    ),
+  );
+  const call = (scope: unknown) =>
+    spawnSync(process.execPath, [helper, "find-potential-duplicates"], {
+      input: JSON.stringify({
+        stateDirectory,
+        payload: { findingId: "missing", scope },
+      }),
+      encoding: "utf8",
+    });
+  for (const scope of [
+    undefined,
+    null,
+    {},
+    { allRepositories: false },
+    { repositoryId: 7 },
+    { repositoryId: "repository", allRepositories: true },
+  ]) {
+    const result = call(scope);
+    assert.equal(result.status, 1);
+    assert.ok(result.stderr.includes("scope must specify either"));
+    assert.equal(existsSync(stateDirectory), false);
+  }
+  for (const scope of [
+    { repositoryId: "repository" },
+    { allRepositories: true },
+  ]) {
+    const result = call(scope);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      error: "finding_not_indexed",
+    });
+  }
+});
 
 test("duplicate retrieval filters before scoring and loads only the stable top 50 documents", (t) => {
   const database = open(t);
@@ -123,14 +168,15 @@ test("cosine scoring handles large and scaled vectors without argument spreading
   });
 });
 
-test("cosine scoring includes the threshold and excludes scores below it", (t) => {
+test("cosine scoring ranks candidates above the threshold and excludes scores below it", (t) => {
   const database = open(t);
   const anchor = finding(database, 1, [7, 0]);
-  const boundary = finding(database, 2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
+  const candidate = finding(database, 2, [0.56, Math.sqrt(1 - 0.56 ** 2)]);
   finding(database, 3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
+  const strongest = finding(database, 4, [1, 0]);
   assert.deepEqual(findPotentialDuplicates(database, anchor.findingId), {
     finding: anchor,
-    potentialDuplicates: [boundary],
+    potentialDuplicates: [strongest, candidate],
   });
 });
 
