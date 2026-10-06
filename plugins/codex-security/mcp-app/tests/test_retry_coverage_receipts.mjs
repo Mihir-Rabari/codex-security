@@ -260,3 +260,112 @@ for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
     });
   }
 }
+
+for (const omitted of ["none", "receipts", "ids-and-receipts"]) {
+  test(`direct-file retry attribution follows persisted normalization (${omitted})`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "retry-normalization-"));
+    try {
+      const workerRoot = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "discovery-0001",
+      );
+      const output = path.join(workerRoot, "output");
+      const archive = path.join(
+        workerRoot,
+        "attempts",
+        "attempt-01",
+        "result.json",
+      );
+      await mkdir(path.dirname(archive), { recursive: true });
+      await mkdir(output);
+      const missingIds = omitted === "ids-and-receipts";
+      const prior = workerDraft([], {
+        complete: false,
+        coverage: {
+          completeness: "partial",
+          surfaces: [
+            {
+              ...(missingIds ? {} : { id: "prior" }),
+              label: "Prior review",
+              disposition: "needs_follow_up",
+              ...(omitted === "none" ? { receiptRefs: [] } : {}),
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [
+            {
+              ...(missingIds ? {} : { id: "pending", surfaceIds: ["prior"] }),
+              reason: "Prior review remains.",
+            },
+          ],
+        },
+      });
+      const archivedBytes = JSON.stringify(prior);
+      await writeFile(archive, archivedBytes);
+      await recordCodexSecurityWorkerScanDraft(
+        { root: output, repoRoot: root, scanId, layout: "worker" },
+        workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "complete",
+            surfaces: [
+              {
+                id: "current",
+                label: "Current review",
+                disposition: "no_issue_found",
+                receiptRefs: [],
+              },
+            ],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        }),
+      );
+      const resultPath = path.join(output, "result.json");
+      const acceptedBytes = await readFile(resultPath, "utf8");
+      const accepted = JSON.parse(acceptedBytes);
+      assert.equal(accepted.coverage.surfaces.length, 2);
+      assert.equal(typeof accepted.coverage.surfaces[1].id, "string");
+      assert.deepEqual(accepted.coverage.surfaces[1].receiptRefs, []);
+      assert.equal(typeof accepted.coverage.deferred[0].id, "string");
+      const sources = await readDeepReductionSources({
+        root: path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "dedup",
+          "dedup-0001",
+          "output",
+        ),
+        repoRoot: root,
+        scanId,
+        layout: "reducer",
+        deepReducer: {
+          scanRoot: root,
+          claimedWorkers: [{ id: "discovery-0001", attempt: 2, resultPath }],
+        },
+      });
+      const coverage = sources.discoveries[0].coverage;
+      assert.deepEqual(
+        coverage.surfaces.map((row) => row.provenance.attempt),
+        [2, 1],
+      );
+      assert.equal(coverage.deferred[0].provenance.attempt, 1);
+      assert.deepEqual(
+        coverage.reviews.map((row) => row.attempt).sort(),
+        [1, 2],
+      );
+      if (!missingIds)
+        assert.deepEqual(coverage.deferred[0].surfaceIds, [
+          coverage.surfaces[1].id,
+        ]);
+      assert.equal(await readFile(archive, "utf8"), archivedBytes);
+      assert.equal(await readFile(resultPath, "utf8"), acceptedBytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

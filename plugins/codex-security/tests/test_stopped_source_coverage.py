@@ -11,6 +11,7 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.mark.parametrize("scope", [".", "subdir"])
 @pytest.mark.parametrize("other_outcome", ["rejected", "reported"])
 @pytest.mark.parametrize("host_coverage", [True, False], ids=["accepted-projection", "legacy"])
 @pytest.mark.parametrize("retry_publication", [False, True], ids=["publish", "retry-publication"])
@@ -24,12 +25,13 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     workbench_db,
     publication_scan,
     host_coverage,
+    scope,
     other_outcome,
     parent_draft,
     retry_publication,
     monkeypatch,
 ):
-    scan = publication_scan()
+    scan = publication_scan(scope=scope)
     projected_parent = parent_draft in ("projected", "interrupted")
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     source_coverage = {
@@ -225,6 +227,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     assert stopped["progress"]["status"] == "failed"
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
+    assert coverage["mode"] == ("scoped_path" if scope != "." else "deep_repository")
+    assert coverage["inventoryStrategy"] == ("scoped_path" if scope != "." else "repository")
     assert len(coverage["deferred"]) == 2
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
     assert len(coverage["surfaces"]) == 2
@@ -808,3 +812,170 @@ def test_generic_closeout_preserves_projected_surface_receipts(
             scan.scan_dir / coverage["surfaces"][0]["receiptRefs"][0]
         ).read_text() == "Synthetic completed review.\n"
         assert all(file.read_bytes() == contents for file, contents in saved.items())
+
+
+@pytest.mark.parametrize("projection_source", ["parent", "reducer"])
+@pytest.mark.parametrize(
+    "retained",
+    [False, True, "changed", "changed-surface"],
+    ids=["missing-projection", "retained-projection", "changed-projection", "changed-surface"],
+)
+def test_reopened_generic_work_uses_worker_projection(
+    workbench_api, workbench_db, publication_scan, projection_source, retained, monkeypatch
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surface = {
+        "id": "surface",
+        "label": "Reopened review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    pending = {
+        "id": "review",
+        "reason": "A later observation reopens this review.",
+        "surfaceIds": ["surface"],
+    }
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": True,
+            "findings": [],
+            "coverage": {
+                "completeness": "complete",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+                "resolvedDeferred": [{"id": "review", "reason": "Earlier review completed."}],
+            },
+        },
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    "completeness": "partial",
+                    "surfaces": [surface],
+                    "explicitExclusions": [],
+                    "deferred": [pending],
+                },
+            }
+        )
+    )
+    os.utime(result, ns=(200, 200))
+    attempt = 2 if retained == "changed-surface" else 1
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
+        )
+    provenance = {"workerId": worker_id, "attempt": attempt}
+    projected_surface = {
+        **surface,
+        "id": f"{worker_id}-attempt-{attempt}-surface-1",
+        "provenance": {**provenance, "sourceId": "surface"},
+    }
+    projected_pending = {
+        **pending,
+        "id": f"{worker_id}-attempt-{attempt}-deferred-1",
+        "surfaceIds": [projected_surface["id"]],
+        "provenance": {**provenance, "sourceId": "review"},
+    }
+    previous_pending = {**projected_pending, "reason": "An earlier distinct observation."}
+    projection = {
+        "completeness": "partial",
+        "surfaces": [projected_surface],
+        "explicitExclusions": [],
+        "deferred": [previous_pending if retained == "changed" else projected_pending]
+        if retained
+        else [],
+        "reviews": [{**provenance, "completeness": "partial"}],
+    }
+    if retained == "changed-surface":
+        previous_surface = {
+            **projected_surface,
+            "id": f"{worker_id}-attempt-1-surface-1",
+            "label": "Earlier review",
+            "provenance": {**projected_surface["provenance"], "attempt": 1},
+        }
+        previous_pending = {
+            **previous_pending,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "surfaceIds": [previous_surface["id"]],
+            "provenance": {**previous_pending["provenance"], "attempt": 1},
+        }
+        projection["surfaces"] = [previous_surface]
+        projection["deferred"] = [previous_pending]
+        projection["reviews"].append(
+            {"workerId": worker_id, "attempt": 1, "completeness": "partial"}
+        )
+    if projection_source == "parent":
+        (scan.scan_dir / "coverage.json").write_text(json.dumps(projection))
+    else:
+        reducer = add_worker(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE result_manifest_path = ?",
+                (str(reducer),),
+            )
+        reducer.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "sourceCoverage": projection,
+                }
+            )
+        )
+    saved = {path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*.json")}
+    with monkeypatch.context() as interrupted:
+
+        def fail_publication(*args, **kwargs):
+            raise OSError("Synthetic publication interruption.")
+
+        interrupted.setattr(
+            workbench_api["saved_results"], "_write_prepared_scan_finalization", fail_publication
+        )
+        stopped = workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
+            ),
+        )["scan"]
+    assert stopped["resultsRecoveryNeeded"] is True
+    for _ in range(2):
+        recovered = workbench_api["recover_scan_results"](
+            workbench_db, Namespace(scan_id=scan.scan_id)
+        )["scan"]
+        assert recovered["resultsRecoveryNeeded"] is False
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        if retained == "changed-surface":
+            assert len(coverage["surfaces"]) == 2
+            assert projected_surface in coverage["surfaces"]
+            assert previous_surface in coverage["surfaces"]
+        else:
+            assert coverage["surfaces"] == [projected_surface]
+        pending_rows = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
+        if retained == "changed-surface":
+            assert len(pending_rows) == 2
+            assert projected_pending in pending_rows
+            assert previous_pending in pending_rows
+        elif retained == "changed":
+            assert len(pending_rows) == 2
+            assert {row["reason"] for row in pending_rows} == {
+                pending["reason"],
+                previous_pending["reason"],
+            }
+            assert len({row["id"] for row in pending_rows}) == 2
+            assert all(row["surfaceIds"] == [projected_surface["id"]] for row in pending_rows)
+            assert all(row["provenance"] == projected_pending["provenance"] for row in pending_rows)
+        else:
+            assert pending_rows == [projected_pending]
+        assert all(path.read_bytes() == contents for path, contents in saved.items())

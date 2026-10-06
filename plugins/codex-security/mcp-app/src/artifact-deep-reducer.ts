@@ -9,6 +9,7 @@ import type {
 } from "./artifact-context.js";
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
+  normalizeSavedScanCoverage,
   parsePersistedScanDraft,
   readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
@@ -107,7 +108,6 @@ export async function readDeepReductionSources(
             sourceFindingIds: [`${worker.id}:${index}`],
           },
         }));
-        const { coverage, ...reduction } = result;
         // Accepted direct-file results may follow an unreadable failed checkpoint.
         const archived = await readArchivedWorkerCheckpoints(
           {
@@ -118,6 +118,11 @@ export async function readDeepReductionSources(
           },
           true,
         ).catch(() => []);
+        normalizeSavedScanCoverage([
+          result,
+          ...archived.map(({ input }) => input),
+        ]);
+        const { coverage, ...reduction } = result;
         return {
           workerId: worker.id,
           coverage: projectDiscoveryCoverage(
