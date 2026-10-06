@@ -7335,7 +7335,8 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, directory, dirtyFiles, ignoredFiles, tree, root } = publication;
+  const { branch, directory, dirtyFiles, ignoredFiles, tree, root } =
+    publication;
   if (ignoredFiles.size > 0) {
     const included = await dependencies.runRepositoryCommand(
       "git",
@@ -7346,7 +7347,9 @@ async function createPatchPullRequest(
     const publishable = new Set(
       included
         .split("\0")
-        .map((file) => relative(directory, resolve(root, file)).replaceAll(sep, "/")),
+        .map((file) =>
+          relative(directory, resolve(root, file)).replaceAll(sep, "/"),
+        ),
     );
     for (const file of ignoredFiles) {
       if (publishable.has(file)) dirtyFiles.add(file);
