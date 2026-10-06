@@ -32,6 +32,7 @@
 - migrate rank pool helpers to TypeScript (#842) ([fecbe05](https://github.com/openai/codex-security/commit/fecbe056f67d8dd14344e3f0493e4c2081724ca3))
 - migrate repository scope binding to TypeScript (#843) ([a7b3618](https://github.com/openai/codex-security/commit/a7b3618f4c5e63aa70f4defa4e72bbe8e0c4cdb1))
 - bump napi from 3.12.2 to 3.13.0 in /plugins/codex-security/native ([#1320](https://github.com/openai/codex-security/pull/1320))
+- add Cyber pricing and hide unavailable costs ([#1336](https://github.com/openai/codex-security/pull/1336))
 
 <!-- release-section: highlights:end -->
 
