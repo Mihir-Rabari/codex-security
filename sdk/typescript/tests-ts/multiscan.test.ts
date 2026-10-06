@@ -3975,3 +3975,189 @@ for (const section of ["rootCause", "validation", "attackPath"] as const) {
     expect(await readFile(path)).toEqual(bytes);
   });
 }
+
+for (const spelling of [
+  "plain",
+  "ancestor relative",
+  "absolute link",
+] as const) {
+  testPosix(
+    `original coordinates preserve tracked scope with ${spelling} spelling`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "coordinate-source");
+      const destination =
+        spelling === "absolute link"
+          ? join(paths.output, "checkouts", "repo", "src")
+          : spelling === "ancestor relative"
+            ? "../../checkouts/repo/src"
+            : "src";
+      await symlink(destination, join(source.path, "alias"), "dir");
+      git(source.path, "add", "alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "add supported scope link",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nrepo,${source.path},${revision},alias\n`,
+      );
+      const runs = mock(completeRun);
+      const campaign = options(paths, client(runs));
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 0,
+      });
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+testPosix(
+  "original coordinates retain ancestor-relative configured scope",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "configured-coordinate-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const target = await normalizeTarget(checkout, settings.target!);
+        expect(target.paths).toEqual(["src"]);
+        const result = await completedScan(
+          settings.outputDir!,
+          "complete",
+          checkout,
+        );
+        result.manifest.scan.scope.includePaths = [...target.paths];
+        await writeFile(
+          join(settings.outputDir!, "scan-manifest.json"),
+          JSON.stringify(result.manifest),
+        );
+        const coveragePath = join(settings.outputDir!, "coverage.json");
+        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+        Object.assign(coverage, {
+          mode: "scoped_path",
+          includePaths: target.paths,
+          inventoryStrategy: "scoped_path",
+        });
+        await writeFile(coveragePath, JSON.stringify(coverage));
+        await reseal(settings.outputDir!);
+        return result;
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      scanOptionsByMode: { standard: { target: ["../../checkouts/repo/src"] } },
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("original coordinates reuse an existing pinned scope checkout without refetching", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "retained-coordinate-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs));
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  const checkout = join(paths.output, "checkouts", "repo");
+  git(paths.root, "clone", "--quiet", source.path, checkout);
+  await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+(process.platform === "win32" ? test : test.skip)(
+  "original coordinates retain canonical Windows checkout parent spelling",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "windows-coordinate-source");
+    await mkdir(join(paths.output, "CHECKOUTS"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+(process.platform === "win32" ? test : test.skip)(
+  "original coordinates retain canonical Windows recovery parent spelling",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(
+      paths.root,
+      "windows-recovery-coordinate-source",
+    );
+    await mkdir(join(paths.output, "RECOVERY-CHECKOUTS"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs), {
+      recoverScan: async () => undefined,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);

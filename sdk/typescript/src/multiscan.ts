@@ -4,7 +4,6 @@ import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
-  mkdtemp,
   open,
   readFile,
   readdir,
@@ -43,8 +42,6 @@ import type { CoverageDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
   bundledPluginRoot,
-  canonicalConfigPath,
-  expandHome,
   executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
@@ -270,7 +267,7 @@ async function runCampaign(
   resolveResumePluginRoot: () => Promise<string>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
-  await ensureOutputDirectory(join(output, "checkouts"));
+  const checkoutRoot = await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks, options);
   const receipts = await readReceipts(
@@ -408,7 +405,7 @@ async function runCampaign(
           "Multiscan recovery is required: saved artifacts are outside their expected campaign directory.",
         );
       }
-      const checkout = join(output, "checkouts", task.id);
+      const checkout = join(checkoutRoot, task.id);
       const schemaPluginRoot = await resolveResumePluginRoot();
       const resumed = await loadResumableScan(
         artifactOutput,
@@ -494,7 +491,7 @@ async function runCampaign(
         if (options.recoverScan === undefined) attempt += 1;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
-        let protectedRoot = join(output, "checkouts", task.id);
+        let protectedRoot = join(checkoutRoot, task.id);
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
@@ -563,7 +560,7 @@ async function runCampaign(
               await mkdir(checkout, { mode: 0o700 });
             } else {
               await validateOutputDir(scanDir);
-              checkout = join(output, "checkouts", task.id);
+              checkout = join(checkoutRoot, task.id);
               await rm(checkout, { recursive: true, force: true });
               await mkdir(checkout, { mode: 0o700 });
             }
@@ -1194,14 +1191,17 @@ async function loadResumableScan(
   const { manifest, findings, coverage } = saved;
   const { target, scope, producer } = manifest.scan;
   const campaignRoot = dirname(dirname(dirname(path)));
+  const recoveryCheckout = join(
+    campaignRoot,
+    "recovery-checkouts",
+    receipt.id,
+    `attempt-${receipt.attempt}`,
+  );
   const targetRoots = [
     checkout,
-    join(
-      campaignRoot,
-      "recovery-checkouts",
-      receipt.id,
-      `attempt-${receipt.attempt}`,
-    ),
+    process.platform === "win32"
+      ? await canonicalWindowsCreationPath(recoveryCheckout)
+      : recoveryCheckout,
   ];
   const matchedRoot = targetRoots.find(
     (root) =>
@@ -1246,32 +1246,30 @@ async function loadResumableScan(
   if (!matchesOutcome) return undefined;
   let expectedPaths = ["."];
   if (requestedPaths !== undefined) {
-    const scopeRoot = await mkdtemp(join(campaignRoot, "scope-validation-"));
-    const scopeCheckout = join(scopeRoot, basename(matchedRoot));
+    // Scope spellings and tracked links are relative to the recorded checkout.
+    if (matchedRoot !== checkout) {
+      await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
+      await ensureOutputDirectory(dirname(matchedRoot));
+    }
+    let createdCheckout = false;
     try {
-      await mkdir(scopeCheckout, { mode: 0o700 });
-      await checkoutRevision(receipt, scopeCheckout, signal, githubHost);
+      try {
+        await mkdir(matchedRoot, { mode: 0o700 });
+        createdCheckout = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        await ensureOutputDirectory(matchedRoot);
+      }
+      if (createdCheckout) {
+        await checkoutRevision(receipt, matchedRoot, signal, githubHost);
+      }
       expectedPaths = [
-        ...(
-          await normalizeTarget(
-            scopeCheckout,
-            await Promise.all(
-              requestedPaths.map(async (path) => {
-                const expanded = expandHome(path);
-                return isAbsolute(expanded)
-                  ? relative(
-                      matchedRoot,
-                      await canonicalConfigPath(expanded),
-                    ) || "."
-                  : expanded;
-              }),
-            ),
-            signal,
-          )
-        ).paths,
+        ...(await normalizeTarget(matchedRoot, requestedPaths, signal)).paths,
       ];
     } finally {
-      await rm(scopeRoot, { recursive: true, force: true });
+      if (createdCheckout) {
+        await rm(matchedRoot, { recursive: true, force: true });
+      }
     }
     if (
       receipt.scope !== undefined &&
