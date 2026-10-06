@@ -2409,11 +2409,8 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     // Missing ownership can match a known worker only when it is unambiguous.
     return JSON.stringify([
       key,
-      typeof owner === "string"
-        ? owner
-        : owners?.size === 1
-          ? [...owners][0]
-          : undefined,
+      (typeof owner === "string" ? owner : undefined) ??
+        (owners?.size === 1 ? [...owners][0] : undefined),
     ]);
   });
   const used = new Map<string, string | undefined>();

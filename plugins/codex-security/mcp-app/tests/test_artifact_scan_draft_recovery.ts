@@ -2318,11 +2318,17 @@ for (const layout of ["standard", "diff"] as const) {
     [undefined, "worker-a"],
     ["worker-a", undefined],
     ["worker-a", "worker-b"],
+    [undefined, { note: "synthetic metadata" }],
+    [{ note: "synthetic metadata" }, undefined],
+    [undefined, ["synthetic metadata"]],
+    [["synthetic metadata"], undefined],
+    ["worker-a", { note: "synthetic metadata" }],
+    [["synthetic metadata"], "worker-a"],
   ]) {
-    for (const separate of owners.every((owner) => owner !== undefined)
+    for (const separate of owners.every((owner) => typeof owner === "string")
       ? [false]
       : [false, true]) {
-      test(`${layout}: optional worker ownership ${owners.join("/")} retains candidate identity, separate=${separate}`, async (t) => {
+      test(`${layout}: optional worker ownership ${JSON.stringify(owners)} retains candidate identity, separate=${separate}`, async (t) => {
         const f = await fixture(t, layout);
         const observations = owners.map((workerId, index) => ({
           ...findingFor("shared-candidate"),
@@ -2338,9 +2344,9 @@ for (const layout of ["standard", "diff"] as const) {
         } else {
           await f.write({ ...f.draft({}, true), findings: observations });
         }
-        for (const stopped of [false, true]) {
+        for (const stopped of [false, "first", true] as const) {
           const findings = await recoverPublishedFindings(f, stopped);
-          const distinct = owners.every((owner) => owner !== undefined);
+          const distinct = owners.every((owner) => typeof owner === "string");
           assert.equal(findings.length, distinct ? 2 : 1);
           assert.equal(
             findings.filter((finding) => finding.severity.level === "high")

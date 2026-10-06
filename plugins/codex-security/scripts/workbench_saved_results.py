@@ -2069,7 +2069,20 @@ def merge_saved_results(
                 continue
             represented_by_parent = False
             mapped_candidate = None
-            if key in represented:
+            candidate_key = (
+                _worker_candidate_key(worker_id, candidate_id, finding)
+                if worker_id and candidate_id
+                else None
+            )
+            if (
+                candidate_key in canonical_candidates
+                and represented_candidates[candidate_key] is not None
+                and represented.get(key) is None
+            ):
+                mapped_key = represented_candidates[candidate_key]
+                mapped_candidate = mapped_key
+                historical_contents = represented_candidate_history.get(candidate_key, set())
+            elif key in represented:
                 mapped_key = represented[key]
                 mapped_candidate = mapped_key
                 historical_contents = represented_history.get(key, set())
