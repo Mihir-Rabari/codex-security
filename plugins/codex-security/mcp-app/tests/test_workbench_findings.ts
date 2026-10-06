@@ -44,10 +44,16 @@ function entry(id: string): Findings.EmbeddedFinding {
 test("import batches preserve identity, repository memberships and stable pages", (t) => {
   const database = open(t);
   const [a, b, c] = ["a", "b", "c"].map(entry);
+  a.finding.identity = {
+    anchor: "anchor\0suffix",
+    instance: "instance\0suffix",
+  };
   assert.deepEqual(storeFindings(database, [b, a], "created", "repository-a"), {
     findingIds: ["b", "a"],
   });
-  storeFindings(database, [a], "updated", "repository-b");
+  assert.deepEqual(storeFindings(database, [a], "updated", "repository-b"), {
+    findingIds: ["a"],
+  });
   assert.deepEqual(listStoredFindings(database, { limit: 1, offset: 0 }), {
     findings: [a.finding],
     limit: 1,
@@ -63,7 +69,7 @@ test("import batches preserve identity, repository memberships and stable pages"
     nextOffset: null,
   });
   const conflict = structuredClone(a);
-  conflict.finding.identity.anchor = "different";
+  conflict.finding.identity.anchor = "anchor";
   assert.deepEqual(
     storeFindings(database, [c, conflict], "later", "repository-c"),
     {

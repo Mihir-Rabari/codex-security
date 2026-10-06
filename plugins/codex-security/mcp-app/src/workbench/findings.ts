@@ -55,7 +55,8 @@ export function storeFindings(
   try {
     return transaction(database, "BEGIN IMMEDIATE", () => {
       const existing = database.prepare(
-        `SELECT fingerprint, rule_id, identity_anchor, identity_instance, details_json
+        `SELECT details_json, fingerprint = ? AND rule_id = ? AND identity_anchor = ?
+          AND identity_instance IS ? AS same_identity
         FROM findings WHERE id = ?`,
       );
       const upsert = database.prepare(
@@ -75,14 +76,14 @@ export function storeFindings(
       );
       for (const entry of entries) {
         const finding = entry.finding;
-        const current = existing.get(finding.findingId);
-        if (
-          current &&
-          (current.fingerprint !== finding.fingerprints.primary ||
-            current.rule_id !== finding.ruleId ||
-            current.identity_anchor !== finding.identity.anchor ||
-            current.identity_instance !== (finding.identity.instance ?? null))
-        ) {
+        const current = existing.get(
+          finding.fingerprints.primary,
+          finding.ruleId,
+          finding.identity.anchor,
+          finding.identity.instance ?? null,
+          finding.findingId,
+        );
+        if (current && !current.same_identity) {
           throw new FindingConflict(
             "The stored finding identity cannot be replaced.",
           );
