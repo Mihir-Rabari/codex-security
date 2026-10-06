@@ -1535,7 +1535,7 @@ async function checkoutRevision(
         path,
         ...args,
       ],
-      { env: command.environment, signal },
+      { env: command.environment, signal, maxBuffer: Infinity },
     );
     if (input !== undefined) pending.child.stdin!.end(input);
     return (await pending).stdout;
@@ -1553,7 +1553,13 @@ async function checkoutRevision(
       const canonicalObjects = await ensureOutputDirectory(
         join(gitDirectory, "objects"),
       );
-      for (const entry of ["config", "FETCH_HEAD"]) {
+      for (const entry of [
+        "config",
+        "FETCH_HEAD",
+        "index",
+        "logs",
+        "logs/HEAD",
+      ]) {
         const saved = await lstat(join(gitDirectory, entry)).catch(
           undefinedIfMissingFile,
         );

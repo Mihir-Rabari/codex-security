@@ -4292,7 +4292,17 @@ for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
       "Preserve the other repository.\n",
     );
     git(outside.path, "add", ".");
-    git(outside.path, "commit", "--quiet", "-m", "Other repository state");
+    git(
+      outside.path,
+      "-c",
+      "user.name=Multiscan Test",
+      "-c",
+      "user.email=multiscan@example.test",
+      "commit",
+      "--quiet",
+      "-m",
+      "Other repository state",
+    );
     const originalHead = git(outside.path, "rev-parse", "HEAD");
     const originalFiles = await readFile(
       join(outside.path, "retained-marker.txt"),
@@ -4576,3 +4586,153 @@ for (const modified of [false, true]) {
     expect(runs).toHaveBeenCalledTimes(1);
   });
 }
+
+for (const entry of ["logs/HEAD", "logs"] as const) {
+  test(`followup recovery refuses linked ${entry} write destinations`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "reflog-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    const outside = await repository(paths.root, "other-reflog-repository");
+    const destination = join(outside.path, ".git", "logs", "HEAD");
+    const bytes = await readFile(destination);
+    await rm(join(checkout, ".git", entry), { recursive: true, force: true });
+    await symlink(
+      join(outside.path, ".git", entry),
+      join(checkout, ".git", entry),
+      entry === "logs" ? "junction" : undefined,
+    );
+    let failed = false;
+    try {
+      await runMultiscan(campaign);
+    } catch {
+      failed = true;
+    }
+    expect(await readFile(destination)).toEqual(bytes);
+    expect(failed).toBe(true);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+test("followup recovery restores deleted paths above the default subprocess buffer", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "large-path-list-source");
+  const directory = `src/long_${"a".repeat(165)}`;
+  await mkdir(join(source.path, directory));
+  const names = Array.from(
+    { length: 4000 },
+    (_, i) => `${directory}/file_${i}_${"b".repeat(120)}.txt`,
+  );
+  for (const name of names)
+    await writeFile(join(source.path, name), "Synthetic source.\n");
+  expect(names.join("\0").length).toBeGreaterThan(1024 * 1024);
+  git(source.path, "add", ".");
+  git(
+    source.path,
+    "-c",
+    "user.name=Multiscan Test",
+    "-c",
+    "user.email=multiscan@example.test",
+    "commit",
+    "-qm",
+    "Add realistic long tracked paths",
+  );
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+  );
+  const runs = mock(
+    async (
+      checkout: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => completedScan(settings.outputDir!, "complete", checkout),
+  );
+  const campaign = options(paths, client(runs));
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  const checkout = join(paths.output, "checkouts", "repo");
+  git(paths.root, "clone", "--quiet", source.path, checkout);
+  await rm(join(checkout, "src"), { recursive: true });
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+test("followup recovery refuses a linked index write destination", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "index-binding-source");
+  const interruptedRevision = source.revision;
+  await appendFile(
+    join(source.path, "src", "app.ts"),
+    "export const pinned = true;\n",
+  );
+  git(source.path, "add", ".");
+  git(
+    source.path,
+    "-c",
+    "user.name=Multiscan Test",
+    "-c",
+    "user.email=multiscan@example.test",
+    "commit",
+    "-qm",
+    "Advance pinned state",
+  );
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+  );
+  const runs = mock(
+    async (
+      checkout: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => completedScan(settings.outputDir!, "complete", checkout),
+  );
+  const campaign = options(paths, client(runs));
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  const checkout = join(paths.output, "checkouts", "repo");
+  const outside = join(paths.root, "other-index-checkout");
+  git(paths.root, "clone", "--quiet", source.path, outside);
+  git(outside, "checkout", "--quiet", "--detach", interruptedRevision);
+  const destination = join(outside, ".git", "index");
+  const bytes = await readFile(destination);
+  git(paths.root, "clone", "--quiet", source.path, checkout);
+  git(checkout, "checkout", "--quiet", "--detach", interruptedRevision);
+  await rm(join(checkout, "src"), { recursive: true });
+  await rm(join(checkout, ".git", "index"));
+  await symlink(destination, join(checkout, ".git", "index"));
+  let failed = false;
+  try {
+    await runMultiscan(campaign);
+  } catch {
+    failed = true;
+  }
+  expect(await readFile(destination)).toEqual(bytes);
+  expect(failed).toBe(true);
+  expect(runs).toHaveBeenCalledTimes(1);
+});
