@@ -323,8 +323,13 @@ def test_standard_publication_preserves_uninterpreted_coverage_provenance(
     ],
     ids=["local-candidate", "local-worker", "descriptive-worker"],
 )
+@pytest.mark.parametrize(
+    "finding_candidate",
+    [False, True],
+    ids=["missing-finding-candidate", "matching-finding-candidate"],
+)
 def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenance(
-    workbench_api, workbench_db, publication_scan, provenance, pending
+    workbench_api, workbench_db, publication_scan, provenance, pending, finding_candidate
 ):
     scan = publication_scan(mode="standard")
     manifest_path = scan.scan_dir / "scan-manifest.json"
@@ -333,6 +338,9 @@ def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenan
     manifest_path.write_text(json.dumps(manifest))
     scan.coverage["surfaces"][0]["candidateId"] = "candidate-1"
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    if finding_candidate:
+        scan.findings[0]["provenance"]["candidateId"] = "candidate-1"
+        (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
     deferred = {
         "id": "older-review",
         "candidateId": "candidate-1",
@@ -355,7 +363,7 @@ def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenan
     )
 
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert (deferred in coverage["deferred"]) is pending
+    assert (deferred in coverage["deferred"]) is (pending or not finding_candidate)
 
 
 @pytest.mark.parametrize("retry_publication", [False, True])

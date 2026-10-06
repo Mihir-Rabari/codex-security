@@ -310,21 +310,44 @@ export function projectDiscoveryCoverage(
   coverage: ScanDraftInput["coverage"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
+  archived: { coverage: ScanDraftInput["coverage"]; attempt?: string }[] = [],
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
-  const provenance = {
+  const current = {
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
-  const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
+  const reviews = [{ ...current, completeness: coverage.completeness }];
+  const origin = (field: string, item: unknown) => {
+    const saved = archived.find((saved) =>
+      ((saved.coverage[field] as unknown[] | undefined) ?? []).some((row) =>
+        isDeepStrictEqual(row, item),
+      ),
+    );
+    const attempt = saved?.attempt?.match(/^attempt-(\d+)$/)?.[1];
+    if (attempt === undefined) return current;
+    const provenance = { workerId: worker.id, attempt: Number(attempt) };
+    if (!reviews.some((review) => review.attempt === provenance.attempt))
+      reviews.push({
+        ...provenance,
+        completeness: saved!.coverage.completeness,
+      });
+    return provenance;
+  };
+  const prefix = (provenance: typeof current) =>
+    `${worker.id}-attempt-${provenance.attempt ?? "unknown"}`;
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const surfaceIds = new Map(
     surfaces.map((surface, index) => [
       surface.id,
-      `${prefix}-surface-${index + 1}`,
+      `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
     ]),
   );
-  const project = (item: Record<string, unknown>) => {
+  const project = (
+    item: Record<string, unknown>,
+    field: string,
+    source: unknown = item,
+  ) => {
     const result = structuredClone(item);
     const descriptions = result.provenance;
     const projected =
@@ -337,7 +360,7 @@ export function projectDiscoveryCoverage(
       delete projected[key];
     result.provenance = {
       ...projected,
-      ...provenance,
+      ...origin(field, source),
       ...(item.id === undefined ? {} : { sourceId: item.id }),
       ...(item.candidateId === undefined
         ? {}
@@ -347,10 +370,10 @@ export function projectDiscoveryCoverage(
   };
   return {
     completeness: coverage.completeness,
-    reviews: [{ ...provenance, completeness: coverage.completeness }],
+    reviews,
     surfaces: surfaces.map((surface, index) => ({
-      ...project(surface),
-      id: `${prefix}-surface-${index + 1}`,
+      ...project(surface, "surfaces"),
+      id: `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (ref) =>
           ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
@@ -358,14 +381,16 @@ export function projectDiscoveryCoverage(
     })),
     explicitExclusions: (
       coverage.explicitExclusions as Record<string, unknown>[]
-    ).map(project),
+    ).map((item) => project(item, "explicitExclusions")),
     deferred: (coverage.deferred as Record<string, unknown>[]).map(
       (item, index) => ({
-        ...project(item),
-        id: `${prefix}-deferred-${index + 1}`,
+        ...project(item, "deferred"),
+        id: `${prefix(origin("deferred", item))}-deferred-${index + 1}`,
         ...(item.candidateId === undefined
           ? {}
-          : { candidateId: `${prefix}-candidate-${index + 1}` }),
+          : {
+              candidateId: `${prefix(origin("deferred", item))}-candidate-${index + 1}`,
+            }),
         ...(item.surfaceIds === undefined
           ? {}
           : {
@@ -381,7 +406,11 @@ export function projectDiscoveryCoverage(
           openQuestions: (
             coverage.openQuestions as (string | Record<string, unknown>)[]
           ).map((question) =>
-            project(typeof question === "string" ? { question } : question),
+            project(
+              typeof question === "string" ? { question } : question,
+              "openQuestions",
+              question,
+            ),
           ),
         }),
   };

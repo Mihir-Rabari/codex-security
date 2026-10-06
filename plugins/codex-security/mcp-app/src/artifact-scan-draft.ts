@@ -1315,7 +1315,7 @@ async function preserveDeepThreatModel(
   };
 }
 
-async function readArchivedWorkerCheckpoints(
+export async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
 ): Promise<SavedScanDraft[]> {
   const workerRoot = dirname(context.root);

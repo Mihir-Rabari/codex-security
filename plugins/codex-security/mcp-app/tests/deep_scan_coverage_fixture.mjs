@@ -449,6 +449,16 @@ export async function publishCoverageFixture(
     );
     assert.equal(prior.length, 1);
     assert.equal(prior[0].disposition, "no_issue_found");
+    assert.equal(prior[0].provenance.workerId, current[0].provenance.workerId);
+    assert.equal(prior[0].provenance.attempt, 1);
+    assert.equal(current[0].provenance.attempt, 2);
+    assert.deepEqual(
+      coverage.reviews
+        .filter((review) => review.workerId === prior[0].provenance.workerId)
+        .map((review) => review.attempt)
+        .sort(),
+      [1, 2],
+    );
     assert.match(
       prior[0].receiptRefs[0],
       /\/attempts\/attempt-01\/artifacts\/prior\.txt$/,

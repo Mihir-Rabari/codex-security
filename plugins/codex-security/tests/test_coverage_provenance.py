@@ -119,3 +119,63 @@ def test_recovery_preserves_descriptive_provenance(
     if field == "explicitExclusions" and not retained and not optional_ids:
         assert actual[0].pop("id").startswith("saved-")
     assert actual == [expected]
+
+
+@pytest.mark.parametrize("parent_review", [False, True], ids=["reconstructed", "retained"])
+@pytest.mark.parametrize("retry_publication", [False, True], ids=["direct", "failed-retry"])
+def test_recovery_uses_host_reviews_without_discovery_review_extensions(
+    workbench_api, workbench_db, publication_scan, monkeypatch, parent_review, retry_publication
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    host_review = {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
+    imported_review = {
+        "workerId": "synthetic-other-worker",
+        "attempt": 99,
+        "completeness": "complete",
+    }
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "reviews": [imported_review]},
+            }
+        )
+    )
+    original = result.read_bytes()
+    if parent_review:
+        (scan.scan_dir / "coverage.json").write_text(
+            json.dumps({**scan.coverage, "reviews": [host_review]})
+        )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication failure.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        stopped = saved.fail_scan(
+            context,
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id,
+                claim_token=None,
+                cost_json=None,
+                message="Stopped.",
+            ),
+        )
+    assert stopped["scan"]["resultsRecoveryNeeded"] is retry_publication
+    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert recovered["scan"]["resultsRecoveryNeeded"] is False
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["reviews"] == [host_review]
+    assert imported_review not in coverage["reviews"]
+    assert result.read_bytes() == original
+    published = (scan.scan_dir / "coverage.json").read_bytes()
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert (scan.scan_dir / "coverage.json").read_bytes() == published

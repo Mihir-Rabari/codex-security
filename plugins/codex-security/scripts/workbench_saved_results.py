@@ -1216,10 +1216,12 @@ def merge_saved_results(
                 if not isinstance(record, dict):
                     continue
                 provenance = record.get("provenance")
-                if not isinstance(provenance, dict) or (
-                    provenance.get("workerId"),
-                    provenance.get("attempt"),
-                ) != (worker["id"], worker["attempt"]):
+                if (
+                    not isinstance(provenance, dict)
+                    or provenance.get("workerId") != worker["id"]
+                    or not isinstance(provenance.get("attempt"), int)
+                    or (worker["id"], provenance["attempt"]) not in reviewed_attempts
+                ):
                     continue
                 original = {
                     key: value for key, value in record.items() if key not in {"id", "provenance"}
@@ -2090,7 +2092,24 @@ def merge_saved_results(
             and relative not in frozen_parent_projections
         ):
             continue
+        if (
+            worker is not None
+            and worker["status"] == "succeeded"
+            and worker["merge_state"] == "merged"
+            and relative in current_results
+            and draft.get("complete") is not False
+        ):
+            reviews = coverage.setdefault("reviews", [])
+            review = {
+                "workerId": worker_id,
+                "attempt": worker["attempt"],
+                "completeness": draft["coverage"]["completeness"],
+            }
+            if isinstance(reviews, list) and review not in reviews:
+                reviews.append(review)
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
+            if field == "reviews" and worker is not None:
+                continue
             if (
                 superseded
                 and relative != accepted_reducer

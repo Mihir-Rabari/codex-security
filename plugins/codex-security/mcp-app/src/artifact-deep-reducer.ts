@@ -10,6 +10,7 @@ import type {
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
+  readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import {
@@ -107,6 +108,11 @@ export async function readDeepReductionSources(
           },
         }));
         const { coverage, ...reduction } = result;
+        const archived = await readArchivedWorkerCheckpoints({
+          ...context,
+          root: dirname(worker.resultPath),
+          layout: "worker",
+        });
         return {
           workerId: worker.id,
           ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
@@ -116,6 +122,10 @@ export async function readDeepReductionSources(
             relative(bound.artifacts.scanDir, dirname(worker.resultPath))
               .split(sep)
               .join("/"),
+            archived.map((saved) => ({
+              coverage: saved.input.coverage,
+              attempt: saved.attempt,
+            })),
           ),
           result: reduction,
         };
