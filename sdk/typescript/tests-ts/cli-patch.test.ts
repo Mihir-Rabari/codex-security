@@ -2673,13 +2673,17 @@ describe("patch publication integrity", () => {
     },
   );
 
-  test.each([
-    "staged",
-    "unstaged",
-    "assume-unchanged",
-    "clean",
-    "deleted-before",
-  ])("handles a renamed file with %s pre-patch state", async (dirty) => {
+  test.each(
+    [
+      "staged",
+      "unstaged",
+      "assume-unchanged",
+      "clean",
+      "deleted-before",
+    ].flatMap((dirty) =>
+      ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
+    ),
+  )("handles a renamed %s file at %s", async (dirty, file) => {
     const directory = await fixtures.create("patch-renamed-local-edits-");
     const git = repositoryGit(directory);
     git("init", "--initial-branch=main");
@@ -2716,14 +2720,15 @@ describe("patch publication integrity", () => {
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
           await rm(join(directory, "old.ts"), { force: true });
-          await writeFile(join(directory, "new.ts"), `fixed\n${content}\n`);
+          await mkdir(dirname(join(directory, file)), { recursive: true });
+          await writeFile(join(directory, file), `fixed\n${content}\n`);
           output?.stdout.write(
             JSON.stringify({
               patches: [
                 {
                   occurrenceId: "occ_1",
                   status: "verified",
-                  files: ["new.ts"],
+                  files: [file],
                   verification: "Synthetic regression passed.",
                 },
               ],
@@ -2740,10 +2745,10 @@ describe("patch publication integrity", () => {
       expect(git("write-tree")).toBe(index);
       expect(git("ls-remote", "origin")).toBe("");
     } else {
-      expect(git("show", "HEAD:new.ts")).toBe(`fixed\n${content}`);
+      expect(git("show", `HEAD:${file}`)).toBe(`fixed\n${content}`);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
     }
-    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+    expect(await readFile(join(directory, file), "utf8")).toBe(
       `fixed\n${content}\n`,
     );
   });

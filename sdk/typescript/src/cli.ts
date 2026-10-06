@@ -7190,7 +7190,10 @@ async function createPatchPullRequest(
         .filter(Boolean)
         .filter((file) => {
           try {
-            return !lstatSync(resolve(root, file), { throwIfNoEntry: false });
+            const metadata = lstatSync(resolve(root, file), {
+              throwIfNoEntry: false,
+            });
+            return !metadata || metadata.isDirectory();
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code === "ENOTDIR")
               return true;
