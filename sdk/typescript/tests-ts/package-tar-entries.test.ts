@@ -198,6 +198,13 @@ describe("plain npm tar entries", () => {
     expect(plainTarEntries(record)).toEqual([
       { path: "package/README.md", size: 1 },
     ]);
+    for (const trailingBytes of [1, 511]) {
+      expect(
+        plainTarEntries(
+          Buffer.concat([archive(record), Buffer.alloc(trailingBytes)]),
+        ),
+      ).toEqual([{ path: "package/README.md", size: 1 }]);
+    }
     for (const zeroBlocks of [1, 2]) {
       expect(
         plainTarEntries(
@@ -222,7 +229,7 @@ describe("plain npm tar entries", () => {
       internalReferenceError,
     );
     for (const bytes of [
-      Buffer.concat([archive(record), Buffer.alloc(1)]),
+      Buffer.concat([archive(record), Buffer.from([1])]),
       record.subarray(0, blockSize),
     ]) {
       expect(() => plainTarEntries(bytes)).toThrow(invalidTarEntryError);

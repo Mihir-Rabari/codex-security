@@ -10,7 +10,6 @@ function headerText(header, start, end) {
 }
 
 export function plainTarEntries(archiveBytes) {
-  if (archiveBytes.byteLength % blockSize !== 0) invalidTarEntry();
   const entries = [];
   let offset = 0;
 
@@ -56,5 +55,7 @@ export function plainTarEntries(archiveBytes) {
     offset = nextOffset;
   }
 
+  if (archiveBytes.subarray(offset).some((byte) => byte !== 0))
+    invalidTarEntry();
   return entries;
 }
