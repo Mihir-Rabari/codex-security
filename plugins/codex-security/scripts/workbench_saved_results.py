@@ -2114,7 +2114,14 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(worker_candidate, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
-                            resolved.setdefault(worker_candidate[:2], "reported")
+                            if not any(
+                                saved_owner == worker_candidate[0]
+                                and _deferred_candidate_id(row, saved_owner, ambiguous_deferred)
+                                == worker_candidate[1]
+                                and modified[1] >= source_order["parent"][1]
+                                for (saved_owner, _), (modified, row, _) in active_deferred.items()
+                            ):
+                                resolved.setdefault(worker_candidate[:2], "reported")
     pending_resolved = resolved.keys() | diff_resolved
 
     replaced_surfaces, surface_updates = _generic_surface_updates(

@@ -6,6 +6,84 @@ import { importSource } from "./import-module.ts";
 import { fixture } from "./scan-draft-recovery-fixture.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
+for (const mode of ["standard", "diff"] as const) {
+  for (const outcome of ["reported", "rejected"] as const) {
+    for (const sameOwner of [false, true]) {
+      for (const payload of ["candidate", "finding"] as const) {
+        test(`legacy candidate coverage reconciles ${mode}/${outcome}/${payload}/${sameOwner ? "same" : "other"} owner`, async (t) => {
+          const f = await fixture(t, mode);
+          const candidateId = "legacy-candidate";
+          const previous = {
+            id: candidateId,
+            sourceWorkerId: "worker-before",
+            reason: "Saved candidate evidence remains available.",
+            [payload]: {
+              ...finding("legacy", "src/legacy.ts"),
+              summary: "Saved older review evidence.",
+            },
+          };
+          const generic = {
+            id: "generic-review",
+            reason: "Independent unfinished work.",
+          };
+          await f.write(f.draft({ deferred: [previous, generic] }));
+          const current = finding("legacy", "src/legacy.ts");
+          const resolved = {
+            ...current,
+            provenance: {
+              ...current.provenance,
+              candidateId,
+              sourceWorkerId: sameOwner ? "worker-before" : "worker-after",
+            },
+          };
+          await f.write({
+            ...f.draft(),
+            findings: outcome === "reported" ? [resolved] : [],
+            coverage: {
+              ...f.draft().coverage,
+              surfaces:
+                outcome === "rejected"
+                  ? [
+                      {
+                        id: "current-decision",
+                        candidateId,
+                        sourceWorkerId: resolved.provenance.sourceWorkerId,
+                        label: "Current candidate review",
+                        disposition: "rejected",
+                        notes: "Current validation resolved this candidate.",
+                      },
+                    ]
+                  : [],
+            },
+          });
+          const coverage = await f.read();
+          assert.equal(
+            coverage.deferred.some(
+              (row: { id: string }) => row.id === candidateId,
+            ),
+            !sameOwner,
+          );
+          assert.ok(
+            coverage.deferred.some(
+              (row: { id: string }) => row.id === generic.id,
+            ),
+          );
+          if (sameOwner && outcome === "reported") {
+            const saved = JSON.parse(
+              await readFile(path.join(f.root, "findings.json"), "utf8"),
+            );
+            assert.ok(
+              JSON.stringify(saved.findings[0].provenance).includes(
+                "Saved older review evidence.",
+              ),
+            );
+          }
+        });
+      }
+    }
+  }
+}
+
 const {
   recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,

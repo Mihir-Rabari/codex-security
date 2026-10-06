@@ -10,6 +10,45 @@ from test_workbench_db import budget_scan_fixture, complete_budget_scan
 from workbench_test_support import run_workbench, write_completed_contract
 
 
+@pytest.mark.parametrize("variant", ["deduplicated", "distinct", "invalid"])
+def test_budget_completion_retains_each_confirmed_candidate_identity(
+    tmp_path: Path, workbench_api: dict[str, Any], variant: str
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    first_candidate = json.loads(ledger.read_text())
+    second_candidate = {**first_candidate, "candidate_id": "candidate-two"}
+    ledger.write_text(
+        "\n".join(json.dumps(row) for row in [first_candidate, second_candidate]) + "\n"
+    )
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    first = findings["findings"][0]
+    first["provenance"]["candidateId"] = first_candidate["candidate_id"]
+    second = json.loads(json.dumps(first))
+    second["provenance"]["candidateId"] = second_candidate["candidate_id"]
+    second["severity"]["level"] = "low"
+    if variant == "distinct":
+        second["identity"]["instance"] = "second-instance"
+    elif variant == "invalid":
+        second.pop("ruleId")
+    findings["findings"] = [first, second]
+    findings_path.write_text(json.dumps(findings))
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    workbench_api["budget_exhausted_draft"](
+        scan, scan_dir, [first_candidate, second_candidate], "Synthetic budget stop."
+    )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert {row["candidateId"] for row in coverage["deferred"] if row.get("candidateId")} == (
+        {second_candidate["candidate_id"]} if variant == "invalid" else set()
+    )
+
+
 @pytest.mark.parametrize(
     "decision",
     [

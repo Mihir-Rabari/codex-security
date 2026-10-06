@@ -38,6 +38,48 @@ const { recordCodexSecurityCandidateValidations } = await loadModule(
   "artifact-validation-phase.ts",
 );
 
+for (const complete of [false, true]) {
+  for (const currentTerminal of [false, true]) {
+    test(`unmarked saved findings survive diff replay (${complete ? "final" : "checkpoint"}, ${currentTerminal ? "new decision" : "empty"})`, async (t) => {
+      const reviewed = candidate("legacy-accepted", "suppressed");
+      const context = await fixture(t, [reviewed]);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete,
+        findings: [finding(reviewed.candidate_id)],
+      });
+      const findingsPath = path.join(context.root, "findings.json");
+      const saved = JSON.parse(await readFile(findingsPath, "utf8"));
+      delete saved.findings[0].provenance.diffCandidateDecision;
+      await writeFile(findingsPath, JSON.stringify(saved));
+      const checkpoints = path.join(context.root, "checkpoints");
+      for (const name of await readdir(checkpoints)) {
+        const file = path.join(checkpoints, name);
+        const checkpoint = JSON.parse(await readFile(file, "utf8"));
+        for (const previous of checkpoint.findings ?? [])
+          delete previous.provenance.diffCandidateDecision;
+        await writeFile(file, JSON.stringify(checkpoint));
+      }
+      const next = { ...draft(), complete };
+      if (currentTerminal)
+        next.coverage.surfaces.push({
+          candidateId: reviewed.candidate_id,
+          label: "Current authored decision",
+          disposition: "rejected",
+          notes: "A new review supersedes the saved finding.",
+        });
+      await recordCodexSecurityScanDraft(context, next);
+      const actual = JSON.parse(await readFile(findingsPath, "utf8"));
+      assert.equal(actual.findings.length, currentTerminal ? 0 : 1);
+      if (!currentTerminal)
+        assert.equal(
+          actual.findings[0].provenance.candidateId,
+          reviewed.candidate_id,
+        );
+    });
+  }
+}
+
 async function reconcileDiffCandidates(
   context: ArtifactContext,
   input: FixtureDraft,

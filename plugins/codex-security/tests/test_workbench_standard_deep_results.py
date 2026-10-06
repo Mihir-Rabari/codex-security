@@ -3080,6 +3080,57 @@ def write_saved_parent(scan_dir: Path, draft: dict, modified: int) -> None:
     os.utime(scan_dir / "coverage.json", ns=(modified, modified))
 
 
+@pytest.mark.parametrize("pending_time", [100, 200, 300])
+def test_absorbed_source_identity_respects_pending_checkpoint_order(
+    tmp_path: Path, generic_review_recovery, pending_time: int
+) -> None:
+    module, pending, _, binding = generic_review_recovery
+    output = tmp_path / "worker"
+    output.mkdir()
+    candidate = pending["coverage"]["deferred"][0]
+    candidate["candidateId"] = candidate["id"]
+    candidate["candidate"] = {"title": "Worker-local candidate still needs review."}
+    checkpoint = write_checkpoint(output / "checkpoints", pending)
+    os.utime(checkpoint, ns=(pending_time, pending_time))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(pending_time, pending_time))
+    empty = {**pending, "coverage": {**pending["coverage"], "deferred": []}}
+    (output / "result.json").write_text(json.dumps(empty))
+    os.utime(output / "result.json", ns=(50, 50))
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+    local = json.loads((contract / "findings.json").read_text())["findings"][0]
+    local["provenance"]["candidateId"] = "review"
+    canonical = copy.deepcopy(local)
+    canonical["provenance"]["candidateId"] = "canonical-parent"
+    canonical["provenance"]["sourceFindings"] = [{"id": "worker:0", "finding": local}]
+    parent = {**empty, "findings": [canonical]}
+    write_saved_parent(tmp_path, parent, 200)
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    source_bytes = {path: path.read_bytes() for path in [checkpoint, head, output / "result.json"]}
+
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+
+    assert first is not None
+    assert any(
+        row.get("candidateId") == "review" and row.get("sourceWorkerId") == "worker"
+        for row in first[2]["deferred"]
+    ) is (pending_time >= 200)
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert any(
+        row.get("candidateId") == "review" and row.get("sourceWorkerId") == "worker"
+        for row in replay[2]["deferred"]
+    ) is (pending_time >= 200)
+    assert all(path.read_bytes() == data for path, data in source_bytes.items())
+
+
 @pytest.mark.parametrize("reopened", [False, True])
 def test_frozen_parent_retains_identical_latest_observation(
     tmp_path: Path, generic_review_recovery, reopened: bool

@@ -2611,6 +2611,12 @@ function normalizeCoverageEntries(coverage: JsonObject): JsonObject {
     ),
   );
   const normalizedDeferred = deferred.map((item) => {
+    if (
+      item.candidateId === undefined &&
+      typeof item.id === "string" &&
+      (isObject(item.candidate) || isObject(item.finding))
+    )
+      item = { ...item, candidateId: item.id };
     const linked = Array.isArray(item.surfaceIds)
       ? {
           ...item,

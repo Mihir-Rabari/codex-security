@@ -266,10 +266,11 @@ export function preserveDiffCandidateDecisions(
         key &&
         !seen.has(key) &&
         candidate &&
-        isDeepStrictEqual(
-          object(finding.provenance)?.diffCandidateDecision,
-          candidateDecision(candidate),
-        )
+        (object(finding.provenance)?.diffCandidateDecision === undefined ||
+          isDeepStrictEqual(
+            object(finding.provenance)?.diffCandidateDecision,
+            candidateDecision(candidate),
+          ))
       )
         accepted.add(key);
       if (key) seen.add(key);
