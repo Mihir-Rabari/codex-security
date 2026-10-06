@@ -7235,13 +7235,18 @@ process.exit(result.status ?? 1);
               expect(environment["GIT_OBJECT_DIRECTORY"]).toBeUndefined();
               expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
             } else {
-              expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
-                gitEnvironment.GIT_OBJECT_DIRECTORY,
-              );
-              expect(environment["GIT_COMMON_DIR"]).toBe(
-                gitEnvironment.GIT_COMMON_DIR,
-              );
               const commandDirectory = options?.directory ?? cwd;
+              for (const name of [
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_COMMON_DIR",
+              ] as const) {
+                const value = environment[name];
+                expect(
+                  value === undefined
+                    ? undefined
+                    : resolve(commandDirectory, value),
+                ).toBe(gitEnvironment[name]);
+              }
               expect(commandDirectory).toBe(target);
               if (environment["GIT_DIR"] !== undefined)
                 expect(resolve(commandDirectory, environment["GIT_DIR"])).toBe(
@@ -7714,6 +7719,7 @@ describe("ordinary patch snapshot context", () => {
             : ["scan", directory, "--patch"];
       let modelCalls = 0;
       let assessmentCalls = 0;
+      let redirectedSnapshotCommands = 0;
       const outcome = await runWorkflow(
         [...argv, ...(flag ? [flag] : []), "--json"],
         {
@@ -7722,11 +7728,18 @@ describe("ordinary patch snapshot context", () => {
           result: scan,
           onWorkbench: () => savedScan(scan, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
-            if (command === "git")
+            if (command === "git") {
+              if (
+                operation === "replace" &&
+                modelCalls > 0 &&
+                (args.includes("read-tree") || args.includes("add"))
+              )
+                redirectedSnapshotCommands++;
               return runGitRepositoryCommand(command, args, cwd, {
                 ...options,
                 environment: { ...environment, ...options?.environment },
               });
+            }
             if (args[1] === "list") return "[]";
             expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(
               resolve(directory, "provider-config"),
@@ -7803,7 +7816,9 @@ describe("ordinary patch snapshot context", () => {
         },
       );
       expect(modelCalls).toBe(operation === "gitfile" ? 2 : 1);
-      expect(assessmentCalls).toBe(flag === "--assess-patch-risk" ? 1 : 0);
+      expect(assessmentCalls).toBe(
+        flag === "--assess-patch-risk" && operation !== "replace" ? 1 : 0,
+      );
       expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
       expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
       expect(foreignGit("ls-remote", "origin")).toBe("");
@@ -7814,11 +7829,19 @@ describe("ordinary patch snapshot context", () => {
       expect(await readFile(join(foreign, "untracked.ts"), "utf8")).toBe(
         "unrelated local content\n",
       );
-      const publicationRejected =
-        operation === "replace" && flag === "--create-pr";
-      expect(outcome.exitCode, outcome.stderr).toBe(
-        publicationRejected ? 2 : 0,
-      );
+      if (operation === "replace") {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Patch directory now resolves outside the selected repository",
+        );
+        expect(redirectedSnapshotCommands).toBe(0);
+        expect(await readFile(join(root, ".git/index"))).toEqual(index);
+        expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "main"));
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(root, "app.ts"), "utf8")).toBe("fixed\n");
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
       const result = JSON.parse(outcome.stdout);
       if (route === "inline") {
         expect(result.patches).toMatchObject(
@@ -7834,7 +7857,7 @@ describe("ordinary patch snapshot context", () => {
         );
         expect(result.files).not.toContain("untracked.ts");
       }
-      if (flag !== "--create-pr" || publicationRejected)
+      if (flag !== "--create-pr")
         expect(await readFile(join(root, ".git/index"))).toEqual(index);
       else
         expect(git("show", "HEAD:app.ts")).toBe(
@@ -7844,7 +7867,6 @@ describe("ordinary patch snapshot context", () => {
       expect(git("diff", "--cached", "--name-only")).toBe(
         stagedUnrelated ? "unrelated.ts" : "",
       );
-      if (publicationRejected) expect(git("ls-remote", "origin")).toBe("");
     },
   );
 });
