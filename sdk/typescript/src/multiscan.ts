@@ -1178,6 +1178,18 @@ async function loadResumableScan(
     receipt.id,
     `attempt-${receipt.attempt}`,
   );
+  const recoveryTarget =
+    receipt.scope === undefined ? configuredTarget : [receipt.scope];
+  if (
+    process.platform === "win32" &&
+    Array.isArray(recoveryTarget) &&
+    target.targetId !==
+      `target_sha256_${createHash("sha256").update(`local-workspace\0${checkout}`).digest("hex")}`
+  ) {
+    // Validate the lexical parents before canonicalization follows Windows aliases.
+    await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
+    await ensureOutputDirectory(dirname(recoveryCheckout));
+  }
   const targetRoots = [
     checkout,
     process.platform === "win32"
@@ -1528,6 +1540,33 @@ async function checkoutRevision(
     );
     return result.stdout.trim();
   };
+  if (restoreIncomplete) {
+    const gitDirectory = join(path, ".git");
+    const metadata = await lstat(gitDirectory).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (metadata !== undefined) {
+      const canonicalGit = await ensureOutputDirectory(gitDirectory);
+      const canonicalObjects = await ensureOutputDirectory(
+        join(gitDirectory, "objects"),
+      );
+      const [common, objects, worktree] = await Promise.all([
+        git("rev-parse", "--path-format=absolute", "--git-common-dir"),
+        git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
+        git("rev-parse", "--show-toplevel"),
+      ]);
+      if (
+        (await realpath(common)) !== canonicalGit ||
+        (await realpath(objects)) !== canonicalObjects ||
+        (await realpath(worktree)) !== (await realpath(path))
+      ) {
+        throw new Error(
+          "The retained campaign checkout has Git bindings outside its own directory.",
+        );
+      }
+    }
+  }
   await git("init", "--quiet");
   await git(
     "fetch",

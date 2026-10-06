@@ -4110,7 +4110,12 @@ test("original coordinates reuse an existing pinned scope checkout without refet
       paths.input,
       `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
     );
-    const runs = mock(completeRun);
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
     const campaign = options(paths, client(runs));
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
@@ -4143,7 +4148,12 @@ test("original coordinates reuse an existing pinned scope checkout without refet
     await runMultiscan(
       options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
     );
-    const runs = mock(completeRun);
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
     const campaign = options(paths, client(runs), {
       recoverScan: async () => undefined,
     });
@@ -4172,7 +4182,12 @@ for (const recovery of [false, true]) {
         await runMultiscan(
           options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
         );
-      const runs = mock(completeRun);
+      const runs = mock(
+        async (
+          checkout: string,
+          settings: Parameters<SecurityClient["run"]>[1] = {},
+        ) => completedScan(settings.outputDir!, "complete", checkout),
+      );
       const campaign = options(
         paths,
         client(runs),
@@ -4248,6 +4263,123 @@ testPosix(
       completed: 1,
       skipped: 1,
     });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
+  test(`retained Git bindings keep ${binding} writes inside the campaign checkout`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retained-binding-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const outside = await repository(paths.root, "other-owned-repository");
+    await writeFile(
+      join(outside.path, "retained-marker.txt"),
+      "Preserve the other repository.\n",
+    );
+    git(outside.path, "add", ".");
+    git(outside.path, "commit", "--quiet", "-m", "Other repository state");
+    const originalHead = git(outside.path, "rev-parse", "HEAD");
+    const originalFiles = await readFile(
+      join(outside.path, "retained-marker.txt"),
+      "utf8",
+    );
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    if (binding === "gitfile") {
+      await rm(join(checkout, ".git"), { recursive: true, force: true });
+      await writeFile(
+        join(checkout, ".git"),
+        `gitdir: ${join(outside.path, ".git")}\n`,
+      );
+    } else if (binding === "worktree") {
+      git(checkout, "config", "core.worktree", outside.path);
+    } else if (binding === "common") {
+      await writeFile(
+        join(checkout, ".git", "commondir"),
+        `${join(outside.path, ".git")}\n`,
+      );
+    } else {
+      await rm(join(checkout, ".git", "objects"), {
+        recursive: true,
+        force: true,
+      });
+      await symlink(
+        join(outside.path, ".git", "objects"),
+        join(checkout, ".git", "objects"),
+        "junction",
+      );
+    }
+    let failed = false;
+    try {
+      await runMultiscan(campaign);
+    } catch {
+      failed = true;
+    }
+    expect(git(outside.path, "rev-parse", "HEAD")).toBe(originalHead);
+    expect(
+      await readFile(join(outside.path, "retained-marker.txt"), "utf8"),
+    ).toBe(originalFiles);
+    expect(failed).toBe(true);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+(process.platform === "win32" ? test : test.skip)(
+  "retained Git bindings reject a Windows recovery parent junction before checkout writes",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "junction-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const externalParent = join(paths.root, "other-recovery-parent");
+    await mkdir(externalParent);
+    const externalCheckout = join(externalParent, "attempt-2");
+    git(paths.root, "clone", "--quiet", source.path, externalCheckout);
+    const runs = mock(
+      async (
+        _checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", externalCheckout),
+    );
+    const campaign = options(paths, client(runs), {
+      recoverScan: async () => undefined,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    await rename(externalCheckout, join(externalParent, "retained-attempt"));
+    const lexicalParent = join(paths.output, "recovery-checkouts", "repo");
+    await rm(lexicalParent, { recursive: true, force: true });
+    await symlink(externalParent, lexicalParent, "junction");
+    await expect(runMultiscan(campaign)).rejects.toThrow();
+    expect(
+      await lstat(externalCheckout).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
     expect(runs).toHaveBeenCalledTimes(1);
   },
 );
