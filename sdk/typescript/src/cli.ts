@@ -7244,7 +7244,8 @@ const NESTED_PATCH_GIT_ENVIRONMENT = {
 
 interface GitPatchState {
   root: string;
-  trees: Map<string, string>;
+  tree: string;
+  files: Map<string, string>;
 }
 
 async function changedPatchFiles(
@@ -7259,35 +7260,28 @@ async function changedPatchFiles(
       .sort();
   }
   const root = typeof base === "string" ? repository : base.root;
-  const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
-  const heads =
+  const head =
     typeof base === "string"
-      ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
-      : (await snapshotGitPatchState(root, dependencies)).trees;
-  const files = new Set<string>();
-  for (const [directory, tree] of bases) {
-    const head = heads.get(directory);
-    if (head === undefined) continue;
-    const output = await dependencies.runRepositoryCommand(
-      "git",
-      [
-        "-C",
-        join(root, directory),
-        "--literal-pathspecs",
-        "diff",
-        "--name-only",
-        "-z",
-        tree,
-        head,
-      ],
-      root,
-      {
-        trim: false,
-        environment: directory ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
-      },
-    );
-    for (const path of output.split("\0").filter(Boolean))
-      files.add(directory ? `${directory}/${path}` : path);
+      ? await snapshotPatchTree(root, dependencies)
+      : await snapshotGitPatchState(root, dependencies);
+  const output = await dependencies.runRepositoryCommand(
+    "git",
+    [
+      "--literal-pathspecs",
+      "diff",
+      "--name-only",
+      "-z",
+      typeof base === "string" ? base : base.tree,
+      typeof head === "string" ? head : head.tree,
+    ],
+    root,
+    { trim: false },
+  );
+  const files = new Set(output.split("\0").filter(Boolean));
+  if (typeof base !== "string" && typeof head !== "string") {
+    for (const path of new Set([...base.files.keys(), ...head.files.keys()])) {
+      if (base.files.get(path) !== head.files.get(path)) files.add(path);
+    }
   }
   return [...files].sort();
 }
@@ -7320,14 +7314,13 @@ async function snapshotGitPatchState(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<GitPatchState> {
-  const trees = new Map<string, string>();
-  const visit = async (directory: string): Promise<void> => {
+  const tree = await snapshotPatchTree(repository, dependencies);
+  const files = new Map<string, string>();
+  const visit = async (directory: string, snapshot: string): Promise<void> => {
     const checkout = join(repository, directory);
-    const tree = await snapshotPatchTree(checkout, dependencies, repository);
-    trees.set(directory, tree);
     const entries = await dependencies.runRepositoryCommand(
       "git",
-      ["-C", checkout, "ls-tree", "-r", "-z", tree],
+      ["-C", checkout, "ls-tree", "-r", "-z", snapshot],
       repository,
       {
         trim: false,
@@ -7335,15 +7328,27 @@ async function snapshotGitPatchState(
         environment: directory ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
       },
     );
-    for (const entry of entries.split("\0")) {
-      if (!entry.startsWith("160000 ")) continue;
-      const path = entry.slice(entry.indexOf("\t") + 1);
-      if (existsSync(join(checkout, path, ".git")))
-        await visit(directory ? `${directory}/${path}` : path);
+    for (const entry of entries.split("\0").filter(Boolean)) {
+      const separator = entry.indexOf("\t");
+      const path = entry.slice(separator + 1);
+      const relative = directory ? `${directory}/${path}` : path;
+      if (directory) files.set(relative, entry.slice(0, separator));
+      if (
+        entry.startsWith("160000 ") &&
+        existsSync(join(checkout, path, ".git"))
+      )
+        await visit(
+          relative,
+          await snapshotPatchTree(
+            join(checkout, path),
+            dependencies,
+            repository,
+          ),
+        );
     }
   };
-  await visit("");
-  return { root: repository, trees };
+  await visit("", tree);
+  return { root: repository, tree, files };
 }
 
 // Literal patch inputs also work in directories without Git metadata.
