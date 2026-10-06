@@ -872,7 +872,8 @@ test.each(["root", "file profile", "CLI profile"])(
     for (const provider of [undefined, "openai"] as const) {
       let native: CodexSecurityConfig | undefined;
       expect(
-        await main(
+        await runCapturedCli(
+          main,
           [
             "scan",
             "-c",
@@ -883,8 +884,6 @@ test.each(["root", "file profile", "CLI profile"])(
               : []),
             "--json",
           ],
-          capture().stream,
-          capture().stream,
           dependencies({
             currentDirectory: input.repository,
             onConfig: (value) => {

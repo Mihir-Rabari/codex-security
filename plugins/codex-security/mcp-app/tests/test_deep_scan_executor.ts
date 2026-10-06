@@ -2172,6 +2172,7 @@ async function fakeCodexFixture(
   const markerPath = path.join(root, "invocation.json");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const scriptPath = path.join(root, "fake-codex.mjs");
+  await writeFile(path.join(root, "config.toml"), "");
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
