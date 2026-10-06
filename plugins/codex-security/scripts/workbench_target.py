@@ -51,7 +51,7 @@ def git_output(
     work_tree: Path | None = None,
 ) -> str | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
-    output = os.fsdecode(completed.stdout).strip()
+    output = os.fsdecode(completed.stdout).removesuffix("\n")
     return output if completed.returncode == 0 and output else None
 
 
@@ -427,11 +427,17 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
+    prefix = git_bytes(target, "rev-parse", "--show-prefix")
+    if prefix is None:
+        raise SystemExit("Could not inspect the selected Git working tree.")
+    pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
+    scoped = (repository / pathspec).resolve()
     try:
-        relative = target.resolve().relative_to(repository)
-    except ValueError as exc:
+        if not scoped.is_relative_to(repository) or not scoped.samefile(target):
+            raise ValueError("Git working tree does not contain the selected target")
+    except (OSError, ValueError) as exc:
         raise SystemExit("Scan target must stay inside its Git working tree.") from exc
-    return repository, relative.as_posix() or "."
+    return repository, pathspec
 
 
 def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
@@ -450,7 +456,8 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
             ) from exc
         if mode != b"160000":
             continue
-        entries.append((repository / os.fsdecode(raw_path), object_id.decode("ascii")))
+        relative_path = Path(os.fsdecode(raw_path)).relative_to(pathspec)
+        entries.append((target / relative_path, object_id.decode("ascii")))
     return tuple(entries)
 
 
@@ -537,7 +544,6 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         relative = Path(os.fsdecode(raw_path))
-        path = repository / relative
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -554,7 +560,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
                 continue
-            path = scope.joinpath(*relative.parts[scope_depth:])
+        path = target.joinpath(*relative.parts[scope_depth:])
         try:
             metadata = path.lstat()
         except FileNotFoundError:
@@ -755,7 +761,7 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
         and is_worktree
         and revision is not None
         and repository_root is not None
-        and Path(repository_root).resolve() == target
+        and Path(repository_root).samefile(target)
     )
     metadata: dict[str, Any] = {
         "hasHead": revision is not None,

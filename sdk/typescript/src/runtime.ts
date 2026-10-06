@@ -1658,8 +1658,8 @@ export async function validateOutputDir(
   if (outputDirectory === undefined) {
     return null;
   }
-  requireModelSafeOutputDir(outputDirectory);
   const path = resolve(expandHome(outputDirectory));
+  requireModelSafeOutputDir(path);
   try {
     const metadata = await lstat(path).catch(nullIfMissingFileError);
     if (metadata !== null) {

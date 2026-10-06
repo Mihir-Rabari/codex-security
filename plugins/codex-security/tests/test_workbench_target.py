@@ -112,6 +112,67 @@ def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     assert directory_content_digest(target) == original_digest
 
 
+@pytest.mark.parametrize("scope", [".", "component"])
+def test_directory_snapshot_preserves_target_alias_spelling(tmp_path: Path, scope: str) -> None:
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    (target / "component").mkdir()
+    (target / "component" / "app.py").write_text("print('fixture')\n")
+    (target / "root.py").write_text("print('root')\n")
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    scoped = target / scope
+    selected = alias / scope
+    expected = [
+        selected / path.relative_to(scoped)
+        for path in WORKBENCH_TARGET["git_directory_snapshot_paths"](scoped)
+    ]
+
+    paths = WORKBENCH_TARGET["git_directory_snapshot_paths"](selected)
+    assert [str(path) for path in paths] == [str(path) for path in expected]
+    original_digest = directory_content_digest(selected)
+    assert original_digest == directory_content_digest(scoped)
+    (selected / "changed.py").write_text("print('changed')\n")
+    assert directory_content_digest(selected) == directory_content_digest(scoped)
+    assert directory_content_digest(selected) != original_digest
+
+
+@pytest.mark.parametrize("scope", [".", "component"])
+@pytest.mark.parametrize("alias_kind", ["symlink", "case"])
+def test_submodule_checks_preserve_target_alias_spelling(
+    tmp_path: Path, scope: str, alias_kind: str
+) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    scoped = target / scope
+    scoped.mkdir(exist_ok=True)
+    submodule = scoped / "submodule"
+    revision = initialize_git_repository(submodule)
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=target,
+        check=True,
+    )
+    alias = tmp_path / ("alias" if alias_kind == "symlink" else "TARGET")
+    if alias_kind == "symlink":
+        alias.symlink_to(target, target_is_directory=True)
+    elif not alias.exists():
+        pytest.skip("filesystem does not support case aliases")
+    selected = alias / scope
+    entries = WORKBENCH_TARGET["git_submodule_entries"](selected)
+    assert entries == ((selected / "submodule", revision),)
+    WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+    (submodule / "README.md").write_text("changed after commit\n")
+    with pytest.raises(SystemExit, match="Dirty Git submodules.*submodule"):
+        WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+
+
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
 def test_content_digest_expands_nested_git_repositories(
     tmp_path: Path, content_digest: Callable[[Path], str]
@@ -328,3 +389,77 @@ def test_git_discovery_preserves_symlink_parent_traversal(
     if os.name != "nt":
         assert expected == host_git
     assert trusted_git_executable(repository) == str(expected)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "component with spaces",
+        pytest.param(
+            "component with spaces ",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows strips trailing spaces"),
+        ),
+    ],
+)
+def test_git_context_retains_scoped_directory_spelling(tmp_path: Path, name: str) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    scoped = target / name
+    scoped.mkdir()
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](scoped)
+    assert repository.samefile(target)
+    assert pathspec == scoped.name
+
+
+def test_git_target_accepts_filesystem_case_aliases(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    alias = tmp_path / "TARGET"
+    if not alias.exists():
+        pytest.skip("filesystem does not support case aliases")
+    assert WORKBENCH_TARGET["git_target_metadata"](alias)["reviewChangesSupported"]
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias)
+    assert repository.samefile(target)
+    assert pathspec == "."
+    scoped = target / "component"
+    scoped.mkdir()
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](alias / "COMPONENT")
+    assert repository.samefile(target)
+    assert (repository / pathspec).samefile(scoped)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not preserve trailing path whitespace")
+@pytest.mark.parametrize("sibling_exists", [False, True])
+def test_git_context_preserves_trailing_root_whitespace(
+    tmp_path: Path, sibling_exists: bool
+) -> None:
+    target = tmp_path / "target "
+    initialize_git_repository(target)
+    if sibling_exists:
+        initialize_git_repository(tmp_path / "target")
+    assert WORKBENCH_TARGET["git_target_metadata"](target)["reviewChangesSupported"]
+    repository, pathspec = WORKBENCH_TARGET["git_worktree_context"](target)
+    assert repository.samefile(target)
+    assert pathspec == "."
+    original_digest = worktree_content_digest(target)
+    (target / "synthetic.txt").write_text("selected target content\n")
+    assert worktree_content_digest(target) != original_digest
+    destination = tmp_path / "copied"
+    WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
+    assert (destination / "synthetic.txt").read_text() == "selected target content\n"
+
+
+def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    unrelated = tmp_path / "unrelated"
+    initialize_git_repository(target)
+    unrelated.mkdir()
+    subprocess.run(["git", "config", "core.worktree", str(unrelated)], cwd=target, check=True)
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        WORKBENCH_TARGET["git_worktree_context"](target)
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        worktree_content_digest(target)
+    destination = tmp_path / "copied"
+    with pytest.raises(SystemExit, match="inside its Git working tree"):
+        WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
+    assert not destination.exists()

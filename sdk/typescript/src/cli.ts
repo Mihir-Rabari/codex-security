@@ -3143,7 +3143,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });

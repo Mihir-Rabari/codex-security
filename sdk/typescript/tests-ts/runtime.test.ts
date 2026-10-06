@@ -5813,6 +5813,9 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
     expect(await validateOutputDir(absent)).toBe(absent);
+    expect(
+      await validateOutputDir(`${root}/parent/../${basename(absent)}`),
+    ).toBe(absent);
     expect(await canonicalizeModelSafePath(join(root, "missing", "scan"))).toBe(
       join(root, "missing", "scan"),
     );
