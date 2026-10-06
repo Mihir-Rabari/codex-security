@@ -622,7 +622,9 @@ def include_execution_settings(connection: sqlite3.Connection, result: dict[str,
         result["deepScan"]["executionSettings"] = recorded_deep_scan_execution_settings(run)
     scan = result.get("scan")
     if isinstance(scan, dict) and isinstance(scan.get("executionAttribution"), dict):
-        run = find_supported_deep_scan_run(connection, scan["scanId"])
+        run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["scanId"],)
+        ).fetchone()
         home = recorded_deep_scan_codex_home(run) if run is not None else None
         if home is not None:
             scan["executionAttribution"]["codexHome"] = home

@@ -195,7 +195,7 @@ def collect_scan_usage(
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     model_usage: dict[str | None, dict[str, int]] = {}
-    for copies in sessions.values():
+    for copies in _parent_first_rollout_copies(sessions):
         session = copies[0]
         owner_turn_id = None
         if (
@@ -263,6 +263,22 @@ def collect_scan_usage(
     if attribution or any(model is not None for model in model_usage):
         result["modelUsage"] = [{"model": model, **usage} for model, usage in model_usage.items()]
     return result
+
+
+def _parent_first_rollout_copies(
+    sessions: dict[str, list[RolloutSession]],
+) -> list[list[RolloutSession]]:
+    """Preserve discovery order while visiting recovered parents before children."""
+    ordered: dict[str, list[RolloutSession]] = {}
+    for thread_id in sessions:
+        lineage: dict[str, list[RolloutSession]] = {}
+        current: str | None = thread_id
+        while current in sessions and current not in ordered and current not in lineage:
+            copies = sessions[current]
+            lineage[current] = copies
+            current = copies[0].parent_thread_id
+        ordered.update(reversed(tuple(lineage.items())))
+    return list(ordered.values())
 
 
 def _read_rollout_copies_usage(

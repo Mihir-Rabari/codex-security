@@ -671,6 +671,7 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "current-unreadable",
         "current-mismatched",
         "external-sqlite",
+        "external-late-parent",
         "external-shared-home",
         "external-missing-copy",
         "external-missing-child",
@@ -825,12 +826,22 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                     _token_event(counted, index * 30, 5),
                 ],
             )
+        middle_id = f"middle-{index}"
+        if worker_home == "external-late-parent":
+            worker_threads[middle_id] = _rollout(
+                root,
+                middle_id,
+                [_token_event(counted, index * 9, 2)],
+                parent_thread_id=f"discovery-{index}",
+            )
         child_id = f"child-{index}"
         worker_threads[child_id] = _rollout(
             root,
             child_id,
             [_token_event(counted, index * 7, 1)],
-            parent_thread_id=f"discovery-{index}",
+            parent_thread_id=(
+                middle_id if worker_home == "external-late-parent" else f"discovery-{index}"
+            ),
         )
         if worker_home in {"current", "inherited-sqlite"}:
             with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
@@ -883,6 +894,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             )
         elif worker_home in {
             "external-sqlite",
+            "external-late-parent",
             "external-shared-home",
             "external-missing-copy",
             "external-missing-child",
@@ -898,8 +910,27 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             _state_graph(
                 {"CODEX_SQLITE_HOME": str(root / "original-external-sqlite")},
                 worker_threads,
-                [(f"discovery-{index}", child_id)],
+                (
+                    [(f"discovery-{index}", middle_id), (middle_id, child_id)]
+                    if worker_home == "external-late-parent"
+                    else [(f"discovery-{index}", child_id)]
+                ),
             )
+        if worker_home == "external-late-parent":
+            # Recovery's index knows the grandchild; its parent remains only
+            # in the recorded worker home after the external index changed.
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    [
+                        (thread_id, str(worker_threads[thread_id]))
+                        for thread_id in (f"discovery-{index}", child_id)
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO thread_spawn_edges VALUES (?, ?)",
+                    [(f"discovery-{index}", middle_id), (middle_id, child_id)],
+                )
         if worker_home in {"external-missing-copy", "external-missing-child"}:
             first_id = f"discovery-{index}"
             with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
@@ -954,11 +985,13 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 "modelUsage": [{"model": None, **_counts(index * 70, 0, 12)}],
             }
         else:
+            expected_input = index * (86 if worker_home == "external-late-parent" else 77)
+            expected_output = 15 if worker_home == "external-late-parent" else 13
             assert usage == {
                 "coverage": "complete",
                 "source": "codex_rollout",
-                **_counts(index * 77, 0, 13),
-                "threadCount": 4,
+                **_counts(expected_input, 0, expected_output),
+                "threadCount": 5 if worker_home == "external-late-parent" else 4,
                 "modelUsage": (
                     [
                         {"model": None, **_counts(index * 47, 0, 8)},
@@ -966,7 +999,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                         {"model": "model-beta", **_counts(index * 10, 0, 2)},
                     ]
                     if copied_rollout
-                    else [{"model": None, **_counts(index * 77, 0, 13)}]
+                    else [{"model": None, **_counts(expected_input, 0, expected_output)}]
                 ),
             }
 

@@ -405,3 +405,79 @@ def test_unsupported_new_workflow_does_not_claim_registered_scan(
     assert rejected["returncode"] != 0
     assert message in str(rejected["stderr"]).lower()
     assert snapshot(state) == before
+
+
+@pytest.mark.parametrize("workflow", ["deep-security-scan/v1", "future/v99"])
+@pytest.mark.parametrize("settings_version", [1, 99])
+def test_saved_log_settings_do_not_require_execution_compatibility(
+    tmp_path: Path, workflow: str, settings_version: int
+) -> None:
+    state = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    run = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["deepScan"]
+    recorded_home = tmp_path / "original-worker-home"
+    owner = {
+        "threadId": "fixture-thread",
+        "turnId": "original",
+        "startedAt": run["createdAt"],
+        "dedicated": False,
+    }
+    settings = {
+        "version": settings_version,
+        "settings": {"codexHome": str(recorded_home), "codexPath": sys.executable},
+    }
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ?, usage_owner_json = ?, execution_settings_json = ?",
+            (workflow, json.dumps(owner), json.dumps(settings)),
+        )
+    before = snapshot(state)
+    ordinary = run_workbench(state, "get-scan", "--scan-id", run["scanId"])
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            "import runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(with_execution_settings=True)",
+            str(SCRIPT),
+            "get-scan",
+            "--scan-id",
+            run["scanId"],
+        ],
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    expected = ordinary
+    if settings_version == 1:
+        expected["scan"]["executionAttribution"]["codexHome"] = str(recorded_home)
+    assert observed["scan"] == expected["scan"]
+    assert observed["workspace"]["id"] == expected["workspace"]["id"]
+    assert snapshot(state) == before
+    if workflow == "future/v99":
+        rejected = run_workbench(
+            state,
+            "claim-deep-scan-coordinator",
+            "--scan-id",
+            run["scanId"],
+            "--thread-id",
+            "fixture-thread",
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+        assert "unsupported" in rejected["stderr"]
+        assert snapshot(state) == before

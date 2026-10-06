@@ -11,8 +11,11 @@ import { Cli, Formatter, z } from "incur";
 import { main } from "../src/cli.js";
 import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
+import { runWorkbench } from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { pythonExecutable } from "./support/python.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -381,6 +384,79 @@ test("saved logs include the privately recorded worker home after recovery", asy
     expect(logs).not.toHaveProperty("codexHome");
     expect(stderr.text()).toBe("");
   } finally {
+    await rm(f.state, { recursive: true, force: true });
+  }
+});
+
+test("saved logs remain readable for a future workflow without admitting execution", async () => {
+  const f = await fixture();
+  const target = await mkdtemp(join(tmpdir(), "saved-future-target-"));
+  const python = pythonExecutable()!;
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: f.state,
+    CODEX_HOME: join(f.state, "codex-home"),
+  };
+  const options = { pluginRoot: PLUGIN_ROOT, python, environment };
+  try {
+    const begun = await runWorkbench(options, [
+      "begin-deep-scan",
+      "--thread-id",
+      "thread-1",
+      "--target-path",
+      target,
+      "--scan-root",
+      join(f.state, "scans"),
+    ]);
+    const scanId = String((begun["deepScan"] as { scanId: string }).scanId);
+    await promisify(execFile)(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); connection.execute(\"UPDATE deep_scan_runs SET workflow_version = 'future/v99' WHERE scan_id = ?\", (sys.argv[2],)); connection.commit(); connection.close()",
+        join(f.state, "workbench.sqlite3"),
+        scanId,
+      ],
+      { env: environment },
+    );
+    let privateSettingsRequested = false;
+    f.deps.runWorkbench = async (
+      args,
+      input,
+      signal,
+      _python,
+      privateSettings,
+    ) => {
+      privateSettingsRequested ||= privateSettings === true;
+      return runWorkbench(
+        { ...options, signal, withExecutionSettings: privateSettings },
+        args,
+        input,
+      );
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scans", "logs", scanId, "--json"], f.deps)).toBe(0);
+    expect(privateSettingsRequested).toBe(true);
+    const logs = JSON.parse(stdout.text());
+    expect(logs.scanId).toBe(scanId);
+    expect(
+      logs.sessions.map((session: { threadId: string }) => session.threadId),
+    ).toEqual(["thread-1"]);
+    expect(logs).not.toHaveProperty("codexHome");
+    expect(stderr.text()).toBe("");
+    await expect(
+      runWorkbench(options, [
+        "claim-deep-scan-coordinator",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        "thread-1",
+      ]),
+    ).rejects.toThrow("unsupported workflow");
+  } finally {
+    await rm(target, { recursive: true, force: true });
     await rm(f.state, { recursive: true, force: true });
   }
 });
