@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { stringify } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   providerProcessConfiguration,
@@ -14,6 +15,7 @@ import {
   prepareDiscoveryExecution,
   prepareMergeExecution,
   prepareExecutionSource,
+  nativeScanConfiguration,
   type PreparedExecution,
 } from "../src/execution-preparation.js";
 import { disabledMcpServers } from "../src/scan-comparison.js";
@@ -27,10 +29,31 @@ import { fixtureSpawn } from "./support/codex-process.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test("native provider credentials use private process environments across worker roles, resumes, and concurrent scans", async () => {
+test("native credentials retain private transport across worker roles, resumes, and concurrent scans", async () => {
   const root = await temporaryDirectory();
   const home = join(root, "home");
   await mkdir(home, { mode: 0o700 });
+  const mcpSettings = (name: string): JsonObject => ({
+    "synthetic.stdio": {
+      command: "synthetic-mcp",
+      env: { SHARED_TOKEN: `synthetic-${name}-stdio` },
+    },
+    "synthetic.other": {
+      command: "synthetic-other-mcp",
+      env: { SHARED_TOKEN: `synthetic-${name}-other` },
+    },
+    "synthetic.http": {
+      url: "https://example.invalid/mcp",
+      http_headers: { Authorization: `synthetic-${name}-http` },
+    },
+  });
+  const originalContents = `# Preserve the caller's original config bytes.\n${stringify({ mcp_servers: mcpSettings("first") })}\n`;
+  await writeFile(join(home, "config.toml"), originalContents, { mode: 0o600 });
+  const inheritedConfiguration = await nativeScanConfiguration(
+    { CODEX_HOME: home },
+    {},
+    2,
+  );
   const executable = join(root, "synthetic-codex.exe");
   const script = join(root, "synthetic-codex.cjs");
   const capture = join(root, "capture.jsonl");
@@ -40,14 +63,14 @@ test("native provider credentials use private process environments across worker
     `
 const fs = require("node:fs");
 const {parse} = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
-const args = process.argv.slice(2), config = {};
+const args = process.argv.slice(2), config = parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME,"config.toml"),"utf8"));
 const merge = (target,value) => { for(const [key,child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {},child) : child; return target; };
 for(let i=0;i<args.length;i++) if(["-c","--config"].includes(args[i])) merge(config,parse(args[++i]));
 if(args.includes("mcp")) { fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n"); console.log("[]"); process.exit(0); }
 const provider = config["model_providers"].synthetic;
 const headers = {...provider["http_headers"]};
 for(const [key,name] of Object.entries(provider["env_http_headers"] ?? {})) { const value=process.env[name]; if(value?.trim()) headers[key]=value; }
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,config,headers,bearer:process.env[provider["env_key"]],unused:process.env[config["model_providers"].unused["env_key"]],privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,config,headers,mcpServers:config.mcp_servers,bearer:process.env[provider["env_key"]],unused:process.env[config["model_providers"].unused["env_key"]],privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
 if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
  const request=JSON.parse(line); if(request.id===undefined)return;
  const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};
@@ -63,6 +86,11 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
   try {
     const sessions = ["first", "second"].map((name) => {
       const configuration: JsonObject = {
+        ...(name === "first" ? inheritedConfiguration : {}),
+        mcp_servers:
+          name === "first"
+            ? inheritedConfiguration["mcp_servers"]!
+            : mcpSettings(name),
         model: "synthetic-model",
         model_provider: "synthetic",
         model_providers: {
@@ -87,6 +115,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
       const environment = {
         PATH: process.env["PATH"],
         CODEX_CLI_PATH: executable,
+        CODEX_HOME: home,
         SYNTHETIC_OVERRIDE: `synthetic-${name}-override`,
       };
       const source = prepareExecutionSource({
@@ -183,6 +212,8 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
         expect(row.args.join("\n")).not.toContain("synthetic-first-");
         expect(row.args.join("\n")).not.toContain("synthetic-second-");
         expect(row.unused).toBe(`synthetic-${name}-unused`);
+        expect(row.mcpServers).toMatchObject(mcpSettings(name));
+        expect(row.mcpServers["codex-security"].enabled).toBe(false);
         expect(row.headers).toEqual({
           "X-Synthetic": `synthetic-${name}-header`,
           "X-Fallback": `synthetic-${name}-fallback`,
@@ -203,6 +234,9 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           expect(permissions.network.enabled).toBe(false);
         }
       }
+      expect(sessions[index]!.source.configuration["mcp_servers"]).toEqual(
+        snapshots[index]!["mcp_servers"],
+      );
       expect(sessions[index]!.source.configuration["model_providers"]).toEqual(
         snapshots[index]!["model_providers"],
       );
@@ -217,6 +251,9 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           .map((row) => row.args.includes("resume")),
       ).toEqual([false, true, false, true]);
     }
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      originalContents,
+    );
   } finally {
     spawn.mockRestore();
   }

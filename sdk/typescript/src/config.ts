@@ -567,6 +567,26 @@ export function providerProcessConfiguration(
   return { config: result, environment: childEnvironment };
 }
 
+/** @internal MCP credentials are read from protected config, not process arguments. */
+export function mcpProcessConfiguration(config: JsonObject): {
+  config: JsonObject;
+  requiresConfigFile: boolean;
+} {
+  const result = structuredClone(config);
+  let requiresConfigFile = false;
+  if (isRecord(result["mcp_servers"])) {
+    for (const server of Object.values(result["mcp_servers"])) {
+      if (!isRecord(server)) continue;
+      for (const field of ["env", "http_headers"]) {
+        if (!Object.hasOwn(server, field)) continue;
+        requiresConfigFile = true;
+        delete server[field];
+      }
+    }
+  }
+  return { config: result, requiresConfigFile };
+}
+
 /** Serialize full tables so dotted names and filesystem paths remain literal keys. */
 export function codexConfigOverrides(config: JsonObject): string[] {
   return Object.entries(config).map(

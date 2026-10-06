@@ -604,6 +604,20 @@ process.exit(0);
         selection: "home-definition" as const,
       }),
     ),
+    ...[
+      { experimental_bearer_token: "synthetic-private-bearer" },
+      { http_headers: { Authorization: "Bearer synthetic-private-header" } },
+    ].map((credentials) => ({
+      name: "synthetic.private-provider",
+      provider: {
+        name: "Synthetic inherited credentials",
+        base_url: "https://provider.example.test/v1",
+        wire_api: "responses",
+        ...credentials,
+      },
+      ambient: false,
+      selection: "home-definition" as const,
+    })),
     {
       name: "custom",
       provider: { name: "Synthetic", env_key: "OPENAI_API_KEY" },
@@ -737,6 +751,7 @@ appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
   codex: process.env.CODEX_API_KEY ?? null,
   providerKey: process.env.SYNTHETIC_PROVIDER_KEY ?? null,
   argv: process.argv.slice(1),
+  internal: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("CODEX_SECURITY_INTERNAL_"))),
 }) + "\\n");
 await new Promise((resolve) => { process.stdin.resume(); process.stdin.on("end", resolve); });
 console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-comparison" }));
@@ -784,12 +799,24 @@ process.exit(0);
       });
       // Profile merging belongs to this wrapper; avoid depending on the
       // installed Codex version's legacy-profile support during MCP enumeration.
+      const literalCredentials =
+        provider["experimental_bearer_token"] !== undefined ||
+        provider["http_headers"] !== undefined;
+      const enumerations: {
+        argv: string[];
+        environment: NodeJS.ProcessEnv;
+      }[] = [];
       const mcpCommand =
-        selection === undefined || selection === "home-definition"
+        !literalCredentials &&
+        (selection === undefined || selection === "home-definition")
           ? undefined
           : spyOn(runtime, "runCodexCommand").mockImplementation(
-              async (_command, args) => {
+              async (_command, args, environment) => {
                 expect(args).toContain("mcp");
+                enumerations.push({
+                  argv: [...args],
+                  environment: { ...environment },
+                });
                 return { success: true, exitCode: 0, stdout: "[]", stderr: "" };
               },
             );
@@ -810,6 +837,36 @@ process.exit(0);
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line));
+        if (literalCredentials) {
+          expect(enumerations).toHaveLength(2);
+          for (const launch of [
+            ...[native, ordinary].map((capture) => ({
+              argv: capture.argv,
+              environment: capture.internal,
+            })),
+            ...enumerations,
+          ]) {
+            expect(JSON.stringify(launch.argv)).not.toContain(
+              "synthetic-private-",
+            );
+            const configured = (
+              argvConfig(launch.argv)["model_providers"] as JsonObject
+            )[name] as JsonObject;
+            if (provider["experimental_bearer_token"] !== undefined) {
+              expect(configured).not.toHaveProperty(
+                "experimental_bearer_token",
+              );
+              expect(launch.environment[configured["env_key"] as string]).toBe(
+                provider["experimental_bearer_token"],
+              );
+            } else {
+              const headers = configured["env_http_headers"] as JsonObject;
+              expect(
+                launch.environment[headers["Authorization"] as string],
+              ).toBe((provider["http_headers"] as JsonObject)["Authorization"]);
+            }
+          }
+        }
         if (selection === "home-definition") {
           for (const capture of [native, ordinary]) {
             const configArgs = (capture.argv as string[]).flatMap(

@@ -14,6 +14,7 @@ import {
   EXTERNAL_CODEX_PROVIDERS,
   deepMerge,
   providerProcessConfiguration,
+  mcpProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
   writeCodexConfigContents,
@@ -183,6 +184,7 @@ export async function lockExecutionConfiguration(
   codexHome: string,
   config: JsonObject,
   signal?: AbortSignal,
+  preserveExistingConfiguration = false,
 ): Promise<() => Promise<void>> {
   const release = await acquireCodexSecurityCredentialHomeLock(
     codexHome,
@@ -196,7 +198,12 @@ export async function lockExecutionConfiguration(
         throw error;
       },
     );
-    await writeCodexConfig(path, config);
+    await writeCodexConfig(
+      path,
+      preserveExistingConfiguration && previous !== null
+        ? deepMerge(parseToml(previous.toString("utf8")) as JsonObject, config)
+        : config,
+    );
     let restoration: Promise<void> | undefined;
     return () =>
       (restoration ??= (async () => {
@@ -261,7 +268,12 @@ export function createExecutionCodex(
     : { config: launchConfig, environment };
   const sdkCodexConfig = { ...launch.config };
   Object.assign(environment, launch.environment);
-  const processConfig = { ...sdkCodexConfig };
+  const mcpLaunch = runtime.preserveCodexHomeConfig
+    ? mcpProcessConfiguration(sdkCodexConfig)
+    : { config: sdkCodexConfig, requiresConfigFile: false };
+  const processConfig = { ...mcpLaunch.config };
+  const requiresConfigFile =
+    session.runtimeConfig !== undefined || mcpLaunch.requiresConfigFile;
   // Native launches read project trust from config.toml, not a large argv override.
   if (client.createCodex === undefined) delete processConfig["projects"];
   const checkPermissions =
@@ -342,8 +354,7 @@ export function createExecutionCodex(
     },
   });
   const deepWorker = session.policy !== "ordinary";
-  if (session.runtimeConfig === undefined && !deepWorker)
-    return { codex, environment };
+  if (!requiresConfigFile && !deepWorker) return { codex, environment };
   const wrap = (thread: CodexThreadLike): CodexThreadLike => ({
     get id() {
       return thread.id;
@@ -351,14 +362,14 @@ export function createExecutionCodex(
     async runStreamed(input, options) {
       return {
         events: (async function* () {
-          let release: (() => Promise<void>) | undefined =
-            session.runtimeConfig === undefined
-              ? undefined
-              : await lockExecutionConfiguration(
-                  runtime.codexHome,
-                  sdkCodexConfig,
-                  options.signal,
-                );
+          let release: (() => Promise<void>) | undefined = !requiresConfigFile
+            ? undefined
+            : await lockExecutionConfiguration(
+                runtime.codexHome,
+                sdkCodexConfig,
+                options.signal,
+                runtime.preserveCodexHomeConfig,
+              );
           const controller = deepWorker ? new AbortController() : undefined;
           const forwardAbort = () => controller?.abort(options.signal?.reason);
           const detach = () =>

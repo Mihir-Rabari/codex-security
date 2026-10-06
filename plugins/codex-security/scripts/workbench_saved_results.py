@@ -1345,7 +1345,10 @@ def merge_saved_results(
                 and isinstance(item.get("candidateId"), str)
                 and item.get("disposition") in {"rejected", "not_applicable"}
                 and item["disposition"] == resolved.get(item["candidateId"])
-                and (field != "surfaces" or surface_rows.get(item.get("id")) is item)
+                and (
+                    field != "surfaces"
+                    or (isinstance(item.get("id"), str) and surface_rows.get(item["id"]) is item)
+                )
             ):
                 resolved_rows.setdefault(item["candidateId"], item)
 

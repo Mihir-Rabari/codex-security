@@ -21,6 +21,8 @@ import {
 import {
   deepMerge,
   codexConfigOverrides,
+  providerProcessConfiguration,
+  mcpProcessConfiguration,
   hasCommandAuth,
   mergedCodexConfig,
   resolveCodexProfile,
@@ -32,6 +34,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { prepareReadOnlyExecution } from "./execution-preparation.js";
+import { definedEnvironment } from "./execution-auth.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   compactFinding,
@@ -656,14 +659,22 @@ async function startReadOnlyCodexThread(
     environment === undefined ? undefined : resolveCodexCommand(environment);
   const createCodex =
     preparedFactory ??
-    (({ config, configOverrides, ...settings }: CodexOptions) =>
-      new Codex({
+    (({ config, configOverrides, ...settings }: CodexOptions) => {
+      const launch = providerProcessConfiguration(
+        (config ?? {}) as JsonObject,
+        settings.env ?? {},
+      );
+      return new Codex({
         ...settings,
+        env: definedEnvironment(launch.environment),
         configOverrides: [
-          ...codexConfigOverrides((config ?? {}) as JsonObject),
+          ...codexConfigOverrides(
+            mcpProcessConfiguration(launch.config).config,
+          ),
           ...(configOverrides ?? []),
         ],
-      }));
+      });
+    });
   const codex = await createCodex({
     ...(command === undefined
       ? {}
@@ -762,21 +773,23 @@ export async function disabledMcpServers(
   configOverrides: readonly string[] = [],
 ): Promise<JsonObject> {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
+  const launch = providerProcessConfiguration(config ?? {}, environment);
   const { success, stdout, stderr } = await runCodexCommand(
     command,
     [
       "-C",
       workingDirectory,
-      ...[...codexConfigOverrides(config ?? {}), ...configOverrides].flatMap(
-        (value) => ["--config", value],
-      ),
+      ...[
+        ...codexConfigOverrides(mcpProcessConfiguration(launch.config).config),
+        ...configOverrides,
+      ].flatMap((value) => ["--config", value]),
       "-c",
       "features.plugins=false",
       "mcp",
       "list",
       "--json",
     ],
-    environment,
+    definedEnvironment(launch.environment),
     undefined,
     options.signal,
     workingDirectory,

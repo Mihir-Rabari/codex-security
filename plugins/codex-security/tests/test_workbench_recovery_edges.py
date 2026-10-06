@@ -1526,3 +1526,58 @@ def test_stopped_recovery_retains_valid_findings_with_pending_null_deferred(
     retained = scan_dir / "checkpoints" / checkpoint.name
     assert retained.read_bytes() == original
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize(
+    "surface_id",
+    [["malformed-surface"], {"surface": "malformed"}, "valid-surface"],
+    ids=["array", "object", "string-control"],
+)
+def test_stopped_scan_recovers_unhashable_terminal_surface_id(
+    tmp_path: Path, action: str, disposition: str, surface_id: object
+) -> None:
+    from workbench_test_support import saved_draft, write_checkpoint
+
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
+    findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    surface = {
+        "id": surface_id,
+        "candidateId": "independent-terminal",
+        "label": "Saved terminal review",
+        "disposition": disposition,
+        "receiptRefs": [],
+    }
+    coverage_path = scan_dir / "coverage.json"
+    file_authored_coverage = json.loads(coverage_path.read_text())
+    file_authored_coverage["surfaces"].append(surface)
+    coverage_path.write_text(json.dumps(file_authored_coverage))
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan["scanId"], findings=findings)
+    )
+    original = checkpoint.read_bytes()
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "Synthetic interruption") if action == "fail-scan" else ()),
+    )
+    stopped = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert stopped["progress"]["status"] == ("canceled" if action == "cancel-scan" else "failed")
+    assert stopped["findingCount"] == 1
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    if isinstance(surface_id, str):
+        assert surface in coverage["surfaces"]
+    else:
+        assert surface not in coverage["surfaces"]
+        assert any(
+            "Skipped malformed coverage surface" in warning for warning in stopped["warnings"]
+        )
+    assert checkpoint.read_bytes() == original
+    assert (scan_dir / "report.md").is_file()
