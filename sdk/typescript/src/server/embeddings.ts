@@ -24,9 +24,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
 
   constructor(
     private readonly apiKey:
-      | string
-      | (() => string | Promise<string>)
-      | undefined,
+      string | (() => string | Promise<string>) | undefined,
     private readonly request: (
       url: string,
       init: RequestInit,
@@ -106,6 +104,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
       );
     }
     if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
       throw new FindingsError(
         "embedding_failed",
         `Embedding provider returned HTTP ${response.status}.`,

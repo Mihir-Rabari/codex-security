@@ -31,6 +31,22 @@ import deep_scan_workbench as deep_workbench
 from workbench_feedback import get_scan_feedback
 from workbench_schema import MIGRATIONS, apply_migrations
 
+deep_workbench.configure(SimpleNamespace(
+    **vars(workbench),
+    preserve_stopped_results=workbench.preserve_stopped_results_after_transition,
+))
+
+
+def deep_fixture_dependency(name):
+    if name in {
+        "require_target", "require_remediation_target", "require_scope", "require_scan",
+        "require_workspace", "require_scannable_target", "safe_segment",
+        "register_security_target", "scan_target_identity", "now", "compact_timestamp",
+        "state_dir",
+    }:
+        return deep_workbench.dependencies()
+    return deep_workbench
+
 scenario = sys.argv[2]
 timestamp = "2026-08-01T00:00:00Z"
 root = Path.cwd() / "synthetic-identity-fixture"
@@ -467,16 +483,17 @@ with ExitStack() as stack:
             for name, value in {
                 "require_target": target, "require_remediation_target": target,
                 "require_scope": ".", "existing_deep_scan_for_target": None,
-                "terminal_deep_scan_for_target_snapshot": None, "git_revision": "synthetic",
-                "worktree_content_digest": "snapshot", "directory_snapshot_regular_file_count": 0,
+                "terminal_deep_scan_for_target_snapshot": None,
+                "scan_target_identity": ("synthetic", "snapshot", 7, metadata[str(target)].st_ino),
+                "directory_snapshot_regular_file_count": 0,
                 "effective_deep_scan_config": {}, "now": timestamp,
                 "compact_timestamp": "synthetic", "state_dir": root,
             }.items():
-                mocks.enter_context(patch.object(deep_workbench, name, return_value=value))
-            mocks.enter_context(patch.object(deep_workbench, "require_scannable_target"))
-            mocks.enter_context(patch.object(deep_workbench, "safe_segment", side_effect=lambda value: value))
-            mocks.enter_context(patch.object(deep_workbench, "register_security_target", side_effect=register))
-            mocks.enter_context(patch.object(deep_workbench, "require_scan", side_effect=lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()))
+                mocks.enter_context(patch.object(deep_fixture_dependency(name), name, return_value=value))
+            mocks.enter_context(patch.object(deep_workbench.dependencies(), "require_scannable_target"))
+            mocks.enter_context(patch.object(deep_workbench.dependencies(), "safe_segment", side_effect=lambda value: value))
+            mocks.enter_context(patch.object(deep_workbench.dependencies(), "register_security_target", side_effect=register))
+            mocks.enter_context(patch.object(deep_workbench.dependencies(), "require_scan", side_effect=lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()))
             mocks.enter_context(patch.object(deep_workbench, "ensure_deep_scan_run"))
             mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
             mocks.enter_context(patch.object(Path, "mkdir"))
@@ -541,7 +558,8 @@ with ExitStack() as stack:
             with ExitStack() as mocks:
                 for module in (workbench, deep_workbench):
                     mocks.enter_context(patch.object(module, "require_uuid", side_effect=lambda value, label: value))
-                    mocks.enter_context(patch.object(module, "require_remediation_target", return_value=target))
+                    owner = deep_workbench.dependencies() if module is deep_workbench else module
+                    mocks.enter_context(patch.object(owner, "require_remediation_target", return_value=target))
                     mocks.enter_context(patch.object(module, "directory_snapshot_regular_file_count", return_value=0))
                 mocks.enter_context(patch.object(workbench, "workspace_state", return_value={}))
                 mocks.enter_context(patch.object(workbench, "scan_context", return_value={}))
@@ -555,12 +573,13 @@ with ExitStack() as stack:
                 for function, value in {
                     "require_target": target, "require_scope": ".",
                     "require_scan": row, "require_workspace": workspace,
-                    "require_owned_scan": (row, workspace), "git_revision": "synthetic",
-                    "worktree_content_digest": "snapshot", "effective_deep_scan_config": {},
+                    "require_owned_scan": (row, workspace),
+                    "scan_target_identity": ("synthetic", None, 7, metadata[str(target)].st_ino),
+                    "effective_deep_scan_config": {},
                     "now": timestamp, "deep_scan_result": {},
                 }.items():
-                    mocks.enter_context(patch.object(deep_workbench, function, return_value=value))
-                mocks.enter_context(patch.object(deep_workbench, "require_scannable_target"))
+                    mocks.enter_context(patch.object(deep_fixture_dependency(function), function, return_value=value))
+                mocks.enter_context(patch.object(deep_workbench.dependencies(), "require_scannable_target"))
                 mocks.enter_context(patch.object(deep_workbench, "require_current_continuation"))
                 mocks.enter_context(patch.object(deep_workbench, "ensure_deep_scan_run", ensure_run))
                 existing = [row] if kind == "deep-direct" else [None, row] if kind == "deep-transaction" else [None, None]

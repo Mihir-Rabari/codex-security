@@ -2,11 +2,7 @@ import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
-  | "list"
-  | "show"
-  | "findings"
-  | "compare"
-  | "match-all";
+  "list" | "show" | "findings" | "compare" | "match-all";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -283,16 +279,13 @@ export function renderScanHistory(
       lines.push(
         `  ${strong("CONFIGURATION")}  ${Object.entries(config)
           .map(([key, value]) => {
-            const rendered =
-              typeof value === "object" ? JSON.stringify(value) : value;
-            return `${clean(key)}=${clean(rendered)}`;
+            return `${clean(key)}=${clean(typeof value === "object" ? JSON.stringify(value) : value)}`;
           })
           .join(`  ${accent("·")}  `)}`,
       );
     }
     const coverage = (result["progress"] as JsonObject)["coverage"] as
-      | JsonObject
-      | undefined;
+      JsonObject | undefined;
     if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null
@@ -311,8 +304,7 @@ export function renderScanHistory(
       }
     }
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
-      | string[]
-      | undefined;
+      string[] | undefined;
     if (knowledgeBase?.length) {
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
@@ -445,6 +437,13 @@ export function renderScanHistory(
       "",
       `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
     );
+    if (result["relatedPairs"] || result["uncertainPairs"]) {
+      const related = result["relatedPairs"] ?? 0;
+      const uncertain = result["uncertainPairs"] ?? 0;
+      lines.push(
+        `  ${clean(related)} related pair${related === 1 ? "" : "s"} recorded    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
+      );
+    }
     if (result["unavailableScans"]) {
       lines.push(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,

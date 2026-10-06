@@ -2,11 +2,10 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity } from "../src/index.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScan } from "./plugin-root.js";
 
 const fixtures = createApiTestFixtures();
 const TestClient = CodexSecurity as unknown as new (
@@ -140,7 +139,7 @@ describe("repository findings across linked worktrees", () => {
           startThread: () => ({
             id: null,
             async runStreamed() {
-              await fixtures.copyCompletedScan(root);
+              await copyCompletedScan(root);
               return { events: completedEvents() };
             },
           }),
