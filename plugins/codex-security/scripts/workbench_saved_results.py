@@ -1198,6 +1198,7 @@ def merge_saved_results(
     ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
+        item = original_coverage_rows.get(id(item), item)
         source = {key: value for key, value in item.items() if key != "provenance"}
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
@@ -1230,6 +1231,15 @@ def merge_saved_results(
                         and isinstance(surface.get("id"), str)
                         and isinstance(surface.get("provenance"), dict)
                     }
+                    source_surfaces = (
+                        drafts_by_path.get(relative, {}).get("coverage", {}).get("surfaces", [])
+                    )
+                    for surface in source_surfaces if isinstance(source_surfaces, list) else []:
+                        if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                            continue
+                        retained = retained_coverage_record("surfaces", surface, worker, relative)
+                        if retained is not None and isinstance(retained.get("id"), str):
+                            surface_ids[retained["id"]] = surface["id"]
                     original["surfaceIds"] = [
                         surface_ids.get(value, value) if isinstance(value, str) else value
                         for value in original["surfaceIds"]
@@ -1288,9 +1298,10 @@ def merge_saved_results(
             provenance.pop(key, None)
         provenance.update(workerId=worker["id"], attempt=attempt)
         result["provenance"] = provenance
+        original = original_coverage_rows.get(id(source[field][index - 1]), item)
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
-            if key in item:
-                result["provenance"][name] = item[key]
+            if key in original:
+                result["provenance"][name] = original[key]
         if field == "surfaces":
             result["id"] = f"{prefix}-surface-{index}"
         elif field == "deferred":
@@ -1385,6 +1396,8 @@ def merge_saved_results(
     }
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
+    # Retained projections describe raw saved rows, while reconciliation needs their aliases.
+    original_coverage_rows: dict[int, dict[str, Any]] = {}
     # Older checkpoints can omit IDs already assigned in their published output.
     for field in ("deferred", "surfaces"):
         named_rows: dict[str | None, list[dict[str, Any]]] = {}
@@ -1426,6 +1439,7 @@ def merge_saved_results(
                     None,
                 )
                 if identity is not None:
+                    original_coverage_rows[id(row)] = copy.deepcopy(row)
                     row["id"] = identity
                     reserved.add(identity)
 

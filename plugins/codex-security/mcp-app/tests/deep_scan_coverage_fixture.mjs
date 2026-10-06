@@ -39,6 +39,10 @@ export async function publishCoverageFixture(
     directFile = false,
     omitCoverageIds = false,
     competingIds = false,
+    namedRetry = false,
+    linkedRetry = false,
+    missingProjection = false,
+    changedRetry = false,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -130,7 +134,7 @@ export async function publishCoverageFixture(
       },
     );
   };
-  const writeDiscovery = async (artifactDir, index) => {
+  const writeDiscovery = async (artifactDir, index, archived = false) => {
     const status = statuses[index];
     const pending = completeness === "partial" && status !== "complete";
     const coverage = {
@@ -164,13 +168,25 @@ export async function publishCoverageFixture(
         ? [{ question: `Deployment question ${index + 1}.` }]
         : [],
     };
-    if (omitCoverageIds) {
+    if (namedRetry) {
+      coverage.surfaces[0].receiptRefs = [];
+      for (const deferred of coverage.deferred) {
+        delete deferred.candidateId;
+        if (!linkedRetry) delete deferred.surfaceIds;
+      }
+    }
+    if (omitCoverageIds && !archived) {
       for (const surface of coverage.surfaces) delete surface.id;
       for (const deferred of coverage.deferred) {
         delete deferred.id;
         delete deferred.candidateId;
-        delete deferred.surfaceIds;
+        if (!linkedRetry) delete deferred.surfaceIds;
       }
+    }
+    if (archived && changedRetry) {
+      coverage.surfaces[0].label = "Earlier independent route";
+      for (const deferred of coverage.deferred)
+        deferred.reason = "An earlier independent observation.";
     }
     if (competingIds) {
       coverage.surfaces.push({ ...coverage.surfaces[0], id: "owned-surface" });
@@ -204,7 +220,7 @@ export async function publishCoverageFixture(
     const resultPath = path.join(artifactDir, "result.json");
     const bytes = JSON.stringify({
       scanId: run.scanId,
-      complete: true,
+      complete: !archived,
       findings: [],
       coverage,
     });
@@ -235,7 +251,7 @@ export async function publishCoverageFixture(
           },
         },
       );
-    } else if (directFile) {
+    } else if (directFile && !archived) {
       await writeFile(resultPath, bytes);
     } else {
       await recordCodexSecurityWorkerScanDraft(
@@ -247,12 +263,29 @@ export async function publishCoverageFixture(
         },
         JSON.parse(bytes),
       );
-      for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
+      for (const name of archived
+        ? []
+        : await readdir(path.join(artifactDir, "checkpoints"))) {
         const checkpointPath = path.join(artifactDir, "checkpoints", name);
         rawSources.set(checkpointPath, await readFile(checkpointPath, "utf8"));
       }
     }
-    rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+    if (!archived) {
+      rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+      if (namedRetry && index === 0) {
+        const archive = path.join(
+          path.dirname(artifactDir),
+          "attempts",
+          "attempt-01",
+        );
+        for (const name of await readdir(archive, { recursive: true })) {
+          if (name.endsWith(".json") || name.endsWith(".md")) {
+            const file = path.join(archive, name);
+            rawSources.set(file, await readFile(file, "utf8"));
+          }
+        }
+      }
+    }
   };
   if (resume) {
     const workers = [];
@@ -274,8 +307,9 @@ export async function publishCoverageFixture(
         artifactDir,
         attempt: index === 0 ? 2 : 1,
       };
-      if (receiptRetry) {
-        await writeReceiptAttempt(artifactDir);
+      if (receiptRetry || (namedRetry && index === 0)) {
+        if (receiptRetry) await writeReceiptAttempt(artifactDir);
+        else await writeDiscovery(artifactDir, index, true);
         await archiveDirectory(
           artifactDir,
           path.join(workerRoot, "attempts", "attempt-01"),
@@ -364,6 +398,8 @@ export async function publishCoverageFixture(
         if (index === 0 && discoveryCalls === 1) {
           if (receiptRetry) {
             await writeReceiptAttempt(request.artifactContext.root);
+          } else if (namedRetry) {
+            await writeDiscovery(request.artifactContext.root, index, true);
           }
           return {
             threadId: thread,
@@ -384,6 +420,7 @@ export async function publishCoverageFixture(
       return { threadId: thread, finalResponse: "Audit finished." };
     },
   };
+  let expectedCoverage;
   const coordinator = new DeepScanCoordinator({
     run,
     store,
@@ -391,6 +428,12 @@ export async function publishCoverageFixture(
     pluginRoot,
     retryDelaysMs: [1],
     onComplete: async (draft, signal) => {
+      if (missingProjection) {
+        expectedCoverage = structuredClone(draft.coverage);
+        draft = structuredClone(draft);
+        if (missingProjection !== "deferred") draft.coverage.surfaces.shift();
+        if (missingProjection !== "surfaces") draft.coverage.deferred.shift();
+      }
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
@@ -481,11 +524,20 @@ export async function publishCoverageFixture(
     await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
   );
   if (directFile || omitCoverageIds) {
-    assert.deepEqual(finalCoverage.surfaces, parentCoverage.surfaces);
+    const expected = expectedCoverage ?? parentCoverage;
+    const rows = (items) =>
+      missingProjection
+        ? [...items].sort((left, right) => left.id.localeCompare(right.id))
+        : items;
+    assert.deepEqual(rows(finalCoverage.surfaces), rows(expected.surfaces));
     assert.deepEqual(
-      finalCoverage.deferred.filter((row) => row.id !== "scan-stopped"),
-      parentCoverage.deferred,
+      rows(finalCoverage.deferred.filter((row) => row.id !== "scan-stopped")),
+      rows(expected.deferred),
     );
+  }
+  if (changedRetry) {
+    for (const field of ["surfaces", "deferred"])
+      assert.equal(parentCoverage[field][0].provenance.attempt, 2);
   }
   if (omitCoverageIds) {
     for (const field of ["surfaces", "deferred"]) {

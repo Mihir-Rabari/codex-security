@@ -406,3 +406,88 @@ for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
     }
   });
 }
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const directFile of [false, true]) {
+    for (const omitCoverageIds of [false, true]) {
+      test(`named retry coverage survives recovery (${workflowVersion}, direct: ${directFile}, omitted: ${omitCoverageIds})`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "coverage-named-retry-"),
+        );
+        try {
+          await publishCoverageFixture(root, "partial", {
+            workflowVersion,
+            directFile,
+            omitCoverageIds,
+            namedRetry: true,
+            stopAfterDraft: true,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+  for (const linkedRetry of [false, true]) {
+    test(`named retry coverage retains ${linkedRetry ? "linked" : "competing"} identities (${workflowVersion})`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "coverage-named-identity-"),
+      );
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          directFile: true,
+          omitCoverageIds: true,
+          competingIds: !linkedRetry,
+          linkedRetry,
+          namedRetry: true,
+          stopAfterDraft: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const missingProjection of ["surfaces", "deferred", "both"]) {
+    test(`named retry fills a missing linked projection (${workflowVersion}, ${missingProjection})`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "coverage-missing-retry-"),
+      );
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          directFile: true,
+          omitCoverageIds: true,
+          namedRetry: true,
+          linkedRetry: true,
+          missingProjection,
+          stopAfterDraft: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+  for (const omitCoverageIds of [false, true]) {
+    test(`named retry preserves changed observations (${workflowVersion}, omitted: ${omitCoverageIds})`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "coverage-changed-retry-"),
+      );
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          directFile: true,
+          omitCoverageIds,
+          namedRetry: true,
+          changedRetry: true,
+          stopAfterDraft: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
