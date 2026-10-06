@@ -4905,9 +4905,14 @@ function dependencyPermissions(
   runtimeHome: string,
 ): JsonObject {
   const ambientHome = configuredCodexHome(environment);
+  const defaultHome = configuredCodexHome({});
   const privatePaths = [
     ...codexSecurityPrivatePaths(environment),
     runtimeHome,
+    codexSecurityCredentialHome({}),
+    join(defaultHome, "auth.json"),
+    join(defaultHome, ".credentials.json"),
+    join(defaultHome, "config.toml"),
     // The ambient home also contains the default dependency evidence directory.
     join(ambientHome, "auth.json"),
     join(ambientHome, ".credentials.json"),

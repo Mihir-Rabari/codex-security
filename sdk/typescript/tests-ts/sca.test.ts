@@ -31,6 +31,7 @@ import {
 import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
 import {
+  codexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   runCodexCommand,
@@ -750,6 +751,16 @@ process.exit(0);
     ] as JsonObject;
     expect(filesystem[dirname(selectedSsh)]).toEqual({ ".": "deny" });
     expect(filesystem[dirname(selectedGitHub)]).toEqual({ ".": "deny" });
+    for (const path of [
+      join(homedir(), ".codex", "auth.json"),
+      join(homedir(), ".codex", ".credentials.json"),
+      join(homedir(), ".codex", "config.toml"),
+      codexSecurityCredentialHome({}),
+    ]) {
+      expect(filesystem[path]).toEqual({ ".": "deny" });
+    }
+    expect(filesystem[f.ambientHome]).toBeUndefined();
+
     const source = join(f.repository, "usage.txt");
     const configArgs = [
       ...options.configOverrides!.flatMap((value) => ["--config", value]),
