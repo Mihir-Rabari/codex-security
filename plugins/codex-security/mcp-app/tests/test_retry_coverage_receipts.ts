@@ -24,3 +24,24 @@ for (const resume of [false, true]) {
     }
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    for (const receiptSpelling of ["scan", "equivalent scan"] as const) {
+      test(`receipt namespace survives ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${receiptSpelling} spelling`, async () => {
+        const root = await mkdtemp(path.join(tmpdir(), "receipt-namespace-"));
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            receiptSpelling,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}

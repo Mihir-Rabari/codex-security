@@ -1725,8 +1725,8 @@ def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, re
 
 @pytest.mark.parametrize(
     "receipt_ref",
-    ["artifacts/review.txt", "artifacts/./review.txt"],
-    ids=["canonical", "equivalent"],
+    ["artifacts/review.txt", "artifacts/./review.txt", "scan-relative", "scan-relative-equivalent"],
+    ids=["canonical", "equivalent", "scan-relative", "scan-relative-equivalent"],
 )
 @pytest.mark.parametrize("closure", [False, True], ids=["unchanged", "generic-closure"])
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
@@ -1747,6 +1747,13 @@ def test_generic_surface_receipt_union_keeps_each_source_directory(
     receipt = output / "artifacts" / "review.txt"
     receipt.parent.mkdir()
     receipt.write_text("Synthetic completed source review.\n")
+    if receipt_ref.startswith("scan-relative"):
+        canonical_ref = receipt.relative_to(scan.scan_dir).as_posix()
+        receipt_ref = (
+            canonical_ref.replace("artifacts/", "artifacts/./", 1)
+            if receipt_ref == "scan-relative-equivalent"
+            else canonical_ref
+        )
     surface = {
         "id": "review",
         "label": "Completed source review",

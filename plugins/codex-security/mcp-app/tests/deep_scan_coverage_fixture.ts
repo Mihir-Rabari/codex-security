@@ -24,6 +24,7 @@ interface CoverageFixtureOptions {
   stopAfterDraft?: boolean;
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
+  receiptSpelling?: "worker" | "scan" | "equivalent scan";
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
   retryFindings?: JsonObject[][];
@@ -91,6 +92,7 @@ export async function publishCoverageFixture(
     stopAfterDraft = false,
     stopBeforeDraft = false,
     receiptRetry = false,
+    receiptSpelling = "worker",
     retryPending = false,
     retryCoverage,
     retryFindings,
@@ -192,6 +194,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       path.join(artifactDir, "artifacts", "prior.txt"),
       "Archived receipt.\n",
     );
+    const archivedRef = `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`;
+    const receiptRef =
+      receiptSpelling === "worker"
+        ? "artifacts/prior.txt"
+        : receiptSpelling === "scan"
+          ? archivedRef
+          : archivedRef.replace("artifacts/", "artifacts/./");
     await recordCodexSecurityWorkerScanDraft(
       {
         root: artifactDir,
@@ -211,14 +220,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               label: "Prior review",
               disposition: "needs_follow_up",
               candidateId: "shared-prior-candidate",
-              receiptRefs: ["artifacts/prior.txt"],
+              receiptRefs: [receiptRef],
             },
             {
               id: "prior-second",
               label: "Prior second surface",
               disposition: "needs_follow_up",
               candidateId: "shared-prior-candidate",
-              receiptRefs: ["artifacts/prior.txt"],
+              receiptRefs: [receiptRef],
             },
           ],
           explicitExclusions: [],

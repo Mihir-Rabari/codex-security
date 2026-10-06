@@ -1210,7 +1210,7 @@ def merge_saved_results(
         worker_prefix = worker_root.as_posix() + "/"
         return [
             Path(f"{directory.as_posix()}/{ref}").as_posix()
-            if isinstance(ref, str) and not ref.startswith(worker_prefix)
+            if isinstance(ref, str) and not Path(ref).as_posix().startswith(worker_prefix)
             else Path(ref).as_posix()
             if isinstance(ref, str)
             else ref

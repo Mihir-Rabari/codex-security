@@ -2,7 +2,7 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
@@ -1438,11 +1438,13 @@ async function readArchivedWorkerCheckpoints(
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
       for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
-        surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) =>
-          ref.startsWith(archivePrefix)
-            ? ref
-            : `${archivePrefix}${attempt.name}/${ref}`,
-        );
+        surface.receiptRefs = (surface.receiptRefs as string[])
+          .map((ref) => posix.normalize(ref))
+          .map((ref) =>
+            ref.startsWith(archivePrefix)
+              ? ref
+              : `${archivePrefix}${attempt.name}/${ref}`,
+          );
       }
       archived.push({ ...draft, attempt: attempt.name });
     }

@@ -338,10 +338,11 @@ export function projectDiscoveryCoverage(
     surfaces: surfaces.map((surface, index) => ({
       ...project(surface),
       id: `${prefix}-surface-${index + 1}`,
-      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
-        (ref) =>
+      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? [])
+        .map((ref) => posix.normalize(ref))
+        .map((ref) =>
           ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
-      ),
+        ),
     })),
     explicitExclusions: (
       coverage.explicitExclusions as Record<string, unknown>[]
