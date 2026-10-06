@@ -221,7 +221,7 @@ describe("scan and patch workflow", () => {
         error: string;
         applied: boolean;
       }[];
-      expect(outcomes).toHaveLength(4);
+      expect(outcomes).toHaveLength(6);
       for (const outcome of outcomes) {
         expect(outcome.exitCode, `${outcome.kind}: ${outcome.error}`).toBe(0);
         expect(outcome.applied).toBe(true);
@@ -883,27 +883,42 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       const url = `https://${apiHost}/example/repository/pull/15`;
       const nativeIdentity = context === "ssh+git" || context === "api-port";
       const repository = join(root, "repository");
-      if (nativeIdentity) {
-        await mkdir(repository);
-        const git = repositoryGit(repository);
-        git("init", "--initial-branch=main");
+      await mkdir(repository);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git(
+        "remote",
+        "add",
+        "origin",
+        `https://${provider === "gitlab" ? "gitlab.com" : "forge.example.test"}/example/repository.git`,
+      );
+      if (context === "ssh+git")
         git(
           "remote",
-          "add",
+          "set-url",
+          "--push",
+          "origin",
+          "ssh+git://git@forge.example.test/example/repository.git",
+        );
+      const multiplePushes =
+        context === "second-push" || context.startsWith("denied-");
+      if (multiplePushes) {
+        git(
+          "remote",
+          "set-url",
+          "--push",
+          "origin",
+          "https://forge.example.test/first/repository.git",
+        );
+        git(
+          "remote",
+          "set-url",
+          "--add",
+          "--push",
           "origin",
           "https://forge.example.test/example/repository.git",
         );
-        if (context === "ssh+git")
-          git(
-            "remote",
-            "set-url",
-            "--push",
-            "origin",
-            "ssh+git://git@forge.example.test/example/repository.git",
-          );
       }
-      const multiplePushes =
-        context === "second-push" || context.startsWith("denied-");
       let selectedIdentityConfig = "";
       const server = Bun.serve({
         hostname: "127.0.0.1",
@@ -978,7 +993,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           ["patch", "--resume-pr", "codex-security/patch-scan-1"],
           {
             environment,
-            ...(nativeIdentity ? { currentDirectory: repository } : {}),
+            currentDirectory: repository,
             onRepositoryCommand: async (command, args, _directory, options) => {
               if (command === "git") {
                 if (args[0] === "config" && args[1] === "--file") {
@@ -986,8 +1001,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   return runGitRepositoryCommand(command, args, root, options);
                 }
                 if (
-                  nativeIdentity &&
-                  (args[0] === "remote" || args.includes("--sq-quote"))
+                  args[0] === "remote" ||
+                  args[0] === "-c" ||
+                  (args[0] === "config" && args[1] === "--null") ||
+                  args.includes("--sq-quote")
                 )
                   return runGitRepositoryCommand(
                     command,
@@ -996,15 +1013,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     options,
                   );
                 expect(args[0]).not.toBe("push");
-                if (args[0] === "remote")
-                  return args[1] === "get-url"
-                    ? multiplePushes
-                      ? "https://forge.example.test/first/repository.git\nhttps://forge.example.test/example/repository.git"
-                      : `https://${provider === "gitlab" ? "gitlab.com" : "forge.example.test"}/example/repository.git`
-                    : "origin";
-                return args.includes("--sq-quote")
-                  ? args.slice(2).join(" ")
-                  : "saved-commit";
+                return "saved-commit";
               }
               const identity = command === "gh" && args[0] === "repo";
               if (identity) {
@@ -5787,6 +5796,7 @@ describe("inherited patch publication context", () => {
     ["unstaged", "src"],
     ["assume-unchanged", "src/finding-1.ts"],
     ["assume-unchanged", "src"],
+    ["untracked-and-ignored", "src"],
   ])("keeps %s edits out of publication of %s", async (dirty, reportedPath) => {
     for (const command of ["patch", "scan"]) {
       const directory = await fixtures.create("patch-publication-");
@@ -5811,7 +5821,7 @@ describe("inherited patch publication context", () => {
       if (dirty === "staged") git("add", ".");
       if (dirty === "assume-unchanged")
         git("update-index", "--assume-unchanged", "src/finding-1.ts");
-      const originalIndex = git("write-tree");
+      let expectedIndex = git("write-tree");
       const remote = await fixtures.create("patch-publication-remote-");
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
@@ -5834,6 +5844,14 @@ describe("inherited patch publication context", () => {
               join(directory, "src/finding-1.ts"),
               "fixed\nlocal edit\n",
             );
+            if (dirty === "untracked-and-ignored") {
+              await writeFile(
+                join(directory, ".gitignore"),
+                "src/finding-1.ts\n",
+              );
+              git("rm", "--cached", "--force", "src/finding-1.ts");
+              expectedIndex = git("write-tree");
+            }
             completePatches(args, output);
             return 0;
           },
@@ -5842,7 +5860,7 @@ describe("inherited patch publication context", () => {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain("uncommitted changes before patching");
       expect(git("rev-parse", "HEAD")).toBe(originalHead);
-      expect(git("write-tree")).toBe(originalIndex);
+      expect(git("write-tree")).toBe(expectedIndex);
       expect(git("ls-remote", "origin")).toBe("");
       expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
         "fixed\nlocal edit\n",
@@ -5985,8 +6003,15 @@ describe("patch change tracking", () => {
     "push-instead",
     "trailing-space",
     "equals",
+    "newline",
+    "newline-multiple",
+    "newline-relative",
+    "mixed-fetch-push-instead",
   ]) {
-    test.skipIf(rewriting === "trailing-space" && process.platform === "win32")(
+    test.skipIf(
+      (rewriting === "trailing-space" || rewriting.startsWith("newline")) &&
+        process.platform === "win32",
+    )(
       `preserves the resolved push destination with ${rewriting} configuration`,
       async () => {
         const { directory, git } = await publicationRepository();
@@ -5995,24 +6020,50 @@ describe("patch change tracking", () => {
           container,
           rewriting === "equals" ? "repository=v2" : "project",
         );
-        const remote = rewriting === "trailing-space" ? `${raw} ` : `${raw}-v2`;
+        const remote =
+          rewriting === "newline-relative"
+            ? join(directory, "\nproject")
+            : rewriting === "trailing-space"
+              ? `${raw} `
+              : rewriting.startsWith("newline")
+                ? `${raw}\npart`
+                : `${raw}-v2`;
         git("init", "--bare", remote);
         git(
           "remote",
           "set-url",
           "origin",
-          rewriting === "ordinary" ||
-            rewriting === "trailing-space" ||
-            rewriting === "equals"
-            ? remote
-            : raw,
+          rewriting === "newline-relative"
+            ? "\nproject"
+            : rewriting === "ordinary" ||
+                rewriting === "trailing-space" ||
+                rewriting === "equals" ||
+                rewriting.startsWith("newline")
+              ? remote
+              : raw,
         );
         if (rewriting === "equal-length")
           git("config", `url.${remote}-incorrect.insteadOf`, remote);
         if (rewriting === "overlapping" || rewriting === "equal-length")
           git("config", `url.${remote}.insteadOf`, raw);
-        if (rewriting === "push-instead")
+        if (
+          rewriting === "push-instead" ||
+          rewriting === "mixed-fetch-push-instead"
+        )
           git("config", `url.${remote}.pushInsteadOf`, raw);
+        if (rewriting === "mixed-fetch-push-instead")
+          git(
+            "config",
+            "--add",
+            "remote.origin.url",
+            join(container, "unused-fetch"),
+          );
+        const secondary = join(container, "secondary");
+        if (rewriting === "newline-multiple") {
+          git("init", "--bare", secondary);
+          git("config", "--add", "remote.origin.pushurl", remote);
+          git("config", "--add", "remote.origin.pushurl", secondary);
+        }
         git("push", "origin", "HEAD:refs/heads/native-control");
         const result = resultWithFindings(["high"]);
         const outcome = await runWorkflow(
@@ -6042,6 +6093,15 @@ describe("patch change tracking", () => {
             "refs/heads/codex-security/patch-scan-1",
           ),
         ).toBe(git("rev-parse", "HEAD"));
+        if (rewriting === "newline-multiple")
+          expect(
+            git(
+              "--git-dir",
+              secondary,
+              "rev-parse",
+              "refs/heads/codex-security/patch-scan-1",
+            ),
+          ).toBe(git("rev-parse", "HEAD"));
       },
     );
   }
@@ -6431,7 +6491,7 @@ describe("patch change tracking", () => {
                   code: 1,
                 });
               }
-              if (args[0] === "-c") {
+              if (args[2] === "codex-security-ssh-config") {
                 sshLookups++;
                 expect(args.slice(0, 3)).toEqual([
                   "-c",
@@ -7105,6 +7165,152 @@ describe("patch change tracking", () => {
       }
     },
   );
+  for (const mode of ["saved", "supplied"]) {
+    test.each([
+      "file",
+      "directory",
+      "info",
+      "global",
+      "unchanged",
+      "unchanged-directory",
+      "removed",
+      "removed-unignored",
+      "force-added",
+      "new",
+    ])(
+      `preserves pre-existing ignored paths during ${mode} publication (%s)`,
+      async (kind) => {
+        const { directory: root, git, remote } = await publicationRepository();
+        const removed = kind === "removed" || kind === "removed-unignored";
+        const forced = kind === "force-added";
+        const directory = kind === "unchanged-directory" || removed || forced;
+        const file =
+          kind === "directory"
+            ? "cache/nested/local.txt"
+            : directory
+              ? "src/local.pyc"
+              : "local.env";
+        const pattern = `${kind === "directory" ? "cache/" : file}\n`;
+        const unchanged =
+          kind === "unchanged" || kind === "unchanged-directory";
+        const rule =
+          kind === "info"
+            ? join(root, ".git", "info", "exclude")
+            : kind === "global"
+              ? join(remote, "excludes")
+              : join(root, ".gitignore");
+        await writeFile(
+          join(root, ".gitignore"),
+          rule === join(root, ".gitignore") ? pattern : "",
+        );
+        git("add", ".gitignore");
+        git("commit", "-m", "Synthetic ignore rule");
+        await writeFile(rule, pattern);
+        if (kind === "global") git("config", "core.excludesFile", rule);
+        if (kind !== "new") {
+          await mkdir(dirname(join(root, file)), { recursive: true });
+          await writeFile(join(root, file), "synthetic local data\n");
+        }
+        const head = git("rev-parse", "HEAD");
+        let expectedIndex = git("write-tree");
+        const result = resultWithFindings(["high"]);
+        result.findings.findings[0]!.locations[0]!.path = file;
+        const blocked = forced
+          ? mode === "saved"
+          : !unchanged && !removed && kind !== "new";
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(mode === "saved"
+              ? ["--scan", "scan-1"]
+              : ["Synthetic ignore update"]),
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: root,
+            onWorkbench: () => savedScan(result, "scan-1", root),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              if (!unchanged && kind !== "removed" && !forced)
+                await writeFile(rule, "");
+              if (kind === "new")
+                await writeFile(join(root, file), "synthetic generated data\n");
+              if (unchanged || removed || forced)
+                await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
+              if (removed) await rm(join(root, file));
+              if (forced) {
+                git("add", "--force", file);
+                expectedIndex = git("write-tree");
+              }
+              output?.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files: directory
+                        ? [
+                            "src",
+                            ...(kind === "removed-unignored"
+                              ? [".gitignore"]
+                              : []),
+                          ]
+                        : unchanged
+                          ? ["src/finding-1.ts"]
+                          : [".gitignore", file],
+                      verification: "Synthetic verification.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+        if (blocked) {
+          expect(outcome.stderr).toContain(
+            "uncommitted changes before patching",
+          );
+          expect(git("rev-parse", "HEAD")).toBe(head);
+          expect(git("write-tree")).toBe(expectedIndex);
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(await readFile(rule, "utf8")).toBe(forced ? pattern : "");
+        } else {
+          expect(git("ls-remote", "origin")).toContain(
+            git("rev-parse", "HEAD"),
+          );
+          expect(
+            git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
+          ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
+        }
+        if (unchanged || removed || (forced && !blocked))
+          expect(
+            git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
+          ).not.toContain(file);
+        if (forced && !blocked)
+          expect(git("diff", "--cached", "--name-only").split("\n")).toContain(
+            file,
+          );
+        if (removed)
+          await expect(
+            readFile(join(root, file), "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+        else
+          expect(await readFile(join(root, file), "utf8")).toBe(
+            kind === "new"
+              ? "synthetic generated data\n"
+              : "synthetic local data\n",
+          );
+      },
+    );
+  }
   test.each([
     "regular",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),
