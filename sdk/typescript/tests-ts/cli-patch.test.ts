@@ -158,6 +158,9 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+
   test.each([false, true])(
     "shows progress during baseline preparation and cleans up on failure: %p",
     async (failSnapshot) => {
@@ -2107,6 +2110,7 @@ describe("scan and patch workflow", () => {
   ] as const)(
     "publishes saved-finding patches for origin %s with environment %j using %s",
     async (origin, environment, client) => {
+      const repository = await fixtures.create("patch-provider-repository-");
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2124,11 +2128,11 @@ describe("scan and patch workflow", () => {
         ],
         {
           environment,
-          onWorkbench: () => savedScan(result),
+          onWorkbench: () => savedScan(result, "scan-1", repository),
           onRepositoryCommand: (command, args, target) => {
-            expect(target).toBe(SAVED_REPOSITORY);
+            expect(target).toBe(repository);
             if (command === "git") {
-              if (args.includes("--show-toplevel")) return SAVED_REPOSITORY;
+              if (args.includes("--show-toplevel")) return repository;
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
