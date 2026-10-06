@@ -78,6 +78,8 @@ async function runPromptfoo(
   const env = {
     ...process.env,
     ...environment,
+    // Promptfoo persists this stable harness path for retry, resume, and viewer replay.
+    TRIAGE_PROVIDER_PATH: path.join(import.meta.dirname, "triage-provider.mts"),
     TRIAGE_RUNTIME_ROOT: runtimeRoot,
     SASTBENCH_RUNTIME_ROOT: runtimeRoot,
     TRIAGE_CALIBRATION_ROOT: path.join(

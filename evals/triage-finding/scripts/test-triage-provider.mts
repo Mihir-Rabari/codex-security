@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 const require = createRequire(import.meta.url);
@@ -606,5 +607,185 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     } finally {
       await disabled.cleanup?.();
     }
+  },
+);
+
+test(
+  "SAST provider survives persisted retry, resume, and viewer replay",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "sast-provider-replay-"),
+    );
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const capture = path.join(root, "captures.jsonl");
+    const failure = path.join(root, "failure");
+    const fakeCodex = path.join(root, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const cwd = process.argv[process.argv.indexOf('--cd') + 1];
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ cwd }) + '\\n');
+console.log(JSON.stringify({ type: 'thread.started', thread_id: 'synthetic-sast-replay' }));
+if (fs.existsSync(${JSON.stringify(failure)})) {
+ console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'synthetic retryable failure' } }));
+} else {
+ console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message', type: 'agent_message', text: 'ok' } }));
+ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
+}
+`,
+      { mode: 0o755 },
+    );
+    const environment = {
+      OPENAI_API_KEY: "synthetic-test-key",
+      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+      PROMPTFOO_DISABLE_WAL_MODE: "true",
+      PROMPTFOO_DISABLE_TELEMETRY: "1",
+      PROMPTFOO_DISABLE_UPDATE: "1",
+      SASTBENCH_TARGET_ROOT: root,
+      SASTBENCH_GIT_CACHE_ROOT: root,
+    };
+    const provider = parse(
+      fs.readFileSync(
+        path.join(evalRoot, "sastbench/promptfooconfig.sastbench.yaml"),
+        "utf8",
+      ),
+    ).providers[0];
+    provider.config.codex_path_override = fakeCodex;
+    // Keep the real YAML provider reference and its original configuration directory.
+    const configPath = path.join(
+      evalRoot,
+      "sastbench",
+      `.provider-replay-${process.pid}.json`,
+    );
+    t.after(() => fs.rmSync(configPath, { force: true }));
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        providers: [provider],
+        prompts: ["hello"],
+        tests: [{ assert: [{ type: "equals", value: "ok" }] }],
+      }),
+    );
+    fs.writeFileSync(failure, "");
+    const initial = await invoke(
+      [
+        "eval",
+        "-c",
+        configPath,
+        "--no-cache",
+        "--no-share",
+        "--no-progress-bar",
+      ],
+      environment,
+    );
+    assert.notEqual(initial.code, 0, initial.output);
+    assert.match(initial.output, /synthetic retryable failure/);
+    fs.rmSync(failure);
+    const retry = await invoke(
+      [
+        "eval",
+        "--retry-errors",
+        "--no-cache",
+        "--no-share",
+        "--no-progress-bar",
+      ],
+      environment,
+    );
+    assert.equal(retry.code, 0, retry.output);
+    const Database = createRequire(require.resolve("promptfoo"))(
+      "better-sqlite3",
+    );
+    const database = new Database(
+      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+    );
+    const stored = database
+      .prepare("SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1")
+      .get();
+    assert.equal(
+      JSON.parse(stored.config).providers[0].id,
+      `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
+    );
+    database.prepare("DELETE FROM eval_results").run();
+    database.close();
+    const resumed = await invoke(
+      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
+      environment,
+    );
+    assert.equal(resumed.code, 0, resumed.output);
+
+    const listener = createServer();
+    await new Promise<void>((resolve) =>
+      listener.listen(0, "127.0.0.1", resolve),
+    );
+    const address = listener.address();
+    assert.ok(address && typeof address !== "string");
+    const port = address.port;
+    await new Promise<void>((resolve, reject) =>
+      listener.close((error) => (error ? reject(error) : resolve())),
+    );
+    const viewer = spawn(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        runner,
+        "view",
+        "--port",
+        String(port),
+        "--no",
+      ],
+      {
+        cwd: evalRoot,
+        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let viewerOutput = "";
+    for (const stream of [viewer.stdout, viewer.stderr])
+      stream.on("data", (chunk) => {
+        viewerOutput += chunk;
+      });
+    const closed = new Promise<number | null>((resolve, reject) => {
+      viewer.once("error", reject);
+      viewer.once("close", resolve);
+    });
+    t.after(async () => {
+      if (viewer.exitCode === null) viewer.kill("SIGTERM");
+      await closed;
+    });
+    const url = `http://127.0.0.1:${port}`;
+    while (true) {
+      try {
+        const response = await fetch(`${url}/api/eval`);
+        if (response.ok) break;
+      } catch {
+        /* The actual viewer is still building its staged runtime. */
+      }
+      assert.equal(viewer.exitCode, null, viewerOutput);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const replay = await fetch(`${url}/api/eval/replay`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        evaluationId: stored.id,
+        testIndex: 0,
+        prompt: "hello",
+        variables: {},
+      }),
+    });
+    assert.equal(replay.status, 200, viewerOutput);
+    assert.equal((await replay.json()).output, "ok");
+    viewer.kill("SIGTERM");
+    await closed;
+    const rows = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(rows.length, 4);
+    assert.equal(new Set(rows.map((row) => row.cwd)).size, 4);
+    for (const row of rows) assert.equal(fs.existsSync(row.cwd), false);
   },
 );
