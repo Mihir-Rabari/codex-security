@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import unicodedata
 
 import pytest
 from workbench_test_support import load_script
@@ -628,6 +630,32 @@ def test_projection_preserves_scope_paths_without_injecting_headings() -> None:
     assert "\n## Injected path heading" not in markdown
     assert "# Security Review: repo ## Injected target heading" in markdown
     assert r'- Included paths: `"src\n## Injected path heading"`' in markdown
+
+
+@pytest.mark.parametrize("legacy_unicode", [False, True])
+def test_scope_paths_distinguish_new_combining_marks(
+    monkeypatch: pytest.MonkeyPatch, legacy_unicode: bool
+) -> None:
+    paths = ["src/\U0001e4d0\U0001e4ef\U0001e4ee.ts", "src/\U0001e4d0\U0001e4ee\U0001e4ef.ts"]
+    if legacy_unicode:
+        normalize = unicodedata.normalize
+        category = unicodedata.category
+        # Model Unicode 13 leaving the newly assigned Nag Mundari marks unchanged.
+        monkeypatch.setattr(
+            unicodedata,
+            "normalize",
+            lambda form, text: text if text in paths else normalize(form, text),
+        )
+        monkeypatch.setattr(
+            unicodedata,
+            "category",
+            lambda character: "Cn" if 0x1E4D0 <= ord(character) <= 0x1E4EF else category(character),
+        )
+    rendered = [PROJECTION._scope_path(path) for path in paths]
+    assert rendered[0] != rendered[1]
+    assert "\\u" in rendered[0]
+    assert json.loads(rendered[0][1:-1]) == paths[0]
+    assert PROJECTION._scope_path("src/café.ts") == "`src/café.ts`"
 
 
 def test_projection_includes_exact_target_identity() -> None:

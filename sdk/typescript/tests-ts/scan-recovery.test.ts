@@ -451,6 +451,27 @@ describe("malformed scan artifact recovery", () => {
       expect(history["scan"]).toMatchObject({
         coverage: { completeness: "partial" },
       });
+      const sarif = await readJson<SarifDocument>(
+        join(fixture.scanDir, "exports", "results.sarif"),
+      );
+      const invocation = sarif.runs[0]!.invocations![0]!;
+      expect(invocation.executionSuccessful).toBe(false);
+      const warnings = invocation.toolExecutionNotifications!.map(
+        ({ message }) => message.text,
+      );
+      expect(warnings.some((warning) => warning.includes(blocker))).toBe(true);
+      expect(
+        warnings.some((warning) => warning.includes(optionalQuestion)),
+      ).toBe(false);
+      if (kind === "surface") {
+        expect(
+          warnings.some((warning) =>
+            warning.includes(
+              (coverage.surfaces as CoverageSurface[])[0]!.label,
+            ),
+          ),
+        ).toBe(true);
+      }
     },
   );
 
@@ -1254,9 +1275,9 @@ describe("malformed scan artifact recovery", () => {
     expect(sarif.runs[0]?.invocations).toEqual([
       {
         executionSuccessful: false,
-        toolExecutionNotifications: [
+        toolExecutionNotifications: expect.arrayContaining([
           { level: "warning", message: { text: completed.warnings[0]! } },
-        ],
+        ]),
       },
     ]);
   });

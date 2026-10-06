@@ -1380,12 +1380,14 @@ def test_completion_succeeds_when_all_findings_are_malformed(tmp_path: Path) -> 
     run = sarif["runs"][0]
     assert run["properties"]["codexSecurityCoverageCompleteness"] == "partial"
     assert run["invocations"][0]["executionSuccessful"] is False
-    assert run["invocations"][0]["toolExecutionNotifications"] == [
-        {
-            "level": "warning",
-            "message": {"text": completed["scan"]["warnings"][0]},
-        }
-    ]
+    notifications = run["invocations"][0]["toolExecutionNotifications"]
+    assert {
+        "level": "warning",
+        "message": {"text": completed["scan"]["warnings"][0]},
+    } in notifications
+    assert any(
+        coverage["surfaces"][0]["label"] in item["message"]["text"] for item in notifications
+    )
 
 
 def test_completion_recovers_lone_surrogate_in_malformed_finding(tmp_path: Path) -> None:

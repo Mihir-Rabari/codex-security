@@ -70,7 +70,10 @@ def _strings(value: Any) -> list[str]:
 def _scope_path(value: Any, fallback: str = "unspecified") -> str:
     path = value if isinstance(value, str) else fallback
     rendered = path
-    normalization_sensitive = unicodedata.normalize("NFC", path) != path
+    # Older Python releases cannot normalize characters added after their Unicode database.
+    normalization_sensitive = unicodedata.normalize("NFC", path) != path or any(
+        unicodedata.category(character) == "Cn" for character in path
+    )
     if (
         not path
         or normalization_sensitive

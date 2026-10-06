@@ -706,7 +706,7 @@ def _read_scan_local_json_with_metadata(
             raw = handle.read()
             metadata = os.fstat(handle.fileno())
         try:
-            payload = _loads_json(raw.decode("utf-8"))
+            payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ContractError(f"{context}: invalid JSON: {exc}") from exc
         if not isinstance(payload, dict):
@@ -887,7 +887,7 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 def _validate_remote(remote: str, context: str) -> None:
     parsed = urlsplit(remote)
-    if not parsed.scheme or not parsed.netloc:
+    if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ContractError(
@@ -2689,8 +2689,12 @@ def build_sarif_projection(
     execution_successful = scan_status == "completed" and completeness == "complete"
     run["invocations"] = [{"executionSuccessful": execution_successful}]
     if not execution_successful:
-        run["properties"]["codexSecurityCoverageCompleteness"] = completeness
         reasons = [item["reason"] for item in coverage["deferred"]]
+        reasons.extend(
+            f"{surface['label']}: {surface.get('notes') or 'Essential in-scope review remains unfinished.'}"
+            for surface in coverage["surfaces"]
+            if surface["disposition"] == "needs_follow_up"
+        )
         if not reasons:
             reasons = [
                 f"Scan status is {scan_status}; results may be incomplete."

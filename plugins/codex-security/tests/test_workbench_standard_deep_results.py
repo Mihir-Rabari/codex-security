@@ -106,6 +106,10 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["completeness"] == "partial"
+    assert stopped["coverage"] == {
+        key: coverage[key]
+        for key in ("mode", "completeness", "includePaths", "excludePaths", "explicitExclusions")
+    }
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (

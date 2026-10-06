@@ -13,7 +13,7 @@ async function projectScope(scope: {
 }): Promise<string> {
   const python = await resolvePluginPython();
   const script = [
-    "import json, pathlib, runpy, sys, unicodedata",
+    "import json, pathlib, runpy, sys",
     "plugin = pathlib.Path(sys.argv[1])",
     "examples = plugin / 'examples' / 'completed-scan'",
     "manifest, findings, coverage = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
@@ -23,7 +23,6 @@ async function projectScope(scope: {
     "coverage.update(scope)",
     "coverage.update({'mode': 'scoped_path', 'completeness': 'partial', 'surfaces': [], 'deferred': [{'id': 'source-review', 'reason': 'Source review remains unfinished.', 'paths': scope['includePaths']}]})",
     "findings['findings'] = []",
-    "unicodedata.category = lambda _character: 'Cn'",
     "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
     "sys.stdout.buffer.write(projection['generate_report_markdown'](manifest, findings, coverage))",
   ].join("\n");
@@ -119,7 +118,7 @@ describe("coverage scope presentation", () => {
     }
   });
 
-  test("escapes invisible Unicode controls independently of Python's Unicode database", async () => {
+  test("escapes invisible Unicode controls in terminal and Markdown output", async () => {
     // Unicode 17 DerivedGeneralCategory.txt, General_Category=Format.
     const formatControls = (
       [
