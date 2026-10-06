@@ -41,19 +41,12 @@ function moveMigration(
   to: number,
   name: string,
 ): void {
-  const current = database
-    .prepare("SELECT name FROM schema_migrations WHERE version = ?")
-    .get(from);
-  if (current?.name !== name) return;
   if (
-    database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")
-      .get(to)
-  ) {
-    throw new Error(
-      "The Codex Security database has an unsupported pre-release migration history.",
-    );
-  }
+    !database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = ? AND name = ?")
+      .get(from, name)
+  )
+    return;
   database
     .prepare(
       "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
@@ -366,109 +359,25 @@ function backfillTargets(database: DatabaseSync): void {
   }
 }
 
-function migrateWorkflowColumns(database: DatabaseSync): void {
-  const update = database.prepare(`UPDATE finding_workflows SET
-    repository_path = ?, scan_request_digest = ?, scan_id = ?, scan_dir = ?,
-    artifact_digest = ?, destination = ?, scope_repository_id = ?, scope_all_repositories = ?,
-    scan_status = ?, scan_error = ?, publish_status = ?, publish_error = ?,
-    dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE rowid = ?`);
+function migrateWorkflowResults(database: DatabaseSync): void {
+  const update = database.prepare(
+    "UPDATE finding_workflows SET results_json = ? WHERE rowid = ?",
+  );
   const rows = database.prepare(
     "SELECT rowid, results_json FROM finding_workflows",
   );
   rows.setReadBigInts(true);
   for (const row of rows.all()) {
-    const state = parseJson(String(row.results_json)) as {
-      repositoryPath?: string;
-      scanRequestDigest?: string;
-      scanId?: string;
-      scanDir?: string;
-      artifactDigest?: string;
-      destination?: string;
-      scope?: { repositoryId?: string; allRepositories?: boolean };
-      stages: Record<
-        string,
-        {
-          status: string;
-          error?: string;
-          result?: unknown;
-          pendingWrite?: unknown;
-        }
-      >;
+    const { stages } = parseJson(String(row.results_json)) as {
+      stages: Record<string, { result?: unknown; pendingWrite?: unknown }>;
     };
-    const scope = state.scope ?? {};
-    const stages = state.stages;
     const results: Record<string, unknown> = {};
     for (const [stage, value] of Object.entries(stages)) {
       if ("result" in value) results[stage] = value.result;
     }
     if ("pendingWrite" in stages.dedupe)
       results.dedupePendingWrite = stages.dedupe.pendingWrite;
-    update.run(
-      state.repositoryPath ?? null,
-      state.scanRequestDigest ?? null,
-      state.scanId ?? null,
-      state.scanDir ?? null,
-      state.artifactDigest ?? null,
-      state.destination ?? null,
-      scope.repositoryId ?? null,
-      scope.allRepositories == null ? null : Number(scope.allRepositories),
-      stages.scan.status,
-      stages.scan.error ?? null,
-      stages.publish.status,
-      stages.publish.error ?? null,
-      stages.dedupe.status,
-      stages.dedupe.error ?? null,
-      stringifyJson(results),
-      row.rowid,
-    );
-  }
-}
-
-function migrateReviewColumns(database: DatabaseSync): void {
-  const update =
-    database.prepare(`UPDATE finding_workflow_reviews SET review_contract_version = ?, codex_version = ?,
-    source_repository_path = ?, source_revision = ?, source_refs_digest = ?, source_content_digest = ?,
-    scope_repository_id = ?, scope_all_repositories = ?, model = ?, effort = ?, settings_digest = ?,
-    prompt_digest = ?, contract_digest = ? WHERE rowid = ?`);
-  const rows = database.prepare(
-    "SELECT rowid, prompt_digest FROM finding_workflow_reviews",
-  );
-  rows.setReadBigInts(true);
-  for (const row of rows.all()) {
-    const binding = parseJson(String(row.prompt_digest)) as {
-      version: number;
-      codexVersion: string;
-      source: {
-        repository: string;
-        revision: string;
-        refsDigest: string;
-        content: string;
-      };
-      scope: { repositoryId?: string; allRepositories?: boolean };
-      model: string;
-      effort: string;
-      settingsDigest?: string;
-      promptDigest: string;
-      contractDigest: string;
-    };
-    const source = binding.source;
-    const scope = binding.scope;
-    update.run(
-      binding.version,
-      binding.codexVersion,
-      source.repository,
-      source.revision,
-      source.refsDigest,
-      source.content,
-      scope.repositoryId ?? null,
-      scope.allRepositories == null ? null : Number(scope.allRepositories),
-      binding.model,
-      binding.effort,
-      binding.settingsDigest ?? null,
-      binding.promptDigest,
-      binding.contractDigest,
-      row.rowid,
-    );
+    update.run(stringifyJson(results), row.rowid);
   }
 }
 
@@ -506,8 +415,7 @@ export function applyMigrations(
         else if (item.version === 11) repairDeepScan(database);
       } else {
         database.exec(item.statements.join("\n"));
-        if (item.version === 38) migrateWorkflowColumns(database);
-        if (item.version === 39) migrateReviewColumns(database);
+        if (item.version === 38) migrateWorkflowResults(database);
       }
       if (!applied.has(item.version)) {
         database

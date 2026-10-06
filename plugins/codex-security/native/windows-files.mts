@@ -140,11 +140,12 @@ export function windowsFileSystem(native: WindowsBinding) {
     }));
   }
 
-  function mkdir(path: Buffer, privateAccess = false): void {
-    check(
-      native.createWindowsDirectories(operationPath(path), privateAccess),
-      path,
-    );
+  function mkdir(path: Buffer): void {
+    check(native.createWindowsDirectories(operationPath(path)), path);
+  }
+
+  function mkdirPrivate(path: Buffer): void {
+    check(native.createPrivateWindowsDirectory(operationPath(path)), path);
   }
 
   function readInto(path: Buffer, buffer: Buffer): number {
@@ -238,6 +239,7 @@ export function windowsFileSystem(native: WindowsBinding) {
     identity,
     entriesWithTypes,
     mkdir,
+    mkdirPrivate,
     readInto,
     readFile,
     writeFile,

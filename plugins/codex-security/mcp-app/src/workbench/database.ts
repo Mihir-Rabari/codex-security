@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readlinkSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -19,8 +20,8 @@ function createStateDirectory(path: string): void {
     process.platform === "win32" ? path : encodePosixPath(path);
   const create = () => {
     if (process.platform === "win32")
-      windowsFileSystem(windowsBinding()).mkdir(widePath(path), true);
-    else mkdirSync(nativePath, { recursive: true, mode: 0o700 });
+      windowsFileSystem(windowsBinding()).mkdirPrivate(widePath(path));
+    else mkdirSync(nativePath, { mode: 0o700 });
   };
   try {
     create();
@@ -32,6 +33,7 @@ function createStateDirectory(path: string): void {
       (error as { winerror?: number }).winerror !== 183
     )
       throw error;
+    if (statSync(nativePath, { throwIfNoEntry: false })?.isDirectory()) return;
     const entry = lstatSync(nativePath, { throwIfNoEntry: false });
     if (entry?.isSymbolicLink()) {
       const target =
@@ -46,7 +48,7 @@ function createStateDirectory(path: string): void {
     const parent = dirname(path);
     if (entry || parent === path) throw error;
     createStateDirectory(parent);
-    create();
+    createStateDirectory(path);
   }
 }
 
