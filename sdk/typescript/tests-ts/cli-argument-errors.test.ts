@@ -127,3 +127,50 @@ describe("scan argument errors", () => {
     }
   });
 });
+
+describe("argument failure token output", () => {
+  test.each([
+    { tokenArguments: ["--token-count"] },
+    { tokenArguments: ["--token-limit", "2"] },
+    { tokenArguments: ["--token-offset=2"] },
+    { tokenArguments: ["--token-limit=2", "--token-offset", "1"] },
+  ])(
+    "honors $tokenArguments before initializing the scanner",
+    async ({ tokenArguments }) => {
+      for (const fullOutput of [false, true]) {
+        const stdout = capture();
+        const stderr = capture();
+        const code = await main(
+          [
+            "scan",
+            "--json",
+            ...(fullOutput ? ["--full-output"] : []),
+            ...tokenArguments,
+            "--path",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onConfig: () => {
+              throw new Error(
+                "Argument errors must not initialize the scanner.",
+              );
+            },
+          }),
+        );
+        expect(code).toBe(2);
+        expect(stderr.text()).toContain("Missing value");
+        if (tokenArguments.some((argument) => argument === "--token-count")) {
+          expect(stdout.text()).toMatch(/^\d+\n$/u);
+        } else {
+          expect(stdout.text()).toContain("[truncated: showing tokens");
+          if (fullOutput) {
+            const envelope = JSON.parse(stdout.text());
+            expect(envelope.ok).toBe(false);
+            expect(typeof envelope.error).toBe("string");
+          }
+        }
+      }
+    },
+  );
+});

@@ -1853,10 +1853,51 @@ export async function main(
         ? { ok: false, error, meta: { command: "scan" } }
         : { status: "failed", ...error };
       try {
-        await writeCliOutput(
-          output,
-          `${JSON.stringify(failure, null, scanJsonFormat === "json" ? 2 : undefined)}\n`,
-        );
+        let rendered = `${JSON.stringify(failure, null, scanJsonFormat === "json" ? 2 : undefined)}\n`;
+        const tokenArguments: string[] = [];
+        for (let index = 0; index < argv.length; index++) {
+          const argument = argv[index]!;
+          if (argument === "--token-count") tokenArguments.push(argument);
+          else if (/^--token-(?:limit|offset)=/u.test(argument)) {
+            const separator = argument.indexOf("=");
+            tokenArguments.push(
+              argument.slice(0, separator),
+              argument.slice(separator + 1),
+            );
+          } else if (
+            argument === "--token-limit" ||
+            argument === "--token-offset"
+          ) {
+            tokenArguments.push(argument);
+            if (argv[index + 1] !== undefined)
+              tokenArguments.push(argv[++index]!);
+          }
+        }
+        if (tokenArguments.length > 0) {
+          const formatted = captureOutput();
+          let handled = false;
+          await Cli.create("codex-security")
+            .command("scan", {
+              run({ error: incurError }) {
+                handled = true;
+                return argv.includes("--full-output")
+                  ? incurError({ ...error, exitCode: 2 })
+                  : failure;
+              },
+            })
+            .serve(
+              [
+                "scan",
+                "--format",
+                scanJsonFormat,
+                ...(argv.includes("--full-output") ? ["--full-output"] : []),
+                ...tokenArguments,
+              ],
+              { stdout: formatted.stream.write, exit: () => undefined },
+            );
+          if (handled) rendered = formatted.text();
+        }
+        await writeCliOutput(output, rendered);
       } catch (error) {
         errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
       }
@@ -3503,7 +3544,7 @@ export async function main(
         "  codex-security scan . --mode deep\n" +
         "  codex-security scan . --auth api-key --json --fail-on-severity high > ../findings.json\n\n" +
         "Configuration notes:\n" +
-        "CLI input/output paths are relative to the current directory (scope paths are repository-relative). Flags override project configuration; displayed defaults are built-in defaults. Use init to create a config and info -c FILE --json to inspect it.\n\n" +
+        "CLI input/output paths are relative to the current directory (scope paths are repository-relative). Flags override project configuration, except model and effort selected by a native Codex profile; displayed defaults are built-in defaults. Use init to create a config and info -c FILE --json to inspect it.\n\n" +
         "Automation and results:\n" +
         "The API-key example requires OPENAI_API_KEY or CODEX_API_KEY. Progress and summaries go to stderr. Completed scans leave stdout empty unless an output option is selected. --json writes results to stdout. Exit codes: 0 success (findings are report-only by default), 1 severity policy failed, 2 error or incomplete coverage, 130/143 interrupted/terminated. Browse saved results with scans and findings; use export to save reports.\n\n" +
         "Import existing findings without security analysis:\n" +
