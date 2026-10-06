@@ -2567,6 +2567,7 @@ test.each([
       `id,repository,revision\nfixture,${repo.path},${repo.revision}\n`,
     );
     const run = mock(async (checkout: string, scanOptions = {}) => {
+      expect(process.env["GIT_DEFAULT_HASH"]).toBe(defaultFormat);
       expect(git(checkout, "rev-parse", "--show-object-format")).toBe(
         objectFormat,
       );
