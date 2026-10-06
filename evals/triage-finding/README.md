@@ -2,7 +2,7 @@
 
 This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the current supported input source types and returns the expected `triage-finding/v0`
 JSON result shape. It also covers bare skill invocation with no supplied finding,
-which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub REST intake cases cover the repository-source control flow, endpoint selection, and selected-connector behavior without querying live GitHub during the eval.
+which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, REST endpoints, and explicit Connector requests without querying live GitHub during the eval.
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
@@ -10,7 +10,7 @@ Use Node.js 22.22.0 or newer for the eval runner. Run these commands from the re
 
 The eval directory has its own `pnpm-workspace.yaml` for its Promptfoo dependencies. Tooling type checks use the SDK’s TypeScript dependencies.
 
-Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner, check the TypeScript tooling, and build the host native helpers with the pinned Rust toolchain from [the native build guide](../../plugins/codex-security/native/README.md); rerun setup after changing native source or its toolchain:
+Install the SDK and MCP app dependencies using the repository’s normal setup, then install the local eval runner and check the TypeScript tooling:
 
 ```bash
 pnpm --dir evals/triage-finding run setup
@@ -42,8 +42,6 @@ Run one case while iterating:
 pnpm --dir evals/triage-finding run eval --filter-metadata case_id=sarif-redirects
 ```
 
-The runner stages this checkout’s triage skill, shared references, schemas, and synthetic fixtures in a temporary directory, and builds the current MCP helper source into that runtime so the skill can resolve SECURITY.md policies. Codex reads the staged skill explicitly; installed plugins and memories are disabled. The read-only permission profile allows the staged runtime and, for calibration, only the selected repository checkout. Dataset labels and sibling checkouts remain outside those roots. The runner removes its temporary directory after normal completion or an interrupt. The provider binds to the current runtime when called, so Promptfoo resume and retry operations use a fresh runtime instead of a deleted directory from the saved configuration.
-
 The eval target is `fixtures/repo`, a small synthetic Express app with both true positive and false positive/review cases. Assertions are deterministic:
 
 - `contains-json` validates the fenced `triage-finding/v0` JSON block against `schemas/triage-result-v0.schema.json`.
@@ -53,11 +51,17 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, and explicit-only GitHub Issue handling. The selected-connector case grades a JSON workflow decision with the built-in schema assertion: retrieval transport, read-only access, missing capabilities, and approval before REST fallback.
+- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
+
+The explicit Connector case returns a three-field JSON decision for transport,
+fallback, and account/repository scope. The code-scanning case returns request
+paths and query parameters as JSON. Other intake cases use freeform answers.
+
+The selected-connector contract also grades read-only retrieval, missing capabilities and approval before REST fallback with the built-in JSON-schema assertion. Expected decision values stay outside the model prompt.
 
 ## Calibration Dataset
 
-`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`. Case IDs, input IDs, and checkout directory names are opaque hashes of the dataset case and commit; vulnerable/fixed labels stay in grader metadata. Regenerate and rehydrate after upgrading from the older variant-named directories; those old ignored directories are no longer used.
+`datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`.
 
 ELI5: the dataset says "this exact old commit should be affected" and "this exact fixed commit should not be affected." The generator turns those rows into Promptfoo test prompts. The hydrator downloads the exact repo commits so Codex can inspect real code instead of synthetic snippets.
 

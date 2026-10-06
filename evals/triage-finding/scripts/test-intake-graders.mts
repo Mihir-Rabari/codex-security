@@ -11,9 +11,14 @@ const require = createRequire(import.meta.url);
 const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 
 for (const repository of ["{owner}/{repo}", "example/project"]) {
+  const context = (behavior: string) => ({
+    vars: {
+      expected_github_rest_behavior: behavior,
+      target_repo: "https://github.com/example/project",
+    },
+  });
   const examples = {
     dependabot_malware: `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100\nNormalize as source_type: "advisory".`,
-    code_scanning: `GET /repos/${repository}/code-scanning/alerts?state=open&per_page=100\nGET /repos/${repository}/code-scanning/alerts/42/instances\nNormalize as source_type: 'sarif'.`,
     advisories_private_reports:
       ["triage", "draft", "published", "closed"]
         .map(
@@ -26,47 +31,13 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       'Specific GitHub Issues are explicitly supplied and are not included in all sources. source_type: "freeform".',
   };
   for (const [behavior, output] of Object.entries(examples)) {
-    const result = github(output, {
-      vars: { expected_github_rest_behavior: behavior },
-    });
+    const result = github(output, context(behavior));
     assert.equal(result.pass, true, result.reason);
-    if (behavior === "code_scanning") {
-      for (const alert of ["42", "{alert_number}"]) {
-        for (const suffix of ["-wrong", "/child", ".json", "_wrong", "Extra"]) {
-          assert.equal(
-            github(
-              output.replace("/42/instances", `/${alert}/instances${suffix}`),
-              {
-                vars: { expected_github_rest_behavior: behavior },
-              },
-            ).pass,
-            false,
-            `must reject instances endpoint suffix ${suffix}`,
-          );
-        }
-        for (const delimiter of [
-          "?per_page=100",
-          "`",
-          '"',
-          ")",
-          ",",
-          ".",
-          ";",
-          ":",
-          "]",
-        ]) {
-          const formatted = github(
-            output.replace("/42/instances", `/${alert}/instances${delimiter}`),
-            { vars: { expected_github_rest_behavior: behavior } },
-          );
-          assert.equal(formatted.pass, true, formatted.reason);
-        }
-      }
-    }
     assert.equal(
-      github(output.replace(/advisory|sarif|freeform/g, "wrong_type"), {
-        vars: { expected_github_rest_behavior: behavior },
-      }).pass,
+      github(
+        output.replace(/advisory|freeform/g, "wrong_type"),
+        context(behavior),
+      ).pass,
       false,
     );
     if (behavior !== "explicit_issue") {
@@ -78,9 +49,7 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
         "Extra",
       ]) {
         assert.equal(
-          github(output.replaceAll("?", `${suffix}?`), {
-            vars: { expected_github_rest_behavior: behavior },
-          }).pass,
+          github(output.replaceAll("?", `${suffix}?`), context(behavior)).pass,
           false,
           `${behavior} must reject collection endpoint suffix ${suffix}`,
         );
@@ -88,7 +57,7 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       for (const delimiter of [
         "\n",
         "` ",
-        '" ',
+        '\" ',
         " ",
         ") ",
         ", ",
@@ -97,38 +66,63 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
         ": ",
         "] ",
       ]) {
-        const formatted = github(output.replaceAll("?", `${delimiter}?`), {
-          vars: { expected_github_rest_behavior: behavior },
-        });
+        const formatted = github(
+          output.replaceAll("?", `${delimiter}?`),
+          context(behavior),
+        );
         assert.equal(formatted.pass, true, formatted.reason);
       }
     }
   }
-  for (const alert of ["42", "{alert_number}"]) {
-    for (const [suffix, pass] of [
-      ["", true],
-      ["?per_page=100", true],
-      [". ", true],
-      ["; ", true],
-      ["` ", true],
-      ["/extra", false],
-      ["-wrong", false],
-      [".json", false],
-      ["_wrong", false],
-      ["Extra", false],
-    ] as const) {
-      const output = examples.code_scanning.replace(
-        "/42/instances",
-        `/${alert}/instances${suffix}`,
-      );
+  // Captured main asks for structured requests and a literal alert placeholder.
+  const answer = {
+    alerts: {
+      path: `/repos/${repository}/code-scanning/alerts`,
+      parameters: { state: "open", per_page: 100 },
+    },
+    instances: {
+      path: `/repos/${repository}/code-scanning/alerts/{alert_number}/instances`,
+      parameters: { per_page: 100 },
+    },
+    source_type: "sarif",
+  };
+  for (const output of [
+    JSON.stringify(answer),
+    JSON.stringify(answer, null, 2),
+    "```json\n" + JSON.stringify(answer) + "\n```",
+  ]) {
+    const result = github(output, context("code_scanning"));
+    assert.equal(result.pass, true, result.reason);
+  }
+  for (const field of ["alerts", "instances"] as const) {
+    for (const suffix of ["/extra", "-wrong", ".json", "_wrong", "Extra"]) {
+      const wrong = structuredClone(answer);
+      wrong[field].path += suffix;
       assert.equal(
-        github(output, {
-          vars: { expected_github_rest_behavior: "code_scanning" },
-        }).pass,
-        pass,
-        `instances endpoint ${alert} with suffix ${JSON.stringify(suffix)}`,
+        github(JSON.stringify(wrong), context("code_scanning")).pass,
+        false,
+        `${field} must reject endpoint suffix ${suffix}`,
       );
     }
+  }
+  for (const wrong of [
+    { ...answer, source_type: "wrong_type" },
+    {
+      ...answer,
+      alerts: {
+        ...answer.alerts,
+        parameters: { state: "closed", per_page: 100 },
+      },
+    },
+    {
+      ...answer,
+      instances: { ...answer.instances, parameters: { per_page: 20 } },
+    },
+  ]) {
+    assert.equal(
+      github(JSON.stringify(wrong), context("code_scanning")).pass,
+      false,
+    );
   }
 }
 assert.equal(hasTriageJson("```sh\necho hello\n```"), false);
