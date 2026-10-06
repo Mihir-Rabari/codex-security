@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from argparse import Namespace
 
 import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import write_checkpoint
 
 
 @pytest.mark.parametrize("retained", [False, True], ids=["missing", "retained"])
@@ -528,12 +530,16 @@ def test_retained_worker_string_question_is_not_duplicated(
     ]
 
 
-def publish_review_projection(workbench_api, connection, scan, coverage):
+def publish_review_projection(
+    workbench_api, connection, scan, coverage, *, findings=None, complete=None
+):
     documents = {
         "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
-        "findings": {"findings": []},
+        "findings": {"findings": [] if findings is None else findings},
         "coverage": coverage,
     }
+    if complete is not None:
+        documents["manifest"]["scan"]["complete"] = complete
     staged = scan.scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     staged.parent.mkdir(exist_ok=True)
     staged.write_text(json.dumps(documents))
@@ -728,4 +734,225 @@ def test_partial_projection_keeps_distinct_descriptive_provenance(
     assert [row["provenance"]["description"] for row in coverage[field]] == [
         record["provenance"]["description"] for record in records
     ]
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("same_worker", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_reported_parent_surface_uses_the_finding_worker_namespace(
+    workbench_api, workbench_db, publication_scan, monkeypatch, same_worker, retry
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    finding_result = result if same_worker else add_worker(workbench_db, scan)
+    finding_worker = finding_result.parent.name
+    candidate = "shared-candidate"
+    finding = copy.deepcopy(scan.findings[0])
+    finding["provenance"] = {
+        "source": "local_plugin",
+        "workerId": finding_worker,
+        "attempt": 1,
+        "candidateId": candidate,
+    }
+    surface = {
+        "id": "review",
+        "candidateId": candidate,
+        "label": "Independent review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    task = {"id": "gap", "candidateId": candidate, "reason": "Validate independent evidence."}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [finding] if same_worker else [],
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "surfaces": [surface],
+                    "deferred": [task],
+                },
+            }
+        )
+    )
+    if not same_worker:
+        finding_result.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [finding],
+                    "coverage": scan.coverage,
+                }
+            )
+        )
+    originals = {path: path.read_bytes() for path in {result, finding_result}}
+    projected = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "disposition": "reported",
+        "provenance": {
+            "workerId": worker_id,
+            "attempt": 1,
+            "sourceId": "review",
+            "candidateId": candidate,
+        },
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [projected],
+            "deferred": [],
+            "reviews": [
+                {"workerId": owner, "attempt": 1, "completeness": "partial"}
+                for owner in {worker_id, finding_worker}
+            ],
+        },
+        findings=[finding],
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
+    assert len(pending) == int(not same_worker)
+    if pending:
+        assert pending[0]["provenance"]["workerId"] == worker_id
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("clear_question", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_historical_parent_review_marker_does_not_restore_cleared_question(
+    workbench_api, workbench_db, publication_scan, monkeypatch, clear_question, retry
+):
+    scan = publication_scan()
+    question = {"question": "Which deployment applies?"}
+    earlier = {
+        **scan.coverage,
+        "completeness": "partial",
+        "openQuestions": [question],
+        "reviews": [],
+    }
+    publish_review_projection(workbench_api, workbench_db, scan, earlier, complete=False)
+    current = {**earlier, "openQuestions": [] if clear_question else [question]}
+    publish_review_projection(workbench_api, workbench_db, scan, current, complete=True)
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert coverage.get("openQuestions", []) == ([] if clear_question else [question])
+
+
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_incomplete_standard_question_matches_its_canonical_text(
+    workbench_api, workbench_db, publication_scan, monkeypatch, padded, retry
+):
+    scan = publication_scan(mode="standard")
+    question = "Which deployment applies?"
+    raw = f"  {question}  " if padded else question
+    write_checkpoint(
+        scan.scan_dir / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {**scan.coverage, "completeness": "partial", "openQuestions": [raw]},
+        },
+    )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "openQuestions": [{"question": question}],
+        },
+        complete=False,
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert coverage["openQuestions"] == [{"question": question}]
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+@pytest.mark.parametrize("reopened", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_reopened_pending_rows_use_the_existing_host_projection(
+    workbench_api, workbench_db, publication_scan, monkeypatch, ambiguous, reopened, retry
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surface = {
+        "id": "review",
+        "label": "Reviewed surface",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    tasks = [
+        {"id": "gap", "reason": f"Validate evidence {index}.", "surfaceIds": ["review"]}
+        for index in range(2 if ambiguous else 1)
+    ]
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": tasks,
+        },
+    }
+    if reopened:
+        earlier = write_checkpoint(
+            result.parent / "checkpoints",
+            {
+                **draft,
+                "complete": False,
+                "coverage": {
+                    **scan.coverage,
+                    "surfaces": [],
+                    "deferred": [],
+                    "resolvedDeferred": [{"id": "gap", "reason": "Earlier closure."}],
+                },
+            },
+        )
+        os.utime(earlier, ns=(100, 100))
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(200, 200))
+    original = result.read_bytes()
+    projected_surface = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    projected_tasks = [
+        {
+            **task,
+            "id": f"{worker_id}-attempt-1-deferred-{index}",
+            "surfaceIds": [projected_surface["id"]],
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "gap"},
+        }
+        for index, task in enumerate(tasks, 1)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [projected_surface],
+            "deferred": projected_tasks,
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert [
+        row for row in coverage["deferred"] if row.get("id") != "scan-stopped"
+    ] == projected_tasks
+    assert coverage["surfaces"] == [projected_surface]
     assert result.read_bytes() == original
