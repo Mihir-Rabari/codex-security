@@ -61,14 +61,19 @@ public static class DirectoryAccessProof {
     }
 }
 '@
-$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH
+$path = $env:CODEX_SECURITY_TEST_ACL_PATH
+$acl = if ([System.IO.Directory]::Exists($path)) {
+    [System.IO.Directory]::GetAccessControl($path)
+} else {
+    [System.IO.File]::GetAccessControl($path)
+}
 $descriptor = $acl.GetSecurityDescriptorBinaryForm()
 $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-$rules = @($acl.Access)
-$principals = @($rules | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Select-Object -Unique)
+$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+$principals = @($rules | ForEach-Object { $_.IdentityReference.Value } | Select-Object -Unique)
 $privateRules = @($rules | Where-Object {
     $_.AccessControlType -eq 'Allow' -and
-    $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -in @('S-1-3-4', 'S-1-5-18', 'S-1-5-32-544') -and
+    $_.IdentityReference.Value -in @('S-1-3-4', 'S-1-5-18', 'S-1-5-32-544') -and
     ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and
     $_.InheritanceFlags -eq ([System.Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [System.Security.AccessControl.InheritanceFlags]::ContainerInherit)
 })
