@@ -1212,10 +1212,10 @@ def merge_saved_results(
             directory = directory.parent
         output = Path(worker["artifact_dir"]).relative_to(scan_dir)
         worker_root = output.parent if output.name == "output" else output
-        archive_prefix = (worker_root / "attempts").as_posix() + "/"
+        worker_prefix = worker_root.as_posix() + "/"
         return [
             f"{directory.as_posix()}/{ref}"
-            if isinstance(ref, str) and not ref.startswith(archive_prefix)
+            if isinstance(ref, str) and not ref.startswith(worker_prefix)
             else ref
             for ref in refs
         ]
@@ -1224,7 +1224,7 @@ def merge_saved_results(
         if field == "surfaces":
             # Canonical IDs can change while source content and ownership stay the same.
             item = {key: value for key, value in item.items() if key != "id"}
-        records = projected_coverage.get(field, [])
+        records = coverage.get(field, [])
         for record in records if isinstance(records, list) else []:
             if not isinstance(record, dict):
                 continue
@@ -1248,6 +1248,17 @@ def merge_saved_results(
     ) -> dict[str, Any]:
         # Match projectDiscoveryCoverage so recovered holes retain source ownership.
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+
+        def surface_id(surface: dict[str, Any], offset: int) -> str:
+            source_id = surface.get("id")
+            if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
+                positions = accepted_surface_positions.get((worker["id"], source_id), [])
+                if len(positions) == 1:
+                    offset = positions[0]
+                elif not positions:
+                    return f"{prefix}-surface-{offset}-{_digest(source_id)[:16]}"
+            return f"{prefix}-surface-{offset}"
+
         result = copy.deepcopy(item)
         provenance = result.get("provenance")
         if not isinstance(provenance, dict):
@@ -1271,7 +1282,7 @@ def merge_saved_results(
             candidate_digest = hashlib.sha256(item["candidateId"].encode()).hexdigest()
             result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
         if field == "surfaces":
-            result["id"] = f"{prefix}-surface-{index}"
+            result["id"] = surface_id(item, index)
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
@@ -1291,7 +1302,7 @@ def merge_saved_results(
                 surfaces = source.get("surfaces", [])
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-                        surface_ids.setdefault(surface["id"], f"{prefix}-surface-{offset}")
+                        surface_ids.setdefault(surface["id"], surface_id(surface, offset))
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
@@ -1365,6 +1376,18 @@ def merge_saved_results(
         for relative, _, worker_id in sources
         if relative in accepted_sources
     )
+    accepted_coverage_sources = {
+        id(draft["coverage"]) for relative, draft, _ in sources if relative in accepted_sources
+    }
+    accepted_surface_positions: dict[tuple[str, str], list[int]] = {}
+    for relative, draft, worker_id in sources:
+        if relative not in accepted_sources:
+            continue
+        surfaces = draft["coverage"].get("surfaces", [])
+        for index, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
+            if isinstance(surface, dict) and isinstance(surface.get("id"), str):
+                accepted_surface_positions.setdefault((worker_id, surface["id"]), []).append(index)
+
     for _, draft, _ in sources:
         questions = draft["coverage"].get("openQuestions")
         if isinstance(questions, list):
@@ -1668,7 +1691,11 @@ def merge_saved_results(
                     and (source_owner, attempt, candidate_id) in accepted_pending_candidates
                 ):
                     return source_owner, candidate_id
-        candidate_id = item.get("candidateId")
+        candidate_id = (
+            _deferred_candidate_id(item, owner, ambiguous_deferred)
+            if any(key in item for key in ("candidate", "finding"))
+            else item.get("candidateId")
+        )
         return (owner, candidate_id) if isinstance(candidate_id, str) else None
 
     def candidate_order(relative: str, owner: str | None) -> tuple[int, int]:
@@ -1747,7 +1774,7 @@ def merge_saved_results(
                 key = (source_owner, identity)
                 previous = active_deferred.get(key)
                 if previous is None or order > previous[0]:
-                    active_deferred[key] = (order, item, relative)
+                    active_deferred[key] = (order, original, relative)
                 if (
                     relative == "parent"
                     or relative in current_results

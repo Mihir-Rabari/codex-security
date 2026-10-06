@@ -1301,3 +1301,203 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     published = coverage_path.read_bytes()
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     assert coverage_path.read_bytes() == published
+
+
+@pytest.mark.parametrize("retry_publication", [False, True])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "new linked surface",
+        "candidate id fallback",
+        "closed sibling candidate",
+        "mixed receipts",
+        "repeated pending",
+        "unchanged",
+    ],
+)
+def test_selected_worker_projection_keeps_links_and_pending_authority(
+    workbench_api, workbench_db, publication_scan, monkeypatch, change, retry_publication
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    prefix = f"{worker_id}-attempt-1"
+    candidate = "source-candidate"
+    surface = {
+        "id": "source-surface",
+        "label": "Source follow-up",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    task = {
+        "id": "source-task",
+        "reason": "Complete source follow-up.",
+        "surfaceIds": [surface["id"]],
+    }
+    surfaces, deferred = [surface], [task]
+    if change == "candidate id fallback":
+        task.update(id=candidate, candidate=copy.deepcopy(scan.findings[0]))
+        surface["candidateId"] = candidate
+    elif change == "closed sibling candidate":
+        deferred.append({**task, "id": "candidate-task", "candidateId": candidate})
+    elif change == "new linked surface":
+        surface["disposition"] = "no_issue_found"
+        deferred = []
+    elif change == "mixed receipts":
+        result = (
+            scan.scan_dir
+            / "artifacts"
+            / "deep_discovery"
+            / "workers"
+            / worker_id
+            / "output"
+            / "result.json"
+        )
+        result.parent.mkdir(parents=True)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+                (str(result.parent), str(result), worker_id),
+            )
+        surface["receiptRefs"] = ["artifacts/old.txt"]
+        for name in ("old", "new"):
+            receipt = result.parent / "artifacts" / f"{name}.txt"
+            receipt.parent.mkdir(exist_ok=True)
+            receipt.write_text(f"Synthetic {name} receipt.\n")
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": deferred,
+        },
+    }
+    result.write_text(json.dumps(draft))
+    projected = {}
+    for field, name, rows in (
+        ("surfaces", "surface", surfaces),
+        ("deferred", "deferred", deferred),
+    ):
+        projected[field] = []
+        for index, original in enumerate(rows, 1):
+            row = copy.deepcopy(original)
+            row["id"] = f"{prefix}-{name}-{index}"
+            row["provenance"] = {"workerId": worker_id, "attempt": 1, "sourceId": original["id"]}
+            if "candidateId" in original:
+                row["provenance"]["candidateId"] = original["candidateId"]
+                row["candidateId"] = (
+                    f"{prefix}-candidate-{hashlib.sha256(candidate.encode()).hexdigest()}"
+                )
+            if field == "surfaces":
+                row["receiptRefs"] = [
+                    (result.parent / ref).relative_to(scan.scan_dir).as_posix()
+                    for ref in original["receiptRefs"]
+                ]
+            else:
+                row["surfaceIds"] = [f"{prefix}-surface-1"]
+            projected[field].append(row)
+    coverage_path = scan.scan_dir / "coverage.json"
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    coverage_path.write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                **projected,
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+            }
+        )
+    )
+    checkpoint = None
+    if change != "unchanged":
+        updated = copy.deepcopy(draft)
+        if change == "new linked surface":
+            updated["coverage"].update(
+                surfaces=[
+                    {
+                        **surface,
+                        "id": "new-surface",
+                        "label": "New follow-up",
+                        "disposition": "needs_follow_up",
+                    }
+                ],
+                deferred=[{**task, "id": "new-task", "surfaceIds": ["new-surface"]}],
+            )
+        elif change == "candidate id fallback":
+            updated["coverage"].update(
+                surfaces=[{**surface, "disposition": "rejected"}], deferred=[]
+            )
+        elif change in {"closed sibling candidate", "mixed receipts"}:
+            updated["coverage"].update(
+                surfaces=[
+                    {
+                        **surface,
+                        "disposition": "no_issue_found",
+                        "receiptRefs": ["artifacts/new.txt"] if change == "mixed receipts" else [],
+                    }
+                ],
+                deferred=[],
+                resolvedDeferred=[{"id": task["id"], "reason": "Source follow-up completed."}],
+            )
+            if change == "closed sibling candidate":
+                updated["coverage"]["surfaces"].append(
+                    {
+                        **surface,
+                        "id": "candidate-surface",
+                        "candidateId": candidate,
+                        "label": "Candidate proof",
+                        "disposition": "rejected",
+                    }
+                )
+        checkpoint = write_checkpoint(result.parent / "checkpoints", updated)
+        os.utime(checkpoint, ns=(300, 300))
+        (result.parent / "checkpoint-head.json").write_text(
+            json.dumps({"checkpoint": checkpoint.name})
+        )
+    os.utime(result, ns=(100, 100))
+    os.utime(coverage_path, ns=(200, 200))
+    originals = {
+        path: path.read_bytes() for path in [result] + ([checkpoint] if checkpoint else [])
+    }
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(
+                workbench_api["saved_results"],
+                "_write_prepared_scan_finalization",
+                fail_publication,
+            )
+        stopped = workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )["scan"]
+    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads(coverage_path.read_text())
+    pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
+    assert len(pending) == int(change in {"new linked surface", "repeated pending", "unchanged"})
+    if change == "new linked surface":
+        linked = next(
+            row for row in coverage["surfaces"] if row["id"] == pending[0]["surfaceIds"][0]
+        )
+        assert linked["label"] == "New follow-up"
+    elif change in {"closed sibling candidate", "mixed receipts"}:
+        saved_surface = next(
+            row for row in coverage["surfaces"] if row.get("label") == surface["label"]
+        )
+        assert saved_surface["disposition"] == "no_issue_found", json.dumps(saved_surface)
+        if change == "mixed receipts":
+            assert set(saved_surface["receiptRefs"]) == {
+                (result.parent / "artifacts" / f"{name}.txt").relative_to(scan.scan_dir).as_posix()
+                for name in ("old", "new")
+            }
+    assert all(path.read_bytes() == content for path, content in originals.items())
+    published = coverage_path.read_bytes()
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert coverage_path.read_bytes() == published
