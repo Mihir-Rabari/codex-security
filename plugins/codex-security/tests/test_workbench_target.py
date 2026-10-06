@@ -174,8 +174,9 @@ def test_submodule_checks_preserve_target_alias_spelling(
 
 
 @pytest.mark.parametrize("content_digest", [directory_content_digest, worktree_content_digest])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
 def test_content_digest_expands_nested_git_repositories(
-    tmp_path: Path, content_digest: Callable[[Path], str]
+    tmp_path: Path, content_digest: Callable[[Path], str], alias_kind: str
 ) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
@@ -188,19 +189,26 @@ def test_content_digest_expands_nested_git_repositories(
     ignored_cache.mkdir()
     ignored_output = ignored_cache / "build-output"
     ignored_output.write_text("ignored runtime data\n")
-    original_digest = content_digest(target)
+    selected = target
+    if alias_kind != "original":
+        selected = tmp_path / ("alias" if alias_kind == "symlink" else "TARGET")
+        if alias_kind == "symlink":
+            selected.symlink_to(target, target_is_directory=True)
+        elif not selected.exists():
+            pytest.skip("filesystem does not support case aliases")
+    original_digest = content_digest(selected)
 
     nested_source.write_text("print('changed')\n")
-    assert content_digest(target) != original_digest
+    assert content_digest(selected) != original_digest
 
     nested_source.write_text("print('fixture')\n")
     (nested / "README.md").write_text("changed after commit\n")
-    assert content_digest(target) != original_digest
+    assert content_digest(selected) != original_digest
 
     (nested / "README.md").write_text("fixture\n")
     (nested / ".git" / "runtime-cache").write_text("runtime metadata\n")
     ignored_output.write_text("changed ignored runtime data\n")
-    assert content_digest(target) == original_digest
+    assert content_digest(selected) == original_digest
 
 
 def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> None:
