@@ -476,6 +476,120 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
     )
 
 
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("ledger_state", ["deferred", "terminal"])
+@pytest.mark.parametrize("finding_source", ["canonical", "checkpoint"])
+def test_stopped_diff_retains_every_reopened_sibling_finding(
+    tmp_path: Path, workbench_api, termination: str, ledger_state: str, finding_source: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    phases = {"validation": {"disposition": "suppressed"}}
+    first = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    first["provenance"]["diffCandidateDecision"] = phases
+    sibling = copy.deepcopy(first)
+    sibling["identity"]["instance"] = "second-synthetic-instance"
+    sibling["title"] = "Second retained sibling finding."
+    sibling["summary"] = "Independent evidence from the second finding."
+    siblings = workbench_api["saved_results"].recoverable_findings(
+        scan_dir,
+        scan_id,
+        json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["target"],
+        [first, sibling],
+    )
+    assert len({finding["findingId"] for finding in siblings}) == 2
+    coverage_path = scan_dir / "coverage.json"
+    if finding_source == "canonical":
+        (scan_dir / "findings.json").write_text(
+            json.dumps({"scanId": scan_id, "findings": siblings})
+        )
+        coverage = json.loads(coverage_path.read_text())
+        coverage.update(surfaces=[], deferred=[])
+        coverage_path.write_text(json.dumps(coverage))
+    else:
+        override = copy.deepcopy(checkpoint)
+        override["findings"] = siblings
+        override["coverage"].update(surfaces=[], deferred=[])
+        write_checkpoint(scan_dir / "checkpoints", override)
+    candidate["validation"] = {
+        "disposition": "deferred" if ledger_state == "deferred" else "suppressed",
+        "counterevidence_or_proof_gap": "Newer phase review.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_retained() -> None:
+        coverage = json.loads(coverage_path.read_text())
+        if ledger_state == "deferred":
+            row = next(item for item in coverage["deferred"] if item.get("candidateId"))
+            retained = list(workbench_api["saved_results"]._retained_findings(row["finding"]))
+        else:
+            row = next(item for item in coverage["surfaces"] if item.get("candidateId"))
+            retained = row["previousFindings"]
+        assert {finding["findingId"] for finding in retained} == {
+            finding["findingId"] for finding in siblings
+        }
+        assert {finding["summary"] for finding in retained} == {
+            finding["summary"] for finding in siblings
+        }
+        assert all(path.read_bytes() == content for path, content in originals.items())
+
+    assert_retained()
+    ledger.write_text("{later incomplete ledger")
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_retained()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_stopped_diff_retains_distinct_saved_proof_gaps(
+    tmp_path: Path, termination: str, resolved: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    first = copy.deepcopy(checkpoint["coverage"]["deferred"][0])
+    first.update(id="first-gap", reason="First independent proof gap.", paths=["README.md"])
+    second = copy.deepcopy(first)
+    second.update(id="second-gap", reason="Second independent proof gap.", paths=["second.py"])
+    second["candidate"]["evidence"] = "Second saved evidence."
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [first, second]
+    coverage_path.write_text(json.dumps(coverage))
+    checkpoint["coverage"]["deferred"] = [first, second]
+    write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    if resolved:
+        candidate = json.loads(ledger.read_text())
+        candidate["validation"] = {"disposition": "suppressed"}
+        ledger.write_text(json.dumps(candidate) + "\n")
+    arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_gaps() -> None:
+        coverage = json.loads(coverage_path.read_text())
+        pending = [row for row in coverage["deferred"] if row.get("candidateId")]
+        current_gaps = [row for row in pending if row["id"] in {"first-gap", "second-gap"}]
+        assert {row["id"] for row in current_gaps} == (
+            set() if resolved else {"first-gap", "second-gap"}
+        )
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == int(not resolved)
+        if resolved:
+            assert pending == []
+        else:
+            assert {row["reason"] for row in current_gaps} == {first["reason"], second["reason"]}
+            assert {tuple(row["paths"]) for row in current_gaps} == {("README.md",), ("second.py",)}
+            assert any(
+                row["candidate"]["evidence"] == "Second saved evidence." for row in current_gaps
+            )
+
+    assert_gaps()
+    ledger.write_text("{later incomplete ledger")
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_gaps()
+
+
 @pytest.mark.parametrize("finding_source", ["canonical", "checkpoint"])
 @pytest.mark.parametrize(
     "ledger_state", ["unchanged", "terminal", "deferred", "missing", "malformed"]

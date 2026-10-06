@@ -835,7 +835,9 @@ def _stopped_diff_candidate_decisions(
         items = draft["coverage"].get("deferred", [])
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and (key := coverage_candidate_key(item)) and key[0] is None:
-                pending.setdefault(key[1], copy.deepcopy(item))
+                rows = pending.setdefault(key[1], [])
+                if item not in rows:
+                    rows.append(copy.deepcopy(item))
     findings = [
         finding
         for finding in current_findings
@@ -978,7 +980,11 @@ def _stopped_diff_candidate_decisions(
                     findings = [finding for finding in findings if finding not in overrides]
                     finding_ids.discard(candidate_id)
                     authoritative.discard(candidate_id)
-                prior = pending.get(candidate_id, generated.get(candidate_id, {}))
+                prior = (
+                    pending[candidate_id][0]
+                    if candidate_id in pending
+                    else generated.get(candidate_id, {})
+                )
                 previous = prior.get("candidate")
                 previous = previous if isinstance(previous, dict) else {}
                 candidate = {
@@ -993,7 +999,7 @@ def _stopped_diff_candidate_decisions(
                     }
                     pending.pop(candidate_id, None)
                     continue
-                item = pending.setdefault(candidate_id, {"candidateId": candidate_id})
+                item = pending.setdefault(candidate_id, [{"candidateId": candidate_id}])[0]
                 current_pending_ids.add(candidate_id)
                 item["candidate"] = candidate
                 if "reason" not in item or item["reason"] == _diff_candidate_reason(previous):
@@ -1016,7 +1022,10 @@ def _stopped_diff_candidate_decisions(
             coverage[field].append(item)
     coverage["surfaces"].extend(decisions.values())
     coverage["deferred"].extend(
-        item for candidate_id, item in pending.items() if candidate_id in current_pending_ids
+        item
+        for candidate_id, rows in pending.items()
+        if candidate_id in current_pending_ids
+        for item in rows
     )
     return {
         "scanId": scan_id,
@@ -1077,7 +1086,14 @@ def _reconcile_stopped_diff_sources(
                 else:
                     retained.append(finding)
             elif state[0] == "deferred":
-                state[1].setdefault("finding", finding)
+                retained_finding = state[1].setdefault("finding", finding)
+                if retained_finding != finding:
+                    provenance = retained_finding.setdefault("provenance", {})
+                    if not isinstance(provenance.get("previousFindings"), list):
+                        provenance["previousFindings"] = []
+                    history = provenance["previousFindings"]
+                    if finding not in history:
+                        history.append(finding)
             else:
                 history = state[1].setdefault("previousFindings", [])
                 if finding not in history:

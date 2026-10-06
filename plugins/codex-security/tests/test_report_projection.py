@@ -92,11 +92,11 @@ def test_projection_counts_saved_candidates_by_worker_and_separates_unfinished_w
     assert "## Unresolved candidates" in markdown
     assert "| candidate-one | worker-one | Review the parser boundary |" in markdown
     assert "| candidate-one | worker-two | Review the parser boundary |" in markdown
-    assert markdown.count("| candidate-one |") == 2
+    assert markdown.count("| candidate-one |") == 3
     assert "src/parser.py:12-15, src/route.py:6" in markdown
     assert "The request value reaches the parser." in markdown
-    assert markdown.count("- The parser call site still needs validation.") == 2
-    assert "Review deferred unit candidate-one-copy" not in markdown
+    assert markdown.count("- The parser call site still needs validation.") == 3
+    assert "Review deferred unit candidate-one-copy" in markdown
     assert "The remaining files were not reviewed." in markdown
 
 
@@ -151,6 +151,45 @@ def test_projection_renders_saved_candidate_evidence_shapes(candidate: dict) -> 
     assert "src/parser.py:12-15" in markdown
     if "validation" not in candidate:
         assert "parse(request.value)" in markdown
+
+
+@pytest.mark.parametrize("owner", [None, "worker-one"])
+def test_projection_keeps_distinct_proof_gaps_for_one_candidate(owner: str | None) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [
+        {
+            "id": row_id,
+            "candidateId": "candidate-one",
+            **({"sourceWorkerId": owner} if owner else {}),
+            "reason": reason,
+            "paths": [path],
+            "surfaceIds": [surface],
+            "candidate": {"title": "Synthetic review", "evidence": evidence},
+        }
+        for row_id, reason, path, surface, evidence in [
+            ("first-gap", "First proof gap.", "src/first.py", "first-surface", "First evidence."),
+            (
+                "second-gap",
+                "Second proof gap.",
+                "src/second.py",
+                "second-surface",
+                "Second evidence.",
+            ),
+        ]
+    ]
+    original = copy.deepcopy(coverage)
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "| Unresolved candidates | 1 |" in markdown
+    for reason, path, surface, evidence in [
+        ("First proof gap.", "src/first.py", "first-surface", "First evidence."),
+        ("Second proof gap.", "src/second.py", "second-surface", "Second evidence."),
+    ]:
+        assert markdown.count(reason) == 2
+        assert path in markdown
+        assert surface in markdown
+        assert evidence in markdown
+    assert coverage == original
 
 
 def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:

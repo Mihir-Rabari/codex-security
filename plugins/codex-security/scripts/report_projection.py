@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from candidate_identity import coverage_candidate_key, unresolved_candidates
+from candidate_identity import (
+    coverage_candidate_key,
+    unresolved_candidate_rows,
+    unresolved_candidates,
+)
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -819,6 +823,7 @@ def build_report_markdown(
         )
     deep_presentation = _uses_deep_presentation(coverage, findings)
     pending_candidates = unresolved_candidates(coverage, findings_document["findings"])
+    pending_rows = unresolved_candidate_rows(coverage, findings_document["findings"])
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
@@ -1043,7 +1048,7 @@ def build_report_markdown(
                 "| --- | --- | --- | --- | --- | --- |",
             ]
         )
-        for candidate in pending_candidates:
+        for candidate in pending_rows:
             original = candidate.get("candidate", candidate.get("finding", {}))
             original = original if isinstance(original, dict) else {}
             title = original.get("title", original.get("summary"))
@@ -1098,7 +1103,7 @@ def build_report_markdown(
         if isinstance(deferred, list)
         else []
     )
-    follow_ups.extend(pending_candidates)
+    follow_ups.extend(pending_rows)
     if follow_ups:
         questions.extend(
             {

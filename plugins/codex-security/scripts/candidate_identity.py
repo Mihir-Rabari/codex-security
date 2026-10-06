@@ -82,6 +82,16 @@ def unresolved_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     """Select saved candidate identities without a finding or terminal disposition."""
+    candidates: dict[CandidateKey, dict[str, Any]] = {}
+    for item in unresolved_candidate_rows(coverage, findings):
+        candidates.setdefault(coverage_candidate_key(item), item)
+    return list(candidates.values())
+
+
+def unresolved_candidate_rows(
+    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Keep each distinct saved proof gap while applying candidate resolutions."""
 
     def objects(value: Any) -> list[dict[str, Any]]:
         # Progress also reads incomplete, unsealed drafts before finalizer recovery.
@@ -97,12 +107,12 @@ def unresolved_candidates(
             if item.get("disposition") in ("rejected", "not_applicable")
             and (key := coverage_candidate_key(item)) is not None
         )
-    candidates: dict[CandidateKey, dict[str, Any]] = {}
+    candidates = []
     for item in objects(coverage.get("deferred")):
         key = coverage_candidate_key(item)
-        if key is not None and key not in resolved:
-            candidates.setdefault(key, item)
-    return list(candidates.values())
+        if key is not None and key not in resolved and item not in candidates:
+            candidates.append(item)
+    return candidates
 
 
 def diff_candidate_disposition(candidate: dict[str, Any]) -> str | None:
