@@ -1671,6 +1671,70 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test.each([false, true])(
+    "requires complete policy receipt coverage for an explicit budget (gap: %s)",
+    async (gap) => {
+      for (const limited of [false, true]) {
+        const f = await setup({
+          config: { codexOverrides: { model: "gpt-5.6-sol" } },
+          stream: async function* (stage) {
+            const thread = `policy-${stage}`;
+            const directory = join(f.root, "codex-home", "sessions");
+            await mkdir(directory, { recursive: true });
+            await writeFile(
+              join(directory, `${thread}.jsonl`),
+              [
+                { type: "session_meta", payload: { id: thread } },
+                ...[
+                  ["first", 100, 100],
+                  ["third", 50, gap ? 180 : 150],
+                ].map(([id, input, cumulative]) => ({
+                  type: "token_usage_record",
+                  payload: {
+                    thread_id: thread,
+                    response_id: id,
+                    model: "gpt-5.6-sol",
+                    usage: { input_tokens: input, output_tokens: 0 },
+                    thread_token_usage: {
+                      input_tokens: cumulative,
+                      output_tokens: 0,
+                    },
+                  },
+                })),
+              ]
+                .map((event) => JSON.stringify(event))
+                .join("\n") + "\n",
+            );
+            for await (const event of events(stage)) {
+              yield event.type === "turn.completed"
+                ? ({ ...event, usage: null } as unknown as ThreadEvent)
+                : event;
+            }
+          },
+        });
+        try {
+          const result = f.security.generatePolicy(f.repository, {
+            outputDir: f.outputDir,
+            ...(limited ? { maxCostUsd: 1 } : {}),
+          });
+          if (limited && gap) {
+            await expect(result).rejects.toThrow(
+              "Could not verify the requested policy-generation cost limit",
+            );
+            expect(f.threads).toHaveLength(1);
+          } else {
+            const completed = await result;
+            expect(completed.content).toBe(POLICY);
+            expect(completed.cost?.inputTokens).toBe(450);
+            expect(completed.cost?.coverage).toBe(gap ? "partial" : undefined);
+          }
+        } finally {
+          await f.security.close();
+        }
+      }
+    },
+  );
+
   test("allows unavailable usage unless an explicit cost limit needs verification", async () => {
     for (const limited of [false, true]) {
       const f = await setup({

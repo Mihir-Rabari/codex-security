@@ -38,6 +38,7 @@ const {
   snapshotWorkerEnvironment,
   WorkbenchDeepScanStore,
   captureDeepScanExecutionSettings,
+  retainDeepScanExecutionSettings,
   loadDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
   appendSafeItemDiagnostic,
@@ -2745,6 +2746,19 @@ async function testIsolatedReconstructedWorkers() {
     assert.equal(await readFile(snapshotPath, "utf8"), snapshot);
     assert.equal(observer.model, settings.model);
     assert.equal(snapshot.includes("synthetic-"), false);
+    const retainedCapture = retainDeepScanExecutionSettings(
+      async () =>
+        await captureDeepScanExecutionSettings(
+          settings,
+          settings.parentSandbox,
+          { ...codexOptions.env, CODEX_CLI_PATH: executable },
+          {
+            threadId: `fixture-${name}-observer`,
+            startedAt: "2026-01-01T00:01:00Z",
+          },
+        ),
+    );
+    assert.deepEqual(await retainedCapture(run), saved);
     const runtimeEnvironment: NodeJS.ProcessEnv = { ...codexOptions.env };
     const restored = restoredDeepScanWorkerSettings(
       saved,
@@ -2776,6 +2790,7 @@ async function testIsolatedReconstructedWorkers() {
       snapshot,
       providerKeys,
       expectedProvider,
+      retainedCapture,
       accessProgram,
       apiFeatures,
       executor: new CodexSdkWorkerExecutor(restored),
@@ -2803,10 +2818,27 @@ async function testIsolatedReconstructedWorkers() {
     for (const phase of [
       "fresh",
       "resume",
+      "readopted-fresh",
+      "readopted",
       "reconstructed-fresh",
       "reconstructed",
       "incomplete",
     ]) {
+      if (phase.startsWith("readopted")) {
+        for (const scan of scans) {
+          const retained = await scan.retainedCapture({
+            ...scan.run,
+            coordinatorGeneration: 2,
+          });
+          const restored = restoredDeepScanWorkerSettings(
+            retained,
+            scan.currentParentSandbox,
+            () => scan.runtimeEnvironment,
+          );
+          restored.codexOptions.baseUrl = scan.settings.codexOptions.baseUrl;
+          scan.executor = new CodexSdkWorkerExecutor(restored);
+        }
+      }
       if (phase.startsWith("reconstructed") || phase === "incomplete") {
         for (const scan of scans) {
           scan.run = await scan.readRun();
@@ -2875,9 +2907,11 @@ async function testIsolatedReconstructedWorkers() {
       for (const kind of ["discovery", "dedup"]) {
         const launches = await Promise.allSettled(
           scans.map(async (scan) => {
-            const resumeThreadId = ["fresh", "reconstructed-fresh"].includes(
-              phase,
-            )
+            const resumeThreadId = [
+              "fresh",
+              "readopted-fresh",
+              "reconstructed-fresh",
+            ].includes(phase)
               ? undefined
               : `fixture-${scan.name}-resumed`;
             const result = await scan.executor.run({

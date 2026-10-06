@@ -44,6 +44,14 @@ export interface DeepScanExecutionSettingsSnapshot {
   settings: DeepScanExecutionSettings;
 }
 
+/** One owning call retains its first capture when it reacquires a coordinator lease. */
+export function retainDeepScanExecutionSettings(
+  load: (run: DeepScanRunState) => Promise<Partial<DeepScanExecutionSettings>>,
+): (run: DeepScanRunState) => Promise<Partial<DeepScanExecutionSettings>> {
+  let settings: Partial<DeepScanExecutionSettings> | undefined;
+  return async (run) => (settings ??= await load(run));
+}
+
 export async function captureDeepScanExecutionSettings(
   original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,

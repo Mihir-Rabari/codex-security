@@ -1109,6 +1109,22 @@ function reconcileDeferredSurfaces(
   return resolved;
 }
 
+/** Read the immutable checkpoint selected by the current worker writer. */
+export async function readCurrentScanDraftCheckpoint(
+  context: ArtifactContext,
+): Promise<JsonObject | undefined> {
+  const head = await readCheckpointHead(context, "current");
+  if (!head) return;
+  return parseJsonObject(
+    await readArtifactText(
+      context,
+      ["checkpoints", head.checkpoint],
+      "current scan checkpoint",
+    ),
+    "current scan checkpoint",
+  );
+}
+
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",

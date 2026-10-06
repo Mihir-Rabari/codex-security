@@ -1109,15 +1109,15 @@ export class CodexSecurity {
             return { usage, cost };
           });
           stopped = true;
-          if (snapshot.cost === null) {
-            completeCost = false;
-            if (options.maxCostUsd !== undefined)
-              throw new CodexSecurityError(
-                "Could not verify the requested policy-generation cost limit.",
-              );
-          } else {
-            accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
-          }
+          if (
+            options.maxCostUsd !== undefined &&
+            (snapshot.cost === null || snapshot.cost.coverage === "partial")
+          )
+            throw new CodexSecurityError(
+              "Could not verify the requested policy-generation cost limit.",
+            );
+          if (snapshot.cost === null) completeCost = false;
+          else accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
           signal.throwIfAborted();
           try {
             return parseSecurityPolicyStageResult(

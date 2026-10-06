@@ -12,10 +12,15 @@ const { validateDiscoveryArtifacts, validateReducerArtifacts } =
       .pathname,
   );
 
+const { saveScanDraftCheckpoint } = await importSource(
+  new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+);
+
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
 try {
   await testDiscoveryValidation(root);
+  await testDiscoveryRequiresCurrentCheckpoint(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
 } finally {
@@ -23,6 +28,48 @@ try {
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
+  const first = draft([finding("first", "src/a.js")]);
+  const current = draft([finding("current", "src/b.js")]);
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "checkpoint-publication"),
+    "worker-001",
+    first,
+  );
+  const context = {
+    root: path.dirname(worker.resultPath),
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId,
+  };
+  await saveScanDraftCheckpoint(context, first);
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+  );
+  // The writer commits its immutable head before replacing the previous result.
+  await saveScanDraftCheckpoint(context, current);
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    /does not match its current checkpoint head/,
+  );
+  await writeResult(worker.resultPath, {
+    ...current,
+    handoffClaimToken: otherScanId,
+  });
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    { ...current, handoffClaimToken: otherScanId },
+  );
+  await rm(path.join(context.root, "checkpoint-head.json"));
+  await writeResult(worker.resultPath, first);
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    first,
+    "older workers without checkpoint heads retain their accepted result contract",
+  );
+}
 
 async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {

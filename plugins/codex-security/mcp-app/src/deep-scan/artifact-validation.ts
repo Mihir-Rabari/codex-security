@@ -1,6 +1,8 @@
+import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   parsePersistedScanDraft,
+  readCurrentScanDraftCheckpoint,
   parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
@@ -108,12 +110,24 @@ export async function readDiscoveryAuditDraft(
   expectedScanId: string,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
+  const saved = await readJsonObject(resultPath);
   const result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
+    saved,
     "Standard scan worker",
     expectedScanId,
     parsePersistedScanDraft,
   );
+  const checkpoint = await readCurrentScanDraftCheckpoint({
+    root: dirname(resultPath),
+    repoRoot: artifacts.scanDir,
+    layout: "worker",
+    scanId: expectedScanId,
+  });
+  const { handoffClaimToken: _claim, ...semantic } = saved;
+  if (checkpoint !== undefined && !isDeepStrictEqual(checkpoint, semantic))
+    throw new Error(
+      "The worker result does not match its current checkpoint head.",
+    );
   return result;
 }
 

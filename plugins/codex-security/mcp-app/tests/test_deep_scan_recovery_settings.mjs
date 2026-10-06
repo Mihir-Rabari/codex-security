@@ -27,6 +27,7 @@ const bundle = await build({
 });
 const {
   captureDeepScanExecutionSettings: captureSettings,
+  retainDeepScanExecutionSettings: retainSettings,
   restoredDeepScanWorkerSettings: restoreSettings,
   loadDeepScanExecutionSettings: loadRecordedSettings,
 } = await import(
@@ -44,6 +45,42 @@ const loadSettings = (directory, original, ...rest) =>
   );
 const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
 try {
+  const retainedConfigPath = join(root, "retained-settings.toml");
+  const retainCurrent = () =>
+    retainSettings(
+      async () =>
+        await captureSettings(
+          {},
+          { filesystemDenies: [] },
+          {
+            CODEX_HOME: root,
+            CODEX_CLI_PATH: process.execPath,
+            CODEX_SECURITY_CONFIG_PATH: retainedConfigPath,
+          },
+        ),
+    );
+  const owningCall = retainCurrent();
+  await writeFile(retainedConfigPath, "broken = [");
+  await assert.rejects(owningCall({}));
+  await writeFile(
+    retainedConfigPath,
+    'service_tier="default"\nmodel_reasoning_summary="concise"\n',
+  );
+  const retainedCaptured = await owningCall({});
+  await writeFile(
+    retainedConfigPath,
+    'service_tier="fast"\nmodel_reasoning_summary="detailed"\n',
+  );
+  assert.deepEqual(
+    await owningCall({ coordinatorGeneration: 2 }),
+    retainedCaptured,
+  );
+  const independent = await retainCurrent()({});
+  assert.equal(independent.serviceTier, "fast");
+  assert.equal(independent.reasoningSummary, "detailed");
+  assert.equal(retainedCaptured.serviceTier, "default");
+  assert.equal(retainedCaptured.reasoningSummary, "concise");
+
   const settings = {
     codexPath: "/fixture/runtime/codex",
     codexHome: "/fixture/account",

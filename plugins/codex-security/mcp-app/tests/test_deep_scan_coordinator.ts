@@ -7,6 +7,7 @@ import type {
   DeepScanLogEvent,
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
+import { importSource } from "./import-module.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
@@ -45,6 +46,51 @@ import {
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
+
+async function testStaleDiscoveryCheckpointRetriesBeforeAcceptance() {
+  const { saveScanDraftCheckpoint } = await importSource(
+    new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+  );
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 2,
+  });
+  const executor = new FakeExecutor();
+  const runWorker = executor.run.bind(executor);
+  let stalePublished = false;
+  executor.run = async (request) => {
+    const result = await runWorker(request);
+    if (request.kind === "discovery") {
+      const draft = await readJson(request.workingDirectory, "result.json");
+      const stale = !stalePublished;
+      stalePublished = true;
+      await saveScanDraftCheckpoint(
+        { ...request.artifactContext!, repoRoot: fixture.run.targetPath },
+        stale
+          ? { ...draft, threatModel: { summary: "New worker checkpoint." } }
+          : draft,
+      );
+    }
+    return result;
+  };
+  const terminal = await runCoordinator(fixture, store, executor, {
+    random: () => 0,
+    retryDelaysMs: [1],
+  });
+  assert.equal(terminal?.status, "succeeded");
+  assert.deepEqual(
+    [...executor.discoveryAttempts.values()].sort(),
+    [1, 2],
+    "a stale result must be retried before acceptance without aborting another worker",
+  );
+  assert.equal(store.workers.size > 2, true);
+  assert.equal(store.failureMessages.length, 0);
+  const accepted = store.workerUpdates.filter(
+    (worker) => worker.kind === "discovery" && worker.status === "succeeded",
+  );
+  assert.equal(accepted.length, 2);
+}
 
 async function testCappedQueueAndSerialDedup() {
   const { fixture, store } = await coordinatorFixture({
@@ -3759,6 +3805,7 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
 }
 
 try {
+  await testStaleDiscoveryCheckpointRetriesBeforeAcceptance();
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();

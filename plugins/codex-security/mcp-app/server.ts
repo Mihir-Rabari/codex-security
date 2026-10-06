@@ -33,6 +33,7 @@ import {
 } from "./src/deep-scan/registry.js";
 import {
   captureDeepScanExecutionSettings,
+  retainDeepScanExecutionSettings,
   loadDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
   type DeepScanLegacySettingsContext,
@@ -1140,6 +1141,39 @@ export function createCodexSecurityServer(): McpServer {
           }
           const immediate = deepScanTerminalResult(begun);
           if (immediate) return { begun, immediate };
+          const executionSettings = retainDeepScanExecutionSettings(
+            async (run) =>
+              begun.startDisposition === "created"
+                ? await captureDeepScanExecutionSettings(
+                    run,
+                    parentSandbox,
+                    process.env,
+                    { threadId, startedAt: run.createdAt, created: true },
+                  )
+                : await loadDeepScanExecutionSettings(
+                    run.scanDir,
+                    run,
+                    async () => {
+                      const context = await runWorkbench([
+                        "get-scan",
+                        "--scan-id",
+                        run.scanId,
+                      ]);
+                      const recipe = context.recipe as
+                        | Pick<DeepScanLegacySettingsContext, "config">
+                        | undefined;
+                      const scan = context.scan as {
+                        executionAttribution?: {
+                          owner: DeepScanRunState["usageOwner"];
+                        };
+                      };
+                      return {
+                        config: recipe?.config,
+                        usageOwner: scan.executionAttribution?.owner,
+                      };
+                    },
+                  ),
+          );
           const started = await startOrJoinDeepScanCoordinator({
             run: begun,
             registry: deepScanCoordinators,
@@ -1148,36 +1182,7 @@ export function createCodexSecurityServer(): McpServer {
               prepareExecutor: async (run) =>
                 new CodexSdkWorkerExecutor({
                   ...restoredDeepScanWorkerSettings(
-                    begun.startDisposition === "created"
-                      ? await captureDeepScanExecutionSettings(
-                          run,
-                          parentSandbox,
-                          process.env,
-                          { threadId, startedAt: run.createdAt, created: true },
-                        )
-                      : await loadDeepScanExecutionSettings(
-                          run.scanDir,
-                          run,
-                          async () => {
-                            const context = await runWorkbench([
-                              "get-scan",
-                              "--scan-id",
-                              run.scanId,
-                            ]);
-                            const recipe = context.recipe as
-                              | Pick<DeepScanLegacySettingsContext, "config">
-                              | undefined;
-                            const scan = context.scan as {
-                              executionAttribution?: {
-                                owner: DeepScanRunState["usageOwner"];
-                              };
-                            };
-                            return {
-                              config: recipe?.config,
-                              usageOwner: scan.executionAttribution?.owner,
-                            };
-                          },
-                        ),
+                    await executionSettings(run),
                     parentSandbox,
                   ),
                   artifactContext: {
