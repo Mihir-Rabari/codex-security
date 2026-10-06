@@ -2857,6 +2857,72 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
   }
 }
 
+for (const layout of ["standard", "diff", "deep", "worker"] as const) {
+  for (const history of [false, true]) {
+    for (const reversed of [false, true]) {
+      test(`${layout}: assigned siblings survive ambiguous matches (history=${history}, reversed=${reversed})`, async (t) => {
+        const f = await fixture(t, layout);
+        const original = finding("Synthetic shared review", {
+          provenance: { source: "local_plugin", candidateId: "candidate-1" },
+        });
+        const first = {
+          ...structuredClone(original),
+          identity: { anchor: "shared-review", instance: "first" },
+        };
+        const sibling = history
+          ? {
+              ...structuredClone(original),
+              identity: { anchor: "shared-review", instance: "second" },
+            }
+          : {
+              ...structuredClone(original),
+              title: "Independent shared-candidate review",
+              summary: "Independent evidence remains active.",
+            };
+        await f.write({
+          ...f.draft(),
+          findings: reversed ? [sibling, first] : [first, sibling],
+        });
+        const revised = {
+          ...first,
+          summary: "Revised evidence.",
+          provenance: {
+            ...first.provenance,
+            ...(history ? { previousFindings: [original] } : {}),
+          },
+        };
+        let previous: unknown;
+        for (let replay = 0; replay < 2; replay++) {
+          await f.write({ ...f.draft(), findings: [revised] });
+          const saved = JSON.parse(
+            await readFile(
+              path.join(
+                f.root,
+                layout === "worker" ? "result.json" : "findings.json",
+              ),
+              "utf8",
+            ),
+          );
+          assert.equal(
+            saved.findings.length,
+            2,
+            `Active findings after replay ${replay}`,
+          );
+          assert.equal(saved.findings[0].summary, revised.summary);
+          const retained = saved.findings.find((row: FixtureFinding) =>
+            history
+              ? row.identity?.instance === "second"
+              : row.summary === sibling.summary,
+          );
+          assert.ok(retained, "Independent evidence remains an active finding");
+          if (previous) assert.deepEqual(saved.findings, previous);
+          previous = saved.findings;
+        }
+      });
+    }
+  }
+}
+
 for (const evidence of ["identical", "distinct", "reordered"] as const) {
   for (const includeResult of [false, true]) {
     test(`unchanged worker batch retains ${evidence} provenance (result=${includeResult})`, async (t) => {

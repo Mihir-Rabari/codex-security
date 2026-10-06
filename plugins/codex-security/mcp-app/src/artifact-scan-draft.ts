@@ -685,16 +685,18 @@ async function preserveScanDraft(
         }
       }
     }
+    const assignedFindings = new Set<JsonObject>();
     const unmatchedFindings = new Set(
-      source.findings.filter(
-        (previous) =>
-          !result.findings.some(
-            (current) =>
-              current.identity !== undefined &&
-              previous.identity !== undefined &&
-              sameSavedFinding(current, previous),
-          ),
-      ),
+      source.findings.filter((previous) => {
+        const matches = result.findings.filter(
+          (current) =>
+            current.identity !== undefined &&
+            previous.identity !== undefined &&
+            sameSavedFinding(current, previous),
+        );
+        for (const current of matches) assignedFindings.add(current);
+        return matches.length === 0;
+      }),
     );
     for (const finding of source.findings) {
       const candidateId = findingCandidateId(finding);
@@ -709,7 +711,14 @@ async function preserveScanDraft(
         disposition.finding ??= structuredClone(finding);
         continue;
       }
-      const matches = result.findings.filter((current) =>
+      const available = result.findings.filter(
+        (current) =>
+          !assignedFindings.has(current) ||
+          (current.identity !== undefined &&
+            finding.identity !== undefined &&
+            sameSavedFinding(current, finding)),
+      );
+      const matches = available.filter((current) =>
         sameSavedFinding(current, finding),
       );
       const containing = matches.filter((current) =>
@@ -720,13 +729,16 @@ async function preserveScanDraft(
       );
       if (
         matches.length === 1 &&
-        source.findings.filter(
-          (current) =>
-            (current === finding || unmatchedFindings.has(current)) &&
-            sameSavedFinding(current, matches[0]!),
-        ).length === 1
+        ((matches[0]!.identity !== undefined &&
+          finding.identity !== undefined) ||
+          source.findings.filter(
+            (current) =>
+              (current === finding || unmatchedFindings.has(current)) &&
+              sameSavedFinding(current, matches[0]!),
+          ).length === 1)
       ) {
         preserveFindingDetails(matches[0]!, finding);
+        assignedFindings.add(matches[0]!);
       } else if (
         containing.length === 1 &&
         source.findings.filter((previous) =>
@@ -735,6 +747,7 @@ async function preserveScanDraft(
       ) {
         // An unchanged sibling still owns its previously published identity.
         preserveFindingDetails(containing[0]!, finding);
+        assignedFindings.add(containing[0]!);
       } else if (
         revisions.length === 1 &&
         source.findings.filter((current) =>
@@ -742,15 +755,19 @@ async function preserveScanDraft(
         ).length === 1
       ) {
         preserveFindingDetails(revisions[0]!, finding);
+        assignedFindings.add(revisions[0]!);
       } else if (
-        !result.findings.some((current) => {
+        !available.some((current) => {
           const history = (current.provenance as JsonObject).previousFindings;
           return (
             Array.isArray(history) &&
             history.some((previous) => {
               if (
                 !isObject(previous) ||
-                !containsSavedFinding(previous, finding)
+                !containsSavedFinding(previous, finding) ||
+                source.findings.filter((sibling) =>
+                  containsSavedFinding(previous, sibling),
+                ).length !== 1
               )
                 return false;
               preserveFindingDetails(previous, finding);
@@ -760,7 +777,9 @@ async function preserveScanDraft(
         }) &&
         containing.length === 0
       ) {
-        result.findings.push(structuredClone(finding));
+        const retained = structuredClone(finding);
+        result.findings.push(retained);
+        assignedFindings.add(retained);
       }
     }
     const resolvedIds = new Set(
