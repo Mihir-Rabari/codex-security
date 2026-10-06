@@ -1050,7 +1050,7 @@ test.each([
     const release = await lockExecutionConfiguration(home, {
       model: "selected-model",
     });
-    expect(parse(await readFile(path, "utf8")).model).toBe("selected-model");
+    expect(parse(await readFile(path, "utf8"))["model"]).toBe("selected-model");
     await release();
     await release();
     if (original === undefined) {
