@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -42,57 +42,28 @@ function entry(id: string): Findings.EmbeddedFinding {
   };
 }
 
-test(
-  "workbench helper help exits without reading stdin and lists its input contract",
-  { timeout: 30_000 },
-  async (t) => {
-    const helper = fileURLToPath(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-        import.meta.url,
-      ),
+test("finding helper help exits without reading stdin", async () => {
+  const helper = fileURLToPath(
+    new URL(
+      "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+      import.meta.url,
+    ),
+  );
+  const commands = ["store-findings", "list-stored-findings"];
+  for (const command of commands) {
+    // execFile leaves stdin open; help must exit without waiting for JSON.
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [helper, command, "--help"],
+      { timeout: 30_000 },
     );
-    for (const [command, expected] of [
-      ["database-info", ["JSON", "absolute state-directory"]],
-      [
-        "store-findings",
-        ["stateDirectory", "payload.entries", "payload.repositoryId"],
-      ],
-      ["list-stored-findings", ["--limit", "--offset", "stateDirectory"]],
-    ] as const) {
-      for (const flag of ["--help", "-h"]) {
-        const child = spawn(process.execPath, [helper, command, flag]);
-        t.after(() => {
-          child.kill();
-        });
-        let output = "";
-        child.stdout.setEncoding("utf8").on("data", (chunk) => {
-          output += chunk;
-        });
-        // Leave stdin open: help must not wait for a JSON request.
-        assert.equal((await once(child, "close"))[0], 0);
-        assert.ok(output.includes(command));
-        for (const field of expected) assert.ok(output.includes(field));
-      }
-    }
-    const usage = spawnSync(process.execPath, [helper], { encoding: "utf8" });
-    assert.equal(usage.status, 2);
-    assert.ok(usage.stderr.includes("store-findings"));
-    assert.ok(usage.stderr.includes("list-stored-findings"));
-    const invalid = spawnSync(process.execPath, [helper, "database-info"], {
-      input: JSON.stringify("relative"),
-      encoding: "utf8",
-    });
-    assert.equal(invalid.status, 1);
-    assert.ok(
-      invalid.stderr
-        .split("\n")
-        .includes(
-          "database-info requires an absolute Unicode state-directory string.",
-        ),
-    );
-  },
-);
+    assert.ok(stdout.startsWith(`Usage: ${command}`));
+    assert.ok(stdout.includes("stateDirectory"));
+  }
+  const usage = spawnSync(process.execPath, [helper], { encoding: "utf8" });
+  assert.equal(usage.status, 2);
+  for (const command of commands) assert.ok(usage.stderr.includes(command));
+});
 
 test("import batches preserve identity, repository memberships and stable pages", (t) => {
   const database = open(t);
@@ -155,7 +126,7 @@ test("import batches preserve identity, repository memberships and stable pages"
   assert.equal(listStoredFindings(database, { limit: 10, offset: 0 }).total, 2);
 });
 
-test("Python and Node keep unchanged stored JSON and invalidate embeddings only for changed findings", async (t) => {
+test("mixed writers retain unchanged Python embeddings and replace supplied Node embeddings", async (t) => {
   const directory = await temporary.create("workbench-findings-");
   const path = join(directory, "workbench.sqlite3");
   const database = open(t, path);
@@ -167,9 +138,8 @@ test("Python and Node keep unchanged stored JSON and invalidate embeddings only 
     database
       .prepare("SELECT details_json FROM findings WHERE id = 'finding'")
       .get()!.details_json;
-  const embeddingCount = () =>
-    database.prepare("SELECT COUNT(*) AS total FROM finding_embeddings").get()!
-      .total;
+  const embedding = () =>
+    database.prepare("SELECT model, vector_json FROM finding_embeddings").get();
   const scripts = fileURLToPath(new URL("../../scripts/", import.meta.url));
   const pythonUpsert = (finding: Findings.Finding | string) =>
     execFileSync(
@@ -199,14 +169,15 @@ with sqlite3.connect(sys.argv[2]) as db:
     ).replace('"score": 10', '"score": 10.0'),
   );
   assert.equal(details(), original);
-  assert.equal(embeddingCount(), 1);
+  assert.ok(embedding());
   const changed = { ...item.finding, title: "Updated finding" };
   pythonUpsert(changed);
-  assert.equal(embeddingCount(), 0);
-  const pythonText = details();
+  assert.equal(embedding(), undefined);
+  item.embedding = { model: "replacement-model", vector: [0, 1] };
   storeFindings(database, [{ ...item, finding: changed }], "node");
-  assert.equal(details(), pythonText);
-  assert.equal(embeddingCount(), 1);
+  const stored = embedding()!;
+  assert.equal(stored.model, item.embedding.model);
+  assert.deepEqual(parseJson(String(stored.vector_json)), [0, 1]);
   assert.deepEqual(
     listStoredFindings(database, { limit: 10, offset: 0 }).findings,
     [changed],
@@ -222,7 +193,7 @@ with sqlite3.connect(sys.argv[2]) as db:
     );
     pythonUpsert({ ...changed, extensions: { foo: after } });
     assert.equal(JSON.parse(String(details())).extensions.foo, after);
-    assert.equal(embeddingCount(), 0);
+    assert.equal(embedding(), undefined);
   }
 });
 

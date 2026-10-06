@@ -42,7 +42,7 @@ const workbenchUsage: Record<string, string> = {
   "store-findings":
     "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
   "list-stored-findings":
-    "Usage: list-stored-findings --limit N --offset N\nReads a JSON object from stdin with an absolute stateDirectory. Limit must be positive and offset non-negative.",
+    "Usage: list-stored-findings\nReads a JSON object from stdin with an absolute stateDirectory, positive payload.limit and non-negative payload.offset.",
 };
 if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
@@ -71,29 +71,21 @@ if (command === "resolve-security-md") {
   process.exitCode = bindRepoScopesCommand(args, posixHome);
 } else if (Object.hasOwn(workbenchUsage, command)) {
   void (async () => {
-    if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    const { values } = parseArgs({
+      args,
+      options: { help: { type: "boolean", short: "h" } },
+    });
+    if (values.help) {
       console.log(workbenchUsage[command]);
       return;
     }
     let result: unknown;
     if (command === "database-info") {
-      const { values } = parseArgs({
-        args,
-        options: { help: { type: "boolean", short: "h" } },
-      });
-      if (values.help) {
-        console.log(workbenchUsage[command]);
-        return;
-      }
       const { databaseInfo } = await import("./src/workbench/database");
       result = await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0))));
     } else {
       const { findingsCommand } = await import("./src/workbench/commands");
-      result = await findingsCommand(
-        command,
-        args,
-        decodeUtf8(readFileSync(0)),
-      );
+      result = await findingsCommand(command, decodeUtf8(readFileSync(0)));
     }
     console.log(
       stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>

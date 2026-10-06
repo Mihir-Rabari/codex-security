@@ -1,5 +1,4 @@
 import type { DatabaseSync } from "node:sqlite";
-import { isDeepStrictEqual } from "node:util";
 import { parseJson, stringifyJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
 
@@ -56,18 +55,15 @@ export function storeFindings(
   try {
     return transaction(database, "BEGIN IMMEDIATE", () => {
       requireSqliteText([timestamp, repositoryId]);
-      const existing = database.prepare(
-        `SELECT details_json, fingerprint = ? AND rule_id = ? AND identity_anchor = ?
-          AND identity_instance IS ? AS same_identity
-        FROM findings WHERE id = ?`,
-      );
       const upsert = database.prepare(
         `INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, identity_instance,
           details_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET fingerprint = excluded.fingerprint,
-          rule_id = excluded.rule_id, identity_anchor = excluded.identity_anchor,
-          identity_instance = excluded.identity_instance, details_json = excluded.details_json,
-          updated_at = excluded.updated_at`,
+        ON CONFLICT(id) DO UPDATE SET details_json = excluded.details_json,
+          updated_at = excluded.updated_at
+        WHERE findings.fingerprint = excluded.fingerprint
+          AND findings.rule_id = excluded.rule_id
+          AND findings.identity_anchor = excluded.identity_anchor
+          AND findings.identity_instance IS excluded.identity_instance`,
       );
       const embedding = database.prepare(
         `INSERT INTO finding_embeddings (finding_id, model, vector_json) VALUES (?, ?, ?)
@@ -86,35 +82,21 @@ export function storeFindings(
           finding.identity.instance,
           entry.embedding.model,
         ]);
-        const current = existing.get(
+        requireFiniteNumbers([finding, entry.embedding.vector]);
+        const { changes } = upsert.run(
+          finding.findingId,
           finding.fingerprints.primary,
           finding.ruleId,
           finding.identity.anchor,
           finding.identity.instance ?? null,
-          finding.findingId,
+          stringifyJson(finding, 0),
+          timestamp,
+          timestamp,
         );
-        if (current && !current.same_identity) {
+        if (changes === 0)
           throw new FindingConflict(
             "The stored finding identity cannot be replaced.",
           );
-        }
-        requireFiniteNumbers([finding, entry.embedding.vector]);
-        // Keep unchanged JSON text so mixed-runtime writes do not invalidate embeddings.
-        const details =
-          typeof current?.details_json === "string" &&
-          isDeepStrictEqual(parseJson(current.details_json), finding)
-            ? current.details_json
-            : stringifyJson(finding, 0);
-        upsert.run(
-          finding.findingId,
-          finding.fingerprints.primary,
-          finding.ruleId,
-          finding.identity.anchor,
-          finding.identity.instance ?? null,
-          details,
-          timestamp,
-          timestamp,
-        );
         if (repositoryId !== undefined)
           repository.run(repositoryId, finding.findingId);
         embedding.run(

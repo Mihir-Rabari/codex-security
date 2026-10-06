@@ -1,4 +1,3 @@
-import { parseArgs } from "node:util";
 import { parseJson } from "../helpers/json";
 import { openWorkbenchDatabase, workbenchDatabasePath } from "./database";
 import {
@@ -9,46 +8,42 @@ import {
 
 export async function findingsCommand(
   command: string,
-  args: string[],
   input: string,
 ): Promise<unknown> {
   const request = parseJson(input) as {
     stateDirectory: string;
-    payload: { entries: EmbeddedFinding[]; repositoryId?: string };
+    payload: unknown;
   };
-  const { values } = parseArgs({
-    args,
-    options:
-      command === "list-stored-findings"
-        ? { limit: { type: "string" }, offset: { type: "string" } }
-        : {},
-  });
   const { stateDirectory, payload } = request;
-  const limit = Number(values.limit);
-  const offset = Number(values.offset);
+  const page = payload as { limit: number; offset: number };
   if (
     command === "list-stored-findings" &&
-    (!Number.isSafeInteger(limit) ||
-      limit <= 0 ||
-      !Number.isSafeInteger(offset) ||
-      offset < 0)
+    (!Number.isSafeInteger(page.limit) ||
+      page.limit <= 0 ||
+      !Number.isSafeInteger(page.offset) ||
+      page.offset < 0)
   )
     throw new Error(
-      "--limit must be a positive integer and --offset a non-negative integer.",
+      "limit must be a positive integer and offset a non-negative integer.",
     );
   const database = await openWorkbenchDatabase(
     workbenchDatabasePath(stateDirectory),
     { deferred: command === "list-stored-findings" },
   );
   try {
-    if (command === "store-findings")
+    if (command === "store-findings") {
+      const { entries, repositoryId } = payload as {
+        entries: EmbeddedFinding[];
+        repositoryId?: string;
+      };
       return storeFindings(
         database,
-        payload.entries,
+        entries,
         new Date().toISOString(),
-        payload.repositoryId,
+        repositoryId,
       );
-    return listStoredFindings(database, { limit, offset });
+    }
+    return listStoredFindings(database, page);
   } finally {
     database.close();
   }
