@@ -30,8 +30,7 @@ const sorts = {
   activity: "records.updatedAt",
   newest: "records.createdAt",
   title: "dashboard_lower(json_quote(records.title))",
-  repository:
-    "dashboard_lower(json_quote(repository_label(records.repositoryIds)))",
+  repository: "repository_label(records.repositoryIds)",
   severity:
     "CASE records.severity WHEN 'informational' THEN 0 WHEN 'low' THEN 1 " +
     "WHEN 'medium' THEN 2 WHEN 'high' THEN 3 WHEN 'critical' THEN 4 END",
@@ -53,8 +52,8 @@ function compare(left: string, right: string) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function repositoryIds(value: string): string[] {
-  return (JSON.parse(value) as string[]).sort(
+function repositoryIds(value: string[]): string[] {
+  return value.sort(
     (left, right) =>
       compare(left.toLowerCase(), right.toLowerCase()) || compare(left, right),
   );
@@ -63,11 +62,10 @@ function repositoryIds(value: string): string[] {
 function item(
   row: Record<string, SQLOutputValue>,
 ): Record<string, SQLOutputValue | string[]> {
+  const value = JSON.parse(row.item as string);
   return {
-    ...row,
-    id: JSON.parse(row.id as string),
-    title: JSON.parse(row.title as string),
-    repositoryIds: repositoryIds(row.repositoryIds as string),
+    ...value,
+    repositoryIds: repositoryIds(value.repositoryIds),
   };
 }
 
@@ -90,16 +88,14 @@ function detail(
       }
     : {
         item: selectedItem,
-        group: {
-          groupId: id,
-          createdAt: selected.createdAt,
-          findingIds: database
+        group: JSON.parse(
+          database
             .prepare(
-              "SELECT json_quote(finding_id) AS finding_id FROM finding_dedupe_group_members WHERE group_id = ? ORDER BY finding_dedupe_group_members.finding_id",
+              `SELECT json_object('groupId', ?, 'createdAt', ?, 'findingIds', json_group_array(finding_id)) AS value
+               FROM (SELECT finding_id FROM finding_dedupe_group_members WHERE group_id = ? ORDER BY finding_id)`,
             )
-            .all(id)
-            .map((row) => JSON.parse(row.finding_id as string)),
-        },
+            .get(id, selectedItem.createdAt as string, id)!.value as string,
+        ),
       };
 }
 
@@ -111,16 +107,18 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
     (JSON.parse(value as string) as string).toLowerCase(),
   );
   database.function("repository_label", { deterministic: true }, (value) =>
-    repositoryIds(value as string).join(", "),
+    repositoryIds(JSON.parse(value as string))
+      .join(", ")
+      .toLowerCase(),
   );
   const clauses: string[] = [];
   const values: string[] = [];
   if (query.query) {
     const columns = ["id", "title", "repositoryIds"];
     clauses.push(
-      `(${columns.map((column) => `instr(dashboard_lower(json_quote(COALESCE(records.${column}, ''))), dashboard_lower(json_quote(?))) > 0`).join(" OR ")})`,
+      `(${columns.map((column) => `instr(dashboard_lower(json_quote(COALESCE(records.${column}, ''))), ?) > 0`).join(" OR ")})`,
     );
-    values.push(...columns.map(() => query.query!));
+    values.push(...columns.map(() => query.query!.toLowerCase()));
   }
   if (query.repository) {
     clauses.push(
@@ -135,18 +133,18 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
     order += `, ${sorts.severity} DESC`;
   order += ", records.id";
   const source = records[query.view];
-  const projection = `json_quote(records.id) AS id, json_quote(records.title) AS title,
-    repositoryIds, createdAt, updatedAt, ${query.view === "findings" ? "severity" : "memberCount"}`;
+  const field = query.view === "findings" ? "severity" : "memberCount";
+  const projection = `json_object('id', records.id, 'title', records.title,
+    'repositoryIds', json(repositoryIds), 'createdAt', createdAt, 'updatedAt', updatedAt,
+    '${field}', ${field}) AS item`;
   return transaction(database, "BEGIN", () => {
     const repositories = database
       .prepare(
-        "SELECT DISTINCT json_quote(repository_id) AS id FROM finding_repositories ORDER BY repository_id",
+        `SELECT json_object('id', repository_id, 'label', repository_id) AS value
+         FROM (SELECT DISTINCT repository_id FROM finding_repositories ORDER BY repository_id)`,
       )
       .all()
-      .map((row) => {
-        const id = JSON.parse(row.id as string) as string;
-        return { id, label: id };
-      });
+      .map((row) => JSON.parse(row.value as string));
     const total = database
       .prepare(`SELECT COUNT(*) AS count FROM (${source}) AS records ${where}`)
       .get(...values)!.count as number;
@@ -165,14 +163,12 @@ export function dashboard(database: DatabaseSync, query: DashboardQuery) {
     const nextOffset = query.offset + rows.length;
     return {
       overview: {
-        findings: database
+        ...database
           .prepare(
-            "SELECT COUNT(*) AS count FROM findings WHERE details_json IS NOT NULL",
+            `SELECT (SELECT COUNT(*) FROM findings WHERE details_json IS NOT NULL) AS findings,
+              (SELECT COUNT(*) FROM finding_dedupe_groups) AS groups`,
           )
-          .get()!.count,
-        groups: database
-          .prepare("SELECT COUNT(*) AS count FROM finding_dedupe_groups")
-          .get()!.count,
+          .get()!,
       },
       repositories,
       items: rows.map(item),

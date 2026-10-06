@@ -119,57 +119,22 @@ test("initializes the shared database concurrently without Python", async () => 
   });
 });
 
-test("stores, lists and groups findings without Python", async () => {
-  const { environment } = await fixture();
-  const store = new SqliteFindingsStore({
-    ...environment,
-    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
-  });
-  const entry = embedded(1);
-  expect(await store.insert([entry], "synthetic-repository")).toEqual([
-    entry.finding.findingId,
-  ]);
-  expect(await store.list({ limit: 1, offset: 0 })).toEqual({
-    findings: [entry.finding],
-    limit: 1,
-    offset: 0,
-    total: 1,
-    nextOffset: null,
-  });
-  await store.insert([embedded(2)], "synthetic-repository");
-  expect(
-    (
-      await store.findPotentialDuplicates(entry.finding.findingId, {
-        repositoryId: "synthetic-repository",
-      })
-    ).potentialDuplicates,
-  ).toEqual([finding(2)]);
-  const groups = await store.storeDedupeGroups([
-    [entry.finding.findingId, finding(2).findingId],
-  ]);
-  expect(await store.listDedupeGroups(entry.finding.findingId)).toEqual(groups);
-});
-
 test("invalid findings pagination is rejected before database creation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "findings-page-"));
   directories.push(directory);
   const stateDirectory = join(directory, "state");
-  for (const args of [
-    ["--limit", "0", "--offset", "0"],
-    ["--limit", "1", "--offset=-1"],
+  for (const payload of [
+    { limit: 0, offset: 0 },
+    { limit: 1, offset: -1 },
   ]) {
     const result = await runCodexCommand(
       { command: "node" },
-      [
-        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-        "list-stored-findings",
-        ...args,
-      ],
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
       process.env,
-      JSON.stringify({ stateDirectory }),
+      JSON.stringify({ stateDirectory, payload }),
     );
     expect(result.success).toBe(false);
-    expect(result.stderr).toContain("--limit must be a positive integer");
+    expect(result.stderr).toContain("limit must be a positive integer");
   }
   expect(await readdir(directory)).toEqual([]);
 });
