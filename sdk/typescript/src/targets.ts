@@ -30,7 +30,7 @@ const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_COMMON_DIR",
   "GIT_REPLACE_REF_BASE",
 ]);
-const GIT_REPOSITORY_ENVIRONMENT = new Set([
+export const GIT_REPOSITORY_ENVIRONMENT = new Set([
   ...UNSUPPORTED_GIT_ENVIRONMENT,
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
@@ -154,9 +154,13 @@ function requirePortableWindowsRepositoryPath(path: string): void {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean } = {},
+  options: { requireIfPresent?: boolean; objectDirectory?: string } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
+  const objectEnvironment =
+    options.objectDirectory === undefined
+      ? {}
+      : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -168,6 +172,7 @@ export async function enclosingGitWorktreeRoot(
           repository,
           ["rev-parse", "--is-inside-git-dir"],
           signal,
+          objectEnvironment,
         )) === "true"
       ) {
         throw new InvalidTargetError(
@@ -180,6 +185,7 @@ export async function enclosingGitWorktreeRoot(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
+      objectEnvironment,
     );
     canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
@@ -205,7 +211,11 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal);
+    await requireGitWorktreeBinding(
+      canonicalRoot,
+      signal,
+      options.objectDirectory,
+    );
   return canonicalRoot;
 }
 
@@ -299,11 +309,25 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean } = {},
+  options: { includeLocalObjects?: boolean; objectDirectory?: string } = {},
 ): Promise<[string, string, ...string[]]> {
+  const environment =
+    options.objectDirectory === undefined
+      ? {}
+      : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    gitOutput(
+      repository,
+      ["rev-parse", "--absolute-git-dir"],
+      signal,
+      environment,
+    ),
+    gitOutput(
+      repository,
+      ["rev-parse", "--git-common-dir"],
+      signal,
+      environment,
+    ),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -413,12 +437,14 @@ export async function gitObjectDirectories(
 async function requireGitWorktreeBinding(
   repository: string,
   signal?: AbortSignal,
+  objectDirectory?: string,
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
+      { objectDirectory },
     );
     if (
       [directory, commonDirectory].every(
@@ -433,6 +459,9 @@ async function requireGitWorktreeBinding(
           repository,
           ["config", "--get", "core.worktree"],
           signal,
+          objectDirectory === undefined
+            ? {}
+            : { GIT_OBJECT_DIRECTORY: objectDirectory },
         )
       )
         return;

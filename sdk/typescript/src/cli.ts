@@ -31,6 +31,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -240,7 +241,10 @@ import {
 import {
   abortable,
   DiffTarget,
+  enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
+  GIT_REPOSITORY_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -7280,7 +7284,14 @@ async function changedPatchFiles(
   for (const [directory, tree] of bases) {
     const head = heads.get(directory);
     if (head === undefined) continue;
-    const output = await dependencies.runRepositoryCommand(
+    const gitDependencies = directory
+      ? await nestedPatchGitDependencies(
+          repository,
+          dependencies,
+          join(repository, directory),
+        )
+      : dependencies;
+    const output = await gitDependencies.runRepositoryCommand(
       "git",
       [
         "--literal-pathspecs",
@@ -7330,9 +7341,30 @@ async function snapshotGitPatchState(
   const trees = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
     const checkout = join(repository, directory);
-    const tree = await snapshotPatchTree(checkout, dependencies);
+    if (directory) {
+      if (
+        isOutsidePath(
+          relative(await realpath(repository), await realpath(checkout)),
+        )
+      ) {
+        throw new CodexSecurityError(
+          "Nested Git checkout is outside the selected repository.",
+        );
+      }
+      await enclosingGitWorktreeRoot(checkout, undefined, {
+        requireIfPresent: true,
+        objectDirectory: await configuredPatchObjectDirectory(
+          repository,
+          dependencies,
+        ),
+      });
+    }
+    const gitDependencies = directory
+      ? await nestedPatchGitDependencies(repository, dependencies, checkout)
+      : dependencies;
+    const tree = await snapshotPatchTree(checkout, gitDependencies);
     trees.set(directory, tree);
-    const entries = await dependencies.runRepositoryCommand(
+    const entries = await gitDependencies.runRepositoryCommand(
       "git",
       ["ls-tree", "-r", "-z", tree],
       checkout,
@@ -7347,6 +7379,117 @@ async function snapshotGitPatchState(
   };
   await visit("");
   return { trees };
+}
+
+async function configuredPatchObjectDirectory(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  return environmentValue(dependencies.environment, "GIT_OBJECT_DIRECTORY") ===
+    undefined
+    ? undefined
+    : (
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+          repository,
+          { trim: false },
+        )
+      ).replace(/\n$/u, "");
+}
+
+async function nestedPatchGitDependencies(
+  repository: string,
+  dependencies: CliDependencies,
+  checkout: string,
+): Promise<CliDependencies> {
+  const root =
+    (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
+  // Resolve "." in Git's actual setup directory, including an outside invocation.
+  const directory = (
+    await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+      repository,
+      { trim: false, environment: { GIT_OBJECT_DIRECTORY: "." } },
+    )
+  ).replace(/\n$/u, "");
+  const objectDirectory = await configuredPatchObjectDirectory(
+    repository,
+    dependencies,
+  );
+  let alternateObjects: string | undefined;
+  const nested: CliDependencies = {
+    ...dependencies,
+    runRepositoryCommand: (command, args, checkout, options) =>
+      dependencies.runRepositoryCommand(
+        command,
+        [
+          "-C",
+          directory,
+          "--git-dir",
+          join(checkout, ".git"),
+          "--work-tree",
+          checkout,
+          ...args,
+        ],
+        root,
+        {
+          ...options,
+          environment: {
+            ...Object.fromEntries(
+              [...GIT_REPOSITORY_ENVIRONMENT]
+                .filter(
+                  (name) =>
+                    name !== "GIT_ALTERNATE_OBJECT_DIRECTORIES" &&
+                    name !== "GIT_NO_REPLACE_OBJECTS" &&
+                    name !== "GIT_REPLACE_REF_BASE",
+                )
+                .map((name) => [name, undefined]),
+            ),
+            GIT_OBJECT_DIRECTORY: objectDirectory,
+            ...(alternateObjects === undefined
+              ? {}
+              : { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }),
+            ...options?.environment,
+          },
+        },
+      ),
+  };
+  if (objectDirectory !== undefined) {
+    const commonDirectory = (
+      await nested.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        checkout,
+        { trim: false, environment: { GIT_OBJECT_DIRECTORY: objectDirectory } },
+      )
+    ).replace(/\n$/u, "");
+    const localObjects = join(commonDirectory, "objects");
+    if (existsSync(localObjects)) {
+      // Retain local reads while writing to the caller's configured primary pool.
+      // Git's alternate list accepts C-quoted paths, including its delimiter.
+      alternateObjects = [
+        `"${localObjects.replace(
+          /[\\"\u0000-\u001f\u007f]/gu,
+          (character) =>
+            `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
+        )}"`,
+        ...(environmentValue(
+          dependencies.environment,
+          "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ) === undefined
+          ? []
+          : [
+              environmentValue(
+                dependencies.environment,
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+              )!,
+            ]),
+      ].join(delimiter);
+    }
+  }
+  return nested;
 }
 
 // Literal patch inputs also work in directories without Git metadata.
