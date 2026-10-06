@@ -7424,12 +7424,15 @@ async function preparePatchPublication(
     const ignored = await dependencies.runRepositoryCommand(
       "git",
       [
+        "--no-literal-pathspecs",
         "ls-files",
         "--full-name",
         "--others",
         "--ignored",
         "--exclude-standard",
         "-z",
+        "--",
+        ":/",
       ],
       root,
       { trim: false, maxBuffer: Infinity },
@@ -7687,6 +7690,7 @@ async function createPatchPullRequest(
       "git",
       [
         "diff",
+        "--no-relative",
         "--name-status",
         "--find-renames",
         "--find-copies-harder",
@@ -7789,6 +7793,7 @@ async function createPatchPullRequest(
       "git",
       [
         "diff",
+        "--no-relative",
         "--name-only",
         "--no-renames",
         "--diff-filter=AMT",
