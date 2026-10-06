@@ -1257,6 +1257,8 @@ process.stdout.write(JSON.stringify({
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
+      ["invalid.api.key", "Authentication failed"],
+      ["token.expired", "Authentication failed"],
       [
         "403 model access denied /private/repository",
         "selected model is unavailable",

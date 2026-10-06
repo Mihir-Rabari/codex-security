@@ -496,6 +496,7 @@ test.each([
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
   "Request refusal due to the safety policy.",
+  "Request was refused because of the safety policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
   "I'm not able to help with that.",
