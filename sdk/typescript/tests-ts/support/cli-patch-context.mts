@@ -103,9 +103,9 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
             return "https://gitlab.com/example/repository.git";
           if (
             args[0] === "ls-remote" &&
-            args[2]?.startsWith("https://gitlab.com/")
+            args[3]?.startsWith("https://gitlab.com/")
           )
-            args = [...args.slice(0, 2), remote, ...args.slice(3)];
+            args = [...args.slice(0, 3), remote, ...args.slice(4)];
           const result = git(
             args,
             options?.directory ?? cwd,
