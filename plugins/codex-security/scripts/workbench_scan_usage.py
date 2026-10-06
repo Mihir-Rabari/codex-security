@@ -71,15 +71,11 @@ def reconcile_completed_scan_cost(
             allow_nan=False,
         )
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def collect_scan_usage(
@@ -117,16 +113,23 @@ def collect_scan_usage(
     current_database = _codex_state_database()
     worker_codex_home = None
     if scan["mode"] == "deep":
-        # Deep orchestration imports the owner-capture helper from this module;
-        # its settings reader is available once completion starts.
-        from deep_scan_workbench import read_deep_scan_execution_settings
+        # Only the workbench-bound original settings select a worker log home.
+        from deep_scan_workbench import (
+            recorded_deep_scan_execution_settings,
+            validate_deep_scan_execution_settings,
+        )
 
-        try:
-            settings = read_deep_scan_execution_settings(Path(scan["scan_dir"]))
-            worker_codex_home = Path(settings["codexHome"])
-        except SystemExit:
-            # Legacy scans may have no recorded home. Keep usage best effort.
-            pass
+        run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+        saved = recorded_deep_scan_execution_settings(run) if run is not None else None
+        if saved is not None:
+            try:
+                settings = validate_deep_scan_execution_settings(saved)
+                worker_codex_home = Path(settings["codexHome"])
+            except SystemExit:
+                # Legacy scans may have no recorded home. Keep usage best effort.
+                pass
     groups = [(current_database, roots)]
     worker_roots: set[str] = set()
     if worker_codex_home is not None:
@@ -350,13 +353,11 @@ def _scan_root_thread_ids(
                 (scan["id"], scan["id"]),
             )
         )
-    roots: list[str] = []
-    seen: set[str] = set()
+    roots: dict[str, None] = {}
     for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip() and candidate not in seen:
-            roots.append(candidate)
-            seen.add(candidate)
-    return roots
+        if isinstance(candidate, str) and candidate.strip():
+            roots[candidate] = None
+    return list(roots)
 
 
 def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
@@ -439,6 +440,20 @@ def scan_execution_attribution(
     executions = _scan_execution_thread_ids(connection, scan)
     if owner.get("dedicated") and owner.get("threadId") not in executions:
         executions.append(owner["threadId"])
+    from deep_scan_workbench import (
+        DEEP_SCAN_WORKFLOW_VERSION,
+        recorded_deep_scan_execution_settings,
+        validate_deep_scan_execution_settings,
+    )
+
+    saved_settings = recorded_deep_scan_execution_settings(run)
+    worker_home = {}
+    if saved_settings is not None:
+        worker_home["workerCodexHome"] = validate_deep_scan_execution_settings(saved_settings)[
+            "codexHome"
+        ]
+    elif run["workflow_version"] == DEEP_SCAN_WORKFLOW_VERSION:
+        worker_home["workerCodexHome"] = None
     return {
         "formatVersion": 1,
         **({"legacy": True} if legacy else {}),
@@ -446,6 +461,7 @@ def scan_execution_attribution(
         "owner": owner,
         "startedAt": scan["started_at"],
         "completedAt": scan["completed_at"],
+        **worker_home,
     }
 
 

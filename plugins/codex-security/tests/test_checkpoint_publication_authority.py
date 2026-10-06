@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from argparse import Namespace
 
@@ -163,12 +164,15 @@ def test_recovery_honors_rejection_committed_before_result_replacement(
     }
     checkpoint = write_checkpoint(result_path.parent / "checkpoints", rejected)
     if has_head:
-        (result_path.parent / "checkpoint-head.json").write_text(
-            json.dumps({"checkpoint": checkpoint.name})
-        )
+        head = result_path.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        observed = result_path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(head, ns=(observed, observed))
+        assert head.stat().st_mtime_ns > result_path.stat().st_mtime_ns
     saved_bytes = {path: path.read_bytes() for path in (result_path, old_checkpoint, checkpoint)}
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
@@ -222,10 +226,16 @@ def test_newer_checkpoint_disposition_precedes_older_archived_head(
     old = result.parent / "attempts" / "attempt-2"
     save_disposition(scan, old, "rejected" if disposition == "reported" else "reported")
     current = result.parent / "attempts" / "attempt-10" if archived else result.parent
+    if not archived:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET attempt = 3 WHERE scan_id = ?", (scan.scan_id,)
+            )
     draft = save_disposition(scan, current, disposition)
     (current / "result.json").write_text(json.dumps(draft))
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
@@ -245,7 +255,12 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     previous = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(previous))
     save_disposition(scan, result.parent, "rejected")
-    checkpoint_name = json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
+    # The rejected head was committed after the result, before its replacement failed.
+    head = result.parent / "checkpoint-head.json"
+    observed = result.stat().st_mtime_ns + 1_000_000_000
+    os.utime(head, ns=(observed, observed))
+    assert head.stat().st_mtime_ns > result.stat().st_mtime_ns
+    checkpoint_name = json.loads(head.read_text())["checkpoint"]
     directory = result.parent.relative_to(scan.scan_dir).as_posix()
     expected_heads = {directory: f"{directory}/checkpoints/{checkpoint_name}"}
     original_outputs = {
@@ -273,7 +288,8 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
 
     with monkeypatch.context() as patch:
         patch.setattr(finalize_scan_contract, "write_scan_local_bytes", fail_coverage_write)
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
@@ -304,7 +320,8 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     else:
         head.write_text(json.dumps({"checkpoint": "a" * 64 + ".json"}))
 
-    replayed = workbench_api["preserve_scan_results"](
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
@@ -340,18 +357,26 @@ def test_explicit_recovery_observes_head_change_between_existing_checkpoints(
     previous = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(previous))
     save_disposition(scan, result.parent, "rejected")
-    stopped = workbench_api["fail_scan"](
+    head = result.parent / "checkpoint-head.json"
+    rejected_at = result.stat().st_mtime_ns + 1_000_000_000
+    os.utime(head, ns=(rejected_at, rejected_at))
+    assert head.stat().st_mtime_ns > result.stat().st_mtime_ns
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
     assert stopped["findingCount"] == 0
 
     save_disposition(scan, result.parent, "reported")
+    reported_at = rejected_at + 1_000_000_000
+    os.utime(head, ns=(reported_at, reported_at))
+    assert head.stat().st_mtime_ns > rejected_at
 
     context = workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]
     assert context["resultsRecoveryNeeded"] is True
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == 1
     assert recovered["resultsRecoveryNeeded"] is False
@@ -377,7 +402,8 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
             "_write_prepared_scan_finalization",
             fail_before_publication,
         )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
@@ -389,7 +415,8 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
         )
     save_disposition(scan, result.parent, "rejected")
 
-    replayed = workbench_api["preserve_scan_results"](
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None

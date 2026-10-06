@@ -1,18 +1,23 @@
-import { existsSync, realpathSync } from "node:fs";
+import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
 import { decodePosixBytes } from "./src/helpers/posix-path";
 import { windowsBinding } from "./src/native";
+import { normalizeCandidatesCommand } from "./src/helpers/normalize-candidates";
 
 // Importing the bundled helper from the SDK does not invoke its CLI adapter.
-const entryPath = import.meta.url.startsWith("file:") ? fileURLToPath(import.meta.url) : import.meta.url;
+const entryPath = import.meta.url.startsWith("file:")
+  ? fileURLToPath(import.meta.url)
+  : import.meta.url;
 const invokedPath = process.argv[1];
 if (
-  invokedPath && existsSync(invokedPath)
-  && realpathSync(invokedPath) === realpathSync(entryPath)
-) runHelper();
+  invokedPath &&
+  existsSync(invokedPath) &&
+  realpathSync(invokedPath) === realpathSync(entryPath)
+)
+  runHelper();
 
 function runHelper(): void {
   let commandLine = process.argv.slice(2);
@@ -27,8 +32,10 @@ function runHelper(): void {
     if (process.platform === "win32") {
       commandLine = commandLine.slice(1);
     } else {
+      const encoded = readFileSync(3, "ascii");
+      closeSync(3);
       const [homeSet, home, ...args] = decodePosixBytes(
-        Buffer.from(commandLine[1] ?? "", "hex"),
+        Buffer.from(encoded.trim(), "hex"),
       )
         .split("\0")
         .slice(0, -1);
@@ -39,9 +46,11 @@ function runHelper(): void {
   const [command, ...args] = commandLine;
   if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
+  } else if (command === "normalize-candidates") {
+    process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else {
     console.error(
-      "Usage: launch_codex_security_mcp[.cmd] --helper resolve-security-md [options]",
+      "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates> [options]",
     );
     process.exitCode = 2;
   }

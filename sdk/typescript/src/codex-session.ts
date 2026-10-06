@@ -28,7 +28,7 @@ export const createCodexClient = (options: CodexOptions): CodexSessionClient =>
 
 /** Reduce a single stream; callers retain error, retry and acceptance policy. */
 export async function readCodexSessionTurn(options: {
-  thread: CodexSessionThread;
+  thread: Pick<CodexSessionThread, "id">;
   events: AsyncGenerator<CodexSessionEvent>;
   onEvent: (event: CodexSessionEvent) => Promise<void> | void;
   stopOnCompletion?: boolean;

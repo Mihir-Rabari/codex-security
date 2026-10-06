@@ -55,7 +55,8 @@ def test_stopped_result_publication_requires_supported_protocol(
             "_write_prepared_scan_finalization",
             interrupt_publication,
         )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id,
@@ -85,7 +86,8 @@ def test_stopped_result_publication_requires_supported_protocol(
     error = None
     try:
         if operation == "preserve":
-            workbench_api["preserve_scan_results"](
+            workbench_api["saved_results"].preserve_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
                 workbench_db,
                 Namespace(
                     scan_id=scan.scan_id,
@@ -95,7 +97,11 @@ def test_stopped_result_publication_requires_supported_protocol(
                 ),
             )
         else:
-            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+            workbench_api["saved_results"].recover_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(scan_id=scan.scan_id),
+            )
     except SystemExit as failure:
         error = str(failure)
     after = snapshot(workbench_db, scan.scan_dir)

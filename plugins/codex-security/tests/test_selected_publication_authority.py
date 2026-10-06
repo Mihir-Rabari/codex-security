@@ -62,12 +62,16 @@ def test_publication_uses_committed_finalization_selection(
     before = {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")}
 
     if publication == "selected":
-        workbench_api["write_scan_draft"](workbench_db, staged)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+        )
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert findings[0]["title"] == "Selected accepted aggregate"
     else:
         with pytest.raises(SystemExit, match="coordinator|publication|aggregate"):
-            workbench_api["write_scan_draft"](workbench_db, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+            )
         assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
     assert accepted.read_bytes() == contents
     assert (

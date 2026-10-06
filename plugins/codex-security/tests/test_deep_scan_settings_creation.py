@@ -244,7 +244,19 @@ def test_internal_settings_input_preserves_public_user_context_and_shape(tmp_pat
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout)
     assert result["deepScan"]["userContext"] == context
-    assert "executionSettings" not in result["deepScan"]
+    assert result["deepScan"]["executionSettings"] == {
+        "version": 1,
+        "settings": settings(tmp_path, "original"),
+    }
+    public = run_workbench(
+        tmp_path / "state",
+        "get-deep-scan",
+        "--scan-id",
+        result["deepScan"]["scanId"],
+        "--thread-id",
+        "original-thread",
+    )
+    assert "executionSettings" not in public["deepScan"]
     assert json.loads(snapshot(result["deepScan"]["scanDir"]).read_bytes())["settings"] == settings(
         tmp_path, "original"
     )
@@ -283,12 +295,8 @@ def test_managed_creation_retry_preserves_saved_settings_before_commit(tmp_path:
     recovered = finish(
         start_process(
             tmp_path,
-            settings(tmp_path, "later"),
+            original,
             *args,
-            "--model",
-            "later-model",
-            "--reasoning-effort",
-            "low",
         )
     )
     assert recovered["startDisposition"] == "created"
@@ -296,3 +304,72 @@ def test_managed_creation_retry_preserves_saved_settings_before_commit(tmp_path:
     assert json.loads(before)["settings"] == original
     assert recovered["deepScan"]["model"] == "original-model"
     assert recovered["deepScan"]["reasoningEffort"] == "high"
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        bound = json.loads(
+            connection.execute(
+                "SELECT execution_settings_json FROM deep_scan_runs WHERE scan_id = ?",
+                (scan["scanId"],),
+            ).fetchone()[0]
+        )
+    assert bound == {"version": 1, "settings": original}
+
+
+def test_preexisting_artifact_does_not_choose_original_execution_settings(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    workspace = create_saved_workspace(state, target, thread_id="original-thread", mode="deep")
+    scan = start_delivered_scan(
+        state, "--workspace-id", workspace["id"], "--scan-root", str(tmp_path / "scans")
+    )["results"]
+    path = snapshot(scan["scanDir"])
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"version": 1, "settings": settings(tmp_path, "substituted")}))
+    original = settings(tmp_path, "original")
+    begun = finish(
+        start_process(
+            tmp_path,
+            original,
+            "begin-deep-scan",
+            "--scan-id",
+            scan["scanId"],
+            "--thread-id",
+            "original-thread",
+        )
+    )
+    assert begun["startDisposition"] == "created"
+    assert json.loads(path.read_text()) == {"version": 1, "settings": original}
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        bound = json.loads(
+            connection.execute(
+                "SELECT execution_settings_json FROM deep_scan_runs WHERE scan_id = ?",
+                (scan["scanId"],),
+            ).fetchone()[0]
+        )
+    assert bound == {"version": 1, "settings": original}
+    path.write_text(json.dumps({"version": 1, "settings": settings(tmp_path, "substituted")}))
+    joined = finish(
+        start_process(
+            tmp_path,
+            settings(tmp_path, "observer"),
+            "begin-deep-scan",
+            "--scan-id",
+            scan["scanId"],
+            "--thread-id",
+            "original-thread",
+        )
+    )
+    assert joined["startDisposition"] == "joined"
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        repeated = json.loads(
+            connection.execute(
+                "SELECT execution_settings_json FROM deep_scan_runs WHERE scan_id = ?",
+                (scan["scanId"],),
+            ).fetchone()[0]
+        )
+    assert repeated == bound
+    public = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])
+    assert public["scan"]["executionAttribution"]["workerCodexHome"] == original["codexHome"]
+    path.unlink()
+    public = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])
+    assert public["scan"]["executionAttribution"]["workerCodexHome"] == original["codexHome"]

@@ -52,12 +52,13 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
-  test.each([{ levels: [] }, { levels: ["high"] }] satisfies {
-    levels: SeverityLevel[];
-  }[])("rejects an unknown threshold with findings %j", ({ levels }) => {
-    expect(() =>
-      fakeResult([...levels]).hasFindingsAtOrAbove("hihg" as SeverityLevel),
-    ).toThrow("Unknown severity threshold");
+  test("rejects an unknown threshold with or without findings", () => {
+    for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
+      const result = fakeResult(levels);
+      expect(() =>
+        result.hasFindingsAtOrAbove("hihg" as SeverityLevel),
+      ).toThrow("Unknown severity threshold");
+    }
   });
 
   test("evaluates a severity threshold without filtering findings or changing serialization", () => {
@@ -110,6 +111,65 @@ describe("ScanResult", () => {
     expect(result.findings).toBe(findings);
   });
 
+  test("exposes retained content independently of Markdown availability", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-result-model-"));
+    const threatModel = {
+      format: "markdown" as const,
+      content: "# Component model\n",
+      scope: { includePaths: ["services/api"] },
+      origin: "generated" as const,
+    };
+    const result = new ScanResult({
+      manifest: { ...manifest, scan: { ...manifest.scan, threatModel } },
+      findings,
+      coverage,
+      scanDir: root,
+      threadId: "thread",
+      turnResult: {},
+    });
+    try {
+      expect(result.threatModel).toEqual(threatModel);
+      expect(result.threatModelPath).toBeNull();
+      expect(result.toJSON()).toMatchObject({
+        threatModel,
+        threatModelPath: null,
+      });
+      const path = join(root, "threatmodel.md");
+      await writeFile(path, "# Earlier model\n");
+      expect(result.threatModelPath).toBeNull();
+      expect(result.toJSON()["threatModelPath"]).toBeNull();
+      await writeFile(path, threatModel.content);
+      const verifiedResult = new ScanResult({
+        ...result,
+        threatModelPath: path,
+      });
+      expect(verifiedResult.threatModelPath).toBe(path);
+      expect(verifiedResult.toJSON()["threatModelPath"]).toBe(path);
+      expect(fakeResult([]).threatModel).toBeNull();
+      await rm(join(root, "threatmodel.md"));
+      await mkdir(join(root, "artifacts", "01_context"), { recursive: true });
+      const legacy = join(root, "artifacts", "01_context", "threat_model.md");
+      await writeFile(legacy, "# Original model\n");
+      expect(result.threatModelPath).toBeNull();
+      const legacyResult = new ScanResult({
+        manifest,
+        findings,
+        coverage,
+        scanDir: root,
+        threadId: "thread",
+        turnResult: {},
+      });
+      expect(legacyResult.threatModel).toBeNull();
+      expect(legacyResult.threatModelPath).toBeNull();
+      if (process.platform !== "win32") {
+        await symlink(legacy, join(root, "threatmodel.md"));
+        expect(result.threatModelPath).toBeNull();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("includes the model and estimated cost in machine-readable results", () => {
     const result = new ScanResult({
       manifest,
@@ -128,7 +188,19 @@ describe("ScanResult", () => {
     });
 
     expect(result.cost?.estimatedUsd).toBe(0.00488);
-    expect(result.toJSON()["cost"]).toEqual(result.cost);
+    const serialized = JSON.parse(JSON.stringify(result));
+    expect(serialized.cost).toEqual(result.cost);
+    expect(serialized.cost).toMatchObject({
+      estimatedUsdRange: { min: 0.00488, max: 0.01156, context: "unknown" },
+      pricing: {
+        longContextUsdPerMillionTokens: {
+          input: 8,
+          cacheRead: 0.8,
+          cacheWrite: 10,
+          output: 30,
+        },
+      },
+    });
   });
 
   test("discovers SARIF at its canonical scan path", async () => {

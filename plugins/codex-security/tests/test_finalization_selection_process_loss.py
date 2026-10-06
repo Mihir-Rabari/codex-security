@@ -22,11 +22,8 @@ from argparse import Namespace
 
 api = runpy.run_path(sys.argv[1], run_name="selection_commit_crash_test")
 deep = api["deep_scan"]
-deep.configure(deep.DeepScanDependencies(**{
-    name: api["preserve_stopped_results_after_transition"
-              if name == "preserve_stopped_results" else name]
-    for name in deep.DeepScanDependencies.__dataclass_fields__
-}))
+from types import SimpleNamespace
+deep.configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
 class CrashConnection(sqlite3.Connection):
     def commit(self):
         if sys.argv[4] == "before":
@@ -150,13 +147,17 @@ def test_selection_commit_loss_replays_accepted_identity_before_stopping(
         assert published_bytes(scan) == before
         stale = stage_publication(scan, generation=2, result_path=accepted, title="Stale aggregate")
         with pytest.raises(SystemExit, match="generation"):
-            workbench_api["write_scan_draft"](connection, stale)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, stale
+            )
         assert published_bytes(scan) == before
         stop_scan(workbench_api, connection, scan, cause)
         stopped = published_bytes(scan)
         late = stage_publication(scan, generation=3, result_path=accepted, title="Late aggregate")
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, late)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, late
+            )
         assert published_bytes(scan) == stopped
         run = connection.execute("SELECT * FROM deep_scan_runs").fetchone()
         assert run["status"] == ("canceled" if cause == "cancel" else "failed")

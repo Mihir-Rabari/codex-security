@@ -13,6 +13,8 @@ concurrency:
 jobs:
   native:
     if: github.repository == 'openai/codex-security'
+    permissions:
+      contents: read
     uses: ./.github/workflows/native-artifacts.yml
 
   verify:
@@ -151,7 +153,6 @@ jobs:
           sudo apt-get install --yes ripgrep
 
       - name: Audit production dependencies
-        continue-on-error: true
         run: sfw pnpm --dir sdk/typescript run audit:prod
 
       - name: Verify

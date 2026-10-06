@@ -1,9 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { isRecord } from "./record.js";
 
 export async function recordedScanCodexHome(
   scanDirectory: string,
+  attribution?: ScanExecutionAttribution | null,
 ): Promise<string | undefined> {
+  if (attribution && "workerCodexHome" in attribution)
+    return attribution.workerCodexHome ?? undefined;
   try {
     const saved: unknown = JSON.parse(
       await readFile(
@@ -33,6 +37,7 @@ export async function recordedScanCodexHome(
 export interface ScanExecutionAttribution {
   formatVersion: 1;
   legacy?: true;
+  workerCodexHome?: string | null;
   executionThreadIds: string[];
   owner: {
     threadId: string | null;
@@ -132,8 +137,4 @@ export function isScanArtifactDirectory(
     components[0] !== ".." &&
     relative(join(workers, components[0]!, "output"), workingDirectory) === ""
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

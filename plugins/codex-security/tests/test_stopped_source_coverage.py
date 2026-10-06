@@ -85,7 +85,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / filename).unlink()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
@@ -104,7 +105,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     else:
         assert coverage["deferred"][0]["candidateId"] == "candidate-1"
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
-    workbench_api["preserve_scan_results"](
+    workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
@@ -156,7 +158,8 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
         )
     )
 
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )

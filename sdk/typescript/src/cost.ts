@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import {
   estimateScanCost,
   estimateScanCostLowerBound,
@@ -22,7 +23,7 @@ import {
   type ScanExecutionAttribution,
 } from "./scan-sessions.js";
 import {
-  scanProgressUpdatesFromEvent,
+  scanProgressUpdatesFromText,
   type ScanProgress,
 } from "./worker-progress.js";
 
@@ -232,10 +233,8 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
-    if (this.#timer !== null) {
-      clearInterval(this.#timer);
-      this.#timer = null;
-    }
+    clearInterval(this.#timer ?? undefined);
+    this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
     if (
@@ -252,13 +251,16 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    let recordedAttribution = this.#attribution;
     if (this.#readAttribution) {
       const record = await this.#readAttribution();
       if (record === null) return;
+      recordedAttribution = record ?? null;
       const attribution = record === undefined || record.legacy ? null : record;
       if (
         attribution &&
         (!this.#attribution ||
+          attribution.workerCodexHome !== this.#attribution.workerCodexHome ||
           attribution.completedAt !== this.#attribution.completedAt)
       ) {
         this.#sessions.clear();
@@ -268,7 +270,10 @@ export class ScanCostTracker {
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     const homes = new Set([this.#options.codexHome]);
     if (this.#options.scanDirectory !== undefined) {
-      const home = await recordedScanCodexHome(this.#options.scanDirectory);
+      const home = await recordedScanCodexHome(
+        this.#options.scanDirectory,
+        recordedAttribution,
+      );
       if (home !== undefined) homes.add(home);
     }
     // Recovery restores workers to their recorded home; the SDK parent can
@@ -335,18 +340,17 @@ export class ScanCostTracker {
     }
     let changed = this.#attribution === null;
     while (changed) {
-      changed = false;
+      const previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
+          included.has(session.parentThreadId)
         ) {
           included.add(session.threadId);
-          changed = true;
         }
       }
+      changed = included.size !== previousSize;
     }
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
@@ -915,12 +919,7 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(
-        ...scanProgressUpdatesFromEvent({
-          type: "item.completed",
-          item: { type: "agent_message", text: payload["message"] },
-        }),
-      );
+      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -1074,13 +1073,7 @@ function sessionProgressUpdates(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     const content = payload["content"];
     if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromEvent({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: sessionContentText(content, false),
-      },
-    });
+    return scanProgressUpdatesFromText(sessionContentText(content, false));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -1099,10 +1092,7 @@ function sessionProgressUpdates(
   if (payload["status"] === "failed" || output === null) {
     return [];
   }
-  return scanProgressUpdatesFromEvent({
-    type: "item.completed",
-    item: { type: "command_execution", aggregated_output: output },
-  });
+  return scanProgressUpdatesFromText(output);
 }
 
 function sessionContentText(
@@ -1161,10 +1151,6 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {

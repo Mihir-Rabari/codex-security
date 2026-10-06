@@ -36,8 +36,13 @@ def saved_selection(connection, scan, accepted, omitted=None, *, reason="saturat
 
 def stop_scan(api, connection, scan, cause):
     if cause == "cancel":
-        return api["cancel_scan"](connection, Namespace(scan_id=scan.scan_id, thread_id=None))
-    return api["fail_scan"](
+        return api["saved_results"].cancel_scan(
+            api["_WORKBENCH_DB_CONTEXT"],
+            connection,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
+    return api["saved_results"].fail_scan(
+        api["_WORKBENCH_DB_CONTEXT"],
         connection,
         Namespace(
             scan_id=scan.scan_id,
@@ -86,9 +91,9 @@ def crash_after_write(root, relative, contents, **kwargs):
         os._exit(71)
 contract.write_scan_local_bytes = crash_after_write
 if cause == "cancel":
-    api["cancel_scan"](connection, Namespace(scan_id=scan_id, thread_id=None))
+    api["saved_results"].cancel_scan(api["_WORKBENCH_DB_CONTEXT"], connection, Namespace(scan_id=scan_id, thread_id=None))
 else:
-    api["fail_scan"](connection, Namespace(
+    api["saved_results"].fail_scan(api["_WORKBENCH_DB_CONTEXT"], connection, Namespace(
         scan_id=scan_id, claim_token=None, cost_json=None,
         message="Scan stopped after reaching the configured cost limit."
     ))
@@ -101,13 +106,18 @@ from argparse import Namespace
 
 api = runpy.run_path(sys.argv[1], run_name="selection_recovery_crash_test")
 deep = api["deep_scan"]
-deep.configure(deep.DeepScanDependencies(**{
-    name: api["preserve_stopped_results_after_transition"
-              if name == "preserve_stopped_results" else name]
-    for name in deep.DeepScanDependencies.__dataclass_fields__
-}))
+from types import SimpleNamespace
+deep.configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
 
 class CrashConnection(sqlite3.Connection):
+    def __exit__(self, kind, error, traceback):
+        if kind is None:
+            if sys.argv[4] == "before":
+                os._exit(72)
+            super().__exit__(kind, error, traceback)
+            os._exit(73)
+        return super().__exit__(kind, error, traceback)
+
     def commit(self):
         if sys.argv[4] == "before":
             os._exit(72)
@@ -164,7 +174,9 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         if cut in {"published", "sealed"}:
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         complete_args = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
         if cut == "sealed":
             workbench_api["complete_scan"](connection, complete_args)
@@ -188,7 +200,16 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
             assert row["failure_message"] == (
                 "Scan stopped after reaching the configured cost limit."
             )
-        assert json.loads(run["finalization_input_json"] or "null") == selection
+        recorded_selection = json.loads(run["finalization_input_json"] or "null")
+        if selection is None:
+            assert recorded_selection is None
+        else:
+            digest = recorded_selection.pop("publicationSha256", None)
+            assert recorded_selection == selection
+            if cut in {"published", "sealed"}:
+                assert isinstance(digest, str) and len(digest) == 64
+            else:
+                assert digest is None
         if selection is not None:
             assert run["terminal_reason"] == selection["terminalReason"]
         if cut != "sealed" and cause == "cancel":
@@ -197,13 +218,16 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
             assert run["terminal_reason"] == "saturated"
         frozen = published_bytes(scan)
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         if cut == "sealed":
             workbench_api["complete_scan"](connection, complete_args)
         else:
             with pytest.raises(SystemExit):
                 workbench_api["complete_scan"](connection, complete_args)
-            workbench_api["preserve_scan_results"](
+            workbench_api["saved_results"].preserve_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
                 connection,
                 Namespace(
                     scan_id=scan.scan_id,
@@ -299,7 +323,9 @@ def test_stopped_publication_process_loss_keeps_frozen_rejection_and_original_se
         save_disposition(scan, omitted.parent, "reported")
         interrupted = published_bytes(scan)
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         assert published_bytes(scan) == interrupted
         args = Namespace(
             scan_id=scan.scan_id,
@@ -307,7 +333,9 @@ def test_stopped_publication_process_loss_keeps_frozen_rejection_and_original_se
             thread_id=None,
             coordinator_generation=None,
         )
-        workbench_api["preserve_scan_results"](connection, args)
+        workbench_api["saved_results"].preserve_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, args
+        )
         row = connection.execute("SELECT * FROM scans").fetchone()
         assert row["status"] == "failed"
         assert bool(row["canceled_at"]) == (cause == "cancel")
@@ -323,7 +351,9 @@ def test_stopped_publication_process_loss_keeps_frozen_rejection_and_original_se
         assert findings[0].get("extensions", {}).get("candidateId") != "candidate-disposition"
         assert all(path.read_bytes() == contents for path, contents in evidence.items())
         sealed = published_bytes(scan)
-        workbench_api["preserve_scan_results"](connection, args)
+        workbench_api["saved_results"].preserve_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, args
+        )
         assert published_bytes(scan) == sealed
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone()[0] == 1
 
@@ -405,7 +435,9 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
         assert "\n".join(connection.iterdump()) == stable
         stale = stage_publication(scan, generation=3, result_path=accepted, title="Old coordinator")
         with pytest.raises(SystemExit, match="generation"):
-            workbench_api["write_scan_draft"](connection, stale)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, stale
+            )
         assert published_bytes(scan) == before
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
@@ -416,6 +448,22 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
         current = stage_publication(
             scan, generation=4, result_path=accepted, title="Recovered selected aggregate"
         )
-        workbench_api["write_scan_draft"](connection, current)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, current
+        )
         assert accepted.read_bytes() == before[accepted.relative_to(scan.scan_dir).as_posix()]
-        assert "\n".join(connection.iterdump()) == stable
+        recorded_selection = json.loads(
+            connection.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
+        )
+        digest = recorded_selection.pop("publicationSha256")
+        assert isinstance(digest, str) and len(digest) == 64
+        assert recorded_selection == selection
+        # Successful host publication adds only its binding; every other database byte is stable.
+        with sqlite3.connect(":memory:") as comparison:
+            connection.backup(comparison)
+            comparison.execute(
+                "UPDATE deep_scan_runs SET finalization_input_json = ?",
+                (json.dumps(selection),),
+            )
+            comparison.commit()
+            assert "\n".join(comparison.iterdump()) == stable

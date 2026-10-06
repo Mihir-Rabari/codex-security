@@ -138,7 +138,11 @@ def test_cost_before_selection_retains_only_merged_findings(
         message="Scan reached its original cost limit.",
     )
     if cancel_first:
-        workbench_api["cancel_scan"](workbench_db, Namespace(scan_id=scan.scan_id, thread_id=None))
+        workbench_api["saved_results"].cancel_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
         before = published_bytes(scan)
         with pytest.raises(SystemExit, match="running"):
             workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
@@ -259,7 +263,9 @@ def test_budget_keeps_selection_committed_before_transaction_and_unmerged_obliga
         ),
     )
     run = workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()
-    assert json.loads(run["finalization_input_json"]) == committed
+    recorded = json.loads(run["finalization_input_json"])
+    assert {key: recorded[key] for key in committed} == committed
+    assert len(recorded["publicationSha256"]) == 64
     assert run["terminal_reason"] == reason
     assert all(path.read_bytes() == contents for path, contents in originals.items())
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -445,7 +451,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         workbench_db.backup(connection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        workbench_api["write_scan_draft"](connection, staged)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+        )
         accepted_bytes = accepted.read_bytes()
         warning = "Scan stopped after reaching its configured cost limit."
         budget_args = Namespace(
@@ -453,7 +461,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         )
         cancel_args = Namespace(scan_id=scan.scan_id, thread_id=None)
         if cancel_first:
-            workbench_api["cancel_scan"](connection, cancel_args)
+            workbench_api["saved_results"].cancel_scan(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, cancel_args
+            )
             frozen = published_bytes(scan)
             with pytest.raises(SystemExit, match="running"):
                 workbench_api["complete_budget_exhausted_scan"](connection, budget_args)
@@ -461,7 +471,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
             workbench_api["complete_budget_exhausted_scan"](connection, budget_args)
             frozen = published_bytes(scan)
             with pytest.raises(SystemExit, match="running"):
-                workbench_api["cancel_scan"](connection, cancel_args)
+                workbench_api["saved_results"].cancel_scan(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"], connection, cancel_args
+                )
         assert published_bytes(scan) == frozen
 
     with sqlite3.connect(database_path) as connection:
@@ -471,7 +483,12 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         assert row["status"] == ("failed" if cancel_first else "complete")
         assert bool(row["canceled_at"]) == cancel_first
         assert run["terminal_reason"] == reason
-        assert json.loads(run["finalization_input_json"] or "null") == selection
+        recorded = json.loads(run["finalization_input_json"] or "null")
+        if selection is None:
+            assert recorded is None
+        else:
+            assert {key: recorded[key] for key in selection} == selection
+            assert len(recorded["publicationSha256"]) == 64
         assert accepted.read_bytes() == accepted_bytes
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         assert coverage["completeness"] == "partial"
@@ -482,7 +499,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert len(findings) == 1
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         assert published_bytes(scan) == frozen
 
 
@@ -535,10 +554,8 @@ script, database, scan_id, cost_json, warning, cut, marker = sys.argv[1:]
 api = runpy.run_path(str(script), run_name='fault_review_budget_child')
 budget = api['complete_budget_exhausted_scan']
 deep = budget.__globals__['deep_scan']
-deep.configure(deep.DeepScanDependencies(**{
-    name: api['preserve_stopped_results_after_transition' if name == 'preserve_stopped_results' else name]
-    for name in deep.DeepScanDependencies.__dataclass_fields__
-}))
+from types import SimpleNamespace
+deep.configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
 
 
 def terminate(stage):
@@ -551,8 +568,8 @@ if cut == 'after-draft-commit':
 elif cut == 'after-seal':
     original = budget.__globals__['_write_prepared_scan_finalization']
 
-    def seal_then_die(prepared):
-        original(prepared)
+    def seal_then_die(prepared, **kwargs):
+        original(prepared, **kwargs)
         terminate(cut)
 
     budget.__globals__['_write_prepared_scan_finalization'] = seal_then_die
@@ -740,7 +757,11 @@ def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
         with workbench_db:
             workbench_db.execute("UPDATE deep_scan_runs SET status = 'running'")
     elif state == "canceled":
-        workbench_api["cancel_scan"](workbench_db, Namespace(scan_id=scan.scan_id, thread_id=None))
+        workbench_api["saved_results"].cancel_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
     elif state == "other-owner":
         with workbench_db:
             workbench_db.execute(

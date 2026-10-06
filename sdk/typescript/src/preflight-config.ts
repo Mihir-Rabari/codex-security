@@ -1,3 +1,5 @@
+import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
+import { isRecord } from "./record.js";
 import { isAbsolute } from "node:path";
 import {
   EXTERNAL_CODEX_PROVIDERS,
@@ -14,12 +16,16 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     !/[\u0000-\u001f\u007f]/u.test(value);
   const safeProfileName = (value: unknown): value is string =>
     safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
-  const safeInteger = (value: unknown): value is number =>
-    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};
-    for (const key of ["goals", "multi_agent", "enable_fanout"]) {
+    for (const key of [
+      "goals",
+      "multi_agent",
+      "enable_fanout",
+      "api_key_cyber_access_programs",
+      "api_key_model_discovery",
+    ]) {
       if (typeof value[key] === "boolean") result[key] = value[key];
     }
     const multiAgent = value["multi_agent_v2"];
@@ -72,11 +78,23 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     return result;
   };
   const result = executionConfig(config);
-  // Keep the effective summary even when preflight filters the profile name.
-  const reasoningSummary =
-    resolveCodexProfile(config)["model_reasoning_summary"];
-  if (safeString(reasoningSummary)) {
-    result["model_reasoning_summary"] = reasoningSummary;
+  // Keep effective worker settings even when preflight filters the profile name.
+  const resolved = resolveCodexProfile(config);
+  for (const key of ["model_reasoning_summary", "service_tier"]) {
+    const value = resolved[key];
+    if (safeString(value)) result[key] = value;
+  }
+  const resolvedFeatures = capabilityFeatures(resolved["features"]);
+  for (const key of [
+    "api_key_cyber_access_programs",
+    "api_key_model_discovery",
+  ]) {
+    if (resolvedFeatures[key] !== undefined) {
+      result["features"] = {
+        ...(isRecord(result["features"]) ? result["features"] : {}),
+        [key]: resolvedFeatures[key],
+      };
+    }
   }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
@@ -135,8 +153,4 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
   }
   return result;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

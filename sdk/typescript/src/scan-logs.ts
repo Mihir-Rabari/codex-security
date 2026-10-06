@@ -1,6 +1,8 @@
 import { createReadStream } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "./record.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -112,32 +114,31 @@ export async function findScanSession(
 }
 
 export async function readScanLogs(options: ScanLogOptions) {
-  const logs = new Map<string, SessionLog>();
-  const sessionPaths = new Map<string, string[]>();
+  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(
     typeof options.codexHome === "string"
       ? [options.codexHome]
       : options.codexHome,
   );
   if (options.scanDirectory !== undefined) {
-    const home = await recordedScanCodexHome(options.scanDirectory);
+    const home = await recordedScanCodexHome(
+      options.scanDirectory,
+      options.executionAttribution,
+    );
     if (home !== undefined) homes.add(home);
   }
   // Recovered workers retain their original home; the parent can use the current home.
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
-        const paths = sessionPaths.get(session.threadId);
-        if (paths) paths.push(session.path);
-        else {
-          logs.set(session.threadId, session);
-          sessionPaths.set(session.threadId, [session.path]);
-        }
+        const copies = logs.get(session.threadId);
+        if (copies === undefined) logs.set(session.threadId, [session]);
+        else copies.push(session);
       }
     }
   }
 
-  const root = options.threadId ? logs.get(options.threadId) : undefined;
+  const root = options.threadId ? logs.get(options.threadId)?.[0] : undefined;
   if (root === undefined && !options.allowMissingRoot) {
     throw new CodexSecurityError(
       `No saved session logs are available for scan ${options.scanId}.`,
@@ -148,7 +149,10 @@ export async function readScanLogs(options: ScanLogOptions) {
     ? null
     : options.executionAttribution;
   const included = attribution
-    ? attributedScanThreads(logs.values(), attribution)
+    ? attributedScanThreads(
+        Array.from(logs.values(), ([session]) => session),
+        attribution,
+      )
     : new Set([
         ...(options.threadId ? [options.threadId] : []),
         ...(options.threadIds ?? []),
@@ -157,10 +161,10 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  const pending = attribution ? [] : [...traversed];
+  const pending = attribution ? [] : traversed;
   for (const parentId of pending) {
-    const parent = logs.get(parentId);
-    for (const session of logs.values()) {
+    const parent = logs.get(parentId)?.[0];
+    for (const [session] of logs.values()) {
       if (
         !traversed.has(session.threadId) &&
         (session.parentThreadId === parentId ||
@@ -171,22 +175,21 @@ export async function readScanLogs(options: ScanLogOptions) {
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
-        pending.push(session.threadId);
       }
     }
   }
   const sessions: SessionLog[] = [];
   for (const threadId of included) {
-    const session = logs.get(threadId);
-    if (session !== undefined) {
-      // Compare only scan-owned logs. Keep traversal order unless a later copy
-      // contains every attributed event followed by additional events.
-      for (const path of sessionPaths.get(threadId)!.slice(1)) {
-        if (await extendsSessionLog(path, session, attribution))
-          session.path = path;
-      }
-      sessions.push(session);
+    const copies = logs.get(threadId);
+    if (copies === undefined) continue;
+    let session = copies[0];
+    for (const copy of copies.slice(1)) {
+      if (
+        await extendsSessionLog(session.path, copy.path, session, attribution)
+      )
+        session = copy;
     }
+    sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
   for (const session of sessions) {
@@ -263,29 +266,6 @@ async function* attributedSessionEvents(
   }
 }
 
-async function extendsSessionLog(
-  path: string,
-  session: SessionLog,
-  attribution: ScanExecutionAttribution | null | undefined,
-): Promise<boolean> {
-  const previous = attributedSessionEvents(session.path, session, attribution);
-  try {
-    for await (const event of attributedSessionEvents(
-      path,
-      session,
-      attribution,
-    )) {
-      const recorded = await previous.next();
-      if (recorded.done) return true;
-      if (JSON.stringify(event) !== JSON.stringify(recorded.value))
-        return false;
-    }
-    return false;
-  } finally {
-    await previous.return(undefined);
-  }
-}
-
 function belongsToScan(
   session: SessionLog,
   root: SessionLog,
@@ -330,6 +310,30 @@ function belongsToScan(
   return false;
 }
 
+// Prefer a longer copy only when it preserves every event in the earlier copy.
+// Identical or divergent copies keep the existing home/archive precedence.
+async function extendsSessionLog(
+  previousPath: string,
+  path: string,
+  session: SessionLog,
+  attribution: ScanExecutionAttribution | null | undefined,
+): Promise<boolean> {
+  const selectedEvents = (source: string) =>
+    attribution
+      ? attributedSessionEvents(source, session, attribution)
+      : sessionEvents(source);
+  const events = selectedEvents(path);
+  try {
+    for await (const previous of selectedEvents(previousPath)) {
+      const next = await events.next();
+      if (next.done || !isDeepStrictEqual(previous, next.value)) return false;
+    }
+    return !(await events.next()).done;
+  } finally {
+    await events.return(undefined);
+  }
+}
+
 async function* sessionEvents(
   path: string,
 ): AsyncGenerator<Record<string, unknown>> {
@@ -351,8 +355,4 @@ async function* sessionEvents(
     lines.close();
     stream.destroy();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

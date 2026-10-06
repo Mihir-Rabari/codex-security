@@ -69,7 +69,8 @@ def test_stopped_recovery_checks_recorded_accepted_bytes(
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             connection,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."

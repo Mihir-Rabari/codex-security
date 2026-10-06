@@ -19,15 +19,9 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         deep,
         "_dependencies",
-        deep.DeepScanDependencies(
-            **{
-                name: workbench_api[
-                    "preserve_stopped_results_after_transition"
-                    if name == "preserve_stopped_results"
-                    else name
-                ]
-                for name in deep.DeepScanDependencies.__dataclass_fields__
-            }
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
         ),
     )
 
@@ -164,7 +158,8 @@ def assert_published_aggregate(scan):
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     for finding in findings:
         for field in ("findingId", "occurrenceId", "fingerprints"):
-            assert finding.pop(field)
+            value = finding.pop(field)
+            assert value
     assert findings == scan.findings
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for field in ("documentType", "schemaVersion", "scanId"):
@@ -386,7 +381,8 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
         result.write_text("{interrupted worker output")
     result_bytes = result.read_bytes()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -406,8 +402,8 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
 
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == len(expected_summaries)
     assert {name: (scan.scan_dir / name).read_bytes() for name in artifact_names} == published
@@ -449,7 +445,8 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     source_bytes = source_path.read_bytes()
     source_relative = source_path.relative_to(scan.scan_dir).as_posix()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Scan interrupted."
@@ -471,8 +468,8 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
 
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
 
     assert recovered["findingCount"] == 1
@@ -487,6 +484,7 @@ def test_standard_publication_preserves_deliberately_partial_coverage(
     scan = publication_scan(mode="standard")
     scan.coverage["completeness"] = "partial"
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    scan.coverage["reviews"] = []
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
     complete(workbench_api, workbench_db, scan)
