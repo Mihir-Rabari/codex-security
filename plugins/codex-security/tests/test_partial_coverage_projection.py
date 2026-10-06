@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import uuid
 from argparse import Namespace
 
 import pytest
@@ -1641,3 +1642,102 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     published = coverage_path.read_bytes()
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     assert coverage_path.read_bytes() == published
+
+
+def publish_review_projection(workbench_api, connection, scan, coverage):
+    documents = {
+        "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
+        "findings": {"findings": []},
+        "coverage": coverage,
+    }
+    staged = scan.scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    saved = workbench_api["saved_results"]
+    saved.write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        connection,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            draft_path=str(staged),
+            checkpoint_path=None,
+            expected_draft_digest=None,
+        ),
+    )
+
+
+def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, retry):
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    with monkeypatch.context() as interrupted:
+        if retry:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        saved.fail_scan(
+            context,
+            connection,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
+    published = (scan.scan_dir / "coverage.json").read_bytes()
+    saved.recover_scan_results(context, connection, Namespace(scan_id=scan.scan_id))
+    assert (scan.scan_dir / "coverage.json").read_bytes() == published
+    return json.loads(published)
+
+
+@pytest.mark.parametrize("closure", [False, True], ids=["unchanged", "generic-closure"])
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_generic_surface_receipt_union_keeps_each_source_directory(
+    workbench_api, workbench_db, publication_scan, monkeypatch, closure, retry
+):
+    scan = publication_scan()
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    receipt = output / "artifacts" / "review.txt"
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic completed source review.\n")
+    surface = {
+        "id": "review",
+        "label": "Completed source review",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    source = {**scan.coverage, "surfaces": [surface], "deferred": []}
+    if closure:
+        source["resolvedDeferred"] = [{"id": "review", "reason": "Source review completed."}]
+    result.write_text(
+        json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": source})
+    )
+    original = result.read_bytes()
+    projected = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix()],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [projected],
+            "deferred": [],
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "complete"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert coverage["surfaces"] == [projected]
+    assert result.read_bytes() == original

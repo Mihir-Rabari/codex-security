@@ -757,6 +757,7 @@ def _generic_surface_updates(
     ambiguous_deferred: set[tuple[str | None, str]],
     record_source: Any,
     record_order: Any,
+    surface_receipts: Any,
 ) -> tuple[set[int], list[tuple[str, str | None, dict[str, Any], dict[str, Any]]]]:
     if not closed_deferred and not reopened_generic:
         return set(), []
@@ -860,10 +861,11 @@ def _generic_surface_updates(
                 matches, key=lambda match: record_order(match[0], surface_owner, match[1])
             )
             update = copy.deepcopy(latest_surface)
-            refs = update.setdefault("receiptRefs", [])
+            refs = copy.deepcopy(surface_receipts(latest_relative, latest_surface))
+            update["receiptRefs"] = refs
             if isinstance(refs, list):
-                for _, row in matches:
-                    previous_refs = row.get("receiptRefs", [])
+                for saved_relative, row in matches:
+                    previous_refs = surface_receipts(saved_relative, row)
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             refs.append(ref)
@@ -2027,6 +2029,11 @@ def merge_saved_results(
                     )
                 )
             ]
+
+    def source_surface_receipts(relative: str, row: dict[str, Any]) -> Any:
+        worker = workers_by_id.get(source_owners.get(relative))
+        return coverage_receipts(row, worker, relative) if worker else row.get("receiptRefs", [])
+
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         closed_deferred,
@@ -2038,6 +2045,7 @@ def merge_saved_results(
         ambiguous_deferred,
         record_source,
         candidate_order,
+        source_surface_receipts,
     )
     replaced_rows = {
         "surfaces": replaced_surfaces,
