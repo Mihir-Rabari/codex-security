@@ -7279,8 +7279,8 @@ function patchChangeSources(
           ![...selected].some((file) => !isOutsidePath(relative(source, file)))
         ) {
           selected.add(source);
-          deleted.add(source);
         }
+        deleted.add(source);
       }
     }
   }
@@ -7417,7 +7417,18 @@ async function createPatchPullRequest(
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  const stageFiles = files.filter((file) => !sources.deleted.has(file));
+  const stageFiles = files.filter(
+    (file) =>
+      !sources.deleted.has(file) &&
+      !files.some((parent) => {
+        const descendant = relative(parent, file);
+        return (
+          descendant !== "" &&
+          !sources.deleted.has(parent) &&
+          !isOutsidePath(descendant)
+        );
+      }),
+  );
   await run(["--literal-pathspecs", "add", "--dry-run", "--", ...stageFiles]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
@@ -7897,29 +7908,102 @@ async function assessPatchRisk(
       state?.tree ??
       (await snapshotPatchTree(request.repository, dependencies));
     await writeFile(patchPath, "", { encoding: "utf8", mode: 0o600 });
-    const changedFiles: string[] = [];
-    const directories = new Set([
-      ...(request.state?.trees.keys() ?? [""]),
-      ...(state?.trees.keys() ?? []),
-    ]);
-    for (const directory of directories) {
-      const previous = request.state?.gitlinks.get(directory);
-      const current = state?.gitlinks.get(directory);
-      const base = directory
-        ? (request.state?.trees.get(directory) ??
-          (previous?.commit === current?.commit
-            ? current?.committedTree
-            : undefined))
+    const changedFiles = new Set<string>();
+    const repositoryRoot = state?.root ?? request.repository;
+    const indexEnvironment = { GIT_INDEX_FILE: join(root, "index") };
+    const writeTree = async (entries: Map<string, string>): Promise<string> => {
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["read-tree", "--empty"],
+        repositoryRoot,
+        { environment: indexEnvironment },
+      );
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["update-index", "-z", "--index-info"],
+        repositoryRoot,
+        {
+          environment: indexEnvironment,
+          input: [...entries]
+            .map(([path, entry]) => `${entry}\t${path}\0`)
+            .join(""),
+        },
+      );
+      return dependencies.runRepositoryCommand(
+        "git",
+        ["write-tree"],
+        repositoryRoot,
+        { environment: indexEnvironment },
+      );
+    };
+    const pointers = new Map<
+      string,
+      [Map<string, string>, Map<string, string>]
+    >();
+    const expand = async (
+      snapshot: GitPatchState,
+      other: GitPatchState,
+      side: 0 | 1,
+    ): Promise<string> => {
+      const entries = new Map<string, string>();
+      const visit = async (
+        directory: string,
+        tree: string,
+        working: boolean,
+      ): Promise<void> => {
+        const links = pointers.get(directory) ?? [new Map(), new Map()];
+        pointers.set(directory, links);
+        for (const [path, entry] of await patchTreeEntries(
+          repositoryRoot,
+          repositoryRoot,
+          tree,
+          dependencies,
+        )) {
+          const fullPath = directory ? `${directory}/${path}` : path;
+          if (entry.startsWith("160000 ")) {
+            const commit = entry.split(" ")[2]!;
+            const current = snapshot.gitlinks.get(fullPath);
+            const counterpart = other.gitlinks.get(fullPath);
+            const nested =
+              (working ? snapshot.trees.get(fullPath) : undefined) ??
+              (counterpart?.commit === commit
+                ? counterpart.committedTree
+                : undefined);
+            links[side].set(path, entry);
+            if (nested !== undefined)
+              await visit(
+                fullPath,
+                nested,
+                working && current?.initialized === true,
+              );
+            continue;
+          }
+          entries.set(fullPath, entry);
+        }
+      };
+      await visit("", snapshot.tree, true);
+      return writeTree(entries);
+    };
+    const base =
+      request.state !== undefined && state !== undefined
+        ? await expand(request.state, state, 0)
         : request.base;
-      if (base === undefined) continue;
-      const tree =
-        (directory ? state?.trees.get(directory) : head) ??
-        (previous?.commit === current?.commit
-          ? previous?.committedTree
-          : undefined) ??
-        (await run(["mktree"], { input: "" }));
-      if (base === tree) continue;
-      const repositoryRoot = state?.root ?? request.repository;
+    const tree =
+      request.state !== undefined && state !== undefined
+        ? await expand(state, request.state, 1)
+        : head;
+    const fragments: [string, string, string][] = [["", base, tree]];
+    for (const [directory, [before, after]] of pointers) {
+      // Gitlink revisions remain part of the assessment even when file contents match.
+      if (before.size || after.size)
+        fragments.push([
+          directory,
+          await writeTree(before),
+          await writeTree(after),
+        ]);
+    }
+    for (const [directory, baseTree, headTree] of fragments) {
+      if (baseTree === headTree) continue;
       const checkout = join(repositoryRoot, directory);
       const fragment = join(root, "fragment.diff");
       const args = [
@@ -7940,8 +8024,8 @@ async function assessPatchRisk(
                     "--name-status",
                     "--find-renames",
                     "-z",
-                    base,
-                    tree,
+                    baseTree,
+                    headTree,
                   ],
                   { trim: false },
                 )
@@ -7972,24 +8056,28 @@ async function assessPatchRisk(
             ? [`--src-prefix=a/${directory}/`, `--dst-prefix=b/${directory}/`]
             : []),
           `--output=${fragment}`,
-          base,
-          tree,
+          baseTree,
+          headTree,
           ...paths,
         ]),
         run(
-          [...args, "--name-only", "--no-renames", "-z", base, tree, ...paths],
+          [
+            ...args,
+            "--name-only",
+            "--no-renames",
+            "-z",
+            baseTree,
+            headTree,
+            ...paths,
+          ],
           { trim: false },
         ),
       ]);
       await appendFile(patchPath, await readFile(fragment));
-      changedFiles.push(
-        ...names
-          .split("\0")
-          .filter(Boolean)
-          .map((file) => (directory ? `${directory}/${file}` : file)),
-      );
+      for (const file of names.split("\0").filter(Boolean))
+        changedFiles.add(directory ? `${directory}/${file}` : file);
     }
-    if ((await lstat(patchPath)).size === 0 || changedFiles.length === 0) {
+    if ((await lstat(patchPath)).size === 0 || changedFiles.size === 0) {
       throw new CodexSecurityError("No completed patch changes to assess.");
     }
     await chmod(patchPath, 0o400);
@@ -8015,7 +8103,7 @@ async function assessPatchRisk(
           sourceType: "patch_file",
           base: request.base,
           head,
-          changedFiles,
+          changedFiles: [...changedFiles],
           sha256: digest.digest("hex"),
         },
       },

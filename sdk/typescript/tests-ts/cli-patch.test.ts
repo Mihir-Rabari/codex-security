@@ -2730,6 +2730,7 @@ describe("patch publication integrity", () => {
       .concat(
         [
           "clean-staged-rename",
+          "clean-staged-rename-supplied",
           "clean-source-directory",
           "clean-ignored-directory",
         ].map((state) => [state, "new.ts"] as const),
@@ -2743,6 +2744,7 @@ describe("patch publication integrity", () => {
     await writeFile(join(directory, "old.ts"), "unsafe\noriginal\n");
     git("add", ".");
     git("commit", "-m", "Synthetic baseline");
+    const supplied = dirty === "clean-staged-rename-supplied";
     const hasLocalEdits =
       !dirty.startsWith("clean") && dirty !== "deleted-before";
     const content = hasLocalEdits ? "synthetic local edit" : "original";
@@ -2764,12 +2766,14 @@ describe("patch publication integrity", () => {
       "unrelated.ts",
       "hidden.ts",
     );
-    await writeFile(join(directory, "unrelated.ts"), "staged work\n");
-    git("add", "unrelated.ts");
-    await writeFile(join(directory, "unrelated.ts"), "working work\n");
-    git("update-index", "--skip-worktree", "hidden.ts");
-    await writeFile(join(directory, "intent.ts"), "intent\n");
-    git("add", "--intent-to-add", "intent.ts");
+    if (!supplied) {
+      await writeFile(join(directory, "unrelated.ts"), "staged work\n");
+      git("add", "unrelated.ts");
+      await writeFile(join(directory, "unrelated.ts"), "working work\n");
+      git("update-index", "--skip-worktree", "hidden.ts");
+      await writeFile(join(directory, "intent.ts"), "intent\n");
+      git("add", "--intent-to-add", "intent.ts");
+    }
     const unrelated = git(
       "ls-files",
       "--stage",
@@ -2787,7 +2791,12 @@ describe("patch publication integrity", () => {
     const result = resultWithFindings(["high"]);
     result.findings.findings[0]!.locations[0]!.path = "old.ts";
     const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      [
+        "patch",
+        ...(supplied ? ["Synthetic issue"] : ["--scan", "scan-1"]),
+        "--create-pr",
+        "--json",
+      ],
       {
         currentDirectory: directory,
         onWorkbench: () => savedScan(result, "scan-1", directory),
@@ -2798,7 +2807,8 @@ describe("patch publication integrity", () => {
               ? "[]"
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
-          if (dirty === "clean-staged-rename") git("mv", "old.ts", file);
+          if (dirty.startsWith("clean-staged-rename"))
+            git("mv", "old.ts", file);
           else await rm(join(directory, "old.ts"), { force: true });
           if (
             dirty === "clean-source-directory" ||
@@ -2859,7 +2869,7 @@ describe("patch publication integrity", () => {
       ),
     ).toBe(unrelated);
     expect(await readFile(join(directory, "unrelated.ts"), "utf8")).toBe(
-      "working work\n",
+      supplied ? "original\n" : "working work\n",
     );
     if (
       dirty === "clean-source-directory" ||
@@ -3523,6 +3533,185 @@ describe("patch change tracking", () => {
     git("remote", "add", "origin", remote);
     return { directory, git, remote };
   }
+
+  test("publishes a committed nested update after assessing its content", async () => {
+    const { directory, git, remote } = await publicationRepository();
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const nestedGit = repositoryGit(nested);
+    nestedGit("init", "--initial-branch=main");
+    nestedGit("config", "user.name", "Synthetic User");
+    nestedGit("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "original\n");
+    nestedGit("add", ".");
+    nestedGit("commit", "-m", "Synthetic nested baseline");
+    git("add", "nested");
+    git("commit", "-m", "Synthetic gitlink");
+    const before = nestedGit("rev-parse", "HEAD");
+    let after = before;
+    let nestedIndex = await readFile(join(nested, ".git/index"));
+    let assessments = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic issue",
+        "--assess-patch-risk",
+        "--create-pr",
+        "--json",
+      ],
+      {
+        currentDirectory: directory,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          if (
+            output?.appServer?.prompt.includes(
+              "$codex-security:assess-patch-risk",
+            )
+          ) {
+            assessments++;
+            const artifact = JSON.parse(
+              output.appServer.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            );
+            const patch = await readFile(artifact.path, "utf8");
+            expect(patch).toContain("-original");
+            expect(patch).toContain("+fixed");
+            expect(artifact.changedFiles).toContain("nested/app.ts");
+            output.stdout.write(patchRiskAssessment().report);
+            return 0;
+          }
+          await writeFile(join(nested, "app.ts"), "fixed\n");
+          nestedGit("commit", "-am", "Synthetic nested update");
+          after = nestedGit("rev-parse", "HEAD");
+          nestedIndex = await readFile(join(nested, ".git/index"));
+          output?.stdout.write("Fixed and checked.");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(assessments).toBe(1);
+    expect(after).not.toBe(before);
+    expect(git("ls-tree", "HEAD", "nested")).toBe(
+      `160000 commit ${after}\tnested`,
+    );
+    expect(
+      repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
+    ).toBe(`160000 commit ${after}\tnested`);
+    expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    expect(git("status", "--porcelain")).toBe("");
+    expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
+    expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+  });
+
+  test.each(
+    ["root", "package", "recursive"].flatMap((scope) =>
+      ["move", "flatten", "revision"].map((change) => [scope, change] as const),
+    ),
+  )("assesses coherent nested %s content after %s", async (scope, change) => {
+    const { directory, git } = await publicationRepository();
+    const path = scope === "recursive" ? "nested/child" : "nested";
+    const nested = join(directory, path);
+    await mkdir(nested, { recursive: true });
+    await mkdir(join(directory, "package"));
+    const nestedGit = repositoryGit(nested);
+    nestedGit("init", "--initial-branch=main");
+    nestedGit("config", "user.name", "Synthetic User");
+    nestedGit("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "before\n");
+    nestedGit("add", ".");
+    nestedGit("commit", "-m", "Synthetic baseline");
+    const parentGit =
+      scope === "recursive" ? repositoryGit(join(directory, "nested")) : git;
+    if (scope === "recursive") {
+      parentGit("init", "--initial-branch=main");
+      parentGit("config", "user.name", "Synthetic User");
+      parentGit("config", "user.email", "synthetic@example.test");
+      parentGit("add", "child");
+      parentGit("commit", "-m", "Synthetic parent");
+    }
+    git("add", "nested");
+    git("commit", "-m", "Synthetic gitlink");
+    const destination = change === "move" ? `${path}-moved` : path;
+    let assessments = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory:
+          scope === "package" ? join(directory, "package") : directory,
+        onRepositoryCommand: runGitRepositoryCommand,
+        onCodex: async (_args, output) => {
+          if (
+            output?.appServer?.prompt.includes(
+              "$codex-security:assess-patch-risk",
+            )
+          ) {
+            assessments++;
+            const artifact = JSON.parse(
+              output.appServer.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            ) as { path: string; sha256: string; changedFiles: string[] };
+            const patch = await readFile(artifact.path);
+            expect(hash("sha256", patch)).toBe(artifact.sha256);
+            expect(patch.toString()).toContain("Subproject commit");
+            const verification = await fixtures.create("coherent-risk-apply-");
+            await mkdir(join(verification, path), { recursive: true });
+            await writeFile(join(verification, path, "app.ts"), "before\n");
+            repositoryGit(verification)(
+              "apply",
+              "--allow-empty",
+              "--include=*.ts",
+              artifact.path,
+            );
+            expect(
+              await readFile(join(verification, destination, "app.ts"), "utf8"),
+            ).toBe(change === "revision" ? "before\n" : "after\n");
+            if (change === "move")
+              expect(
+                await readFile(join(verification, path, "app.ts")).catch(
+                  () => null,
+                ),
+              ).toBeNull();
+            expect(artifact.changedFiles).toContain(
+              change === "revision" ? path : `${destination}/app.ts`,
+            );
+            output.stdout.write(patchRiskAssessment().report);
+            return 0;
+          }
+          if (change === "revision")
+            nestedGit("commit", "--allow-empty", "-m", "Synthetic revision");
+          else {
+            if (change === "move")
+              await rename(nested, join(directory, destination));
+            else {
+              parentGit(
+                "rm",
+                "--cached",
+                scope === "recursive" ? "child" : "nested",
+              );
+              await rm(join(nested, ".git"), { recursive: true });
+            }
+            await writeFile(join(directory, destination, "app.ts"), "after\n");
+            if (change === "flatten") {
+              parentGit("add", ".");
+              parentGit("commit", "-m", "Synthetic flatten");
+            }
+          }
+          output?.stdout.write("Fixed.");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(assessments).toBe(1);
+  });
 
   test.each(
     ["saved", "supplied"].flatMap((mode) =>
