@@ -31,8 +31,8 @@ describe("CLI workbench", () => {
     let spelling: ReturnType<typeof spyOn> | undefined;
     try {
       const repository = join(root, "repository");
-      const upper = join(root, "CaseRepository");
-      const lower = join(root, "caserepository");
+      const upper = join(root, "first-alias");
+      const lower = join(root, "second-alias");
       const other = join(root, "other");
       await Promise.all([mkdir(repository), mkdir(other)]);
       for (const alias of [upper, lower]) {

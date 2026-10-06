@@ -519,3 +519,54 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
     with pytest.raises(SystemExit, match="inside its Git working tree"):
         WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("scope", [".", "component"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+def test_copy_retains_alias_rooted_gitlink_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, alias_kind: str
+) -> None:
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    scoped = repository / scope
+    scoped.mkdir(exist_ok=True)
+    (scoped / "fixture.py").write_text("synthetic = True\n")
+    submodule = scoped / "submodule"
+    submodule.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    selected = scoped
+    if alias_kind != "original":
+        alias = tmp_path / ("selected-alias" if alias_kind == "symlink" else "REPOSITORY")
+        if alias_kind == "symlink":
+            alias.symlink_to(repository, target_is_directory=True)
+        elif not alias.exists():
+            pytest.skip("filesystem does not support case aliases")
+        selected = alias / scope
+    entries = WORKBENCH_TARGET["git_submodule_entries"](selected)
+    WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+    copy = WORKBENCH_TARGET["copy_git_worktree_files"]
+    calls = []
+
+    def checked_copy(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
+        assert not source.samefile(submodule), "An excluded uninitialized gitlink was traversed"
+        calls.append(source)
+        return copy(source, destination, excluded)
+
+    monkeypatch.setitem(copy.__globals__, "copy_git_worktree_files", checked_copy)
+    selected_exclusions = tuple(path for path, _ in entries)
+    for index, excluded in enumerate({selected_exclusions, (submodule,)}):
+        calls.clear()
+        copied = checked_copy(selected, tmp_path / f"copied-{index}", excluded)
+        assert len(calls) == 1
+        assert (copied / "fixture.py").read_text() == "synthetic = True\n"
+        assert not (copied / "submodule").exists()
