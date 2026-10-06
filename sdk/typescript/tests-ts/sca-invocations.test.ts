@@ -218,6 +218,8 @@ test.each([
   ["exit", 1],
   ["invalid-json", 0],
   ["invalid-json", 1],
+  ["invalid-contract", 0],
+  ["invalid-contract", 1],
   ["failure", 1],
   ["cancel", 1],
 ] as const)(
@@ -244,9 +246,12 @@ test.each([
           scanned++;
           const stdout = outputFor(argv.at(-1)!);
           if (scanned === failedIndex + 1) {
-            if (failure === "invalid-json")
+            if (failure === "invalid-json" || failure === "invalid-contract")
               return {
-                stdout: "incomplete JSON",
+                stdout:
+                  failure === "invalid-json"
+                    ? "incomplete JSON"
+                    : '{"results":{}}',
                 stderr: "Synthetic failure",
                 exitCode: 127,
               };
@@ -273,7 +278,10 @@ test.each([
         : await operation;
     expect(result.status).toBe("partial");
     expect(result.coverage.status).toBe("partial");
-    const continues = failure === "exit" || failure === "invalid-json";
+    const continues =
+      failure === "exit" ||
+      failure === "invalid-json" ||
+      failure === "invalid-contract";
     const retained = failure === "exit" ? 3 : 2;
     expect(result.components).toHaveLength(retained);
     expect(result.matches).toHaveLength(retained);
@@ -291,8 +299,11 @@ test.each([
     ).toHaveLength(retained);
     for (const [index, invocation] of result.scanner.invocations!.entries()) {
       expect(await readFile(invocation.rawOutputPath, "utf8")).toBe(
-        failure === "invalid-json" && index === failedIndex
-          ? "incomplete JSON"
+        index === failedIndex &&
+          (failure === "invalid-json" || failure === "invalid-contract")
+          ? failure === "invalid-json"
+            ? "incomplete JSON"
+            : '{"results":{}}'
           : outputFor(join(repository, paths[index]!)),
       );
       expect(await readFile(invocation.stderrPath, "utf8")).toBe(
@@ -303,10 +314,14 @@ test.each([
             : "Synthetic interrupted output",
       );
     }
-    if (failure === "invalid-json")
+    if (failure === "invalid-json" || failure === "invalid-contract")
       expect(result.diagnostics.join("\n")).toContain(paths[failedIndex]!);
     expect(result.scanner.exitCode).toBe(
-      failure === "exit" ? 130 : failure === "invalid-json" ? 127 : null,
+      failure === "exit"
+        ? 130
+        : failure === "invalid-json" || failure === "invalid-contract"
+          ? 127
+          : null,
     );
   },
 );

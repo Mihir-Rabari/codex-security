@@ -1241,17 +1241,17 @@ export async function runOsvScan(
       result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
       const matchCount = result.matches.length;
       if (output.stdout.trim() !== "") {
-        let raw: unknown;
+        let sources: Set<string> | undefined;
         try {
-          raw = JSON.parse(output.stdout);
+          sources = consumeOutput(
+            JSON.parse(output.stdout),
+            output.stderr,
+            input,
+          );
         } catch (error) {
           options.signal?.throwIfAborted();
           result.diagnostics.push(`${input.path}: ${errorMessage(error)}`);
         }
-        const sources =
-          raw === undefined
-            ? undefined
-            : consumeOutput(raw, output.stderr, input);
         if (sources !== undefined && !sources.has(input.path)) {
           if (output.stderr.includes(emptyInputReceipt)) {
             input.reason = "OSV extracted no packages from this lockfile.";

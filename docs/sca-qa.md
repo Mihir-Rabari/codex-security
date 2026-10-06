@@ -2,7 +2,7 @@
 
 The additive SDK entry point is
 `security.scanDependencies({ repositoryPath, outputDir, auth, signal, maxCostUsd })`.
-The MVP covers the [supported language/file matrix](../sdk/typescript/README.md#dependency-assessment-sca-mvp), retains OSV evidence,
+The MVP covers the [supported language/file matrix](../sdk/typescript/docs/cli.md#dependency-assessment-sca-mvp), retains OSV evidence,
 performs static application assessment, and produces a report, conservative
 base/head comparison, and developer-selected update handoff.
 See [the runnable examples](../examples/sca/README.md).

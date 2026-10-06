@@ -20,7 +20,7 @@ Codex provider configuration.
 
 The same SDK workflow handles JavaScript/TypeScript, Python, Go, Rust,
 Java/Kotlin, Ruby, PHP, and .NET dependency files, including mixed repositories.
-See the [supported file matrix and limitations](../../sdk/typescript/README.md#dependency-assessment-sca-mvp).
+See the [supported file matrix and limitations](../../sdk/typescript/docs/cli.md#dependency-assessment-sca-mvp).
 Untracked Git-ignored files and node_modules are outside inventory. Unsupported
 inputs and unresolved local/Git/URL identities leave coverage incomplete.
 Requirements and Maven manifest results explicitly retain partial coverage;
