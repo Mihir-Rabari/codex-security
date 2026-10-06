@@ -582,9 +582,7 @@ def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
     )
 
 
-def _worker_candidate_key(
-    worker_id: str, candidate_id: str, finding: dict[str, Any]
-) -> tuple[str, str, Any, Any, Any]:
+def _worker_candidate_key(worker_id: str, candidate_id: str, finding: dict[str, Any]) -> str:
     """Identify one worker-local candidate without merging unrelated locations."""
     provenance = finding.get("provenance")
     identity = (
@@ -598,7 +596,7 @@ def _worker_candidate_key(
         identity = normalized.get("identity")
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, finding.get("ruleId"), _encoded(anchor), _encoded(instance)
+    return _digest([worker_id, candidate_id, finding.get("ruleId"), anchor, instance])
 
 
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
@@ -1345,10 +1343,13 @@ def merge_saved_results(
         previous_candidate = finding_candidate_id(previous)
         current_owner = finding.get("provenance", {}).get("workerId") or current_owner
         previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
+        current_owner = current_owner if isinstance(current_owner, str) else None
+        previous_owner = previous_owner if isinstance(previous_owner, str) else None
         key = _finding_key(recovered_finding(finding) or finding)
         if bool(current_candidate) != bool(previous_candidate):
+            if current_owner and previous_owner and current_owner != previous_owner:
+                return True
             owner = previous_owner if current_candidate else current_owner
-            owner = owner if isinstance(owner, str) else None
             return (
                 sum(
                     (1 if owner else len(owners) or 1)
@@ -1392,15 +1393,21 @@ def merge_saved_results(
 
     represented: dict[str, str | None] = {}
     represented_explicit: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
+    represented_candidates: dict[str, str | None] = {}
+    canonical_candidates: set[str] = set()
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
+    represented_candidate_history: dict[str, set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
+    recovered_observations: dict[bytes, dict[str, Any] | None] = {}
+
     def recovered_finding(value: Any) -> dict[str, Any] | None:
+        observation = _encoded(value)
+        if observation in recovered_observations:
+            return copy.deepcopy(recovered_observations[observation])
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
@@ -1413,7 +1420,9 @@ def merge_saved_results(
             scan_dir,
             [],
         )
-        return next(iter(document["findings"]), None)
+        recovered = next(iter(document["findings"]), None)
+        recovered_observations[observation] = copy.deepcopy(recovered)
+        return recovered
 
     def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
         provenance = finding.get("provenance", {})
@@ -1699,8 +1708,6 @@ def merge_saved_results(
                 recovered["identity"],
             ]
         )
-
-    canonical_candidates: set[tuple[str, str, Any, Any, Any]] = set()
 
     def register_parent_finding(finding: dict[str, Any], canonical_key: str) -> None:
         identity_key = explicit_finding_key(finding)
@@ -2041,37 +2048,43 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             key = _finding_key(finding)
+            if relative == "parent":
+                # Preserve accepted checkpoint row order after source validation.
+                position = candidate_position_key(finding, key)
+                finding_positions.setdefault(position, len(findings))
+                register_parent_finding(finding, position)
+                findings.append(finding)
+                continue
             represented_by_parent = False
             mapped_candidate = None
-            if relative != "parent":
-                if key in represented:
-                    mapped_key = represented[key]
-                    mapped_candidate = mapped_key
-                    historical_contents = represented_history.get(key, set())
-                elif (
-                    identity_key := explicit_finding_key(value, worker_id)
-                ) in represented_explicit and len(source_explicit_positions[identity_key]) == 1:
-                    mapped_key = represented_explicit[identity_key]
-                    mapped_candidate = mapped_key
-                    historical_contents = set()
-                    represented_by_parent = (
-                        mapped_key is not None
-                        and source_order["parent"][1] >= source_order[relative][1]
-                    )
-                elif worker_id and candidate_id:
-                    candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
-                    if candidate_key not in represented_candidates:
-                        represented_candidates[candidate_key] = key
-                    mapped_key = represented_candidates[candidate_key]
-                    historical_contents = represented_candidate_history.get(candidate_key, set())
-                else:
-                    mapped_key = None
-                    historical_contents = set()
-                if mapped_key is not None:
-                    key = mapped_key
-                    represented_by_parent = represented_by_parent or (
-                        _digest(_finding_content(value)) in historical_contents
-                    )
+            if key in represented:
+                mapped_key = represented[key]
+                mapped_candidate = mapped_key
+                historical_contents = represented_history.get(key, set())
+            elif (
+                identity_key := explicit_finding_key(value, worker_id)
+            ) in represented_explicit and len(source_explicit_positions[identity_key]) == 1:
+                mapped_key = represented_explicit[identity_key]
+                mapped_candidate = mapped_key
+                historical_contents = set()
+                represented_by_parent = (
+                    mapped_key is not None
+                    and source_order["parent"][1] >= source_order[relative][1]
+                )
+            elif worker_id and candidate_id:
+                candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
+                if candidate_key not in represented_candidates:
+                    represented_candidates[candidate_key] = key
+                mapped_key = represented_candidates[candidate_key]
+                historical_contents = represented_candidate_history.get(candidate_key, set())
+            else:
+                mapped_key = None
+                historical_contents = set()
+            if mapped_key is not None:
+                key = mapped_key
+                represented_by_parent = represented_by_parent or (
+                    _digest(_finding_content(value)) in historical_contents
+                )
             canonical_candidate = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
                 if worker_id and candidate_id
@@ -2093,8 +2106,6 @@ def merge_saved_results(
                     )
             if not represented_by_parent and mapped_candidate is None:
                 key = candidate_position_key(finding, key)
-            if relative == "parent":
-                register_parent_finding(finding, key)
             if key in finding_positions:
                 position = finding_positions[key]
                 retained = findings[position]

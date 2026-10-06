@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -15,9 +16,11 @@ from test_workbench_standard_deep_results import (
     run_workbench_with_fault,
 )
 from workbench_test_support import (
+    create_saved_workspace,
     run_workbench,
     saved_draft,
     start_saved_scan,
+    start_workspace_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -73,6 +76,116 @@ def stop_draft(tmp_path, state, home, scan_id, *, deep=False, retry=False):
         ]
         args = ("recover-scan-results", "--scan-id", scan_id)
     run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("parent", ["checkpoint", "canonical"])
+@pytest.mark.parametrize("location", ["src/inside.py", "vendor/outside.py"])
+def test_recovered_parent_checkpoint_preserves_scope_filter(
+    tmp_path: Path, retry: bool, parent: str, location: str
+):
+    state, home, target = tmp_path / "state", tmp_path / "home", tmp_path / "target"
+    for path in ("src/inside.py", "vendor/outside.py"):
+        file = target / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("value = 1\n")
+    workspace = create_saved_workspace(state, target)
+    run_workbench(
+        state,
+        "save-workspace",
+        "--workspace-id",
+        workspace["id"],
+        "--target-path",
+        str(target),
+        "--scope",
+        "src",
+        "--mode",
+        "standard",
+        "--user-context",
+        "Scoped fixture.",
+    )
+    scan_id, scan_dir = start_workspace_scan(state, workspace["id"], tmp_path / "scans")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path=location, include_paths=["src"]
+    )
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())["scan"]
+    manifest_path.write_text(
+        json.dumps({"scan": {key: manifest[key] for key in ("target", "scope")}})
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(completeness="complete", surfaces=[], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    if parent == "checkpoint":
+        checkpoint = write_checkpoint(
+            scan_dir / "checkpoints",
+            {**saved_draft(scan_id, findings=[finding]), "coverage": coverage},
+        )
+        (scan_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+            (scan_dir / name).unlink()
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    # Existing canonical documents are authoritative on their first publication.
+    retained = location.startswith("src/") or (parent == "canonical" and not retry)
+    assert scan["findingCount"] == int(retained)
+    if retained:
+        assert scan["findings"][0]["locations"][0]["path"] == location
+    else:
+        assert any("out-of-scope" in warning for warning in scan["warnings"])
+    assert not scan["resultsRecoveryNeeded"]
+
+
+def test_checkpoint_history_recovery_reuses_repeated_observations(tmp_path: Path):
+    calls = []
+    for length in (5, 10):
+        case = tmp_path / str(length)
+        case.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(case)
+        original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        history = []
+        for index in range(length):
+            raw = copy.deepcopy(original)
+            raw["summary"] = f"Observation {index}"
+            raw["provenance"]["candidateId"] = "candidate-a"
+            finding = copy.deepcopy(raw)
+            finding["provenance"]["previousFindings"] = copy.deepcopy(history)
+            history.append(raw)
+            checkpoint = write_checkpoint(
+                scan_dir / "checkpoints",
+                {**saved_draft(scan_id, findings=[finding]), "coverage": coverage},
+            )
+        (scan_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        count_path = case / "recovery-count.txt"
+        result = run_workbench_with_fault(
+            case / "count.py",
+            state,
+            home,
+            "import atexit, pathlib\n"
+            "calls = 0\n"
+            "original = workbench_saved_results._recover_unsealed_findings\n"
+            "def counted(*args, **kwargs):\n"
+            "    global calls\n"
+            "    calls += 1\n"
+            "    return original(*args, **kwargs)\n"
+            "workbench_saved_results._recover_unsealed_findings = counted\n"
+            f"atexit.register(lambda: pathlib.Path({str(count_path)!r}).write_text(str(calls)))\n",
+            "fail-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Stopped for test",
+        )
+        assert result.returncode == 0, result.stderr
+        scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 1
+        assert not scan["resultsRecoveryNeeded"]
+        calls.append(int(count_path.read_text()))
+    # Doubling the retained history must not repeatedly validate its shared prefix.
+    assert calls[1] <= 2 * calls[0]
 
 
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan", "recover"])
@@ -806,6 +919,209 @@ def test_retained_identityless_worker_source_is_not_republished(tmp_path: Path, 
     findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
     assert len(findings) == 1
     assert findings[0]["identity"] == reduced["identity"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("distinct_parent_candidate", [False, True])
+def test_canonical_worker_update_keeps_independent_alias_sibling(
+    tmp_path: Path, reverse: bool, retry: bool, distinct_parent_candidate: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding_path = scan_dir / "findings.json"
+    document = json.loads(finding_path.read_text())
+    original = document["findings"][0]
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    independent = json.loads(json.dumps(original))
+    independent.update(
+        identity={"anchor": "reviewed-a"}, title="Beta", summary="Independent candidate A."
+    )
+    independent["severity"]["level"] = "medium"
+    independent["provenance"]["candidateId"] = "candidate-a"
+    earlier = json.loads(json.dumps(independent))
+    earlier.pop("identity")
+    independent["provenance"]["previousFindings"] = [earlier]
+    canonical = json.loads(json.dumps(original))
+    canonical.update(identity={"anchor": "beta"}, title="Beta", summary="Candidate B.")
+    canonical["severity"]["level"] = "low"
+    canonical["provenance"].update(candidateId="candidate-b", workerId=worker_id)
+    historical = json.loads(json.dumps(canonical))
+    canonical["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": historical}]
+    if distinct_parent_candidate:
+        canonical["provenance"]["candidateId"] = "canonical-b"
+    document["findings"] = [canonical, independent] if reverse else [independent, canonical]
+    finding_path.write_text(json.dumps(document))
+    historical["severity"]["level"] = "high"
+    historical["summary"] = "Stronger candidate B observation."
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [historical]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 2
+    assert {row["provenance"]["candidateId"] for row in findings} == {
+        "candidate-a",
+        "candidate-b",
+    }
+    assert {row["summary"] for row in findings} == {
+        "Independent candidate A.",
+        "Stronger candidate B observation.",
+    }
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("alias", [{"anchor": []}, {"anchor": "finding", "instance": {}}])
+def test_worker_update_preserves_structured_historical_identity(
+    tmp_path: Path, retry: bool, alias: dict
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    finding_path = scan_dir / "findings.json"
+    document = json.loads(finding_path.read_text())
+    finding = document["findings"][0]
+    finding["provenance"].update(
+        candidateId="candidate-a", workerId=worker_id, preservedIdentity=alias
+    )
+    finding["severity"]["level"] = "low"
+    finding_path.write_text(json.dumps(document))
+    updated = copy.deepcopy(finding)
+    updated["severity"]["level"] = "high"
+    updated["summary"] = "Stronger retained observation."
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [updated]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["findingCount"] == 1
+    assert not scan["resultsRecoveryNeeded"]
+    retained = scan["findings"][0]
+    assert retained["summary"] == updated["summary"]
+    assert retained["severity"]["level"] == "high"
+    assert retained["provenance"]["preservedIdentity"] == alias
+
+
+@pytest.mark.parametrize("renamed", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("history", ["sourceFindings", "previousFindings"])
+def test_canonical_worker_slot_survives_a_stronger_replacement(
+    tmp_path: Path, renamed: bool, retry: bool, history: str
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding_path = scan_dir / "findings.json"
+    parent = json.loads(finding_path.read_text())
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    original = parent["findings"][0]
+    original.update(identity={"anchor": "finding"}, title="Finding")
+    original["severity"]["level"] = "low"
+    original["provenance"].update(candidateId="worker-candidate", workerId=worker_id)
+    historical = json.loads(json.dumps(original))
+    if renamed:
+        original["provenance"]["candidateId"] = "canonical-candidate"
+    original["provenance"][history] = (
+        [{"id": f"{worker_id}:0", "finding": historical}]
+        if history == "sourceFindings"
+        else [historical]
+    )
+    finding_path.write_text(json.dumps(parent))
+    worker = json.loads(result_path.read_text())
+    if history == "sourceFindings":
+        write_checkpoint(
+            result_path.parent / "checkpoints",
+            {**worker, "complete": False, "findings": [historical]},
+        )
+    current = json.loads(json.dumps(historical))
+    current["severity"]["level"] = "high"
+    current["summary"] = "Stronger current worker observation."
+    if history == "sourceFindings":
+        current["locations"][0].update(startLine=2, endLine=2)
+    worker["findings"] = [current]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 1
+    assert findings[0]["summary"] == current["summary"]
+    assert findings[0]["locations"][0]["startLine"] == current["locations"][0]["startLine"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "foreign-owner",
+        "split-owners",
+        "explicit-priority",
+        "interleaved-explicit",
+        "raw-stronger",
+        "explicit-stronger",
+    ],
+)
+def test_frozen_recovery_preserves_worker_ownership_and_explicit_identity_priority(
+    tmp_path: Path, case: str
+):
+    snapshots = []
+    for retry in (False, True):
+        directory = tmp_path / str(retry)
+        directory.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(directory)
+        finding_path = scan_dir / "findings.json"
+        document = json.loads(finding_path.read_text())
+        original = document["findings"][0]
+        original.update(identity={"anchor": "finding"}, title="Finding")
+        if case == "foreign-owner":
+            observations = [
+                ("B", "worker-a", "low"),
+                ("A", "worker-a", "high"),
+                (None, "worker-b", "high"),
+            ]
+        elif case == "split-owners":
+            observations = [
+                ("A", "worker-a", "low"),
+                (None, "worker-a", "high"),
+                ("B", "worker-b", "low"),
+            ]
+        else:
+            observations = [
+                ("A", None, "high" if case == "raw-stronger" else "low"),
+                ("A", None, "high" if case == "explicit-stronger" else "low"),
+                ("B", None, "low"),
+            ]
+        findings = []
+        for index, (candidate, owner, level) in enumerate(observations):
+            finding = json.loads(json.dumps(original))
+            finding["severity"]["level"] = level
+            finding["provenance"].pop("candidateId", None)
+            if candidate:
+                finding["provenance"]["candidateId"] = candidate
+            if owner:
+                finding["provenance"]["workerId"] = owner
+            elif index == 0:
+                finding.pop("identity")
+            findings.append(finding)
+        if case == "interleaved-explicit":
+            findings[1], findings[2] = findings[2], findings[1]
+        document["findings"] = findings
+        finding_path.write_text(json.dumps(document))
+        stop_draft(directory, state, home, scan_id, retry=retry)
+        recovered = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+        expected = 3 if case == "foreign-owner" else 2
+        assert len(recovered) == expected
+        snapshots.append(
+            {
+                (
+                    finding["provenance"].get("workerId"),
+                    finding["provenance"].get("candidateId"),
+                ): finding["identity"]
+                for finding in recovered
+            }
+        )
+    assert snapshots[0] == snapshots[1]
+    if case == "interleaved-explicit":
+        assert snapshots[0][None, "B"] == {"anchor": "finding"}
 
 
 def test_recovered_identity_does_not_depend_on_worker_assignment(tmp_path: Path):

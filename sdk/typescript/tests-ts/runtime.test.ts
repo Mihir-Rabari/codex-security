@@ -39,7 +39,6 @@ import { PassThrough } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -283,54 +282,6 @@ describe("plugin runtime preparation", () => {
         expect(pattern.test(`safe${control}path`)).toBe(false);
       }
     }
-  });
-
-  test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const sources = [
-      "buildFindings",
-      "scanFindingIdentity",
-      "findingCandidateId",
-      "semanticIdentifier",
-      "isRecord",
-    ].map((name) => {
-      const source = new RegExp(`function ${name}\\([^]*?\\n\\}`, "u").exec(
-        runtime,
-      )?.[0];
-      expect(source).toBeDefined();
-      return source;
-    });
-    const buildFindings = new Function(
-      `${sources.join("\n")}\nreturn buildFindings;`,
-    )() as (
-      findings: Array<{
-        ruleId: string;
-        title: string;
-        provenance: { source: string };
-        locations: Array<{ path: string; startLine: number }>;
-        extensions: { candidateId: string };
-      }>,
-    ) => Array<{ identity: { anchor: string } }>;
-
-    const findings = buildFindings(
-      ["candidate-a", "candidate-b"].map((candidateId) => ({
-        ruleId: "synthetic-rule",
-        title: "Same finding",
-        provenance: { source: "local_plugin" },
-        locations: [{ path: "app.py", startLine: 1 }],
-        extensions: { candidateId },
-      })),
-    );
-
-    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
-      "candidate-a",
-      "candidate-b",
-    ]);
   });
 
   test("generates canonical scoped security inventory paths", async () => {

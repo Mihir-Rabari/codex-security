@@ -2082,6 +2082,32 @@ print(json.dumps(stages))`,
 }
 
 for (const layout of ["standard", "diff"] as const) {
+  for (const order of ["AB", "BA"]) {
+    test(`${layout}: repeated publication preserves candidate identity aliases in ${order}`, async (t) => {
+      const f = await fixture(t, layout);
+      const input = {
+        ...f.draft({}, true),
+        findings: [...order].map(findingFor),
+      };
+      let expected: unknown;
+      for (let publication = 0; publication < 3; publication++) {
+        await f.write(input);
+        for (const stopped of ["first", true] as const) {
+          const findings = await recoverPublishedFindings(f, stopped);
+          assert.equal(findings.length, 2);
+          const identities = Object.fromEntries(
+            findings.map((row) => [row.provenance.candidateId, row.identity]),
+          );
+          assert.deepEqual(Object.keys(identities).sort(), ["A", "B"]);
+          expected ??= identities;
+          assert.deepEqual(identities, expected);
+        }
+      }
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: repeated observations of one candidate retain the strongest finding`, async (t) => {
     const f = await fixture(t, layout);
     await f.write({
