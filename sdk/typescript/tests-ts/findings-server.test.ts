@@ -160,7 +160,11 @@ test("invalid findings pagination is rejected before database creation", async (
   ]) {
     const result = await runCodexCommand(
       { command: "node" },
-      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings", ...args],
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "list-stored-findings",
+        ...args,
+      ],
       process.env,
       JSON.stringify({ stateDirectory }),
     );
