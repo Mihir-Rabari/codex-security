@@ -1929,9 +1929,10 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (
-                        id, occurrence_id, status, close_reason, note, created_at, decision_sequence
+                        id, occurrence_id, status, close_reason, note, created_at, decision_sequence, scan_sequence
                     ) VALUES (?, ?, ?, ?, ?, ?,
-                        (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions))
+                        (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions),
+                        (SELECT COALESCE(MAX(rowid), 0) FROM scans))
                     """,
                     (
                         str(uuid.uuid4()),

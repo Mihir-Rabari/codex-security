@@ -474,10 +474,11 @@ def test_legacy_decision_migration_preserves_chronology_and_appends(history, leg
         if statement.startswith("INSERT INTO finding_decisions")
     )
     with sqlite3.connect(database) as connection:
-        if "decision_sequence" in {
-            row[1] for row in connection.execute("PRAGMA table_info(finding_decisions)")
-        }:
-            connection.execute("ALTER TABLE finding_decisions DROP COLUMN decision_sequence")
+        for column in ("scan_sequence", "decision_sequence"):
+            if column in {
+                row[1] for row in connection.execute("PRAGMA table_info(finding_decisions)")
+            }:
+                connection.execute(f"ALTER TABLE finding_decisions DROP COLUMN {column}")
         connection.execute("DELETE FROM schema_migrations WHERE version > 41")
         connection.execute("DELETE FROM finding_decisions")
         connection.execute("DELETE FROM finding_triage")
@@ -579,3 +580,122 @@ def test_stopped_sealed_occurrences_remain_in_complete_scan_history(history) -> 
         assert indexed["occurrenceCount"] == 2
         assert set(indexed["knownScanIds"]) == {stopped["scanId"], current["scanId"]}
         assert indexed["status"] == "closed"
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_stable_recurrence_keeps_prior_uncertainty_until_later_coverage(history, uncertain) -> None:
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository, identity_anchor="stable")
+    repeated = create_cli_scan(state, root, repository, identity_anchor="stable")
+    independent = create_cli_scan(state, root, repository, identity_anchor="independent")
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in (first, repeated, independent)
+    ]
+    assert rows[0]["findingId"] == rows[1]["findingId"]
+    if uncertain:
+        comparison = save_scan_matches(
+            state,
+            first,
+            independent,
+            uncertain=(
+                {
+                    "beforeOccurrenceId": rows[0]["occurrenceId"],
+                    "afterOccurrenceId": rows[2]["occurrenceId"],
+                    "reason": "Synthetic comparison remains uncertain.",
+                },
+            ),
+        )
+        assert comparison["summary"]["unknown"] == 2
+    findings = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    stable = [row for row in findings if row["findingId"] == rows[0]["findingId"]]
+    assert len(stable) == int(uncertain)
+    repositories = run_workbench(state, "list-repositories")["repositories"]
+    assert repositories[0]["openFindingsCount"] == 1 + int(uncertain)
+    create_cli_scan(state, root, repository, finding=False)
+    assert (
+        run_workbench(state, "list-global-findings", "--repository", str(repository))["findings"]
+        == []
+    )
+
+
+@pytest.mark.parametrize("artifact", ["scan-manifest.json", "coverage.json"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_pruned_coverage_keeps_history_but_tampering_is_rejected(
+    history, artifact, missing
+) -> None:
+    state, root, repository = history
+    earlier = create_cli_scan(state, root, repository)
+    later = create_cli_scan(state, root, repository, finding=False)
+    path = Path(later["scanDir"]) / artifact
+    if missing:
+        path.unlink()
+        findings = run_workbench(state, "list-global-findings")["findings"]
+        assert [finding["scanId"] for finding in findings] == [earlier["scanId"]]
+    else:
+        path.write_text(path.read_text() + "\n")
+        result = run_workbench(state, "list-global-findings", check=False)
+        assert result["returncode"] != 0
+        assert "changed" in result["stderr"]
+
+
+def test_selected_repository_ignores_an_unrelated_tampered_scan(history) -> None:
+    state, root, repository = history
+    selected = create_cli_scan(state, root, repository)
+    unrelated = repository.with_name("unrelated")
+    unrelated.mkdir()
+    create_cli_scan(state, root, unrelated)
+    later = create_cli_scan(state, root, unrelated, finding=False)
+    manifest = Path(later["scanDir"]) / "scan-manifest.json"
+    manifest.write_text(manifest.read_text() + "\n")
+    result = run_workbench(state, "list-repositories", "--target-id", selected["targetId"])
+    assert len(result["repositories"]) == 1
+    assert result["repositories"][0]["targetId"] == selected["targetId"]
+    assert result["repositories"][0]["openFindingsCount"] == 1
+    unfiltered = run_workbench(state, "list-repositories", check=False)
+    assert unfiltered["returncode"] != 0
+    assert "changed after completion" in unfiltered["stderr"]
+
+
+@pytest.mark.parametrize("close_reason", ["already_fixed", "false_positive"])
+def test_clock_rollback_keeps_a_new_decision_until_a_new_scan_is_admitted(
+    history, close_reason
+) -> None:
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = '2099-10-06T10:00:00Z' WHERE id = ?", (first["scanId"],)
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        close_reason,
+        "--note",
+        "Synthetic explicit decision",
+    )
+    assert (
+        run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0][
+            "status"
+        ]
+        == "closed"
+    )
+    later = create_cli_scan(state, root, repository)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = '2000-01-01T00:00:00Z' WHERE id = ?", (later["scanId"],)
+        )
+    findings = run_workbench(state, "list-global-findings", "--include-resolved")["findings"]
+    assert len(findings) == 1
+    assert findings[0]["scanId"] == later["scanId"]
+    assert findings[0]["status"] == "open"

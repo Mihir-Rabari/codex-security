@@ -197,6 +197,10 @@ def _indexed_findings(
                  WHERE decisions.occurrence_id = occurrences.id),
                 triage.rowid
             ) AS decision_sequence,
+            (SELECT decisions.scan_sequence
+             FROM finding_decisions AS decisions
+             WHERE decisions.occurrence_id = occurrences.id
+             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_scan_sequence,
             occurrences.title,
             occurrences.summary,
             (
@@ -235,7 +239,11 @@ def _indexed_findings(
         if (
             status == "closed"
             and decision["close_reason"] in {"already_fixed", "false_positive"}
-            and latest["scan_started_at"] > decision["decision_updated_at"]
+            and (
+                latest["scan_sequence"] > decision["decision_scan_sequence"]
+                if decision["decision_scan_sequence"] is not None
+                else latest["scan_started_at"] > decision["decision_updated_at"]
+            )
         ):
             status = "open"
         scans = sorted(
@@ -504,6 +512,23 @@ def _active_findings(
         if query
         else "0"
     )
+    uncertain_by_finding: dict[tuple[str, str], set[str]] = {}
+    if uncertain_scans:
+        for occurrence in connection.execute(
+            f"""
+            SELECT occurrences.id, occurrences.finding_id,
+                COALESCE(targets.id, scans.target_path) AS indexed_target_id
+            FROM finding_occurrences AS occurrences
+            JOIN scans ON scans.id = occurrences.scan_id
+            LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
+            WHERE 1 = 1 {target_filter} {repository_filter} {current_owner_only}
+            """,
+            target_values,
+        ):
+            if scans_with_uncertainty := uncertain_scans.get(occurrence["id"]):
+                uncertain_by_finding.setdefault(
+                    (occurrence["indexed_target_id"], occurrence["finding_id"]), set()
+                ).update(scans_with_uncertainty)
     rows = connection.execute(
         f"""
         WITH ranked_findings AS (
@@ -590,14 +615,21 @@ def _active_findings(
                 break
             if scan["seal_manifest_digest"] is None:
                 continue
-            if scan["id"] in uncertain_scans.get(row["occurrence_id"], ()):
+            if scan["id"] in uncertain_by_finding.get(
+                (row["indexed_target_id"], row["finding_id"]), ()
+            ):
                 continue
             if scan["id"] not in coverage_by_scan_id:
                 try:
                     coverage_by_scan_id[scan["id"]] = read_coverage(scan)
                 except SystemExit as error:
+                    cause: BaseException | None = error
+                    while cause is not None and not isinstance(cause, FileNotFoundError):
+                        cause = cause.__cause__
                     message = str(error)
-                    if message == (
+                    if isinstance(cause, FileNotFoundError):
+                        coverage_by_scan_id[scan["id"]] = None
+                    elif message == (
                         "Scan directory must be an existing canonical non-symlink directory."
                     ):
                         try:
@@ -650,7 +682,13 @@ def list_repositories(
 
     open_findings_by_target = Counter(
         row["target_id"]
-        for row in _indexed_active_findings(connection, read_coverage)
+        for row in _indexed_active_findings(
+            connection,
+            read_coverage,
+            target_ids={args.target_id}
+            if args is not None and args.target_id is not None
+            else None,
+        )
         if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}

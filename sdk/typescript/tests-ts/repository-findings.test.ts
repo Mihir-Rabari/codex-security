@@ -18,7 +18,7 @@ CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT);
 CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT, target_path TEXT, seal_manifest_digest TEXT, scan_dir TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT, close_reason TEXT);
-CREATE TABLE finding_decisions(occurrence_id TEXT);
+CREATE TABLE finding_decisions(occurrence_id TEXT, decision_sequence INTEGER NOT NULL, scan_sequence INTEGER);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
 CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
 CREATE TABLE scan_comparisons(before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);
@@ -35,7 +35,7 @@ def add_finding(occurrence, finding, scan):
 
 def add_decision(occurrence, status, timestamp, close_reason):
     connection.execute("INSERT INTO finding_triage VALUES (?, ?, ?, ?) ON CONFLICT(occurrence_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, close_reason = excluded.close_reason", (occurrence, status, timestamp, close_reason))
-    connection.execute("INSERT INTO finding_decisions VALUES (?)", (occurrence,))
+    connection.execute("INSERT INTO finding_decisions (occurrence_id, decision_sequence, scan_sequence) SELECT ?, COALESCE(MAX(decision_sequence), 0) + 1, (SELECT MAX(rowid) FROM scans) FROM finding_decisions", (occurrence,))
 
 for scan_id, target, day in [("old", "first", 1), ("same", "first", 2), ("renamed", "first", 3), ("latest", "first", 4), ("other", "second", 4)]:
     add_scan(scan_id, target, day)

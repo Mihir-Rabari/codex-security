@@ -335,7 +335,8 @@ export function renderScanHistory(
       key: string,
       label: string,
     ): void => {
-      const items = value[key];
+      const valueItems = value[key];
+      const items = typeof valueItems === "string" ? [valueItems] : valueItems;
       if (!Array.isArray(items)) return;
       for (const item of items) {
         const detail = description(item);
@@ -393,6 +394,7 @@ export function renderScanHistory(
           }
         }
         if (key === "attackPath") {
+          appendDescriptions(sections, value, "steps", "Step");
           for (const [nestedLabel, nestedKey] of [
             ["Dataflow", "dataflow"],
             ["Dataflow", "dataFlow"],

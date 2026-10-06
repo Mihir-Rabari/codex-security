@@ -888,6 +888,14 @@ MIGRATIONS = (
         SET decision_sequence = (SELECT sequence FROM ordered WHERE ordered.id = finding_decisions.id);
         """,
     ),
+    (
+        43,
+        "bind new finding decisions to admitted scans",
+        """
+        ALTER TABLE finding_decisions
+        ADD COLUMN scan_sequence INTEGER;
+        """,
+    ),
 )
 
 

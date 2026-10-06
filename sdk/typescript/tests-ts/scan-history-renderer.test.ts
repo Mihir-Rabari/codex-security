@@ -639,3 +639,40 @@ describe("scan history renderer", () => {
     }
   });
 });
+
+test.each([
+  { evidence: "Synthetic validation proof" },
+  { evidence: ["Synthetic validation proof"] },
+])(
+  "renders accepted scalar and array validation evidence: %j",
+  (validation) => {
+    const text = renderScanHistory(
+      {
+        title: "Synthetic saved finding",
+        severity: { level: "high" },
+        validation,
+      },
+      "finding",
+      { color: false },
+    );
+    expect(text).toContain("Synthetic validation proof");
+    expect(text).toContain("VALIDATION");
+  },
+);
+
+test("renders accepted attack-path steps without a summary", () => {
+  const text = renderScanHistory(
+    {
+      title: "Synthetic saved finding",
+      severity: { level: "high" },
+      attackPath: {
+        steps: ["Upload a synthetic archive.", "Trigger extraction."],
+      },
+    },
+    "finding",
+    { color: false },
+  );
+  expect(text).toContain("Upload a synthetic archive.");
+  expect(text).toContain("Trigger extraction.");
+  expect(text).toContain("ATTACK PATH");
+});
