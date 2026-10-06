@@ -1372,3 +1372,66 @@ test.each([
     expect(onRun).not.toHaveBeenCalled();
   },
 );
+
+test.each([
+  { values: ['profiles.review.model_provider="amazon-bedrock"'] },
+  {
+    values: [
+      'profile="review"',
+      'profiles.review.model_provider="amazon-bedrock"',
+    ],
+  },
+  { values: ['profiles.review={model_provider="amazon-bedrock"}'] },
+])(
+  "rejects an explicit selected-profile provider conflict: %j",
+  ({ values }) => {
+    expect(() =>
+      parseCodexOverrides(values, undefined, undefined, "openai", {
+        profile: "review",
+        profiles: { review: { model: "synthetic-model" } },
+      }),
+    ).toThrow(
+      "--provider conflicts with --codex profiles.review.model_provider",
+    );
+  },
+);
+
+test("provider selection preserves inherited and unselected profile controls", () => {
+  const defaults = {
+    profile: "review",
+    profiles: {
+      review: { model: "synthetic-model", model_provider: "amazon-bedrock" },
+    },
+  };
+  expect(
+    parseCodexOverrides([], undefined, undefined, "openai", defaults),
+  ).toMatchObject({
+    model_provider: "openai",
+    profiles: { review: { model_provider: "openai" } },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.unselected.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      "openai",
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: {
+      review: { model_provider: "openai" },
+      unselected: { model_provider: "amazon-bedrock" },
+    },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.review.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      undefined,
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: { review: { model_provider: "amazon-bedrock" } },
+  });
+});

@@ -1,6 +1,9 @@
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { join } from "node:path";
+import { ScanResult } from "../src/result.js";
+import type { ThreatModel } from "../src/models.js";
 import {
   capture,
   dependencies,
@@ -96,3 +99,63 @@ describe("scan output schema", () => {
     },
   );
 });
+
+const retainedThreatModels: (ThreatModel | null)[] = [
+  null,
+  { summary: "Synthetic component trust boundary", assets: ["synthetic data"] },
+  { format: "markdown", content: "# Synthetic threat model\n" },
+];
+
+test.each(retainedThreatModels)(
+  "declares nullable threat-model fields from actual scan output: %j",
+  async (threatModel) => {
+    const schema = await scanOutputSchema();
+    expect(schema).toMatchObject({
+      anyOf: [
+        {
+          properties: {
+            threatModel: { anyOf: [{ type: "object" }, { type: "null" }] },
+            threatModelPath: { type: ["string", "null"] },
+          },
+        },
+        {},
+        {},
+      ],
+    });
+    const original = fakeResult(["high"]);
+    const result = new ScanResult({
+      manifest: {
+        ...original.manifest,
+        scan: {
+          ...original.manifest.scan,
+          ...(threatModel === null ? {} : { threatModel }),
+        },
+      },
+      findings: original.findings,
+      coverage: original.coverage,
+      scanDir: original.scanDir,
+      threadId: original.threadId,
+      turnResult: original.turnResult,
+      threatModelPath:
+        threatModel === null ? null : join(original.scanDir, "threatmodel.md"),
+    });
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    const data = JSON.parse(stdout.text()) as Record<string, unknown>;
+    expect(data).toMatchObject({
+      threatModel,
+      threatModelPath: result.threatModelPath,
+    });
+    const validate = new Ajv2020({ strict: false }).compile(schema);
+    expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...data, threatModel: "wrong object type" })).toBe(false);
+    expect(validate({ ...data, threatModelPath: 1 })).toBe(false);
+  },
+);

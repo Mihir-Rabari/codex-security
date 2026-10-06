@@ -1044,6 +1044,14 @@ const scanOutputSchema: z.ZodType<Record<string, unknown> | undefined> = z
       scanDir: z.string().describe("Saved scan directory."),
       threadId: z.string(),
       reportPath: z.string().describe("Markdown report path."),
+      threatModel: z
+        .record(z.string(), z.unknown())
+        .nullable()
+        .describe("Retained threat-model content, when available."),
+      threatModelPath: z
+        .string()
+        .nullable()
+        .describe("Saved threat-model Markdown path, when available."),
       artifactsDir: z.string(),
       sarifPath: z.string().nullable(),
       cost: z.record(z.string(), z.unknown()).nullable(),
@@ -9621,6 +9629,17 @@ export function parseCodexOverrides(
       isJsonObject(profiles[profile] ?? null)
     ) {
       const overrides = result["profiles"] ?? {};
+      const selectedOverrides = isJsonObject(overrides)
+        ? overrides[profile]
+        : undefined;
+      if (
+        isJsonObject(selectedOverrides) &&
+        Object.hasOwn(selectedOverrides, "model_provider")
+      ) {
+        throw new CodexSecurityError(
+          `--provider conflicts with --codex profiles.${profile}.model_provider`,
+        );
+      }
       result["profiles"] = mergeCodexOverrides(
         isJsonObject(overrides) ? overrides : {},
         { [profile]: { model_provider: provider } },
