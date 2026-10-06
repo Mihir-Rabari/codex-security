@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
 import {
   mergedCodexConfig,
+  EXTERNAL_CODEX_PROVIDERS,
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
@@ -28,6 +29,76 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
+  test.each(["openrouter", "fireworks"] as const)(
+    "saves generated %s settings when a file profile supplies only a model",
+    async (provider) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const home = join(root, "home");
+      const runtimeHome = join(root, "runtime");
+      const scanDir = join(root, "scan");
+      for (const path of [repository, home, runtimeHome, scanDir])
+        await mkdir(path, { mode: 0o700 });
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model="synthetic-model"\n',
+      );
+      let savedRecipe: JsonObject | undefined;
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            profile: "review",
+            model_provider: provider,
+            model_providers: {
+              [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+            },
+          },
+        },
+        {
+          environment: {
+            CODEX_HOME: home,
+            [EXTERNAL_CODEX_PROVIDERS[provider].env_key]:
+              "synthetic-provider-key",
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareRuntime: async () => preparedRuntime(runtimeHome),
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan")
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              runStreamed: rejecting(
+                "synthetic generated provider scan started",
+              ),
+            }),
+          }),
+        },
+      );
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic generated provider scan started",
+        );
+        const config = savedRecipe!["config"] as JsonObject;
+        expect(config["profile"]).toBe("review");
+        const replay = resolveCodexProfile(
+          await mergedCodexConfig({ codexOverrides: config }, home),
+        );
+        expect(replay["model_provider"]).toBe(provider);
+        expect(replay["model_providers"]).toEqual({
+          [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each([
     "direct",
     "profile",

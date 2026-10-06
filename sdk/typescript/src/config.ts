@@ -277,6 +277,8 @@ export async function readCodexFileProfile(
       "model_instructions_file",
       "experimental_compact_prompt_file",
       "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
     ]) {
       const path = nativeProfile[key];
       if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
@@ -290,6 +292,16 @@ export async function readCodexFileProfile(
         const path = agent["config_file"];
         if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
           agent["config_file"] = resolve(profileHome, path);
+        }
+      }
+    }
+    const skills = nativeProfile["skills"];
+    if (isObject(skills) && Array.isArray(skills["config"])) {
+      for (const skill of skills["config"]) {
+        if (!isObject(skill)) continue;
+        const path = skill["path"];
+        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+          skill["path"] = resolve(profileHome, path);
         }
       }
     }

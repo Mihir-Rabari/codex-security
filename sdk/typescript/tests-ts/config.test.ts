@@ -200,6 +200,8 @@ describe("Codex configuration", () => {
       "model_instructions_file",
       "experimental_compact_prompt_file",
       "model_catalog_json",
+      "sqlite_home",
+      "log_dir",
     ].flatMap((key) =>
       [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
     ),
@@ -256,6 +258,36 @@ describe("Codex configuration", () => {
         ...(explicit === undefined
           ? {}
           : { agents: { reviewer: { config_file: explicit } } }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit/SKILL.md", "~/native/SKILL.md"])(
+    "preserves native skill path origins before explicit overrides (%s)",
+    async (explicit) => {
+      const home = await temporaryDirectory("codex-security-skill-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[[skills.config]]\npath="skill/SKILL.md"\nenabled=false\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(explicit === undefined
+              ? {}
+              : { skills: { config: [{ path: explicit, enabled: true }] } }),
+          },
+        },
+        home,
+      );
+      expect(config["skills"]).toEqual({
+        config: [
+          {
+            path: explicit ?? join(home, "skill/SKILL.md"),
+            enabled: explicit !== undefined,
+          },
+        ],
       });
     },
   );

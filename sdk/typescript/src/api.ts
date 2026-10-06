@@ -55,6 +55,7 @@ import {
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
+  readCodexFileProfile,
   resolveCodexProfile,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
@@ -1581,8 +1582,16 @@ export class CodexSecurity {
       ) {
         recipeConfig["profile"] = profileName;
         // Reload the file's provider instead of overlaying generated defaults.
-        if (isExternalModelProvider(scanModelProvider(preflightConfig))) {
-          delete recipeConfig["model_providers"];
+        const provider = scanModelProvider(preflightConfig);
+        if (isExternalModelProvider(provider)) {
+          const fileProfile = await readCodexFileProfile(
+            effectiveConfig,
+            configuredCodexHome(this.#dependencies.environment),
+          );
+          const providers = fileProfile["model_providers"];
+          if (isRecord(providers) && isRecord(providers[provider])) {
+            delete recipeConfig["model_providers"];
+          }
         }
       }
       const recipe = scanRecipe({

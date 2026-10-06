@@ -9419,18 +9419,30 @@ async function parseScanCodexOverrides(
   if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }
-  const overrides = mergeCodexOverrides(
-    defaults ?? {},
-    parseCodexOverrides(values, model, effort),
-  );
+  const explicit = parseCodexOverrides(values, model, effort);
+  const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
   const profile = await readCodexFileProfile(overrides, profileHome);
-  return parseCodexOverrides(
+  const result = parseCodexOverrides(
     values,
     model,
     effort,
     provider,
     mergeCodexOverrides(profile, defaults ?? {}),
   );
+  const providers = profile["model_providers"];
+  if (
+    isExternalModelProvider(provider) &&
+    isRecord(providers) &&
+    isRecord(providers[provider])
+  ) {
+    // The file supplies this provider. Keep explicit CLI refinements without
+    // combining native command auth with a generated env-key definition.
+    delete result["model_providers"];
+    if (explicit["model_providers"] !== undefined) {
+      result["model_providers"] = explicit["model_providers"];
+    }
+  }
+  return result;
 }
 
 export function parseCodexOverrides(

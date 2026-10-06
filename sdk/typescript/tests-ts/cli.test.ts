@@ -3094,6 +3094,60 @@ describe("CLI", () => {
     },
   );
 
+  test.each(["openrouter", "fireworks"])(
+    "keeps file-profile command authentication with --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-auth-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
+      );
+      for (const explicit of [undefined, "http://127.0.0.1:2/v1"]) {
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--json",
+          ...(explicit === undefined
+            ? []
+            : [
+                "--codex",
+                `model_providers.${provider}.base_url=${JSON.stringify(explicit)}`,
+              ]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: { CODEX_HOME: home },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        const effective = await mergedCodexConfig(selected!, home);
+        expect(effective["model_providers"]).toEqual({
+          [provider]: {
+            name: "Synthetic",
+            wire_api: "responses",
+            base_url: explicit ?? "http://127.0.0.1:1/v1",
+            auth: { command: "synthetic-auth" },
+          },
+        });
+        expect(selected!.codexOverrides?.["model_provider"]).toBe(provider);
+      }
+    },
+  );
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
