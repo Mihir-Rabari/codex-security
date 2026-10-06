@@ -1,4 +1,5 @@
 import {
+  bundledPluginRoot,
   workbenchEnvironment,
   resolveWorkbenchRuntime,
   runWorkbench,
@@ -23,7 +24,14 @@ export class SqliteFindingsStore implements FindingsStore {
   constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
 
   async initialize(): Promise<void> {
-    await this.run(["database-info"]);
+    await runWorkbench(
+      {
+        pluginRoot: await bundledPluginRoot(),
+        environment: workbenchEnvironment(this.environment),
+        failureMessage: "Could not access the findings database",
+      },
+      ["database-info"],
+    );
   }
 
   async dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {

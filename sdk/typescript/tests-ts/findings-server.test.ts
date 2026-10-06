@@ -1,11 +1,15 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
-import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
+import {
+  resolvePluginPython,
+  runCodexCommand,
+  runWorkbench,
+} from "../src/runtime.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
@@ -78,6 +82,43 @@ async function fixture() {
   };
   return { environment, store: new SqliteFindingsStore(environment) };
 }
+
+test("initializes the shared database concurrently without Python", async () => {
+  const { environment } = await fixture();
+  const nativeEnvironment = {
+    ...environment,
+    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
+  };
+  await Promise.all([
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+    new SqliteFindingsStore(nativeEnvironment).initialize(),
+  ]);
+  const result = await runWorkbench(
+    { pluginRoot: PLUGIN_ROOT, environment: nativeEnvironment },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(environment.CODEX_SECURITY_STATE_DIR),
+      "workbench.sqlite3",
+    ),
+  });
+});
+
+test("escapes terminal controls in database helper diagnostics", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-"));
+  directories.push(directory);
+  const blocked = join(directory, "blocked\u202e");
+  await writeFile(blocked, "existing file");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    { ...process.env, CODEX_SECURITY_STATE_DIR: join(blocked, "state") },
+  );
+  expect(result.success).toBe(false);
+  expect(result.stderr).toContain("\\u202e");
+  expect(result.stderr).not.toContain("\u202e");
+});
 
 async function start(
   store: SqliteFindingsStore,

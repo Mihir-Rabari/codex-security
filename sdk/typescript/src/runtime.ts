@@ -1554,7 +1554,7 @@ const workbenchComparisonSupport = new Map<
 >();
 
 export async function runWorkbench(
-  options: WorkbenchCommandOptions,
+  options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
@@ -1563,9 +1563,21 @@ export async function runWorkbench(
     arguments_: readonly string[],
     input?: string,
   ): Promise<string> => {
+    const native = arguments_[0] === "database-info";
+    const command = native
+      ? process.versions["bun"]
+        ? "node"
+        : process.execPath
+      : (options.python ??
+        (await resolvePluginPython({
+          environment: options.environment,
+          signal: options.signal,
+        })));
     const result = await runCodexCommand(
-      { command: options.python },
-      ["-I", "-X", "utf8", "-B", script, ...arguments_],
+      { command },
+      native
+        ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
+        : ["-I", "-X", "utf8", "-B", script, ...arguments_],
       pluginHelperEnvironment(options.environment),
       input,
       options.signal,
