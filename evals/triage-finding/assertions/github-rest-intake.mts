@@ -1,23 +1,53 @@
-import {
-  outputText as textFor,
-  hasTriageJson,
-  extractJson,
-} from "./output.mts";
+import { outputText as textFor, hasTriageJson } from "./output.mts";
 import type { AssertionContext } from "../types.ts";
+
+function repositoryName(value: string) {
+  const path = value.includes("://")
+    ? new URL(value).pathname
+    : value.replace(/^(?:[^@/]+@)?[^/:]+:/, "");
+  return path.replace(/^\/|\/$/g, "").replace(/\.git$/, "");
+}
+
 function endpointPattern(path: string, queryParts: string[] = []) {
-  const patterns = [
-    escapedLiteralPattern(path),
-    ...queryParts.map((part) => new RegExp(part, "i")),
-  ];
-  return (text: string) => patterns.every((pattern) => pattern.test(text));
+  return (text: string, context: AssertionContext) => {
+    const repository = repositoryName(context.vars.target_repo as string);
+    const paths = [path, path.replace("{owner}/{repo}", repository)];
+    return (
+      paths.some((candidate) => escapedLiteralPattern(candidate).test(text)) &&
+      queryParts.every((part) => escapedLiteralPattern(part).test(text))
+    );
+  };
 }
 
 function escapedLiteralPattern(value: unknown) {
   return new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-const checks = {
-  choose_source: (text: string) => {
+function structuredAnswer(text: string) {
+  try {
+    return JSON.parse(
+      text.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, "$1"),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function normalizesAs(text: string, sourceType: string) {
+  const field = `(?:(?:"source_type"|'source_type'|\x60?source_type\x60?)[*_]*\\s*:\\s*|\x60?normalize as\\s+)`;
+  const value = `(?:"${sourceType}"|'${sourceType}'|\x60${sourceType}\x60|${sourceType})`;
+  const normalization = field + "[*_]*" + value + "\x60?";
+  return new RegExp(
+    `(?:^|[\\s{,(\\[])[*_]*${normalization}[*_]*(?=$|[\\s\x60,}.;:!?\\)\\]])`,
+    "i",
+  ).test(text);
+}
+
+const checks: Record<
+  string,
+  (text: string, context: AssertionContext) => string[]
+> = {
+  choose_source: (text) => {
     const failures = [];
     if (!/choose|specify|which|select/i.test(text)) {
       failures.push("must ask the user to choose or specify a GitHub source");
@@ -42,8 +72,8 @@ const checks = {
     return failures;
   },
 
-  project_repo_inference: (text: string, context: AssertionContext) => {
-    const failures = checks.choose_source(text);
+  project_repo_inference: (text, context) => {
+    const failures = checks.choose_source(text, context);
     const expectedRepo = String(context.vars.expected_inferred_repo || "");
 
     if (
@@ -70,50 +100,66 @@ const checks = {
     return failures;
   },
 
-  dependabot_malware: (text: string) => {
+  dependabot_malware: (text, context) => {
     const hasEndpoint = endpointPattern(
       "/repos/{owner}/{repo}/dependabot/alerts",
       ["classification=malware", "state=open", "per_page=100"],
-    )(text);
+    )(text, context);
     return [
       ...(!hasEndpoint
         ? [
             "must use Dependabot alerts endpoint with classification=malware, state=open, and per_page=100",
           ]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!normalizesAs(text, "advisory")
         ? ["must say Dependabot malware normalizes as advisory"]
         : []),
     ];
   },
 
-  code_scanning: (text: string) => {
-    const hasAlerts = endpointPattern(
-      "/repos/{owner}/{repo}/code-scanning/alerts",
-      ["state=open", "per_page=100"],
-    )(text);
-    const hasInstances =
-      /code-scanning\/alerts\/\{alert_number\}\/instances/i.test(text);
+  code_scanning: (text, context) => {
+    const answer = structuredAnswer(text);
+    const repositories = [
+      "{owner}/{repo}",
+      repositoryName(context.vars.target_repo as string),
+    ];
+    const requestMatches = (
+      request:
+        | { path?: unknown; parameters?: { per_page?: unknown } }
+        | null
+        | undefined,
+      suffix: string,
+    ) =>
+      request &&
+      repositories.some(
+        (repository) =>
+          request.path === `/repos/${repository}/code-scanning/alerts${suffix}`,
+      ) &&
+      [100, "100"].some((value) => value === request.parameters?.per_page);
     return [
-      ...(!hasAlerts
+      ...(!requestMatches(answer?.alerts, "") ||
+      answer?.alerts?.parameters?.state !== "open"
+        ? ["must describe open code scanning alerts with per_page=100"]
+        : []),
+      ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
+        ? ["must describe per-alert instances with per_page=100"]
+        : []),
+      ...(answer?.source_type !== "sarif"
+        ? ["must normalize code scanning as sarif"]
+        : []),
+      ...(Object.keys(answer ?? {}).length !== 3 || hasTriageJson(text)
         ? [
-            "must use code scanning alerts endpoint with state=open and per_page=100",
+            "must return only alerts, instances, and source_type without triage JSON",
           ]
-        : []),
-      ...(!hasInstances
-        ? ["must fetch code scanning alert instances per alert"]
-        : []),
-      ...(!/source_type:\s*`?sarif`?|normalize as `?sarif`?/i.test(text)
-        ? ["must say code scanning normalizes as sarif"]
         : []),
     ];
   },
 
-  advisories_private_reports: (text: string) => {
+  advisories_private_reports: (text, context) => {
     const hasEndpoint = endpointPattern(
       "/repos/{owner}/{repo}/security-advisories",
       ["per_page=100"],
-    )(text);
+    )(text, context);
     const hasEachState = ["triage", "draft", "published", "closed"].every(
       (state) => new RegExp(`state=${state}`, "i").test(text),
     );
@@ -136,43 +182,65 @@ const checks = {
       )
         ? ["must identify state=triage as private vulnerability reports"]
         : []),
-      ...(!/source_type:\s*`?advisory`?|normalize as `?advisory`?/i.test(text)
+      ...(!normalizesAs(text, "advisory")
         ? ["must say advisories/private reports normalize as advisory"]
         : []),
     ];
   },
 
-  explicit_connector: (text: string, context: AssertionContext) => {
+  explicit_connector: (text, context) => {
+    const repository = repositoryName(context.vars.target_repo as string);
     let decision;
     try {
-      decision = extractJson(text, "github-transport-decision/v0", {
+      decision = extractJson(text, undefined, {
         requireSingle: true,
+        failureMessage: "must return one connector decision JSON object",
       });
     } catch (error) {
       return [(error as Error).message];
     }
+    const scope = decision.scope as Record<string, unknown> | undefined;
+    const failures = [];
     if (
-      JSON.stringify(decision).includes('"schema_version":"triage-finding/v0"')
-    ) {
-      return ["must not emit triage-finding/v0 in a transport decision"];
-    }
-    const expected = {
-      transport: "github_connector",
-      access: "read_only",
-      unavailable_endpoint: "explain_limitation",
-      rest_fallback: "only_if_endpoint_unavailable",
-      rest_approval: "before_use",
-      rest_account: "specified_account",
-      rest_repository: new URL(String(context.vars.target_repo)).pathname.slice(
-        1,
-      ),
-    };
-    return Object.entries(expected)
-      .filter(([field, value]) => decision[field] !== value)
-      .map(([field, value]) => `expected ${field}: ${value}`);
+      Object.keys(decision ?? {}).length !== 3 ||
+      Object.keys(scope ?? {}).length !== 2
+    )
+      failures.push(
+        "must return only transport, fallback, and scope with only account and repository",
+      );
+    if (decision?.transport !== "github_connector_read_only")
+      failures.push(
+        "must retrieve findings through the requested read-only GitHub Connector",
+      );
+    if (decision?.fallback !== "explain_and_request_rest_approval")
+      failures.push(
+        "must explain the limitation and request approval before REST fallback",
+      );
+    if (
+      scope?.account !== "user_specified_or_approved" ||
+      scope?.repository !== repository
+    )
+      failures.push(
+        "must scope the REST fallback to the specified account and exact repository",
+      );
+    return failures;
   },
 
-  explicit_issue: (text: string) => {
+  default_rest: (text) => {
+    try {
+      const decision = extractJson(text, undefined, {
+        requireSingle: true,
+        failureMessage: "must return one transport decision JSON object",
+      });
+      return decision.transport === "rest" && Object.keys(decision).length === 1
+        ? []
+        : ["must select REST when the user has not requested the Connector"];
+    } catch (error) {
+      return [(error as Error).message];
+    }
+  },
+
+  explicit_issue: (text) => {
     return [
       ...(!/GitHub Issues?.*(explicit|specific)|specific.*GitHub Issues?/is.test(
         text,
@@ -186,7 +254,7 @@ const checks = {
             "must say GitHub Issues are not included in all/default source selection",
           ]
         : []),
-      ...(!/source_type:\s*`?freeform`?|normalize as `?freeform`?/i.test(text)
+      ...(!normalizesAs(text, "freeform")
         ? ["must say explicit GitHub Issues normalize as freeform"]
         : []),
     ];
@@ -196,7 +264,7 @@ const checks = {
 export default (output: unknown, context: AssertionContext) => {
   const text = textFor(output);
   const behavior = String(context.vars.expected_github_rest_behavior || "");
-  const check = checks[behavior as keyof typeof checks];
+  const check = Object.hasOwn(checks, behavior) ? checks[behavior] : undefined;
   const failures = check
     ? check(text, context)
     : [`unknown expected_github_rest_behavior: ${behavior}`];
