@@ -6741,9 +6741,12 @@ async function patchPublicationDestination(
 ) {
   const run = (command: "git" | "gh" | "glab" | "ssh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
-  const remotes = (
-    await run("git", ["remote", "get-url", "--push", "--all", "origin"])
-  ).split("\n");
+  const remotes = [
+    ...(
+      await run("git", ["remote", "get-url", "--push", "--all", "origin"])
+    ).split("\n"),
+    await run("git", ["remote", "get-url", "origin"]),
+  ];
   const remote =
     remotes.find(
       (remote) =>
@@ -6751,7 +6754,7 @@ async function patchPublicationDestination(
         !win32.isAbsolute(remote) &&
         !remote.startsWith("file://") &&
         patchRemoteHost(remote),
-    ) ?? remotes[0]!;
+    ) ?? "";
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -6767,17 +6770,27 @@ async function patchPublicationDestination(
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
   const repositoryId = (remote: string) =>
-    run("gh", ["repo", "view", remote, "--json", "id", "--jq", ".id"]);
+    run("gh", [
+      "repo",
+      "view",
+      ...(remote ? [remote] : []),
+      "--json",
+      "id",
+      "--jq",
+      ".id",
+    ]);
   let headRepository: string | undefined;
   if (!gitlab) {
     try {
       headRepository = await repositoryId(remote);
     } catch (initialError) {
-      if (!host || !(remote.startsWith("ssh://") || !remote.includes("://")))
-        throw initialError;
+      if (!host) throw initialError;
       const url = new URL(
         remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
       );
+      if (!["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol))
+        throw initialError;
+      url.protocol = "ssh:";
       const sshArguments = [
         ...(url.port ? ["-p", url.port] : []),
         url.username
@@ -7009,7 +7022,7 @@ async function publishPatchBranch(
 
 function patchRemoteHost(remote: string): string | undefined {
   if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?([^:/]+):[^/]/u.exec(remote)?.[1]?.toLowerCase();
+  return /^(?:[^@/]+@)?([^:/]+):/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
@@ -7214,6 +7227,13 @@ async function requireCleanPatchPullRequestBase(
   }
 }
 
+const NESTED_PATCH_GIT_ENVIRONMENT = {
+  GIT_DIR: undefined,
+  GIT_WORK_TREE: undefined,
+  GIT_OBJECT_DIRECTORY: undefined,
+  GIT_COMMON_DIR: undefined,
+};
+
 interface GitPatchState {
   root: string;
   trees: Map<string, string>;
@@ -7255,9 +7275,7 @@ async function changedPatchFiles(
       root,
       {
         trim: false,
-        environment: directory
-          ? { GIT_DIR: undefined, GIT_WORK_TREE: undefined }
-          : undefined,
+        environment: directory ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
       },
     );
     for (const path of output.split("\0").filter(Boolean))
@@ -7306,9 +7324,7 @@ async function snapshotGitPatchState(
       {
         trim: false,
         maxBuffer: Infinity,
-        environment: directory
-          ? { GIT_DIR: undefined, GIT_WORK_TREE: undefined }
-          : undefined,
+        environment: directory ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
       },
     );
     for (const entry of entries.split("\0")) {
@@ -7507,9 +7523,7 @@ async function snapshotPatchTree(
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const environment = {
     GIT_INDEX_FILE: join(root, "index"),
-    ...(commandRoot === repository
-      ? {}
-      : { GIT_DIR: undefined, GIT_WORK_TREE: undefined }),
+    ...(commandRoot === repository ? {} : NESTED_PATCH_GIT_ENVIRONMENT),
   };
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand(

@@ -9,6 +9,7 @@ import {
   mkdir,
   readFile,
   readlink,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -1527,13 +1528,10 @@ describe("scan and patch workflow", () => {
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
               if (gitlab && args[0] === "remote") {
-                expect(args).toEqual([
-                  "remote",
-                  "get-url",
-                  "--push",
-                  "--all",
-                  "origin",
-                ]);
+                expect([
+                  ["remote", "get-url", "--push", "--all", "origin"],
+                  ["remote", "get-url", "origin"],
+                ]).toContainEqual([...args]);
                 return origin;
               }
               if (gitlab && args[0] === "ls-remote") {
@@ -2123,13 +2121,10 @@ describe("scan and patch workflow", () => {
               if (args.includes("--show-toplevel")) return SAVED_REPOSITORY;
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
-                expect(args).toEqual([
-                  "remote",
-                  "get-url",
-                  "--push",
-                  "--all",
-                  "origin",
-                ]);
+                expect([
+                  ["remote", "get-url", "--push", "--all", "origin"],
+                  ["remote", "get-url", "origin"],
+                ]).toContainEqual([...args]);
                 return origin;
               }
               return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
@@ -3322,13 +3317,24 @@ describe("patch change tracking", () => {
       "local",
       "local-first",
       "file-first",
+      "windows-first",
+      "local-fetch",
+      "local-fetch-ghrepo",
+      "local-push-only",
+      "network-push-only",
       "ssh-api",
       "ssh-enterprise",
       "scp",
       "scp-userless",
       "scp-mixed",
+      "scp-absolute",
+      "scp-absolute-command",
       "ssh-uri",
       "ssh-uri-mixed",
+      "ssh-uri-git+ssh",
+      "ssh-uri-ssh+git",
+      "ssh-uri-git+ssh-command",
+      "ssh-uri-ssh+git-command",
       "ssh-missing",
       "ssh-failed",
       "ssh-host",
@@ -3365,6 +3371,8 @@ describe("patch change tracking", () => {
         : transport.endsWith("executable")
           ? { GIT_SSH: "synthetic path/ssh" }
           : {};
+      if (transport === "local-fetch-ghrepo" || transport.endsWith("push-only"))
+        environment["GH_REPO"] = "upstream-owner/repository";
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] ??
         coreCommand ??
@@ -3372,31 +3380,52 @@ describe("patch change tracking", () => {
       const alias = transport.endsWith("-mixed")
         ? "GitHub-Work"
         : "github-work";
-      const localFirst =
-        transport === "local-first" || transport === "file-first";
-      const pushRemote = localFirst
-        ? "https://github.example.test/push-owner/repository.git"
-        : transport === "local"
-          ? remote
-          : transport === "scp-userless"
-            ? "github.com:example/repository.git"
-            : transport === "ssh-api"
-              ? "git@github.com:push-owner/repository.git"
-              : transport === "ssh-enterprise"
-                ? "git@enterprise.example.test:push-owner/other-repository.git"
-                : transport.startsWith("scp")
-                  ? `git@${alias}:example/repository.git`
-                  : transport.startsWith("ssh-uri")
-                    ? `ssh://git@${alias}:2222/example/repository.git`
-                    : "git@ssh.github.com:example/repository.git";
+      const localFirst = [
+        "local-first",
+        "file-first",
+        "windows-first",
+      ].includes(transport);
+      const localOnly =
+        transport.startsWith("local-fetch") || transport === "local-push-only";
+      const fetchRemote =
+        "https://github.example.test/fetch-owner/repository.git";
+      const sshScheme = transport.includes("git+ssh")
+        ? "git+ssh"
+        : transport.includes("ssh+git")
+          ? "ssh+git"
+          : "ssh";
+      const pushRemote =
+        localFirst || transport === "network-push-only"
+          ? "https://github.example.test/push-owner/repository.git"
+          : transport === "local" || localOnly
+            ? remote
+            : transport === "scp-userless"
+              ? "github.com:example/repository.git"
+              : transport === "ssh-api"
+                ? "git@github.com:push-owner/repository.git"
+                : transport === "ssh-enterprise"
+                  ? "git@enterprise.example.test:push-owner/other-repository.git"
+                  : transport.startsWith("scp")
+                    ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
+                    : transport.startsWith("ssh-uri")
+                      ? `${sshScheme}://git@${alias}:2222/example/repository.git`
+                      : "git@ssh.github.com:example/repository.git";
       const directLookup =
         localFirst ||
-        ["local", "ssh-api", "ssh-enterprise"].includes(transport);
-      const lookupRemote = directLookup
-        ? pushRemote
-        : transport === "scp-userless"
-          ? "ssh://github.com/example/repository.git"
-          : "ssh://git@github.com/example/repository.git";
+        localOnly ||
+        ["local", "network-push-only", "ssh-api", "ssh-enterprise"].includes(
+          transport,
+        );
+      const lookupRemote =
+        transport === "local" || transport === "local-push-only"
+          ? undefined
+          : transport.startsWith("local-fetch")
+            ? fetchRemote
+            : directLookup
+              ? pushRemote
+              : transport === "scp-userless"
+                ? "ssh://github.com/example/repository.git"
+                : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
         transport === "scp-userless"
@@ -3404,12 +3433,7 @@ describe("patch change tracking", () => {
           : `git@${transport.startsWith("scp") || transport.startsWith("ssh-uri") ? alias : "ssh.github.com"}`,
       ];
       if (transport !== "local") {
-        git(
-          "remote",
-          "set-url",
-          "origin",
-          "https://github.example.test/fetch-owner/repository.git",
-        );
+        git("remote", "set-url", "origin", fetchRemote);
         git(
           "remote",
           "set-url",
@@ -3418,7 +3442,9 @@ describe("patch change tracking", () => {
           localFirst
             ? transport === "file-first"
               ? pathToFileURL(remote).href
-              : remote
+              : transport === "windows-first"
+                ? "C:\\synthetic\\mirror.git"
+                : remote
             : pushRemote,
         );
         if (localFirst)
@@ -3430,6 +3456,8 @@ describe("patch change tracking", () => {
           "https://github.example.test/upstream-owner/repository.git",
         );
       }
+      if (transport.endsWith("push-only"))
+        git("config", "--unset-all", "remote.origin.url");
       const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
       if (resume) {
@@ -3517,9 +3545,11 @@ describe("patch change tracking", () => {
               expect(args).toEqual([
                 "repo",
                 "view",
-                directLookup || repositoryLookups % 2 === 1
-                  ? pushRemote
-                  : lookupRemote,
+                ...(directLookup
+                  ? lookupRemote
+                    ? [lookupRemote]
+                    : []
+                  : [repositoryLookups % 2 === 1 ? pushRemote : lookupRemote!]),
                 "--json",
                 "id",
                 "--jq",
@@ -3585,7 +3615,14 @@ describe("patch change tracking", () => {
       "package",
       ...(process.platform === "win32" ? [] : ["package-space"]),
     ].flatMap((scope) =>
-      ["ordinary", "absolute", "relative"].map((settings) => ({
+      [
+        "ordinary",
+        "absolute",
+        "relative",
+        "object-directory",
+        "custom-objects",
+        "common-directory",
+      ].map((settings) => ({
         scope,
         settings,
       })),
@@ -3615,9 +3652,14 @@ describe("patch change tracking", () => {
       await writeFile(join(directory, "app.ts"), "unsafe\n");
       git("add", ".");
       git("commit", "-m", "Synthetic outer baseline");
+      if (settings === "custom-objects")
+        await rename(
+          join(root, ".git", "objects"),
+          join(root, ".git", "custom-objects"),
+        );
       const target = scope === "root" ? root : directory;
       const gitEnvironment = {
-        ...(settings === "ordinary"
+        ...(settings !== "absolute" && settings !== "relative"
           ? {}
           : {
               GIT_DIR:
@@ -3627,6 +3669,18 @@ describe("patch change tracking", () => {
               GIT_WORK_TREE:
                 settings === "relative" ? relative(target, root) || "." : root,
             }),
+        ...(settings === "object-directory" || settings === "custom-objects"
+          ? {
+              GIT_OBJECT_DIRECTORY: join(
+                root,
+                ".git",
+                settings === "custom-objects" ? "custom-objects" : "objects",
+              ),
+            }
+          : {}),
+        ...(settings === "common-directory"
+          ? { GIT_COMMON_DIR: join(root, ".git") }
+          : {}),
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
@@ -3656,7 +3710,15 @@ describe("patch change tracking", () => {
             if (args[0] === "-C" && args[1] === nested) {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();
+              expect(environment["GIT_OBJECT_DIRECTORY"]).toBeUndefined();
+              expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
             } else {
+              expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
+                gitEnvironment.GIT_OBJECT_DIRECTORY,
+              );
+              expect(environment["GIT_COMMON_DIR"]).toBe(
+                gitEnvironment.GIT_COMMON_DIR,
+              );
               expect(environment["GIT_DIR"]).toBe(
                 settings === "relative"
                   ? join(root, ".git")
@@ -3694,6 +3756,11 @@ describe("patch change tracking", () => {
         new Set([...snapshots.values()].flatMap((indices) => [...indices]))
           .size,
       ).toBe(4);
+      if (settings === "custom-objects")
+        await rename(
+          join(root, ".git", "custom-objects"),
+          join(root, ".git", "objects"),
+        );
       expect(git("diff", "--cached", "--name-only")).toBe("");
       expect(inner("diff", "--cached", "--name-only")).toBe("");
     },
