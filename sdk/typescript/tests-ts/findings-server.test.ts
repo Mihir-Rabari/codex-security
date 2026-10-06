@@ -1,4 +1,5 @@
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -8,7 +9,7 @@ import {
 } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
@@ -111,6 +112,52 @@ test("initializes the shared database concurrently without Python", async () => 
     ),
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "database initialization under Bun ignores repository-local Node shims",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
+    directories.push(directory);
+    const repository = join(directory, "repository");
+    const bin = join(repository, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(bin, "node"),
+      `#!/bin/sh
+: > "$SYNTHETIC_NODE_SHIM_MARKER"
+printf '%s\n' '{"databasePath":"shim"}'
+`,
+      { mode: 0o755 },
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const state = join(directory, "state");
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+await new SqliteFindingsStore().initialize();`,
+      ],
+      {
+        cwd: repository,
+        env: {
+          ...process.env,
+          PATH: [bin, dirname(node!)].join(delimiter),
+          CODEX_SECURITY_STATE_DIR: state,
+          SYNTHETIC_NODE_SHIM_MARKER: join(bin, "invoked"),
+        },
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(await readdir(bin)).toEqual(["node"]);
+    expect(
+      (await readFile(join(state, "workbench.sqlite3")))
+        .subarray(0, 16)
+        .toString(),
+    ).toBe("SQLite format 3\0");
+  },
+);
 
 test.skipIf(process.platform === "win32")(
   "database initialization and Python operations share the configured state directory",

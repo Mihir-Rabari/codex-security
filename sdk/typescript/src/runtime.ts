@@ -1564,10 +1564,19 @@ export async function runWorkbench(
     input?: string,
   ): Promise<string> => {
     const native = arguments_[0] === "database-info";
+    const node =
+      native && process.versions["bun"]
+        ? await resolveTrustedExecutable(
+            "node",
+            options.environment,
+            process.cwd(),
+          )
+        : undefined;
+    if (node === null) {
+      throw new Error("Node.js is not available on a trusted PATH.");
+    }
     const command = native
-      ? process.versions["bun"]
-        ? "node"
-        : process.execPath
+      ? (node?.executable ?? process.execPath)
       : (options.python ??
         (await resolvePluginPython({
           environment: options.environment,
@@ -1578,7 +1587,7 @@ export async function runWorkbench(
       native
         ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
         : ["-I", "-X", "utf8", "-B", script, ...arguments_],
-      pluginHelperEnvironment(options.environment),
+      pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
         ? JSON.stringify(codexSecurityStateDirectory(options.environment))
