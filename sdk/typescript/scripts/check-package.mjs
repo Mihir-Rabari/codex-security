@@ -159,6 +159,15 @@ for (const [path, name] of [
   }
 }
 
+function privateExtractionDirectories(directory) {
+  chmodSync(directory, 0o700);
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      privateExtractionDirectories(join(directory, entry.name));
+    }
+  }
+}
+
 function extractedArchiveFiles() {
   const rawSizes = new Map();
   const expectedPaths = new Map();
@@ -183,17 +192,21 @@ function extractedArchiveFiles() {
   );
   try {
     chmodSync(extractionRoot, 0o700);
-    tar([
-      "--keep-old-files",
-      "--no-same-owner",
-      "--no-same-permissions",
-      "--no-acls",
-      "--no-xattrs",
-      "-xzf",
-      "-",
-      "-C",
-      extractionRoot,
-    ]);
+    try {
+      tar([
+        "--keep-old-files",
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-acls",
+        "--no-xattrs",
+        "-xzf",
+        "-",
+        "-C",
+        extractionRoot,
+      ]);
+    } finally {
+      privateExtractionDirectories(extractionRoot);
+    }
 
     const archiveFiles = new Map();
     let expandedBytes = 0;

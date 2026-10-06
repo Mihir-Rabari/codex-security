@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -33,11 +34,13 @@ function packageTar({
   sizeTerminator = " ",
   type = 0x30,
   compatibleLayout = false,
+  rootDirectoryMode = 0o755,
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
   type?: number;
   compatibleLayout?: boolean;
+  rootDirectoryMode?: number;
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -90,7 +93,7 @@ function packageTar({
         tarRecord(Buffer.alloc(0), {
           name,
           type: 0x35,
-          mode: 0o755,
+          mode: name === "package/" ? rootDirectoryMode : 0o755,
         }),
       ),
       ...records.flatMap((record) => [Buffer.alloc(512), record]),
@@ -148,6 +151,12 @@ describe("npm package tar listings", () => {
           "compatible-tar-layout",
           gzipSync(packageTar({ compatibleLayout: true })),
         ],
+        [
+          "read-only-directories",
+          gzipSync(
+            packageTar({ compatibleLayout: true, rootDirectoryMode: 0o555 }),
+          ),
+        ],
       ] as const;
       expect(archives[0][1].length).toBeLessThan(1024 * 1024);
       expect(archives[1][1].length).toBeGreaterThan(31 * 1024 * 1024);
@@ -204,7 +213,10 @@ describe("npm package tar listings", () => {
       const contractPath = join(root, "plugin contract.json");
       const logPath = join(root, "tar calls.jsonl");
       const adjacentTarMarker = join(root, "archive tar ran");
-      const tarBytes = packageTar();
+      const tarBytes = packageTar({
+        compatibleLayout: true,
+        rootDirectoryMode: 0o555,
+      });
       const archiveContents = gzipSync(tarBytes, { level: 0 });
       writeFileSync(archivePath, archiveContents);
       writeFileSync(contractPath, JSON.stringify(pluginContract));
@@ -213,6 +225,11 @@ describe("npm package tar listings", () => {
       const environment: NodeJS.ProcessEnv = { ...process.env };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
       environment["PATH"] = `.${delimiter}${process.env["PATH"] ?? ""}`;
+      const extractionDirectory = join(root, "extraction");
+      mkdirSync(extractionDirectory, { mode: 0o700 });
+      for (const variable of ["TMPDIR", "TMP", "TEMP"]) {
+        environment[variable] = extractionDirectory;
+      }
       if (process.platform === "win32") {
         for (const name of ["tar.com", "tar.exe"]) {
           writeFileSync(join(archiveDirectory, name), "not an executable");
@@ -249,6 +266,10 @@ const result = spawnSync(process.env.REAL_TAR, process.argv.slice(2), {
   windowsHide: true,
 });
 if (result.error !== undefined) throw result.error;
+if (result.status === 0 && process.argv.includes("-xzf") && process.env.TAR_PROXY_FAIL_EXTRACT) {
+  process.stderr.write("synthetic extraction failure\\n");
+  process.exit(23);
+}
 process.exit(result.status ?? 1);
 `;
         const proxyPath = join(root, "tar");
@@ -281,6 +302,7 @@ process.exit(result.status ?? 1);
         status: 0,
         stderr: "",
       });
+      expect(readdirSync(extractionDirectory)).toEqual([]);
       if (process.platform === "win32") return;
 
       const calls = readFileSync(logPath, "utf8")
@@ -319,6 +341,28 @@ process.exit(result.status ?? 1);
         "-",
         "-C",
       ]);
+
+      environment["TAR_PROXY_FAIL_EXTRACT"] = "true";
+      const failed = spawnSync(
+        nodePath,
+        [
+          fileURLToPath(
+            new URL("../scripts/check-package.mjs", import.meta.url),
+          ),
+          archivePath,
+          contractPath,
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: environment,
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect(failed.status).not.toBe(0);
+      expect(failed.stderr).toContain("synthetic extraction failure");
+      expect(readdirSync(extractionDirectory)).toEqual([]);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
