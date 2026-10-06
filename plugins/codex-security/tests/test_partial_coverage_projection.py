@@ -12,7 +12,9 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
-@pytest.mark.parametrize("parent_surfaces", ["missing", "projected", "renamed", "no-parent"])
+@pytest.mark.parametrize(
+    "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent"]
+)
 @pytest.mark.parametrize("merge_state", ["buffered", "merging", "merged"])
 def test_missing_deferred_projection_links_first_duplicate_surface(
     workbench_api, workbench_db, publication_scan, parent_surfaces, merge_state
@@ -74,7 +76,11 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
                 **scan.coverage,
                 "completeness": "partial",
                 "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
-                "surfaces": [] if parent_surfaces == "missing" else projected,
+                "surfaces": []
+                if parent_surfaces == "missing"
+                else projected[1:]
+                if parent_surfaces == "second-only"
+                else projected,
             }
         )
     )
@@ -1190,8 +1196,15 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
 
 @pytest.mark.parametrize("disposition", ["rejected", "reported"])
 @pytest.mark.parametrize("retry_publication", [False, True])
+@pytest.mark.parametrize("parent_review", ["earlier", "copied-later", "changed-later"])
 def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
-    workbench_api, workbench_db, publication_scan, monkeypatch, disposition, retry_publication
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    disposition,
+    retry_publication,
+    parent_review,
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1240,6 +1253,9 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
         ]
         for field, name, row in (("surfaces", "surface", surface), ("deferred", "deferred", task))
     }
+    if parent_review == "changed-later":
+        projected["surfaces"][0]["label"] = "Parent requested additional review."
+        projected["deferred"][0]["reason"] = "Parent requested additional proof."
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     coverage_path = scan.scan_dir / "coverage.json"
     coverage_path.write_text(
@@ -1267,9 +1283,12 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
         },
     )
     os.utime(result, ns=(100, 100))
-    os.utime(coverage_path, ns=(200, 200))
+    modified = 200 if parent_review == "earlier" else 400
+    os.utime(coverage_path, ns=(modified, modified))
     os.utime(checkpoint, ns=(300, 300))
-    (result.parent / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = result.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(300, 300))
     originals = {path: path.read_bytes() for path in (result, checkpoint)}
     with monkeypatch.context() as interrupted:
         if retry_publication:
@@ -1289,12 +1308,16 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     assert stopped["resultsRecoveryNeeded"] is retry_publication
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     coverage = json.loads(coverage_path.read_text())
-    assert not any(row.get("reason") == task["reason"] for row in coverage["deferred"])
-    assert not any(
+    if parent_review != "changed-later":
+        assert not any(row.get("reason") == task["reason"] for row in coverage["deferred"])
+    assert any(
+        row.get("reason") == "Parent requested additional proof." for row in coverage["deferred"]
+    ) is (parent_review == "changed-later")
+    assert any(
         row.get("disposition") == "needs_follow_up"
         and row.get("provenance", {}).get("workerId") == worker_id
         for row in coverage["surfaces"]
-    )
+    ) is (parent_review == "changed-later")
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == int(disposition == "reported")
     assert all(path.read_bytes() == value for path, value in originals.items())
