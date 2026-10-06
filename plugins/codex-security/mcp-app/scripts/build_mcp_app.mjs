@@ -1,12 +1,5 @@
 #!/usr/bin/env node
-import {
-  copyFile,
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
@@ -52,56 +45,6 @@ export async function buildMcpApp({ output, native = "universal" }) {
   });
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
-
-  const ui = await build({
-    absWorkingDir: root,
-    entryPoints: [join(root, "src/ui/local.ts")],
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: "es2022",
-    minify: true,
-    write: false,
-    legalComments: "inline",
-    metafile: true,
-  });
-  const packages = new Set();
-  for (const output of Object.values(ui.metafile.outputs)) {
-    for (const [source, { bytesInOutput }] of Object.entries(output.inputs)) {
-      const directory = /^(.*node_modules\/(?:@[^/]+\/)?[^/]+)\//.exec(
-        source.replaceAll("\\", "/"),
-      )?.[1];
-      if (directory && bytesInOutput > 0) packages.add(directory);
-    }
-  }
-  const notices = [];
-  for (const directory of [...packages].sort()) {
-    const path = resolve(root, directory);
-    const manifest = JSON.parse(
-      await readFile(join(path, "package.json"), "utf8"),
-    );
-    const license = (await readdir(path)).find((name) =>
-      /^licen[sc]e(?:\.[^.]+)?$/i.test(name),
-    );
-    if (!license)
-      throw new Error(`Missing UI dependency license: ${manifest.name}`);
-    notices.push(
-      `${manifest.name}@${manifest.version}\n\n${await readFile(join(path, license), "utf8")}`,
-    );
-  }
-  await writeFile(join(mcpDir, "ui-notices.txt"), notices.join("\n\n---\n\n"));
-  const html = await readFile(join(root, "src/ui/local.html"), "utf8");
-  const css = await readFile(join(root, "src/ui/local.css"), "utf8");
-  await writeFile(
-    join(mcpDir, "local.html"),
-    html
-      .replace("</head>", () => `<style>${css}</style></head>`)
-      .replace(
-        "</body>",
-        () =>
-          `<script>${ui.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body>`,
-      ),
-  );
 
   await writeRuntime("server", "main.ts");
   for (const file of nativeFiles) {

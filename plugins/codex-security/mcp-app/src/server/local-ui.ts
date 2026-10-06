@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -6,6 +7,11 @@ import * as z from "zod/v4";
 const resourceUri = "ui://codex-security/local.html";
 
 export function registerLocalUi(server: McpServer, runtimeDirectory: string) {
+  // Distributions may supply a UI document alongside the runtime.
+  // Without it, hosts retain their existing native workbench.
+  const document = join(runtimeDirectory, "local.html");
+  if (!existsSync(document)) return;
+
   server.registerResource(
     "codex-security-local",
     resourceUri,
@@ -18,7 +24,7 @@ export function registerLocalUi(server: McpServer, runtimeDirectory: string) {
         {
           uri: resourceUri,
           mimeType: "text/html;profile=mcp-app",
-          text: await readFile(join(runtimeDirectory, "local.html"), "utf8"),
+          text: await readFile(document, "utf8"),
           _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } } },
         },
       ],
