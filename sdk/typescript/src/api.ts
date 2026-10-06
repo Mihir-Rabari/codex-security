@@ -950,7 +950,7 @@ export class CodexSecurity {
         throwIfAborted(signal, outputDir);
         result.status = "partial";
         for (const assessment of result.assessments) {
-          if (assessment.status === "completed") continue;
+          if (assessment.status !== "not_started") continue;
           assessment.status = "failed";
           assessment.error = message;
         }
@@ -964,7 +964,7 @@ export class CodexSecurity {
       if (result !== undefined && signal.aborted) {
         result.status = "partial";
         for (const assessment of result.assessments) {
-          if (assessment.status === "completed") continue;
+          if (assessment.status !== "not_started") continue;
           assessment.status = "cancelled";
           assessment.error = errorMessage(signal.reason);
         }

@@ -1160,6 +1160,38 @@ test.each(["truncated", "malformed", "duplicate_id"] as const)(
   },
 );
 
+test.each(["unauthorized", "source_changed", "cancelled"] as const)(
+  "a later %s turn preserves an earlier failed assessment and its diagnostic",
+  async (failure) => {
+    const controller = new AbortController();
+    const { client, repository, outputDir, turns } = await fixture({
+      controller,
+      turns: ["malformed", failure, "completed"],
+    });
+    await using security = client;
+    const operation = security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      signal: controller.signal,
+    });
+    if (failure === "cancelled")
+      await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
+    else expect((await operation).status).toBe("partial");
+    expect(turns).toHaveLength(2);
+    const prior = turns[1]!.evidence.assessments[0]!;
+    expect(prior.status).toBe("failed");
+    expect(prior.error).not.toBeNull();
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.assessments[0]).toEqual(prior);
+    expect(saved.assessments.slice(1).map((item) => item.status)).toEqual([
+      failure === "cancelled" ? "cancelled" : "failed",
+      failure === "cancelled" ? "cancelled" : "failed",
+    ]);
+  },
+);
+
 test("cumulative match costs stop the next thread without discarding completed assessments", async () => {
   const { client, repository, outputDir, turns } = await fixture({
     turns: ["completed", "completed", "completed"],
