@@ -541,13 +541,24 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
         {"id": candidate, "candidateId": candidate, "reason": f"Review {candidate}."}
         for candidate in ("candidate-A", "candidate-B")
     ]
+    rejected = {
+        "label": "Resolved review",
+        "candidateId": "candidate-A",
+        "disposition": "rejected",
+        "receiptRefs": [],
+    }
     result.write_text(
         json.dumps(
             {
                 "scanId": scan.scan_id,
                 "complete": True,
                 "findings": [],
-                "coverage": {**scan.coverage, "completeness": "partial", "deferred": deferred},
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "surfaces": [rejected],
+                    "deferred": deferred,
+                },
             }
         )
     )
@@ -562,7 +573,7 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
                     {
                         "id": f"{worker_id}-attempt-1-surface-1",
                         "label": "Resolved review",
-                        "candidateId": f"{worker_id}-attempt-1-candidate-1",
+                        "candidateId": "candidate-A",
                         "disposition": "rejected",
                         "receiptRefs": [],
                         "provenance": {

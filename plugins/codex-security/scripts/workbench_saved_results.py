@@ -1283,13 +1283,15 @@ def merge_saved_results(
                 result.pop("provenance", None)
         return result
 
+    restored_source_records: dict[int, dict[str, Any]] = {}
+
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
     ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
 
-        source = source_record(item)
+        source = source_record(restored_source_records.get(id(item), item))
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
         for projection in projected_coverages:
@@ -1497,6 +1499,7 @@ def merge_saved_results(
                     None,
                 )
                 if identity is not None:
+                    restored_source_records[id(row)] = copy.deepcopy(row)
                     row["id"] = identity
                     reserved.add(identity)
 
@@ -1617,6 +1620,30 @@ def merge_saved_results(
         )
         return bool(document["findings"])
 
+    accepted_projection_records = [
+        item
+        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions")
+        if isinstance(items := accepted_coverage.get(field), list)
+        for item in items
+        if isinstance(item, dict)
+    ]
+    for relative, draft, owner in sources:
+        worker = workers_by_id.get(owner)
+        if (
+            worker is None
+            or worker["status"] != "succeeded"
+            or worker["merge_state"] != "merged"
+            or relative not in current_results
+            or draft.get("complete") is False
+        ):
+            continue
+        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+            items = draft["coverage"].get(field, [])
+            for item in items if isinstance(items, list) else []:
+                retained = retained_coverage_record(field, item, worker, relative)
+                if retained is not None and retained not in accepted_projection_records:
+                    accepted_projection_records.append(retained)
+
     def coverage_candidate(
         owner: str | None, item: dict[str, Any]
     ) -> tuple[str | None, str] | None:
@@ -1630,6 +1657,7 @@ def merge_saved_results(
                 and source_owner in workers_by_id
                 and isinstance(provenance.get("attempt"), int)
                 and (source_owner, provenance["attempt"]) in reviewed_attempts
+                and item in accepted_projection_records
                 and isinstance(source_candidate, str)
             ):
                 return source_owner, source_candidate

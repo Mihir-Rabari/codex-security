@@ -5,12 +5,17 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { scanId, workerDraft } from "./scan-draft-fixture.ts";
+import { draftFixture } from "./scan-draft-recovery-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { readDeepReductionSources } = await importSource(
   fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
 );
-const { recordCodexSecurityWorkerScanDraft } = await importSource(
+const {
+  recordCodexSecurityWorkerScanDraft,
+  recordCodexSecurityScanDraft,
+  parsePersistedScanDraft,
+} = await importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
 const { validateDiscoveryArtifacts } = await importSource(
@@ -301,3 +306,80 @@ for (const optionalIds of [false, true]) {
     }
   });
 }
+
+test("persisted optional coverage IDs retain their original host-projection shape", async () => {
+  const f = await fixture();
+  try {
+    const source = workerDraft([], {
+      complete: true,
+      coverage: {
+        completeness: "partial",
+        surfaces: [
+          {
+            label: "Synthetic pending surface",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          },
+        ],
+        explicitExclusions: [],
+        deferred: [{ reason: "Review the synthetic pending task." }],
+      },
+    });
+    await writeFile(f.resultPath, JSON.stringify(source));
+    const original = await readFile(f.resultPath);
+    const sources = await readDeepReductionSources(f.context);
+    const discovery = sources.discoveries[0];
+    const parsed = parsePersistedScanDraft(JSON.parse(original.toString()));
+    assert.equal(parsed.coverage.surfaces[0].id, undefined);
+    assert.equal(parsed.coverage.deferred[0].id, undefined);
+    assert.equal(discovery.coverage.surfaces[0].provenance.sourceId, undefined);
+    assert.equal(discovery.coverage.deferred[0].provenance.sourceId, undefined);
+    assert.equal(
+      discovery.coverage.surfaces[0].id,
+      "synthetic-worker-attempt-3-surface-1",
+    );
+    assert.equal(
+      discovery.coverage.deferred[0].id,
+      "synthetic-worker-attempt-3-deferred-1",
+    );
+    assert.deepEqual(await readFile(f.resultPath), original);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("generic Deep progress preserves parent review and provenance extensions", async () => {
+  const root = await temporaryDirectory("parent-review-extensions-", true);
+  try {
+    const { context, draft } = draftFixture(root, "deep");
+    const reviews = [
+      { workerId: "synthetic-child", attempt: 1, completeness: "complete" },
+    ];
+    const provenance = {
+      workerId: "synthetic-child",
+      attempt: 1,
+      candidateId: "candidate-1",
+    };
+    const surfaces = [
+      {
+        id: "parent-surface",
+        candidateId: "candidate-1",
+        label: "Parent review",
+        disposition: "rejected",
+        receiptRefs: [],
+        provenance,
+      },
+    ];
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({ reviews, surfaces }, false),
+    );
+    const coverage = JSON.parse(
+      await readFile(path.join(root, "coverage.json"), "utf8"),
+    );
+    assert.deepEqual(coverage.reviews, reviews);
+    assert.deepEqual(coverage.surfaces, surfaces);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1251,3 +1251,145 @@ def test_new_selected_worker_surface_links_keep_retained_surface_identity(
     assert pending["surfaceIds"] == [surfaces[expected["label"]]["id"]]
     assert len(surfaces) == (2 if inserted else 1)
     assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("field", ["surfaces", "deferred"])
+@pytest.mark.parametrize(
+    "named_result", [0, 1, 2], ids=["optional-id", "explicit-id", "distinct-ids"]
+)
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_restored_optional_worker_id_matches_accepted_projection(
+    workbench_api, workbench_db, publication_scan, monkeypatch, field, named_result, retry
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker = result.parent.name
+    item = (
+        {"label": "Synthetic pending surface", "disposition": "needs_follow_up", "receiptRefs": []}
+        if field == "surfaces"
+        else {"reason": "Review the synthetic pending task."}
+    )
+    named = {**item, "id": "source-record"}
+    source = named if named_result else item
+    records = [source]
+    checkpoint_records = [named]
+    if named_result == 2:
+        sibling = {**named, "id": "source-sibling"}
+        records.append(sibling)
+        checkpoint_records.append(sibling)
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {**scan.coverage, field: records},
+    }
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {**draft, "complete": False, "coverage": {**draft["coverage"], field: checkpoint_records}},
+    )
+    result.write_text(json.dumps(draft))
+    kind = "surface" if field == "surfaces" else "deferred"
+    projection = {
+        **source,
+        "id": f"{worker}-attempt-1-{kind}-1",
+        "provenance": {
+            "workerId": worker,
+            "attempt": 1,
+            **({"sourceId": "source-record"} if named_result else {}),
+        },
+    }
+    projections = [projection]
+    if named_result == 2:
+        projections.append(
+            {
+                **projection,
+                "id": f"{worker}-attempt-1-{kind}-2",
+                "provenance": {**projection["provenance"], "sourceId": "source-sibling"},
+            }
+        )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            field: projections,
+            "reviews": [{"workerId": worker, "attempt": 1, "completeness": "complete"}],
+        },
+    )
+    originals = {path: path.read_bytes() for path in [result, checkpoint]}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    records = [record for record in coverage[field] if record.get("id") != "scan-stopped"]
+    assert records == projections
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("worker_state", ["pending", "accepted-pending", "host-projection"])
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
+    workbench_api, workbench_db, publication_scan, monkeypatch, worker_state, retry
+):
+    scan = publication_scan()
+    accepted_worker = worker_state == "host-projection"
+    result = add_worker(
+        workbench_db, scan, status="running" if worker_state == "pending" else "succeeded"
+    )
+    worker = result.parent.name
+    pending = {
+        "id": "pending-surface",
+        "candidateId": "candidate-1",
+        "label": "Unresolved synthetic child candidate",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    task = {"id": "pending-task", "candidateId": "candidate-1", "reason": "Review child evidence."}
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": False,
+        "findings": [],
+        "coverage": {**scan.coverage, "surfaces": [pending], "deferred": [task]},
+    }
+    checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+    rejected = {**pending, "disposition": "rejected"}
+    result.write_text(
+        json.dumps(
+            {
+                **draft,
+                "complete": True,
+                "coverage": {**draft["coverage"], "surfaces": [rejected], "deferred": []},
+            }
+            if accepted_worker
+            else {**draft, "complete": worker_state == "accepted-pending"}
+        )
+    )
+    projected = {
+        **rejected,
+        "id": f"{worker}-attempt-1-surface-1",
+        "provenance": {
+            "workerId": worker,
+            "attempt": 1,
+            "sourceId": pending["id"],
+            "candidateId": "candidate-1",
+        },
+    }
+    review = {"workerId": worker, "attempt": 1, "completeness": "complete"}
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {**scan.coverage, "surfaces": [projected], "deferred": [], "reviews": [review]},
+        complete=False,
+    )
+    originals = {path: path.read_bytes() for path in [result, checkpoint]}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert projected in coverage["surfaces"]
+    assert review in coverage["reviews"]
+    assert (
+        any(row.get("reason") == task["reason"] for row in coverage["deferred"])
+        is not accepted_worker
+    )
+    assert (
+        any(row.get("disposition") == "needs_follow_up" for row in coverage["surfaces"])
+        is not accepted_worker
+    )
+    assert all(path.read_bytes() == value for path, value in originals.items())
