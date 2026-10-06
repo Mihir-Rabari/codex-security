@@ -57,6 +57,7 @@ interface SessionUsage {
   counterUsage: ScanTokenUsage | null;
   model: string | null;
   modelUsage: Map<string | null, ScanTokenUsage>;
+  counterModelUsage: Map<string | null, ScanTokenUsage>;
   currentTurnId: string | null;
   previousUsage: ScanTokenUsage | null;
   responseIds: Set<string>;
@@ -64,6 +65,12 @@ interface SessionUsage {
   responseTokens: number;
   expectedResponseTokens: number;
   responseBaselineTokens: number;
+  responseCounterOffset: number;
+  responseCounterTokens: number;
+  responseCounterRecords: Map<
+    string,
+    { start: number; end: number; offset: number }
+  >;
   excludedResponseTokens: Map<string, { tokens: number; cumulative: number }>;
   counterRegressed: boolean;
   calls: Map<string, ScanActivity>;
@@ -118,6 +125,7 @@ function createSessionUsage(): SessionUsage {
     counterUsage: null,
     model: null,
     modelUsage: new Map(),
+    counterModelUsage: new Map(),
     currentTurnId: null,
     previousUsage: null,
     responseIds: new Set(),
@@ -125,6 +133,9 @@ function createSessionUsage(): SessionUsage {
     responseTokens: 0,
     expectedResponseTokens: 0,
     responseBaselineTokens: 0,
+    responseCounterOffset: 0,
+    responseCounterTokens: 0,
+    responseCounterRecords: new Map(),
     excludedResponseTokens: new Map(),
     counterRegressed: false,
     calls: new Map(),
@@ -367,6 +378,7 @@ export class ScanCostTracker {
       }
     }
     const usageSessions = new Map<string, SessionUsage>();
+    const counterSessions = new Map<string, SessionUsage>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -431,6 +443,11 @@ export class ScanCostTracker {
       ) {
         usageSessions.set(threadId, session);
       }
+      if (
+        (session.counterUsage?.total_tokens ?? -1) >
+        (counterSessions.get(threadId)?.counterUsage?.total_tokens ?? -1)
+      )
+        counterSessions.set(threadId, session);
       const counterLowerBound =
         session.responseUsageObserved && session.usage && session.counterUsage
           ? addTokenUsage(
@@ -499,6 +516,7 @@ export class ScanCostTracker {
       return;
     }
     const modelUsage = new Map<string | null, ScanTokenUsage>();
+    const liveModelUsage = new Map<string | null, ScanTokenUsage>();
     let observedModel = false;
     for (const [threadId, value] of usages) {
       if (value === null) continue;
@@ -524,6 +542,27 @@ export class ScanCostTracker {
           addTokenUsage(modelUsage.get(model) ?? null, remainder),
         );
       }
+      const counter = counterSessions.get(threadId);
+      const live =
+        (counter?.counterUsage?.total_tokens ?? -1) >
+        (session?.usage?.total_tokens ?? -1);
+      const liveTokens = live ? counter?.counterUsage : session?.usage;
+      const liveModels = live
+        ? counter?.counterModelUsage
+        : session?.modelUsage;
+      for (const [model, tokens] of liveModels ?? [])
+        liveModelUsage.set(
+          model,
+          addTokenUsage(liveModelUsage.get(model) ?? null, tokens),
+        );
+      const liveRemainder = liveTokens
+        ? subtractTokenUsage(value, liveTokens)
+        : value;
+      if (liveRemainder !== null && liveRemainder.total_tokens > 0)
+        liveModelUsage.set(
+          null,
+          addTokenUsage(liveModelUsage.get(null) ?? null, liveRemainder),
+        );
     }
     const reconciled =
       observedModel || this.#attribution !== null
@@ -540,7 +579,13 @@ export class ScanCostTracker {
       : reconciled;
     const cost = estimateScanCost(this.#options.model, measured);
     this.#snapshot = { usage: measured, cost };
-    this.#reportCost(cost, measured);
+    this.#reportCost(cost, measured, {
+      ...usage,
+      modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
+        model,
+        ...tokens,
+      })),
+    });
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -583,10 +628,25 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null, usage: unknown): void {
+  #reportCost(
+    cost: ScanCost | null,
+    usage: unknown,
+    liveUsage?: unknown,
+  ): void {
     if (cost === null) {
       if (this.#options.onCostLowerBound === undefined) return;
-      const lowerBound = estimateScanCostLowerBound(this.#options.model, usage);
+      const receiptCost = estimateScanCostLowerBound(
+        this.#options.model,
+        usage,
+      );
+      const liveCost = estimateScanCostLowerBound(
+        this.#options.model,
+        liveUsage,
+      );
+      const lowerBound =
+        liveCost && liveCost.estimatedUsd > (receiptCost?.estimatedUsd ?? -1)
+          ? liveCost
+          : receiptCost;
       if (lowerBound === null) return;
       const signature = JSON.stringify(lowerBound);
       if (signature === this.#lastCostLowerBound) return;
@@ -792,15 +852,28 @@ function readSessionEvent(
         : session.currentTurnId;
     const cumulative = tokenUsage(payload["thread_token_usage"]);
     const timestamp = sessionStartedAt(event["timestamp"]);
+    const cumulativeTokens =
+      cumulative &&
+      (attribution === null ||
+        (timestamp !== null &&
+          (!attribution.completedAt ||
+            timestamp <= Date.parse(attribution.completedAt))))
+        ? receiptCounterTotal(
+            session,
+            responseId,
+            usage.total_tokens,
+            cumulative.total_tokens,
+          )
+        : null;
     if (
       attribution &&
       timestamp !== null &&
       timestamp < Date.parse(attribution.startedAt)
     ) {
-      if (cumulative)
+      if (cumulativeTokens !== null)
         session.responseBaselineTokens = Math.max(
           session.responseBaselineTokens,
-          cumulative.total_tokens,
+          cumulativeTokens,
         );
       return;
     }
@@ -813,24 +886,19 @@ function readSessionEvent(
         event["timestamp"],
       )
     ) {
-      if (
-        cumulative &&
-        timestamp !== null &&
-        (!attribution.completedAt ||
-          timestamp <= Date.parse(attribution.completedAt))
-      )
+      if (cumulativeTokens !== null)
         session.excludedResponseTokens.set(responseId, {
           tokens: usage.total_tokens,
-          cumulative: cumulative.total_tokens,
+          cumulative: cumulativeTokens,
         });
       return;
     }
     session.responseIds.add(responseId);
     session.excludedResponseTokens.delete(responseId);
-    if (cumulative)
+    if (cumulativeTokens !== null)
       session.expectedResponseTokens = Math.max(
         session.expectedResponseTokens,
-        cumulative.total_tokens,
+        cumulativeTokens,
       );
     if (!session.responseUsageObserved) {
       // Exact receipts include compaction and survive counter resets. Keep the
@@ -1004,8 +1072,14 @@ function readSessionEvent(
       timestamp < Date.parse(attribution.startedAt)
     ) {
       session.previousUsage = ownUsage;
+      // The last pre-scan counter is this window's baseline, including resets.
+      session.responseBaselineTokens = ownUsage.total_tokens;
+      session.responseCounterOffset = 0;
+      session.responseCounterTokens = ownUsage.total_tokens;
+      session.responseCounterRecords.clear();
       return;
     }
+    const hadPreviousUsage = session.previousUsage !== null;
     const delta =
       session.previousUsage === null
         ? ownUsage
@@ -1030,11 +1104,20 @@ function readSessionEvent(
       return;
     }
     session.previousUsage = ownUsage;
-    if (delta !== null && !session.responseUsageObserved) {
-      session.modelUsage.set(
-        session.model,
-        addTokenUsage(session.modelUsage.get(session.model) ?? null, delta),
+    if (delta !== null) {
+      const model =
+        !hadPreviousUsage && session.responseUsageObserved
+          ? null
+          : session.model;
+      session.counterModelUsage.set(
+        model,
+        addTokenUsage(session.counterModelUsage.get(model) ?? null, delta),
       );
+      if (!session.responseUsageObserved)
+        session.modelUsage.set(
+          session.model,
+          addTokenUsage(session.modelUsage.get(session.model) ?? null, delta),
+        );
     }
     session.counterUsage =
       attribution && delta !== null
@@ -1042,6 +1125,40 @@ function readSessionEvent(
         : ownUsage;
     if (!session.responseUsageObserved) session.usage = session.counterUsage;
   }
+}
+
+function receiptCounterTotal(
+  session: SessionUsage,
+  responseId: string,
+  tokens: number,
+  cumulative: number,
+): number {
+  const previous = session.responseCounterRecords.get(responseId);
+  if (previous) return previous.offset + previous.end;
+  const start = cumulative - tokens;
+  // Distinct exact receipts cannot cover the same counter interval. An overlap
+  // starts a reset window; disjoint delayed receipts fill the earlier gaps.
+  if (
+    [...session.responseCounterRecords.values()].some(
+      (record) =>
+        record.offset === session.responseCounterOffset &&
+        start < record.end &&
+        cumulative > record.start,
+    )
+  ) {
+    session.responseCounterOffset += session.responseCounterTokens;
+    session.responseCounterTokens = 0;
+  }
+  session.responseCounterTokens = Math.max(
+    session.responseCounterTokens,
+    cumulative,
+  );
+  session.responseCounterRecords.set(responseId, {
+    start,
+    end: cumulative,
+    offset: session.responseCounterOffset,
+  });
+  return session.responseCounterOffset + cumulative;
 }
 
 function uuid7Order(value: unknown): bigint | null {

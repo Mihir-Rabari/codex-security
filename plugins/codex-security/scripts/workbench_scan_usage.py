@@ -720,6 +720,28 @@ def _read_rollout_usage(
     response_tokens = 0
     expected_response_tokens = 0
     response_baseline_tokens = 0
+    response_counter_offset = 0
+    response_counter_tokens = 0
+    response_counter_records: dict[str, tuple[int, int, int]] = {}
+
+    def receipt_counter_total(response_id: str, tokens: int, cumulative: int) -> int:
+        nonlocal response_counter_offset, response_counter_tokens
+        recorded = response_counter_records.get(response_id)
+        if recorded is not None:
+            return recorded[1] + recorded[2]
+        start = cumulative - tokens
+        # Overlapping distinct receipts belong to separate reset windows;
+        # disjoint delayed receipts can complete an earlier gap.
+        if any(
+            offset == response_counter_offset and start < end and cumulative > begin
+            for begin, end, offset in response_counter_records.values()
+        ):
+            response_counter_offset += response_counter_tokens
+            response_counter_tokens = 0
+        response_counter_tokens = max(response_counter_tokens, cumulative)
+        response_counter_records[response_id] = (start, cumulative, response_counter_offset)
+        return response_counter_offset + cumulative
+
     excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
 
@@ -805,30 +827,33 @@ def _read_rollout_usage(
                 cumulative = _token_snapshot(
                     {"info": {"total_token_usage": payload.get("thread_token_usage")}}
                 )
-                if timestamp < started_at:
-                    if cumulative is not None:
-                        response_baseline_tokens = max(
-                            response_baseline_tokens, cumulative["totalTokens"]
-                        )
-                    continue
                 if completed_at is not None and timestamp > completed_at:
+                    continue
+                cumulative_tokens = (
+                    receipt_counter_total(
+                        response_id, usage["totalTokens"], cumulative["totalTokens"]
+                    )
+                    if cumulative is not None
+                    else None
+                )
+                if timestamp < started_at:
+                    if cumulative_tokens is not None:
+                        response_baseline_tokens = max(response_baseline_tokens, cumulative_tokens)
                     continue
                 if (
                     owner_turn_id is not None
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
-                    if cumulative is not None:
+                    if cumulative_tokens is not None:
                         excluded_response_tokens[response_id] = (
                             usage["totalTokens"],
-                            cumulative["totalTokens"],
+                            cumulative_tokens,
                         )
                     continue
                 response_ids.add(response_id)
                 excluded_response_tokens.pop(response_id, None)
-                if cumulative is not None:
-                    expected_response_tokens = max(
-                        expected_response_tokens, cumulative["totalTokens"]
-                    )
+                if cumulative_tokens is not None:
+                    expected_response_tokens = max(expected_response_tokens, cumulative_tokens)
                 if not response_usage_observed:
                     response_usage_observed = True
                     total = _empty_token_usage()
@@ -854,6 +879,10 @@ def _read_rollout_usage(
             if timestamp < started_at:
                 # A compaction before this scan changes its starting counter.
                 previous = snapshot
+                response_baseline_tokens = snapshot["totalTokens"]
+                response_counter_offset = 0
+                response_counter_tokens = snapshot["totalTokens"]
+                response_counter_records.clear()
                 continue
             if (completed_at is not None and timestamp > completed_at) or (
                 owner_turn_id is not None and current_turn_id != owner_turn_id

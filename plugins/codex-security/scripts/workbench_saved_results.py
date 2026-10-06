@@ -124,11 +124,13 @@ def validate_sealed_budget_draft(
     # The seal can reach disk before parent completion commits. Validate
     # it without changing bytes; the existing finalizer commits replay.
     try:
-        _prepare_scan_finalization(
+        _, _, _, _, coverage, _, _ = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             completion_binding=db.workbench_completion_binding(scan, scan["started_at"], manifest),
         )
+        if coverage["completeness"] != "partial":
+            raise ContractError("Budget-exhausted completion requires partial coverage.")
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
 
