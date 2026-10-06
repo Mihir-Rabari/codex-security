@@ -445,7 +445,8 @@ describe("CodexSecurity finding validation", () => {
     const root = fixtureRoot ?? (await temporaryDirectory());
     const repository = join(root, "repository");
     const codexHome = await temporaryDirectory();
-    const stateDirectory = join(root, "state");
+    const stateDirectory =
+      environmentOverrides["CODEX_SECURITY_STATE_DIR"] ?? join(root, "state");
     await mkdir(repository, { recursive: true });
     const captured: {
       codex?: CodexOptions;
@@ -514,7 +515,15 @@ describe("CodexSecurity finding validation", () => {
       finding: "Candidate finding",
       outputDir: join(root, "validation"),
     };
-    return { client, options, stateDirectory, captured, workbench, root };
+    return {
+      client,
+      options,
+      stateDirectory,
+      captured,
+      workbench,
+      root,
+      codexHome,
+    };
   }
 
   test.each(["text", "object"])(
@@ -1039,6 +1048,134 @@ describe("CodexSecurity finding validation", () => {
       await client.validate(request);
       expect(modelCalls).toBe(2);
       expect(fixture.captured.prompt).toContain("Candidate finding");
+    },
+  );
+
+  test
+    .skipIf(process.platform === "win32" || process.geteuid?.() === 0)
+    .each(["file", "directory"] as const)(
+    "validates unreadable ignored cache entries: %s",
+    async (kind) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      const repository = fixture.options.repositoryPath;
+      execFileSync("git", ["init", "-q", repository]);
+      await writeFile(join(repository, ".gitignore"), "ignored-cache\n");
+      const entry = join(repository, "ignored-cache");
+      if (kind === "directory") {
+        await mkdir(entry);
+        await writeFile(join(entry, "cache.txt"), "Synthetic cache data.");
+      } else await writeFile(entry, "Synthetic cache data.");
+      const mode = (await stat(entry)).mode;
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "unreadable-validation-cache",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: repository });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      await chmod(entry, 0);
+      try {
+        expect(await client.validate(request)).toMatchObject(assessment);
+        expect(await client.validate(request)).toMatchObject(assessment);
+        expect(modelCalls).toBe(2);
+      } finally {
+        await chmod(entry, mode);
+      }
+      expect(await client.validate(request)).toMatchObject(assessment);
+      expect(await client.validate(request)).toMatchObject(assessment);
+      expect(modelCalls).toBe(3);
+    },
+  );
+
+  test.each([
+    { scope: "home", changed: true },
+    { scope: "home", changed: false },
+    { scope: "output worktree", changed: true },
+    { scope: "output worktree", changed: false },
+    { scope: "none", changed: false },
+  ] as const)(
+    "preserves native validation guidance: %p",
+    async ({ scope, changed }) => {
+      const python = await resolvePluginPython();
+      const stateRoot = await temporaryDirectory(
+        "native-validation-guidance-",
+        true,
+      );
+      if (scope === "output worktree")
+        execFileSync("git", ["init", "-q", stateRoot]);
+      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      let guide: string | undefined;
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        expect(fixture.captured.codex?.env?.["CODEX_HOME"]).toBe(
+          fixture.codexHome,
+        );
+        if (scope === "output worktree")
+          expect(
+            relative(
+              stateRoot,
+              fixture.captured.thread!.workingDirectory!,
+            ).startsWith(".."),
+          ).toBe(false);
+        yield* validationEvents(
+          JSON.stringify({
+            ...assessment,
+            report:
+              guide === undefined
+                ? "Synthetic assessment."
+                : await readFile(guide, "utf8"),
+          }),
+        );
+      }
+      fixture = await validationClient(events, PLUGIN_ROOT, python, undefined, {
+        CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
+      });
+      await using client = fixture.client;
+      guide =
+        scope === "home"
+          ? join(fixture.codexHome, "AGENTS.md")
+          : scope === "output worktree"
+            ? join(stateRoot, "AGENTS.md")
+            : undefined;
+      if (guide !== undefined) {
+        await mkdir(dirname(guide), { recursive: true });
+        await writeFile(guide, "Original synthetic guidance.");
+      }
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "native-validation-guidance",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      const first = await client.validate(request);
+      if (changed) await writeFile(guide!, "Updated synthetic guidance.");
+      const second = await client.validate(request);
+      expect(second.report).toBe(
+        changed ? "Updated synthetic guidance." : first.report,
+      );
+      if (changed) expect(modelCalls).toBe(2);
+      if (scope === "none") expect(modelCalls).toBe(1);
     },
   );
 

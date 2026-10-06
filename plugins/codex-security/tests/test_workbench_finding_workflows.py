@@ -339,3 +339,41 @@ def test_optional_review_snapshot_disables_cache_for_unsupported_file_types(
         workflow(
             workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
         )
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="Mode permissions require a non-root Unix user",
+)
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_optional_review_snapshot_disables_cache_for_unreadable_entries(
+    workbench_api, workbench_db, tmp_path, kind
+):
+    target = tmp_path / "repository"
+    target.mkdir()
+    (target / "source.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    entry = target / "ignored-cache"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "cache.txt").write_text("Synthetic cache data.", encoding="utf-8")
+    else:
+        entry.write_text("Synthetic cache data.", encoding="utf-8")
+    first = workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+    mode = entry.stat().st_mode
+    entry.chmod(0)
+    try:
+        with pytest.raises((PermissionError, SystemExit)):
+            workflow(workbench_api, workbench_db, "source", repository=str(target))
+        assert workflow(
+            workbench_api, workbench_db, "source", repository=str(target), optional=True
+        ) == {"source": None}
+    finally:
+        entry.chmod(mode)
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+        == first
+    )
+    with pytest.raises(FileNotFoundError):
+        workflow(
+            workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
+        )

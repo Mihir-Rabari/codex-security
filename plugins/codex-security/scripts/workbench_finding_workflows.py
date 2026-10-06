@@ -13,6 +13,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import (
     UnsupportedLocalFileType,
+    UnreadableLocalFile,
     directory_content_digest,
     git_output,
     git_revision,
@@ -131,7 +132,7 @@ def finding_workflow(
         target = Path(payload["repository"]).resolve(strict=True)
         try:
             content = directory_content_digest(target, include_ignored=True)
-        except UnsupportedLocalFileType:
+        except (UnsupportedLocalFileType, UnreadableLocalFile, OSError):
             if payload.get("optional") is True:
                 return {"source": None}
             raise

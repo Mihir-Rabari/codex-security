@@ -739,13 +739,59 @@ export class CodexSecurity {
       let checkpoint:
         | { workflow: FindingWorkflow; binding: JsonObject; key: string }
         | undefined;
+      const outputRoot =
+        inputs.outputDir === null
+          ? await preparePersistentOutputRoot(
+              inputs.stateDirectory,
+              "validations",
+              basename(inputs.repository),
+            )
+          : temporaryRoot;
       const knowledgeBasePath = knowledgeBase?.path;
       // Codex resolves file-backed instructions in its validation working directory.
-      const cacheable =
-        typeof resolveCodexProfile(session.effectiveConfig)[
-          "model_instructions_file"
-        ] !== "string";
-      if (options.workflowId !== undefined && cacheable) {
+      const canCache = async (): Promise<boolean> => {
+        const configuration = resolveCodexProfile(session.effectiveConfig);
+        if (typeof configuration["model_instructions_file"] === "string")
+          return false;
+        // Codex owns instruction discovery. Leave file-backed native guidance to it.
+        const fallback = configuration["project_doc_fallback_filenames"];
+        const names = [
+          "AGENTS.override.md",
+          "AGENTS.md",
+          ...(Array.isArray(fallback)
+            ? fallback.filter(
+                (name): name is string => typeof name === "string",
+              )
+            : []),
+        ];
+        const candidates = [
+          join(runtime.codexHome, "AGENTS.override.md"),
+          join(runtime.codexHome, "AGENTS.md"),
+        ];
+        let directory = await canonicalConfigPath(
+          inputs.outputDir ?? outputRoot,
+        );
+        for (;;) {
+          candidates.push(...names.map((name) => join(directory, name)));
+          const parent = dirname(directory);
+          if (parent === directory) break;
+          directory = parent;
+        }
+        for (const path of candidates) {
+          try {
+            await lstat(path);
+            return false;
+          } catch (error) {
+            if (
+              !isRecord(error) ||
+              (error["code"] !== "ENOENT" && error["code"] !== "ENOTDIR")
+            )
+              return false;
+          }
+        }
+        return true;
+      };
+      if (options.workflowId !== undefined && (await canCache())) {
         const workflow = new FindingWorkflow(
           options.workflowId,
           this.#dependencies.environment,
@@ -830,20 +876,12 @@ export class CodexSecurity {
                   "Repository changed during validation.",
                 );
               }
-              return validationResultSchema.parse(saved);
+              if (await canCache()) return validationResultSchema.parse(saved);
             }
           }
           checkpoint = { workflow, binding, key: reviewKey };
         }
       }
-      const outputRoot =
-        inputs.outputDir === null
-          ? await preparePersistentOutputRoot(
-              inputs.stateDirectory,
-              "validations",
-              basename(inputs.repository),
-            )
-          : temporaryRoot;
       outputDir = await prepareOutputDir(
         inputs.outputDir ?? undefined,
         basename(inputs.repository),
@@ -912,7 +950,7 @@ export class CodexSecurity {
       }
       await checkTarget();
       const assessment = { ...result, outputDir, threadId };
-      if (checkpoint !== undefined) {
+      if (checkpoint !== undefined && (await canCache())) {
         const { workflow, binding, key } = checkpoint;
         const current = await workflow.sourceSnapshot(inputs.repository, true);
         if (current !== null) {

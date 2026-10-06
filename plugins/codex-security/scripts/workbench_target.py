@@ -20,6 +20,10 @@ from filesystem_identity import stored_filesystem_identity_matches
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
+class UnreadableLocalFile(SystemExit):
+    """Source contents are unavailable for an optional review cache."""
+
+
 class UnsupportedLocalFileType(SystemExit):
     """An entry cannot be read as source content for a review cache."""
 
@@ -649,7 +653,7 @@ def directory_content_digest(
         try:
             metadata = path.lstat()
         except OSError as exc:
-            raise SystemExit(f"Could not read local file: {relative_path}") from exc
+            raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
         update_digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode())
@@ -669,7 +673,7 @@ def directory_content_digest(
                         content_digest.update(chunk)
                         content_size += len(chunk)
             except OSError as exc:
-                raise SystemExit(f"Could not read local file: {relative_path}") from exc
+                raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
             update_digest_field(digest, b"kind", b"file")
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
