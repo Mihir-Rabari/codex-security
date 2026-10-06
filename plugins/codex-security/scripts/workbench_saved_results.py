@@ -851,7 +851,7 @@ def _stopped_diff_candidate_decisions(
         for item in items if isinstance(items, list) else []:
             if (
                 isinstance(item, dict)
-                and item.get("disposition") in {"rejected", "not_applicable"}
+                and item.get("disposition") in ("rejected", "not_applicable")
                 and (key := coverage_candidate_key(item)) is not None
                 and key[0] is None
             ):

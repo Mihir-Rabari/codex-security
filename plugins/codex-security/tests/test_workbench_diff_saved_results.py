@@ -1374,3 +1374,31 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
     else:
         run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
     assert_retained()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize(
+    "disposition", [{"status": "synthetic-review"}, ["synthetic-review"], "rejected"]
+)
+def test_stopped_diff_retains_generic_exclusion_extensions(
+    tmp_path: Path, termination: str, disposition: object
+) -> None:
+    state_dir, scan_dir, scan_id, _, _ = saved_diff_candidate(tmp_path)
+    exclusion = {
+        "pattern": "vendor/**",
+        "reason": "Synthetic imported scope exclusion.",
+        "disposition": disposition,
+        "annotation": "Keep the authored extension unchanged.",
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["explicitExclusions"].append(exclusion)
+    coverage_path.write_text(json.dumps(coverage))
+    arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert stopped["progress"]["status"] == ("failed" if termination == "fail-scan" else "canceled")
+    assert stopped["progress"]["candidates"]["unresolved"] == 1
+    assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+    assert (scan_dir / "report.md").is_file()
+    assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])

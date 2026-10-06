@@ -436,12 +436,13 @@ export async function runCustomValidation(options: {
     previousDecisions.set(key, rows);
     return mapped;
   };
-  coverage.surfaces = coverage.surfaces.filter((item) =>
-    retainDecision(
-      item,
-      mappedSurfaces.has(item.id) || retainedSurfaceIds.has(item.id),
-    ),
-  );
+  coverage.surfaces = coverage.surfaces.filter((item) => {
+    if (retainDecision(item, mappedSurfaces.has(item.id))) return true;
+    if (!retainedSurfaceIds.has(item.id)) return false;
+    // Keep linked evidence while the reassessed candidate's old decision is archived.
+    delete item.candidateId;
+    return true;
+  });
   coverage.explicitExclusions = coverage.explicitExclusions.filter((item) =>
     retainDecision(item, false),
   );

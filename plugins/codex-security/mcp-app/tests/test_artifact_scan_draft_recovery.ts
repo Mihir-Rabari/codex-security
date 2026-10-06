@@ -1694,3 +1694,38 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  for (const authoredId of [false, true]) {
+    for (const authoredReceipts of [false, true]) {
+      test(`${layout}: resumed surface keeps the base implicit identity, authoredId=${authoredId}, authoredReceipts=${authoredReceipts}`, async (t) => {
+        const f = await fixture(t, layout);
+        const surface = {
+          ...(authoredId ? { id: "authored-surface" } : {}),
+          label: "Synthetic saved API review",
+          disposition: "needs_follow_up",
+          notes: "The saved review remains pending.",
+          ...(authoredReceipts ? { receiptRefs: [] } : {}),
+        };
+        // The base draft writer hashes the authored row before defaulting receipts.
+        const authored = draftApi.scanDraftInputSchema.parse(
+          f.draft({ surfaces: [surface] }),
+        ).coverage.surfaces[0];
+        const id = authoredId
+          ? "authored-surface"
+          : `surface-${hash("sha256", JSON.stringify(authored)).slice(0, 16)}`;
+        await f.write(
+          f.draft({ surfaces: [{ ...surface, id, receiptRefs: [] }] }),
+        );
+        const saved = await f.read();
+        const original = structuredClone(surface);
+        for (let replay = 0; replay < 2; replay++) {
+          const resumed = await f.write(f.draft({ surfaces: [surface] }));
+          assert.deepEqual(resumed.coverage.surfaces, saved.surfaces);
+          assert.deepEqual((await f.read()).surfaces, saved.surfaces);
+        }
+        assert.deepEqual(surface, original);
+      });
+    }
+  }
+}

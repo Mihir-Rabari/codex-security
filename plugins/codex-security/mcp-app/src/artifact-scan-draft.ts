@@ -2571,6 +2571,11 @@ function normalizeCheckpointCoverage(coverage: JsonObject): JsonObject {
       (item, index) => {
         if (typeof original[index]!.id === "string") return item;
         const { id: _id, ...semantic } = item;
+        if (
+          section === "surfaces" &&
+          original[index]!.receiptRefs === undefined
+        )
+          delete semantic.receiptRefs;
         return semantic;
       },
     );

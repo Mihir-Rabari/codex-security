@@ -1439,11 +1439,28 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           run: async () => JSON.stringify(result(disposition)),
         });
         const saved = await loadResult(f.scanDir);
+        const reopened = saved.unresolvedCandidates.filter(
+          (row) =>
+            row.candidateId === "validated-candidate" &&
+            row.sourceWorkerId === "worker-current",
+        );
+        expect(reopened).toHaveLength(disposition === "deferred" ? 1 : 0);
         if (gap === "none") {
           expect(saved.coverage.surfaces).not.toContainEqual(previous);
         } else {
-          expect(saved.coverage.surfaces).toContainEqual(previous);
+          const { candidateId: _candidateId, ...evidence } = previous;
+          expect(saved.coverage.surfaces).toContainEqual(evidence);
           expect(saved.coverage.deferred).toContainEqual(independent);
+        }
+        if (disposition === "deferred") {
+          expect(reopened[0]!.reason).toBe(
+            "The required service was unavailable.",
+          );
+          expect(reopened[0]!.candidate).toMatchObject({
+            provenance: {
+              originalCandidates: expect.arrayContaining([previous]),
+            },
+          });
         }
       });
     }
