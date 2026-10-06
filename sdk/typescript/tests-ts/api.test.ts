@@ -2583,6 +2583,44 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test.each([false, true])(
+    "creates new output before acquiring execution (archive existing: %p)",
+    async (archiveExisting) => {
+      const { root, repository, codexHome } = await runtimeDirectories();
+      const output = join(root, "new-scan");
+      const acquire = mock(async (_state: string, directory: string) => {
+        await realpath(directory);
+        return async () => {};
+      });
+      const client = new TestClient(
+        {},
+        {
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          acquireScanExecution: acquire,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            if (args[0] === "list-scans") return { scans: [] };
+            throw new Error("SYNTHETIC_REGISTERED_OUTPUT");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.run(repository, { outputDir: output, archiveExisting }),
+        ).rejects.toThrow("SYNTHETIC_REGISTERED_OUTPUT");
+        expect((await stat(output)).isDirectory()).toBe(true);
+        expect(acquire).toHaveBeenCalledTimes(1);
+        expect(
+          (await readdir(root)).filter((name) =>
+            name.startsWith("new-scan.previous-"),
+          ),
+        ).toEqual([]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("previews an existing output archive without changing files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

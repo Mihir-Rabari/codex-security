@@ -1662,9 +1662,16 @@ export class CodexSecurity {
           (args) => workbench(workbenchOptions, args),
           requestedOutput,
         );
-        releaseExecution ??= await (
-          this.#dependencies.acquireScanExecution ?? acquireScanExecution
-        )(stateDirectory, requestedOutput, await bundledPluginRoot());
+        const existingOutput = await lstat(requestedOutput).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (existingOutput)
+          releaseExecution ??= await (
+            this.#dependencies.acquireScanExecution ?? acquireScanExecution
+          )(stateDirectory, requestedOutput, await bundledPluginRoot());
       }
       const scanOutputRoot =
         requestedOutput === null &&

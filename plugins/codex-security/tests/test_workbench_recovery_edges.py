@@ -1446,3 +1446,83 @@ def test_parent_recovery_refreshes_repaired_empty_child_note(
         assert "Recovery failed:" not in (parent_dir / "report.md").read_text()
         for path, contents in {**history, **evidence}.items():
             assert path.read_bytes() == contents
+
+
+@pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
+@pytest.mark.parametrize(
+    "surface_ids", [None, 7, ["shared-surface"]], ids=["null", "scalar", "valid"]
+)
+def test_stopped_recovery_retains_findings_with_ambiguous_task_surface_metadata(
+    tmp_path: Path, action: str, surface_ids: object
+) -> None:
+    from workbench_test_support import saved_draft, write_checkpoint
+
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan["scanId"], target, relative_path="app.py")
+    findings = json.loads((contract / "findings.json").read_text())["findings"]
+    valid_work = {"id": "independent-review", "reason": "Independent review remains."}
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(
+            scan["scanId"],
+            findings=findings,
+            deferred=[
+                {"id": "shared-task", "reason": "First saved review.", "surfaceIds": surface_ids},
+                {"id": "shared-task", "reason": "Distinct saved review."},
+                valid_work,
+            ],
+        ),
+    )
+    original = checkpoint.read_bytes()
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "Synthetic interruption") if action == "fail-scan" else ()),
+    )
+    stopped = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert stopped["findingCount"] == 1
+    assert stopped["resultsRecoveryNeeded"] is False
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert valid_work in coverage["deferred"]
+    assert any(row["reason"] == "Distinct saved review." for row in coverage["deferred"])
+    assert checkpoint.read_bytes() == original
+    assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
+@pytest.mark.parametrize("deferred", [None, []], ids=["null", "valid"])
+def test_stopped_recovery_retains_valid_findings_with_pending_null_deferred(
+    tmp_path: Path, action: str, deferred: object
+) -> None:
+    from workbench_test_support import saved_draft, write_checkpoint
+
+    target, state, scan_dir = tmp_path / "target", tmp_path / "state", tmp_path / "scan"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    scan = register(state, target, scan_dir)
+    write_completed_contract(scan_dir, scan["scanId"], target, relative_path="app.py")
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    pending = saved_draft(scan["scanId"], findings=[finding])
+    pending["coverage"]["deferred"] = deferred
+    checkpoint = write_checkpoint(scan_dir / "checkpoints/pending", pending)
+    original = checkpoint.read_bytes()
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        scan["scanId"],
+        *(("--message", "Synthetic interruption") if action == "fail-scan" else ()),
+    )
+    stopped = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    assert stopped["findingCount"] == 1
+    assert stopped["resultsRecoveryNeeded"] is False
+    retained = scan_dir / "checkpoints" / checkpoint.name
+    assert retained.read_bytes() == original
+    assert (scan_dir / "report.md").is_file()

@@ -1017,7 +1017,9 @@ def merge_saved_results(
         for _, draft in all_sources
         for item in _deferred_rows(draft["coverage"])
         if plain_row(item) and isinstance(item.get("id"), str) and item["id"] in ambiguous_deferred
-        for surface_id in item.get("surfaceIds", [])
+        for surface_id in (
+            item.get("surfaceIds", []) if isinstance(item.get("surfaceIds", []), list) else []
+        )
         if isinstance(surface_id, str)
     }
     surface_output = coverage.setdefault("surfaces", [])
@@ -1149,7 +1151,7 @@ def merge_saved_results(
         if superseded and not stopped and parent_findings_valid:
             continue
         if relative in pending_paths:
-            pending_work.update(_encoded(item) for item in draft["coverage"].get("deferred", []))
+            pending_work.update(_encoded(item) for item in _deferred_rows(draft["coverage"]))
         if isinstance(draft.get("threatModel"), dict) and (
             relative == frozen_model_source
             or "threatModel" not in manifest["scan"]

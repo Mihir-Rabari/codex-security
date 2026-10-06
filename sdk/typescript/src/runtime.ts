@@ -80,21 +80,21 @@ export const MARKETPLACE_NAME = "codex-security-sdk";
 export const PLUGIN_NAME = "codex-security";
 function marketplaceManifest(name: string): string {
   return `${JSON.stringify(
-  {
-    name,
-    interface: { displayName: "Codex Security SDK" },
-    plugins: [
-      {
-        name: PLUGIN_NAME,
-        source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
-        policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-        category: "Security",
-      },
-    ],
-  },
-  null,
-  2,
-)}\n`;
+    {
+      name,
+      interface: { displayName: "Codex Security SDK" },
+      plugins: [
+        {
+          name: PLUGIN_NAME,
+          source: { source: "local", path: `./plugins/${PLUGIN_NAME}` },
+          policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+          category: "Security",
+        },
+      ],
+    },
+    null,
+    2,
+  )}\n`;
 }
 
 const MAX_ZIP_ENTRIES = 4_096;
@@ -2616,7 +2616,11 @@ export async function bootstrapPlugin(
       "utf8",
     ).catch(nullIfMissingFileError)) !== marketplaceManifest(marketplaceName)
   ) {
-    await writeMarketplaceManifest(marketplace, options.signal, marketplaceName);
+    await writeMarketplaceManifest(
+      marketplace,
+      options.signal,
+      marketplaceName,
+    );
   }
 
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(

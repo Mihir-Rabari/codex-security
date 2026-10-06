@@ -21,7 +21,6 @@ import {
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { nativeScanConfiguration } from "../src/execution-preparation.js";
 import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
@@ -238,15 +237,29 @@ await new Promise(() => {});
     expect(recipe["config"]).not.toHaveProperty("marketplaces");
     expect(recipe["config"]).not.toHaveProperty("features.plugins");
     environment.CODEX_SAFETY_IDENTIFIER = "synthetic-other-host-identifier";
-    // NativeScanHost restores the caller's ambient config before applying the
-    // saved execution projection; managed resumes use the private recipe alone.
-    const resumedConfig = native
-      ? await nativeScanConfiguration(
-          { ...environment, CODEX_HOME: codexHome },
-          { recipe: { config: recipe["config"] as JsonObject } },
-          8,
-        )
-      : (recipe["config"] as JsonObject);
+    // CLI replay restores the native caller's ambient provider configuration;
+    // the resumed child consumes that projection at its actual process boundary.
+    let resumedConfig = recipe["config"] as JsonObject;
+    if (native) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", "rerun", saved["scanId"] as string, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            environment: { ...environment, CODEX_HOME: codexHome },
+            currentDirectory: repository,
+            onWorkbench: () => saved,
+            onConfig: (config) => {
+              resumedConfig = config.codexOverrides as JsonObject;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(resumedConfig).toMatchObject(savedSettings);
+    }
     const resumed = makeClient(false, resumedConfig);
     try {
       await expect(
@@ -311,9 +324,19 @@ await new Promise(() => {});
 );
 
 test("CLI resume restores saved native permissions into the shared SDK operation", async () => {
-  const { root, repository, inheritedPermissions } = await fixture();
+  const { root, repository, codexHome, inheritedPermissions } = await fixture();
+  const provider = {
+    name: "Synthetic provider",
+    base_url: "https://provider.example.test/v1",
+    env_key: "SYNTHETIC_PROVIDER_KEY",
+    wire_api: "responses",
+  };
+  await writeCodexConfig(join(codexHome, "config.toml"), {
+    model_providers: { synthetic: provider },
+  });
   const id = randomUUID();
   let selected: ScanOptions | undefined;
+  let restoredConfig: JsonObject | undefined;
   const stderr = capture();
   const result = await main(
     ["scans", "resume", id, "--json"],
@@ -322,6 +345,10 @@ test("CLI resume restores saved native permissions into the shared SDK operation
     {
       ...dependencies({
         currentDirectory: root,
+        environment: { CODEX_HOME: codexHome },
+        onConfig: (config) => {
+          restoredConfig = config.codexOverrides as JsonObject;
+        },
         result: fakeResult(),
         onTurn: (_repository, options) => {
           selected = options as ScanOptions;
@@ -334,7 +361,12 @@ test("CLI resume restores saved native permissions into the shared SDK operation
           repository,
           target: { kind: "repository", paths: [] },
           mode: "deep",
-          config: { model: "gpt-6-astra", model_reasoning_effort: "ultra" },
+          config: {
+            model: "gpt-6-astra",
+            model_reasoning_effort: "ultra",
+            model_provider: "synthetic",
+          },
+          preserveProviderEnvironment: true,
           inheritedPermissions,
           safetyIdentifier: "synthetic-saved-identifier",
         },
@@ -342,6 +374,10 @@ test("CLI resume restores saved native permissions into the shared SDK operation
     },
   );
   expect(result).toBe(0);
+  expect(restoredConfig).toMatchObject({
+    model_provider: "synthetic",
+    model_providers: { synthetic: provider },
+  });
   expect(selected).toMatchObject({
     resumeScanId: id,
     inheritedPermissions,

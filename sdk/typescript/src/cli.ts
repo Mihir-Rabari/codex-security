@@ -271,6 +271,8 @@ import {
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { resolveDeepScanConfig } from "./deep-config.js";
+import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
+import { nativeScanConfiguration } from "./execution-preparation.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -2287,6 +2289,7 @@ export async function main(
                   : undefined,
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           if (scanArguments.mode !== "deep")
             throw new CodexSecurityError(
@@ -2435,6 +2438,7 @@ export async function main(
                     ),
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
@@ -4604,6 +4608,7 @@ export async function main(
                             : undefined,
                       },
                       currentDirectory,
+                      dependencies.environment,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6001,6 +6006,7 @@ async function prepareScanArgumentsFromRecipe(
     "scanPrompt" | "scanPromptFile" | "validationPromptFile"
   >,
   directory: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -6178,6 +6184,14 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
+  const replayConfig =
+    recipe["preserveProviderEnvironment"] === true
+      ? await nativeScanConfiguration(
+          environment,
+          { recipe: { config } },
+          deepScan.data?.subagents ?? DEFAULT_DEEP_SCAN_SETTINGS.subagents,
+        )
+      : config;
   return {
     repository,
     inheritedPermissions:
@@ -6202,9 +6216,9 @@ async function prepareScanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     archiveExisting: false,
-    codexOverrides: Object.hasOwn(config, "approval_policy")
-      ? config
-      : { ...config, approval_policy: "never" },
+    codexOverrides: Object.hasOwn(replayConfig, "approval_policy")
+      ? replayConfig
+      : { ...replayConfig, approval_policy: "never" },
     failureSeverity: threshold as FailureSeverity | undefined,
     maxCostUsd,
     dryRun: false,

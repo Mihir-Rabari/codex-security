@@ -73,7 +73,20 @@ describe("bundled plugin build", () => {
       const plugin = fileURLToPath(
         new URL("../../../plugins/codex-security/", import.meta.url),
       );
-      const source = join(root, "plugin");
+      const source = join(root, "plugins", "codex-security");
+      const packageRoot = join(root, "sdk", "typescript");
+      await cp(new URL("../src/", import.meta.url), join(packageRoot, "src"), {
+        recursive: true,
+      });
+      await cp(
+        new URL("../package.json", import.meta.url),
+        join(packageRoot, "package.json"),
+      );
+      await symlink(
+        fileURLToPath(new URL("../node_modules/", import.meta.url)),
+        join(packageRoot, "node_modules"),
+        "junction",
+      );
       await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
         recursive: true,
         filter: (path) =>
@@ -189,6 +202,21 @@ describe("bundled plugin build", () => {
       ]);
       expect(helper.stdout).toBe("[]\n");
       expect(helper.stderr).toBe("");
+      const execution = execFileAsync(
+        "node",
+        [join(destination, "server.mjs"), "--stdio"],
+        { cwd: root, timeout: 10_000 },
+      );
+      execution.child.stdin?.end(mcpSmokeInput);
+      const standalone = await execution;
+      const responses = mcpSmokeResponses(standalone.stdout);
+      expect(
+        responses.find((response) => response.id === 2)?.result.tools,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "start_codex_security_deep_scan" }),
+        ]),
+      );
     },
   );
 
