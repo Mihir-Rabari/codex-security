@@ -2,7 +2,8 @@
   "sources": [
     "https://github.com/openai/codex-security/actions/runs/33215429477",
     "https://github.com/openai/codex-security/actions/runs/33227512538",
-    "https://github.com/openai/codex-security/actions/runs/33233690024"
+    "https://github.com/openai/codex-security/actions/runs/33233690024",
+    "https://github.com/openai/codex-security/actions/runs/37439758240"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 0.372,
@@ -135,7 +136,7 @@
     "cli-history-paths.test.ts": 0.009,
     "cli-launcher.test.ts": 9.241,
     "cli-patch-trust.test.ts": 3.655,
-    "cli-patch.test.ts": 8.605,
+    "cli-patch.test.ts": 624.5,
     "cli-publish.test.ts": 0.583,
     "cli-scan-prompts.test.ts": 0.919,
     "cli-serve.test.ts": 7.776,

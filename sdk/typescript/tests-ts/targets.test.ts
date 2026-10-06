@@ -715,3 +715,34 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
 });
+
+test.each(["common-disabled", "enabled-correct", "enabled-rebound"])(
+  "honors common configuration when binding a linked checkout: %s",
+  async (kind) => {
+    const main = await repository();
+    const linked = join(main, "..", "linked");
+    git(main, "worktree", "add", "--detach", linked, "HEAD");
+    const metadata = git(linked, "rev-parse", "--absolute-git-dir");
+    git(main, "config", "core.worktree", main);
+    git(
+      main,
+      "config",
+      "extensions.worktreeConfig",
+      kind === "common-disabled" ? "false" : "true",
+    );
+    if (kind === "enabled-correct")
+      git(linked, "config", "--worktree", "core.worktree", linked);
+    const result = enclosingGitWorktreeRoot(linked, undefined, {
+      requireIfPresent: true,
+      runGit: async (args) =>
+        execFileSync(
+          "git",
+          [`--git-dir=${metadata}`, `--work-tree=${linked}`, ...args],
+          { cwd: linked, encoding: "utf8" },
+        ).trim(),
+    });
+    if (kind === "enabled-rebound")
+      await expect(result).rejects.toThrow("Git metadata is not bound");
+    else expect(await result).toBe(await realpath(linked));
+  },
+);
