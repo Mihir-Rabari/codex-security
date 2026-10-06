@@ -58,7 +58,7 @@ for (const resume of [false, true]) {
             (item) => item.id !== "scan-stopped",
           );
           assert.ok(records.length > 0, field);
-          for (const item of records) {
+          for (const [index, item] of records.entries()) {
             const review = coverage.reviews.find(
               (review) => review.workerId === item.provenance.workerId,
             );

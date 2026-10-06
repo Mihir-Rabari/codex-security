@@ -989,6 +989,13 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
+      const accepted = discoveries.filter((source) =>
+        inputs.some(
+          (input) =>
+            input.dedupWorkerId === worker.id &&
+            input.discoveryWorkerId === source.id,
+        ),
+      );
       const sources = await readDeepReductionSources({
         root: worker.artifactDir,
         repoRoot: this.state.targetPath,
