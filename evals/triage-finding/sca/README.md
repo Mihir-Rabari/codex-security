@@ -19,7 +19,7 @@ schema. No model, network, OSV binary, or package installation inside the
 synthetic target repositories is required:
 
 ```sh
-node --test evals/triage-finding/sca/scripts/test-sca.js
+node --experimental-strip-types --test evals/triage-finding/sca/scripts/test-sca.js
 ```
 
 Checks cover frozen input/source/advisory digests, all three gold labels, schema
@@ -42,8 +42,8 @@ with `pnpm run setup`, then:
 pnpm run validate:sca
 pnpm run eval:sca:smoke
 pnpm run eval:sca
-node sca/scripts/sca-result.js artifacts/sca-eval.json > artifacts/sca-summary.json
-node sca/scripts/baselines.js > artifacts/sca-baselines.json
+node --experimental-strip-types sca/scripts/sca-result.js artifacts/sca-eval.json > artifacts/sca-summary.json
+node --experimental-strip-types sca/scripts/baselines.js > artifacts/sca-baselines.json
 ```
 
 `eval:sca:smoke` selects the first affected/not-affected/unresolved family.

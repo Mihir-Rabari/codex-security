@@ -86,7 +86,7 @@ cd sdk/typescript
 bun test --timeout 30000 tests-ts/sca.test.ts tests-ts/sca-*.test.ts
 bun scripts/check-sca-osv-contract.mts /path/to/osv-scanner
 cd ../..
-node --test evals/triage-finding/sca/scripts/test-sca.js
+node --experimental-strip-types --test evals/triage-finding/sca/scripts/test-sca.js
 ```
 
 The scanner harness constructs fictional advisory data without installing or
