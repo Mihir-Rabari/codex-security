@@ -5889,6 +5889,103 @@ describe("patch change tracking", () => {
     return { directory, git, remote };
   }
 
+  test.each(["required", "empty"] as const)(
+    "preserves the %s origin proxy during publication preflight",
+    async (kind) => {
+      const { directory, git } = await publicationRepository();
+      const original = git("rev-parse", "HEAD");
+      const requests: string[] = [];
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(request) {
+          const path = new URL(request.url).pathname;
+          requests.push(path);
+          if (path === "/repository.git/info/refs")
+            return new Response(`${original}\trefs/heads/main\n`, {
+              headers: { "Content-Type": "text/plain" },
+            });
+          if (path === "/repository.git/HEAD")
+            return new Response("ref: refs/heads/main\n");
+          return new Response("Not found", { status: 404 });
+        },
+      });
+      try {
+        const proxy = `http://127.0.0.1:${server.port}`;
+        git(
+          "remote",
+          "set-url",
+          "origin",
+          `${kind === "required" ? "http://127.0.0.1:1" : proxy}/repository.git`,
+        );
+        git("config", "remote.origin.proxy", kind === "required" ? proxy : "");
+        const globalConfig = join(directory, ".git", "global-config");
+        await writeFile(
+          globalConfig,
+          kind === "empty" ? "[http]\nproxy = http://127.0.0.1:1\n" : "",
+        );
+        const environment = {
+          GIT_CONFIG_GLOBAL: globalConfig,
+          GIT_CONFIG_NOSYSTEM: "1",
+          HTTP_PROXY: "",
+          http_proxy: "",
+          HTTPS_PROXY: "",
+          https_proxy: "",
+          ALL_PROXY: "",
+          all_proxy: "",
+          NO_PROXY: "",
+          no_proxy: "",
+        };
+        const runGit: typeof runGitRepositoryCommand = async (
+          command,
+          args,
+          cwd,
+          options,
+        ) => {
+          expect(command).toBe("git");
+          const { stdout } = await promisify(execFile)("git", [...args], {
+            cwd: options?.directory ?? cwd,
+            env: { ...process.env, ...environment, ...options?.environment },
+            maxBuffer: options?.maxBuffer,
+          });
+          return options?.trim === false ? stdout : stdout.trim();
+        };
+        expect(
+          await runGit("git", ["ls-remote", "origin"], directory),
+        ).toContain(original);
+        requests.length = 0;
+        const result = resultWithFindings(["high"]);
+        const onCodex = mock(
+          (
+            args: readonly string[],
+            output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+          ) => {
+            completePatches(args, output, "blocked");
+            return 0;
+          },
+        );
+        const outcome = await runWorkflow(
+          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: directory,
+            environment,
+            onWorkbench: () => savedScan(result, "scan-1", directory),
+            onCodex,
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git" ? runGit(command, args, cwd, options) : "[]",
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(1);
+        expect(onCodex).toHaveBeenCalledTimes(1);
+        expect(requests).toContain("/repository.git/info/refs");
+        expect(git("rev-parse", "HEAD")).toBe(original);
+        expect(git("status", "--porcelain")).toBe("");
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
+
   test.each(["free", "occupied", "race", "option", "uploadpack"] as const)(
     "preserves all push destinations: second destination=%s",
     async (destination) => {

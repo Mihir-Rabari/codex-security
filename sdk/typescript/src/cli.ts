@@ -6799,7 +6799,7 @@ async function withResolvedPatchRemote<T>(
   remote: string,
   repository: string,
   dependencies: CliDependencies,
-  run: (token: string, include: string) => Promise<T>,
+  run: (token: string, include: string, name: string) => Promise<T>,
 ): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "codex-security-remote-"));
   const config = join(directory, "config");
@@ -6822,7 +6822,11 @@ async function withResolvedPatchRemote<T>(
       ["rev-parse", "--sq-quote", `include.path=${config}`],
       repository,
     );
-    return await run(directory + remote.slice(prefix.length), include);
+    return await run(
+      directory + remote.slice(prefix.length),
+      include,
+      basename(directory),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -6843,22 +6847,18 @@ async function patchPublicationDestination(
   const entries = (
     await run(
       "git",
-      [
-        "config",
-        "--null",
-        "--get-regexp",
-        "^remote\\.origin\\.(pushurl|url|uploadpack)$",
-      ],
+      ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
       { trim: false },
     )
   )
     .split("\0")
     .filter(Boolean);
-  const uploadPackKey = "remote.origin.uploadpack\n";
-  const uploadPack = entries
-    .findLast((entry) => entry.startsWith(uploadPackKey))
-    ?.slice(uploadPackKey.length);
-  const urls = entries.filter((entry) => !entry.startsWith(uploadPackKey));
+  const urls: string[] = [];
+  const settings: string[] = [];
+  for (const entry of entries) {
+    if (/^remote\.origin\.(pushurl|url)\n/u.test(entry)) urls.push(entry);
+    else settings.push(entry);
+  }
   const push = urls.filter((entry) =>
     entry.startsWith("remote.origin.pushurl\n"),
   );
@@ -7083,7 +7083,7 @@ async function patchPublicationDestination(
   return {
     remote,
     remotes,
-    uploadPack,
+    settings,
     gitlab,
     command,
     existing: found,
@@ -7225,17 +7225,28 @@ async function preparePatchPublication(
           remote,
           repository,
           dependencies,
-          (token, include) =>
-            dependencies.runRepositoryCommand(
+          async (token, include, name) => {
+            const config = await dependencies.runRepositoryCommand(
+              "git",
+              [
+                "rev-parse",
+                "--sq-quote",
+                ...destination.settings.map((entry) =>
+                  entry
+                    .replace(/^remote\.origin\./u, `remote.${name}.`)
+                    .replace("\n", "="),
+                ),
+                `remote.${name}.url=${token}`,
+              ],
+              repository,
+            );
+            return dependencies.runRepositoryCommand(
               "git",
               [
                 "ls-remote",
-                ...(destination.uploadPack !== undefined
-                  ? ["--upload-pack", destination.uploadPack]
-                  : []),
                 "--heads",
                 "--",
-                token,
+                name,
                 ...refs,
                 `refs/heads/${branch}/*`,
               ],
@@ -7244,13 +7255,15 @@ async function preparePatchPublication(
                 environment: {
                   GIT_CONFIG_PARAMETERS: [
                     dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                    config,
                     include,
                   ]
                     .filter(Boolean)
                     .join(" "),
                 },
               },
-            ),
+            );
+          },
         ),
       );
     }
