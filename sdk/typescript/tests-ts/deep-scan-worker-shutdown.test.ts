@@ -8,9 +8,10 @@ test("Deep worker cancellation at the child-process boundary", async () => {
   await promisify(execFile)(
     "node",
     [
+      "--experimental-strip-types",
       fileURLToPath(
         new URL(
-          "../../../plugins/codex-security/mcp-app/tests/test_deep_scan_executor.mjs",
+          "../../../plugins/codex-security/mcp-app/tests/test_deep_scan_executor.ts",
           import.meta.url,
         ),
       ),

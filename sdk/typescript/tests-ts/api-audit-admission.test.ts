@@ -3,16 +3,13 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runScanEvents } from "../src/api.js";
 import type { ScanDraftInput } from "../src/accepted-audit.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-} from "./support/api-events.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
+import { completedEvents } from "./support/api-events.js";
 
-const { temporaryDirectory, copyCompletedScan, cleanup } =
-  createApiTestFixtures();
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 const bundle = await build({
@@ -462,14 +459,15 @@ async function observeStandardAdmission(
 ) {
   const finalization = new Error("The enclosing finalizer owns the next step.");
   let finalizations = 0;
+  const thread = {
+    id: "standard-thread",
+    async runStreamed() {
+      return { events: completedEvents("standard-thread") };
+    },
+  };
   const error = await runScanEvents({
     scanId,
-    thread: {
-      id: "standard-thread",
-      async runStreamed() {
-        return { events: completedEvents("standard-thread") };
-      },
-    },
+    thread,
     events: completedEvents("standard-thread"),
     signal: new AbortController().signal,
     scanDir,

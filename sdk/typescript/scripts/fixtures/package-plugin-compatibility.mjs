@@ -178,7 +178,8 @@ try {
   assert.equal(result.coverage.surfaces[0].notes, " ");
   assert.equal(result.coverage.surfaces[0].riskArea, " ");
   assert.equal(result.coverage.completeness, "partial");
-  assert.equal(result.coverage.surfaces[1].disposition, "needs_follow_up");
+  // Main normalizes absent receipt references without changing review disposition.
+  assert.equal(result.coverage.surfaces[1].disposition, "reported");
   assert.deepEqual(result.coverage.surfaces[1].receiptRefs, []);
   assert.deepEqual(result.coverage.deferred, []);
   assert.ok(
