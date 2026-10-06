@@ -1199,7 +1199,7 @@ def merge_saved_results(
         if not isinstance(item, dict):
             return None
         item = original_coverage_rows.get(id(item), item)
-        source = {key: value for key, value in item.items() if key != "provenance"}
+        source = dict(item)
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
         for projection in projected_coverages:
@@ -1215,9 +1215,7 @@ def merge_saved_results(
                     or (worker["id"], provenance["attempt"]) not in reviewed_attempts
                 ):
                     continue
-                original = {
-                    key: value for key, value in record.items() if key not in {"id", "provenance"}
-                }
+                original = {key: value for key, value in record.items() if key != "id"}
                 if "sourceId" in provenance:
                     original["id"] = provenance["sourceId"]
                 if "candidateId" in provenance:
@@ -1244,6 +1242,16 @@ def merge_saved_results(
                         surface_ids.get(value, value) if isinstance(value, str) else value
                         for value in original["surfaceIds"]
                     ]
+                for value in (source, original):
+                    descriptions = value.pop("provenance", None)
+                    if isinstance(descriptions, dict):
+                        descriptions = {
+                            key: value
+                            for key, value in descriptions.items()
+                            if key not in {"workerId", "attempt", "sourceId", "candidateId"}
+                        }
+                        if descriptions:
+                            value["provenance"] = descriptions
                 if original == source:
                     return record
         return None
@@ -1379,10 +1387,47 @@ def merge_saved_results(
         parent = copy.deepcopy(drafts_by_path[latest_reducer])
         parent_uses_source_coverage = "sourceCoverage" in parent
 
+    terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
+    for relative, draft, worker_id in sources:
+        if relative in current_results and draft.get("complete") is not False:
+            order = source_order[relative]
+            terminal_worker_orders[worker_id] = max(
+                terminal_worker_orders.get(worker_id, order), order
+            )
+    stopped_parent_seal = bool(
+        stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
+    )
+
+    def source_superseded(relative: str, worker_id: str | None) -> bool:
+        worker_result_order = terminal_worker_orders.get(worker_id)
+        return (
+            worker_id is None
+            and parent is not None
+            and parent.get("complete") is not False
+            and relative != "parent"
+            and source_order[relative] <= (0, parent_modified)
+            and (not stopped_parent_seal or relative in parent_preserved_sources)
+        ) or (
+            relative not in current_results
+            and worker_result_order is not None
+            and (
+                relative not in selected_observations
+                or source_order[relative] < worker_result_order
+            )
+        )
+
     projected_coverages = [
         accepted_coverage,
         parent["coverage"] if parent else {},
         *frozen_parent_projections.values(),
+        *[
+            draft["coverage"]
+            for relative, draft, _ in sources
+            if relative in reducer_paths
+            and relative != accepted_reducer
+            and "sourceCoverage" in draft
+            and not source_superseded(relative, None)
+        ],
     ]
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
     reviewed_attempts = {
@@ -1540,9 +1585,6 @@ def merge_saved_results(
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    stopped_parent_seal = bool(
-        stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
-    )
 
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
@@ -1995,13 +2037,6 @@ def merge_saved_results(
             selected_terminal_orders[worker_id] = max(
                 selected_terminal_orders.get(worker_id, order), order
             )
-    terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
-    for relative, draft, worker_id in sources:
-        if relative in current_results and draft.get("complete") is not False:
-            order = source_order[relative]
-            terminal_worker_orders[worker_id] = max(
-                terminal_worker_orders.get(worker_id, order), order
-            )
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
         selected_coverage_superseded = worker_id in selected_terminal_orders and (
@@ -2016,21 +2051,7 @@ def merge_saved_results(
             for (owner, candidate_id), (_, source) in ordered_outcomes.items()
             if owner == worker_id and source == relative
         }
-        superseded = (
-            worker_id is None
-            and parent is not None
-            and parent.get("complete") is not False
-            and relative != "parent"
-            and source_order[relative] <= (0, parent_modified)
-            and (not stopped_parent_seal or relative in parent_preserved_sources)
-        ) or (
-            relative not in current_results
-            and worker_result_order is not None
-            and (
-                relative not in selected_observations
-                or source_order[relative] < worker_result_order
-            )
-        )
+        superseded = source_superseded(relative, worker_id)
         # A failed result write can leave pending work outside the accepted result.
         accepted_order = (
             (0, parent_modified)

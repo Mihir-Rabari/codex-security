@@ -851,7 +851,7 @@ def test_generic_closeout_preserves_projected_surface_receipts(
         assert all(file.read_bytes() == contents for file, contents in saved.items())
 
 
-@pytest.mark.parametrize("projection_source", ["parent", "reducer"])
+@pytest.mark.parametrize("projection_source", ["parent", "reducer", "checkpoint"])
 @pytest.mark.parametrize(
     "retained,merge_state",
     [
@@ -995,6 +995,21 @@ def test_reopened_generic_work_uses_worker_projection(
                 }
             )
         )
+    if projection_source == "checkpoint":
+        write_checkpoint(reducer.parent / "checkpoints", json.loads(reducer.read_text()))
+        reducer.unlink()
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET status = 'failed', result_manifest_path = NULL "
+                "WHERE artifact_dir = ?",
+                (str(reducer.parent),),
+            )
+        assert not reducer.exists()
+        state = workbench_db.execute(
+            "SELECT status, result_manifest_path FROM deep_scan_workers WHERE artifact_dir = ?",
+            (str(reducer.parent),),
+        ).fetchone()
+        assert tuple(state) == ("failed", None)
     saved = {path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*.json")}
     with monkeypatch.context() as interrupted:
 
@@ -1011,6 +1026,14 @@ def test_reopened_generic_work_uses_worker_projection(
             ),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is True
+    frozen_merges = []
+    merge = workbench_api["saved_results"].merge_saved_results
+
+    def observe_merge(*args, **kwargs):
+        frozen_merges.append(kwargs.get("frozen_source_digests"))
+        return merge(*args, **kwargs)
+
+    monkeypatch.setattr(workbench_api["saved_results"], "merge_saved_results", observe_merge)
     for _ in range(2):
         recovered = workbench_api["recover_scan_results"](
             workbench_db, Namespace(scan_id=scan.scan_id)
@@ -1040,3 +1063,7 @@ def test_reopened_generic_work_uses_worker_projection(
         else:
             assert pending_rows == [projected_pending]
         assert all(path.read_bytes() == contents for path, contents in saved.items())
+
+    assert frozen_merges and frozen_merges[0]
+    if projection_source == "checkpoint":
+        assert any("/checkpoints/" in path for path in frozen_merges[0])

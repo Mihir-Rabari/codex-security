@@ -516,3 +516,80 @@ for (const interruptReducer of ["merging", "buffered"]) {
     }
   }
 }
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const directFile of [false, true]) {
+    test(`partial parent retains descriptive coverage variants (${workflowVersion}, ${directFile ? "direct" : "writer"})`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "coverage-descriptions-"));
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          directFile,
+          omitCoverageIds: directFile,
+          resume: true,
+          stopAfterDraft: true,
+          descriptiveVariants: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+for (const provenanceKind of ["owner-only", "absent"]) {
+  test(`retained projection accepts ${provenanceKind} provenance`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "coverage-provenance-"));
+    try {
+      await publishCoverageFixture(root, "partial", {
+        workflowVersion: "deep-security-scan/v2",
+        directFile: true,
+        omitCoverageIds: true,
+        stopAfterDraft: true,
+        provenanceKind,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+for (const interruptReducer of ["merging", "buffered"]) {
+  for (const directFile of [false, true]) {
+    test(`checkpoint-only reducer preserves represented coverage (${interruptReducer}, ${directFile ? "direct" : "writer"})`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "coverage-checkpoint-only-"),
+      );
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion: "deep-security-scan/v2",
+          resume: true,
+          interruptReducer,
+          checkpointOnly: true,
+          directFile,
+          omitCoverageIds: directFile,
+          namedRetry: true,
+          linkedRetry: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+for (const parentTiming of ["older", "newer"]) {
+  test(`checkpoint-only reducer reconciles ${parentTiming} parent`, async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "coverage-checkpoint-parent-"),
+    );
+    try {
+      await publishCoverageFixture(root, "partial", {
+        workflowVersion: "deep-security-scan/v2",
+        resume: true,
+        interruptReducer: "buffered",
+        checkpointOnly: true,
+        parentTiming,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
