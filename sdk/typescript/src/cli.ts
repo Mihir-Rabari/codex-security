@@ -30,6 +30,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
@@ -6875,24 +6876,17 @@ async function patchPublicationDestination(
   for (const remotes of [pushRemotes, [fetchRemote]]) {
     let hosted = false;
     for (const remote of remotes.filter(isNetwork)) {
-      const url = new URL(
-        remote.includes("://")
-          ? remote
-          : `ssh://${remote.replace(/^((?:[^@/]+@)?(?:\[[^\]]+\]|[^:/]+)):/u, "$1/")}`,
-      );
+      const uri = remote.includes("://");
+      const url = uri ? new URL(remote) : patchScpRemote(remote)!;
       const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
       if (url.hostname.toLowerCase() === "ssh.github.com")
         url.hostname = "github.com";
-      if (
-        url.hostname.toLowerCase().replace(/^www\./u, "") !== apiHost &&
-        ssh
-      ) {
+      if (patchApiHostname(url.hostname) !== apiHost && ssh) {
         const sshHost = url.hostname.replace(/^\[|\]$/gu, "");
+        const username = uri ? decodeURIComponent(url.username) : url.username;
         const sshArguments = [
           ...(url.port ? ["-p", url.port] : []),
-          url.username
-            ? `${decodeURIComponent(url.username)}@${sshHost}`
-            : sshHost,
+          username ? `${username}@${sshHost}` : sshHost,
         ];
         const sshCommand =
           dependencies.environment["GIT_SSH_COMMAND"] ??
@@ -6917,12 +6911,15 @@ async function patchPublicationDestination(
         url.hostname =
           hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
       }
-      if (url.hostname.toLowerCase().replace(/^www\./u, "") === apiHost) {
+      if (patchApiHostname(url.hostname) === apiHost) {
         hosted = true;
         const id = await run("gh", [
           "repo",
           "view",
-          `${apiEndpoint}/${decodeURIComponent(url.pathname)
+          `${apiEndpoint}/${(uri
+            ? decodeURIComponent(url.pathname)
+            : url.pathname
+          )
             .replace(/^\/+|\/+$/gu, "")
             .replace(/\.git$/u, "")}`,
           "--json",
@@ -7188,9 +7185,29 @@ async function publishPatchBranch(
   }
 }
 
+function patchApiHostname(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/^www\./u, "");
+  const address = host.replace(/^\[|\]$/gu, "");
+  return isIP(address) === 6 && !address.includes("%")
+    ? new URL(`ssh://[${address}]`).hostname
+    : host;
+}
+
+function patchScpRemote(remote: string) {
+  const match = /^(?:([^@/]+)@)?(\[[^\]]+\]|[^:/]+):(.*)$/su.exec(remote);
+  if (!match) return undefined;
+  return {
+    protocol: "ssh:",
+    hostname: match[2]!,
+    port: "",
+    username: match[1] ?? "",
+    pathname: match[3]!,
+  };
+}
+
 function patchRemoteHost(remote: string): string | undefined {
   if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?(\[[^\]]+\]|[^:/]+):/u.exec(remote)?.[1]?.toLowerCase();
+  return patchScpRemote(remote)?.hostname.toLowerCase();
 }
 
 async function resumePatchPullRequest(

@@ -4541,6 +4541,12 @@ describe("patch change tracking", () => {
       "scp-userless",
       "scp-ipv6",
       "scp-ipv6-userless",
+      "scp-ipv6-api",
+      "scp-expanded-ipv6-api",
+      "scp-ipv6-scoped",
+      "scp-ipv6-scoped-userless",
+      "scp-percent",
+      "ssh-uri-percent",
       "scp-mixed",
       "scp-absolute",
       "scp-absolute-command",
@@ -4595,7 +4601,13 @@ describe("patch change tracking", () => {
         coreCommand ??
         (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
       const alias = transport.includes("ipv6")
-        ? "[2001:db8::1]"
+        ? transport.includes("scoped")
+          ? "[fe80::1%lo]"
+          : transport.endsWith("ipv6-api")
+            ? transport.includes("expanded")
+              ? "[0:0:0:0:0:0:0:1]"
+              : "[::1]"
+            : "[2001:db8::1]"
         : transport.endsWith("-mixed")
           ? "GitHub-Work"
           : "github-work";
@@ -4607,8 +4619,9 @@ describe("patch change tracking", () => {
       const localOnly =
         transport.startsWith("local-fetch") || transport === "local-push-only";
       const apiPort = transport.endsWith("-api-port") ? ":8443" : "";
-      const hostingHost =
-        transport === "ssh-enterprise" || apiPort
+      const hostingHost = transport.endsWith("ipv6-api")
+        ? "[::1]"
+        : transport === "ssh-enterprise" || apiPort
           ? "enterprise.example.test"
           : "github.com";
       const hostingUrl = `https://${hostingHost}${apiPort}`;
@@ -4623,6 +4636,10 @@ describe("patch change tracking", () => {
         : transport.includes("ssh+git")
           ? "ssh+git"
           : "ssh";
+      const remoteUser = transport.includes("percent") ? "git%2Duser" : "git";
+      const repositoryPath = transport.includes("percent")
+        ? "example/repository%2Dname.git"
+        : "example/repository.git";
       const pushRemote =
         transport === "https-api-port"
           ? `${hostingUrl}/push-owner/repository.git`
@@ -4654,12 +4671,14 @@ describe("patch change tracking", () => {
                             : transport === "ssh-enterprise"
                               ? "git@enterprise.example.test:push-owner/other-repository.git"
                               : transport.startsWith("scp")
-                                ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
+                                ? `${remoteUser}@${alias}:${transport.includes("absolute") ? "/" : ""}${repositoryPath}`
                                 : transport.startsWith("ssh-uri")
-                                  ? `${sshScheme}://git@${alias}:2222/example/repository.git`
+                                  ? `${sshScheme}://${remoteUser}@${alias}:2222/${repositoryPath}`
                                   : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
       const aliasLookup =
-        (transport.startsWith("scp") && transport !== "scp-userless") ||
+        (transport.startsWith("scp") &&
+          transport !== "scp-userless" &&
+          !transport.endsWith("ipv6-api")) ||
         transport.startsWith("ssh-uri") ||
         ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport);
       const lookupRemote =
@@ -4689,14 +4708,14 @@ describe("patch change tracking", () => {
                         "https-api-port",
                       ].includes(transport)
                     ? `${hostingHost}${apiPort}/push-owner/repository`
-                    : `${hostingHost}${apiPort}/example/repository`;
+                    : `${hostingHost}${apiPort}/example/${transport === "scp-percent" ? "repository%2Dname" : transport === "ssh-uri-percent" ? "repository-name" : "repository"}`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
         transport.includes("ipv6")
-          ? `${transport.endsWith("userless") ? "" : "git@"}2001:db8::1`
+          ? `${transport.endsWith("userless") ? "" : "git@"}${alias.slice(1, -1)}`
           : transport === "scp-userless"
             ? "github.com"
-            : `git@${aliasLookup ? alias : "ssh.github.com"}`,
+            : `${transport === "ssh-uri-percent" ? "git-user" : remoteUser}@${aliasLookup ? alias : "ssh.github.com"}`,
       ];
       if (transport !== "local") {
         git("remote", "set-url", "origin", fetchRemote);
@@ -4789,7 +4808,7 @@ describe("patch change tracking", () => {
                   );
                 return transport === "ssh-empty"
                   ? ""
-                  : `hostname ${transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
+                  : `hostname ${transport.endsWith("ipv6-api") ? "::1" : transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
               }
               if (args.includes("ls-remote"))
                 return runGitRepositoryCommand(
