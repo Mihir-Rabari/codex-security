@@ -1608,8 +1608,12 @@ export async function runWorkbench(
         const scanDir = arguments_[arguments_.indexOf("--scan-dir") + 1]!;
         const archiveDir = await planOutputArchive(scanDir);
         if (archiveDir !== null) {
+          const stateDirectory = codexSecurityStateDirectory(
+            options.environment,
+          );
           if (
-            isWithin(scanDir, codexSecurityStateDirectory(options.environment))
+            isWithin(scanDir, stateDirectory) ||
+            isWithin(scanDir, await canonicalConfigPath(stateDirectory))
           ) {
             throw new Error(
               "The scan artifact directory cannot contain the active workbench database.",
