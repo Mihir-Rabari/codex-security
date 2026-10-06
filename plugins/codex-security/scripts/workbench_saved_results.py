@@ -1190,6 +1190,7 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+        parent_modified = source_order[latest_reducer][1]
     parent_requires_scope_filter = not parent_is_canonical
     if parent is not None:
         # Publisher-created copies retain the canonical coverage envelope on replay.

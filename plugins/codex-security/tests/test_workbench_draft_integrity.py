@@ -758,6 +758,55 @@ def test_older_worker_attempt_keeps_newer_parent_location(tmp_path: Path, retry:
 
 
 @pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("worker_is_newer", [False, True])
+def test_reducer_fallback_retains_observation_chronology(
+    tmp_path: Path, retry: bool, worker_is_newer: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    finding["identity"] = {"anchor": "reviewed-worker-observation"}
+    finding["provenance"]["workerId"] = worker_id
+    finding["locations"][0].update(startLine=2, endLine=2)
+    finding["severity"]["level"] = "low"
+    document = saved_draft(scan_id, findings=[finding])
+    result_path.write_text(json.dumps(document))
+    _, reducer_path, _ = committed_standard_reducer(
+        state, home, scan_dir, scan_id, worker_id, result_path
+    )
+    # Exercise the committed reducer fallback without a canonical parent or parent head.
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / name).unlink()
+    for checkpoint in (reducer_path.parent / "checkpoints").glob("*.json"):
+        os.utime(checkpoint, ns=(200, 200))
+    os.utime(reducer_path, ns=(200, 200))
+    previous = copy.deepcopy(finding)
+    previous["locations"][0].update(startLine=1, endLine=1)
+    previous["severity"]["level"] = "critical"
+    checkpoint = write_checkpoint(
+        result_path.parent / "checkpoints", saved_draft(scan_id, findings=[previous])
+    )
+    modified = 300 if worker_is_newer else 100
+    os.utime(checkpoint, ns=(modified, modified))
+    os.utime(result_path, ns=(100, 100))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 1
+    retained = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    expected = previous if worker_is_newer else finding
+    assert retained["locations"] == expected["locations"]
+    assert retained["severity"]["level"] == expected["severity"]["level"]
+    older = finding if worker_is_newer else previous
+    assert any(
+        row["locations"] == older["locations"]
+        for row in retained["provenance"].get("previousFindings", [])
+    )
+
+
+@pytest.mark.parametrize("retry", [False, True])
 def test_tied_parent_checkpoint_keeps_identityless_semantic_rows(tmp_path: Path, retry: bool):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"
