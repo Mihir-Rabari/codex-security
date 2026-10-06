@@ -744,6 +744,17 @@ export class CodexSecurity {
             baseUrl: environmentValue(runtime.environment, "OPENAI_BASE_URL"),
             command: this.#codexCommand(),
             pluginVersion: runtime.plugin.version,
+            validationSkillDigest: workflowDigest(
+              await readFile(
+                join(
+                  runtime.plugin.pluginRoot,
+                  "skills",
+                  "validation",
+                  "SKILL.md",
+                ),
+                "utf8",
+              ),
+            ),
           }),
           promptDigest: workflowDigest(finding),
           contractDigest: workflowDigest(outputSchema),

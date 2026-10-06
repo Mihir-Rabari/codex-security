@@ -784,6 +784,83 @@ describe("CodexSecurity finding validation", () => {
     expect(modelCalls).toBe(6);
   });
 
+  test.each([false, true])(
+    "binds cached validation to same-version selected instructions, changed=%p",
+    async (changed) => {
+      const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
+      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+      const skill = join(pluginRoot, "skills", "validation", "SKILL.md");
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      const reviewKeys: string[] = [];
+      async function* events() {
+        modelCalls += 1;
+        yield* validationEvents(
+          JSON.stringify({
+            ...assessment,
+            report: `Synthetic assessment ${modelCalls}.`,
+          }),
+        );
+      }
+      function useWorkbench(
+        fixture: Awaited<ReturnType<typeof validationClient>>,
+      ) {
+        fixture.workbench.mockImplementation(async (options, args, input) => {
+          if (args[0] === "finding-workflow") {
+            const request = JSON.parse(input!);
+            if (request.action === "save-review") reviewKeys.push(request.key);
+          }
+          return await runWorkbench(options, args, input);
+        });
+      }
+      const original = await validationClient(events, pluginRoot, python);
+      useWorkbench(original);
+      await using originalClient = original.client;
+      const workflow = new FindingWorkflow(
+        "selected-validation-instructions",
+        { CODEX_SECURITY_STATE_DIR: original.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: original.options.repositoryPath });
+      const request = {
+        ...original.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      const first = await originalClient.validate(request);
+      expect(modelCalls).toBe(1);
+      expect(await originalClient.validate(request)).toEqual(first);
+      expect(modelCalls).toBe(1);
+      await originalClient.close();
+      if (changed)
+        await appendFile(
+          skill,
+          "\nReview the synthetic validation instruction update.\n",
+        );
+      const resumed = await validationClient(
+        events,
+        pluginRoot,
+        python,
+        original.root,
+      );
+      useWorkbench(resumed);
+      await using client = resumed.client;
+      const second = await client.validate(request);
+      expect(modelCalls).toBe(changed ? 2 : 1);
+      expect(second.report).toBe(
+        changed ? "Synthetic assessment 2." : first.report,
+      );
+      expect(await client.validate(request)).toEqual(second);
+      expect(modelCalls).toBe(changed ? 2 : 1);
+      expect(reviewKeys).toHaveLength(changed ? 2 : 1);
+      expect(await workflow.getReview(reviewKeys[0]!)).toEqual(first);
+      expect(resumed.captured.prompt ?? original.captured.prompt).toContain(
+        JSON.stringify(skill),
+      );
+    },
+  );
+
   test.each([
     "unchanged",
     "source contents",
