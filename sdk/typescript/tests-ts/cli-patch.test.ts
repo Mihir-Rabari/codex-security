@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
+import { pathToFileURL } from "node:url";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -2368,12 +2369,44 @@ describe("scan and patch workflow", () => {
 
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories(true);
-  test("preserves direct patch scope when optional assessment or publication is enabled", async () => {
-    const observations = [];
-    for (const flag of [undefined, "--assess-patch-risk", "--create-pr"]) {
+  test.each(
+    ["ordinary", "absolute", "relative", "empty"].flatMap((settings) =>
+      [
+        { command: "patch", flag: undefined },
+        { command: "patch", flag: "--assess-patch-risk" },
+        { command: "patch", flag: "--create-pr" },
+        { command: "scan", flag: undefined },
+        { command: "scan", flag: "--create-pr" },
+      ].map((entry) => ({ settings, ...entry })),
+    ),
+  )(
+    "preserves $command patch scope with $settings Git settings and $flag",
+    async ({ settings, command, flag }) => {
       const root = await fixtures.create("patch-direct-scope-");
       const directory = join(root, "package");
       await mkdir(directory);
+      const gitSettings =
+        settings === "ordinary"
+          ? {}
+          : {
+              GIT_DIR:
+                settings === "relative"
+                  ? "../.git"
+                  : settings === "empty"
+                    ? ""
+                    : join(root, ".git"),
+              GIT_WORK_TREE:
+                settings === "relative"
+                  ? ".."
+                  : settings === "empty"
+                    ? ""
+                    : root,
+            };
+      const settingsBefore = JSON.stringify(gitSettings);
+      let inputDependencies: ReturnType<typeof dependencies> | undefined;
+      let inputRunner:
+        ReturnType<typeof dependencies>["runRepositoryCommand"] | undefined;
+      let modelCalls = 0;
       const git = repositoryGit(root);
       git("init", "--initial-branch=main");
       git("config", "user.name", "Synthetic User");
@@ -2384,25 +2417,43 @@ describe("patch publication integrity", () => {
       const remote = await fixtures.create("patch-direct-scope-remote-");
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json", ...(flag ? [flag] : [])],
-        {
-          currentDirectory: directory,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? ""
-                : "https://github.example.test/example/repository/pull/1",
-          onCodex: async (_args, output) => {
-            expect(output?.appServer?.directory).toBe(directory);
-            await writeFile(join(directory, "app.ts"), "fixed\n");
-            output?.stdout.write("Fixed and checked.");
-            return 0;
-          },
+      const scanResult = resultWithFindings(["high"]);
+      scanResult.findings.findings[0]!.locations[0]!.path = "app.ts";
+      const fixture: Parameters<typeof dependencies>[0] = {
+        result: scanResult,
+        currentDirectory: directory,
+        environment: gitSettings,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment: { ...gitSettings, ...options?.environment },
+              })
+            : args[1] === "list"
+              ? ""
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          modelCalls++;
+          expect(output?.appServer?.directory).toBe(directory);
+          await writeFile(join(directory, "app.ts"), "fixed\n");
+          if (command === "scan") completePatches(_args, output);
+          else output?.stdout.write("Fixed and checked.");
+          return 0;
         },
+      };
+      const outcome = await runWorkflow(
+        [
+          ...(command === "scan"
+            ? ["scan", ".", "--patch"]
+            : ["patch", "Synthetic issue"]),
+          "--json",
+          ...(flag ? [flag] : []),
+        ],
+        fixture,
         {
           configure: (current) => {
+            inputDependencies = current;
+            inputRunner = current.runRepositoryCommand;
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
               expect(request.files).toEqual(["package/app.ts"]);
@@ -2411,24 +2462,38 @@ describe("patch publication integrity", () => {
           },
         },
       );
+      expect(inputDependencies!.runRepositoryCommand).toBe(inputRunner!);
+      expect(JSON.stringify(inputDependencies!.environment)).toBe(
+        settingsBefore,
+      );
+      expect(JSON.stringify(gitSettings)).toBe(settingsBefore);
+      if (settings === "empty") {
+        expect(outcome.exitCode).toBe(flag === undefined ? 0 : 2);
+        expect(modelCalls).toBe(flag === undefined ? 1 : 0);
+        return;
+      }
       expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      if (flag === "--create-pr") {
+        const resumed = await runWorkflow(
+          ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
+          fixture,
+        );
+        expect(resumed.exitCode, resumed.stderr).toBe(0);
+        expect(modelCalls).toBe(1);
+      }
       const result = JSON.parse(outcome.stdout);
-      observations.push({
-        flag,
-        repository: relative(directory, result.repository),
-        files: result.files,
-      });
-    }
-    expect(observations).toEqual([
-      { flag: undefined, repository: "", files: ["package/app.ts"] },
-      {
-        flag: "--assess-patch-risk",
-        repository: "",
-        files: ["package/app.ts"],
-      },
-      { flag: "--create-pr", repository: "", files: ["package/app.ts"] },
-    ]);
-  });
+      if (command === "patch")
+        expect({
+          repository: relative(directory, result.repository),
+          files: result.files,
+        }).toEqual({ repository: "", files: ["package/app.ts"] });
+      else
+        expect(result.patches).toMatchObject([
+          { status: "verified", files: ["app.ts"] },
+        ]);
+    },
+  );
 
   test.each([
     "staged",
@@ -2689,14 +2754,15 @@ describe("patch publication integrity", () => {
   });
 
   test.each(["local", "remote", "push remote", "OPEN", "CLOSED", "MERGED"])(
-    "checks an existing %s patch publication before starting the model",
+    "preserves an existing %s patch publication",
     async (existing) => {
       const directory = await fixtures.create("patch-repeat-");
       const git = repositoryGit(directory);
       git("init", "--initial-branch=main");
       git("config", "user.name", "Synthetic User");
       git("config", "user.email", "synthetic@example.test");
-      await writeFile(join(directory, "app.ts"), "original\n");
+      await mkdir(join(directory, "src"));
+      await writeFile(join(directory, "src/finding-1.ts"), "original\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
       const remote = await fixtures.create("patch-repeat-remote-");
@@ -2710,8 +2776,21 @@ describe("patch publication integrity", () => {
       }
       if (existing === "remote" || existing === "push remote")
         git("push", "origin", "HEAD:refs/heads/codex-security/patch-scan-1");
+      const remoteOnly = existing === "remote" || existing === "push remote";
+      const branch = "codex-security/patch-scan-1";
+      const pushRemote = git("remote", "get-url", "--push", "origin");
+      const before = git("ls-remote", pushRemote, `refs/heads/${branch}`);
       const result = resultWithFindings(["high"]);
-      const onCodex = mock(() => 0);
+      const onCodex = mock(
+        async (
+          args: readonly string[],
+          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+        ) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      );
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
@@ -2731,8 +2810,18 @@ describe("patch publication integrity", () => {
         },
       );
       expect(outcome.exitCode).toBe(2);
-      expect(onCodex).not.toHaveBeenCalled();
-      expect(outcome.stderr).toContain("already exists");
+      expect(onCodex).toHaveBeenCalledTimes(remoteOnly ? 1 : 0);
+      expect(git("ls-remote", pushRemote, `refs/heads/${branch}`)).toBe(before);
+      if (remoteOnly) {
+        const saved = git(
+          "config",
+          "--get",
+          `branch.${branch}.codexSecurityPatchCommit`,
+        );
+        expect(saved).toBe(git("rev-parse", `refs/heads/${branch}`));
+        expect(saved).not.toBe(before.split(/\s+/)[0]);
+        expect(outcome.stderr).toContain("--resume-pr");
+      } else expect(outcome.stderr).toContain("already exists");
     },
   );
 
@@ -3118,23 +3207,25 @@ describe("patch change tracking", () => {
     return { directory, git, remote };
   }
 
-  test.each(["free", "occupied", "option"] as const)(
-    "checks all push destinations before patching: second destination=%s",
+  test.each(["free", "occupied", "race", "option"] as const)(
+    "preserves all push destinations: second destination=%s",
     async (destination) => {
-      const occupied = destination === "occupied";
+      const occupied = destination === "occupied" || destination === "race";
       const option = destination === "option";
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
       git("clone", "--bare", directory, secondary);
       const branch = "codex-security/patch-scan-1";
-      if (occupied)
+      const original = git("rev-parse", "HEAD");
+      const occupy = () =>
         git(
           "--git-dir",
           secondary,
           "update-ref",
           `refs/heads/${branch}`,
-          git("rev-parse", "HEAD"),
+          original,
         );
+      if (destination === "occupied") occupy();
       git("remote", "set-url", "--add", "--push", "origin", remote);
       const marker = join(directory, "upload-pack-marker");
       const script = join(directory, "upload-pack.cjs");
@@ -3159,6 +3250,7 @@ describe("patch change tracking", () => {
           args: readonly string[],
           output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
         ) => {
+          if (destination === "race") occupy();
           await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
           completePatches(args, output);
           return 0;
@@ -3181,13 +3273,28 @@ describe("patch change tracking", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
-      expect(onCodex).toHaveBeenCalledTimes(occupied || option ? 0 : 1);
+      expect(onCodex).toHaveBeenCalledTimes(1);
       await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
       if (occupied || option) {
-        expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
-          before,
+        if (occupied)
+          expect(
+            git("--git-dir", secondary, "rev-parse", `refs/heads/${branch}`),
+          ).toBe(original);
+        else
+          expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
+            before,
+          );
+        const saved = git(
+          "config",
+          "--get",
+          `branch.${branch}.codexSecurityPatchCommit`,
         );
-        expect(git("ls-remote", remote)).toBe("");
+        expect(saved).toBe(git("rev-parse", `refs/heads/${branch}`));
+        expect(saved).not.toBe(original);
+        expect(git("ls-remote", remote, `refs/heads/${branch}`)).toContain(
+          saved,
+        );
+        expect(outcome.stderr).toContain("--resume-pr");
       } else {
         for (const target of [remote, secondary])
           expect(git("ls-remote", target, `refs/heads/${branch}`)).toContain(
@@ -3200,6 +3307,8 @@ describe("patch change tracking", () => {
   test.each(
     [
       "local",
+      "local-first",
+      "file-first",
       "ssh-api",
       "ssh-enterprise",
       "scp",
@@ -3250,8 +3359,11 @@ describe("patch change tracking", () => {
       const alias = transport.endsWith("-mixed")
         ? "GitHub-Work"
         : "github-work";
-      const pushRemote =
-        transport === "local"
+      const localFirst =
+        transport === "local-first" || transport === "file-first";
+      const pushRemote = localFirst
+        ? "https://github.example.test/push-owner/repository.git"
+        : transport === "local"
           ? remote
           : transport === "scp-userless"
             ? "github.com:example/repository.git"
@@ -3264,9 +3376,9 @@ describe("patch change tracking", () => {
                   : transport.startsWith("ssh-uri")
                     ? `ssh://git@${alias}:2222/example/repository.git`
                     : "git@ssh.github.com:example/repository.git";
-      const directLookup = ["local", "ssh-api", "ssh-enterprise"].includes(
-        transport,
-      );
+      const directLookup =
+        localFirst ||
+        ["local", "ssh-api", "ssh-enterprise"].includes(transport);
       const lookupRemote = directLookup
         ? pushRemote
         : transport === "scp-userless"
@@ -3285,7 +3397,19 @@ describe("patch change tracking", () => {
           "origin",
           "https://github.example.test/fetch-owner/repository.git",
         );
-        git("remote", "set-url", "--push", "origin", pushRemote);
+        git(
+          "remote",
+          "set-url",
+          "--push",
+          "origin",
+          localFirst
+            ? transport === "file-first"
+              ? pathToFileURL(remote).href
+              : remote
+            : pushRemote,
+        );
+        if (localFirst)
+          git("remote", "set-url", "--add", "--push", "origin", pushRemote);
         git(
           "remote",
           "add",
@@ -3344,27 +3468,19 @@ describe("patch change tracking", () => {
                 expect(args).toEqual([
                   "push",
                   "--set-upstream",
+                  `--force-with-lease=refs/heads/${branch}:`,
                   "origin",
                   branch,
                 ]);
                 return runGitRepositoryCommand(
                   command,
-                  ["push", "--set-upstream", remote, branch],
-                  cwd,
-                  options,
-                );
-              }
-              if (args[0] === "ls-remote") {
-                expect(args).toEqual([
-                  "ls-remote",
-                  "--heads",
-                  "--",
-                  pushRemote,
-                  `refs/heads/${branch}`,
-                ]);
-                return runGitRepositoryCommand(
-                  command,
-                  ["ls-remote", "--heads", remote, `refs/heads/${branch}`],
+                  [
+                    "push",
+                    "--set-upstream",
+                    `--force-with-lease=refs/heads/${branch}:`,
+                    remote,
+                    branch,
+                  ],
                   cwd,
                   options,
                 );
@@ -3456,11 +3572,14 @@ describe("patch change tracking", () => {
       "package",
       ...(process.platform === "win32" ? [] : ["package-space"]),
     ].flatMap((scope) =>
-      [false, true].map((exported) => ({ scope, exported })),
+      ["ordinary", "absolute", "relative"].map((settings) => ({
+        scope,
+        settings,
+      })),
     ),
   )(
-    "reports nested changes from $scope with exported Git settings=$exported",
-    async ({ scope, exported }) => {
+    "reports nested changes from $scope with $settings Git settings",
+    async ({ scope, settings }) => {
       const parent = await fixtures.create("synthetic-nested-basis-");
       const root = join(
         parent,
@@ -3485,9 +3604,16 @@ describe("patch change tracking", () => {
       git("commit", "-m", "Synthetic outer baseline");
       const target = scope === "root" ? root : directory;
       const gitEnvironment = {
-        ...(exported
-          ? { GIT_DIR: join(root, ".git"), GIT_WORK_TREE: root }
-          : {}),
+        ...(settings === "ordinary"
+          ? {}
+          : {
+              GIT_DIR:
+                settings === "relative"
+                  ? relative(target, join(root, ".git"))
+                  : join(root, ".git"),
+              GIT_WORK_TREE:
+                settings === "relative" ? relative(target, root) || "." : root,
+            }),
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
@@ -3498,6 +3624,7 @@ describe("patch change tracking", () => {
         ["patch", "Synthetic issue", "--json"],
         {
           currentDirectory: target,
+          environment: gitEnvironment,
           onRepositoryCommand: (command, args, cwd, options) => {
             expect(cwd).not.toBe(nested);
             if (args[0] === "-C") {
@@ -3516,9 +3643,15 @@ describe("patch change tracking", () => {
             if (args[0] === "-C" && args[1] === nested) {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();
-            } else if (exported) {
-              expect(environment["GIT_DIR"]).toBe(join(root, ".git"));
-              expect(environment["GIT_WORK_TREE"]).toBe(root);
+            } else {
+              expect(environment["GIT_DIR"]).toBe(
+                settings === "relative"
+                  ? join(root, ".git")
+                  : gitEnvironment.GIT_DIR,
+              );
+              expect(environment["GIT_WORK_TREE"]).toBe(
+                settings === "relative" ? root : gitEnvironment.GIT_WORK_TREE,
+              );
             }
             expect(environment["GIT_CONFIG_COUNT"]).toBe("1");
             expect(environment["SYNTHETIC_GIT_SETTING"]).toBe("preserved");

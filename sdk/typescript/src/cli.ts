@@ -1758,6 +1758,34 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  const parentDependencies = dependencies;
+  let gitEnvironment: NodeJS.ProcessEnv | undefined;
+  dependencies = {
+    ...parentDependencies,
+    runRepositoryCommand(command, args, repository, options) {
+      if (command === "git") {
+        gitEnvironment ??= Object.fromEntries(
+          ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
+            const value = parentDependencies.environment[name];
+            return value && !isAbsolute(value)
+              ? [[name, resolve(repository, value)]]
+              : [];
+          }),
+        );
+        options = {
+          ...options,
+          environment: { ...gitEnvironment, ...options?.environment },
+        };
+      }
+      return parentDependencies.runRepositoryCommand(
+        command,
+        args,
+        repository,
+        options,
+      );
+    },
+  };
+
   if (
     argv[0] === "dedupe" &&
     argv.includes("--records") &&
@@ -6716,7 +6744,14 @@ async function patchPublicationDestination(
   const remotes = (
     await run("git", ["remote", "get-url", "--push", "--all", "origin"])
   ).split("\n");
-  const remote = remotes[0]!;
+  const remote =
+    remotes.find(
+      (remote) =>
+        !isAbsolute(remote) &&
+        !win32.isAbsolute(remote) &&
+        !remote.startsWith("file://") &&
+        patchRemoteHost(remote),
+    ) ?? remotes[0]!;
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -6818,7 +6853,6 @@ async function patchPublicationDestination(
   );
   return {
     remote,
-    remotes,
     gitlab,
     command,
     existing: existing
@@ -6859,16 +6893,6 @@ async function preparePatchPublication(
       dependencies,
     );
     existing = Boolean(destination.existing);
-    for (const remote of destination.remotes) {
-      if (existing) break;
-      existing = Boolean(
-        await dependencies.runRepositoryCommand(
-          "git",
-          ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`],
-          repository,
-        ),
-      );
-    }
   }
   if (existing) {
     throw new CodexSecurityError(
@@ -6932,7 +6956,13 @@ async function publishPatchBranch(
         );
     }
     if (!url) {
-      await run("git", ["push", "--set-upstream", "origin", branch]);
+      await run("git", [
+        "push",
+        "--set-upstream",
+        `--force-with-lease=refs/heads/${branch}:`,
+        "origin",
+        branch,
+      ]);
       url = await run(
         command,
         gitlab
