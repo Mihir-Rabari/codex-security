@@ -22,6 +22,7 @@
 - update Codex CLI and SDK to 0.162.0-alpha.16 ([#1321](https://github.com/openai/codex-security/pull/1321))
 - migrate Atlassian app and simplify finding workflows ([#1039](https://github.com/openai/codex-security/pull/1039))
 - restore formatting and concurrent plugin repairs ([#1328](https://github.com/openai/codex-security/pull/1328))
+- preserve carriage-return inventory filenames ([#1327](https://github.com/openai/codex-security/pull/1327))
 
 <!-- release-section: highlights:end -->
 
