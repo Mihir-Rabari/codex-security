@@ -1280,6 +1280,20 @@ patches remain available for review. Existing patch branches and pull requests
 are checked before patching, including closed or merged requests. Review and
 publish further patches from the same scan separately.
 
+Automatic publication also compares changed files with in-memory digests of
+nonempty, ignored regular files enumerated by Git before patching. An exact
+content match is refused, including a move or copy into a new publishable path;
+the edits remain available for manual review and publication. This can also
+refuse independently generated content identical to an ignored template or build
+output. Empty files and external link targets are not fingerprinted. This adds
+reads proportional to the ignored data and does not detect arbitrary transformed
+or partial copies. Existing tracked edits are protected by path overlap and
+Git's rename/copy recognition.
+
+All configured push destinations are checked for existing branch namespace
+collisions before patching. Separate remote servers cannot be updated atomically:
+a remote can change or fail after that check, leaving an earlier push complete.
+
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit without rerunning Codex, but refuses changed branches or an existing

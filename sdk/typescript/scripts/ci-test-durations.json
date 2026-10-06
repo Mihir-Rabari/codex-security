@@ -198,7 +198,7 @@
     "cli-history-paths.test.ts": 0.009,
     "cli-launcher.test.ts": 1.319,
     "cli-patch-trust.test.ts": 9.679,
-    "cli-patch.test.ts": 21.549,
+    "cli-patch.test.ts": 643.75,
     "cli-publish.test.ts": 0.402,
     "cli-scan-prompts.test.ts": 0.901,
     "cli-serve.test.ts": 13.64,
