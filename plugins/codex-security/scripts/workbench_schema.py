@@ -883,6 +883,9 @@ MIGRATIONS = (
         CREATE INDEX scans_by_repository_generation
         ON scans(repository_generation);
 
+        CREATE INDEX scans_by_target_path
+        ON scans(target_path);
+
         ALTER TABLE scans
         ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);
 

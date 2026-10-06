@@ -1778,3 +1778,156 @@ def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
         ]
         assert len(scoped) == 1
         assert scoped[0]["confirmedInLatestScan"] is False
+
+
+@pytest.mark.parametrize("mode", ("standard", "deep"))
+def test_portable_identity_allows_git_initialization_after_plain_directory_history(
+    tmp_path: Path, mode: str
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "README.md").write_text("fixture\n")
+    state = tmp_path / "state"
+    before = create_cli_scan(state, tmp_path / "results", repository, mode=mode)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT target_revision FROM scans WHERE id = ?", (before["scanId"],)
+            ).fetchone()[0]
+            == "unversioned"
+        )
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "."],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "Initialize repository",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    after = create_cli_scan(
+        state, tmp_path / "results", repository, mode=mode, target_revision=revision
+    )
+    assert compare_scan_pair(state, before, after)["afterScanId"] == after["scanId"]
+
+
+@pytest.mark.parametrize("same_origin", (True, False))
+def test_portable_identity_explicit_clone_comparison_without_birth_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_origin: bool
+) -> None:
+    import argparse
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_scan_history as history
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.test/synthetic/project.git"],
+        cwd=repository,
+        check=True,
+    )
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.test/synthetic/project.git"
+            if same_origin
+            else "https://example.test/synthetic/other.git",
+        ],
+        cwd=clone,
+        check=True,
+    )
+    state = tmp_path / "state"
+    before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("UPDATE scans SET repository_generation = NULL")
+        connection.execute("UPDATE security_targets SET repository_identity = NULL")
+        monkeypatch.setattr(target_state, "_repository_birth_time_ns", lambda *_: None)
+        args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
+
+        def compare():
+            return history.compare_scans(
+                connection,
+                args,
+                require_scan=lambda db, id: db.execute(
+                    "SELECT * FROM scans WHERE id = ?", (id,)
+                ).fetchone(),
+                read_coverage=lambda row: json.loads(
+                    (Path(row["scan_dir"]) / "coverage.json").read_text()
+                ),
+            )
+
+        if same_origin:
+            assert compare()["afterScanId"] == after["scanId"]
+        else:
+            with pytest.raises(SystemExit, match="same repository"):
+                compare()
+
+
+@pytest.mark.parametrize(
+    "platform,ending,literal_cr",
+    (
+        ("win32", b"\r\n", False),
+        ("win32", b"\n", False),
+        ("linux", b"\n", False),
+        ("linux", b"\n", True),
+    ),
+)
+def test_portable_identity_decodes_git_line_protocol_without_changing_path_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, ending: bytes, literal_cr: bool
+) -> None:
+    import os
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_target_state as target_state
+
+    monkeypatch.setattr(target_state.sys, "platform", platform)
+    expected = tmp_path / ("path\r" if literal_cr else "path")
+    assert target_state._path_from_git_bytes(os.fsencode(expected) + ending, tmp_path) == expected
+    assert (
+        target_state._path_from_git_bytes(os.fsencode(expected), tmp_path, strip_line_feed=False)
+        == expected
+    )
+
+
+@pytest.mark.parametrize("reopen", (False, True))
+def test_portable_identity_history_lookup_uses_indexes(tmp_path: Path, reopen: bool) -> None:
+    state = tmp_path / "state"
+    run_workbench(state, "list-repositories")
+    if reopen:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute("DROP INDEX IF EXISTS scans_by_target_path")
+        run_workbench(state, "list-repositories")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        plan = [
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT target_device, target_inode, started_at, created_at FROM scans WHERE target_id = ? OR target_path = ?",
+                ("synthetic-target", "synthetic-path"),
+            )
+        ]
+        assert not any(line.startswith("SCAN scans") for line in plan), plan
+        assert any("target_id=?" in line for line in plan), plan
+        assert any("target_path=?" in line for line in plan), plan

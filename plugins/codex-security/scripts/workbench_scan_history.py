@@ -21,6 +21,7 @@ from workbench_target import require_scan_target_identity
 from workbench_target_state import (
     RepositoryIdentityCache,
     _timestamp_ns,
+    repository_relative_path,
     scan_repository_generation,
 )
 from workbench_validation import reject_non_finite_json
@@ -175,7 +176,17 @@ def _same_repository(
     ):
         return before_stored is None or after_stored is None
     if before_state.repository is None or after_state.repository is None:
-        return False
+        before_relative = repository_relative_path(Path(before_state.target_path))
+        after_relative = repository_relative_path(Path(after_state.target_path))
+        after_origin = identities.origin(after_state)
+        return (
+            before_stored is None
+            and after_stored is None
+            and before_relative is not None
+            and before_relative == after_relative
+            and after_origin is not None
+            and identities.origin(before_state) == after_origin
+        )
     before_identity = before_state.live_identity
     after_identity = after_state.live_identity
     if before_identity is not None and before_identity == after_identity:

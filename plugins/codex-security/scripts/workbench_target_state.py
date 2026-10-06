@@ -52,7 +52,7 @@ def _path_from_git_bytes(
     value: bytes, relative_to: Path, *, strip_line_feed: bool = True
 ) -> Path | None:
     if strip_line_feed and value.endswith(b"\n"):
-        value = value[:-1]
+        value = value[:-2] if sys.platform == "win32" and value.endswith(b"\r\n") else value[:-1]
     if not value or b"\0" in value:
         return None
     path = Path(os.fsdecode(value))
@@ -444,9 +444,10 @@ def _inspect_repository_target(
             timestamps = (
                 ", started_at, created_at" if {"started_at", "created_at"} <= scan_columns else ""
             )
+            revisions = ", target_revision" if "target_revision" in scan_columns else ""
             scans = connection.execute(
                 f"""
-                SELECT target_device, target_inode{timestamps} FROM scans
+                SELECT target_device, target_inode{timestamps}{revisions} FROM scans
                 WHERE target_id = ? OR target_path = ?
                 """,
                 (target_id, target_path),
@@ -488,7 +489,12 @@ def _inspect_repository_target(
                 or stored_identity is None
                 and repository is not None
                 and historical_scan
+                and not verified_repository
                 and not generation_predates_history
+                and not all(
+                    "target_revision" in scan.keys() and scan["target_revision"] == "unversioned"
+                    for scan in scans
+                )
             )
         ownership_matches = ownership_matches and not generation_conflict
     return RepositoryTargetState(
