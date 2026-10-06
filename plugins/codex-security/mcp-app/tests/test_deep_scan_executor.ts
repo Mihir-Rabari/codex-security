@@ -1128,6 +1128,7 @@ async function testWorkerRuntimeSettings() {
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
     "CODEX_CLI_PATH",
+    "CODEX_MCP_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1227,6 +1228,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const providerKeys = settings.map((_, index) =>
         index < 2 ? `synthetic-gateway-key-${index}` : undefined,
       );
+      const nodePaths = settings.map((_, index) =>
+        path.join(fixture.root, `selected node ${index}`, "node"),
+      );
       const executors = settings.map(
         (modelSettings) =>
           new CodexSdkWorkerExecutor({
@@ -1247,6 +1251,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1316,6 +1321,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
+            assert.equal(invocation.mcpNodePath, nodePaths[index]);
+            assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               process.env.SYNTHETIC_GATEWAY_KEY,
@@ -1348,6 +1355,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
+              "mcp_servers.cs_artifacts.command": process.execPath,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
                 helperPython,
             });
@@ -2269,7 +2277,7 @@ const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHON
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

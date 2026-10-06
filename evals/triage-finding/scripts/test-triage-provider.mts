@@ -777,7 +777,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
       }),
     });
     assert.equal(replay.status, 200, viewerOutput);
-    assert.equal((await replay.json()).output, "ok");
+    assert.equal(((await replay.json()) as { output: unknown }).output, "ok");
     viewer.kill("SIGTERM");
     await closed;
     const rows = fs
