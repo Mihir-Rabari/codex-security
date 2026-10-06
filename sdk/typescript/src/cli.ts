@@ -7988,7 +7988,8 @@ export function skillCommandFailure(
       "Codex could not load its model metadata. Update Codex or refresh its model cache.";
   } else if (
     classification === "network_error" ||
-    classification === "timeout"
+    classification === "timeout" ||
+    /\bECONNABORTED\b/iu.test(detail)
   ) {
     advice =
       "Codex could not connect to the model service. Check the network and retry.";

@@ -2079,3 +2079,22 @@ def test_bad_diff_revision_keeps_git_diagnostic_without_traceback(tmp_path: Path
     assert "missing-synthetic-revision" in result.stderr
     assert "unknown revision" in result.stderr or "bad revision" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_unavailable_git_reports_status_without_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_SECURITY_GIT", "")
+    result = run_cli(
+        "make-diff-rank-input",
+        "--repo",
+        str(tmp_path),
+        "--base",
+        "HEAD",
+        "--out",
+        str(tmp_path / "rank.jsonl"),
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "127" in result.stderr
+    assert "Traceback" not in result.stderr
