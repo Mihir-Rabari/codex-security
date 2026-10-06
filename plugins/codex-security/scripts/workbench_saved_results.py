@@ -564,6 +564,7 @@ def _finding_key(finding: dict[str, Any]) -> str:
         normalized.pop("identity", None)
         _ensure_finding_identity(normalized)
         identity = normalized["identity"]
+    identity = {key: identity[key] for key in ("anchor", "instance") if key in identity}
     return _digest([finding.get("ruleId"), identity, _finding_locations(finding)])
 
 
@@ -2304,7 +2305,7 @@ def merge_saved_results(
         if not isinstance(identity, dict):
             continue
         key = _fingerprint("", recovered)
-        variant = _digest(_finding_locations(recovered))
+        variant = _finding_key(recovered)
         assigned = identities.setdefault(key, [])
         matching = next(
             (
