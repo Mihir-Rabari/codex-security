@@ -2390,14 +2390,18 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def _require_current_deep_publication(
     db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
 ) -> None:
-    run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
     publication = draft.get("deepScanPublication")
     if (
         publication is None
         and draft["manifest"]["scan"].get("complete") is False
-        and run["status"] == "running"
+        and (run is None or run["status"] == "running")
     ):
         return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
