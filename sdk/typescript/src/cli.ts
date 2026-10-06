@@ -7020,6 +7020,9 @@ async function createPatchPullRequest(
       ...deleted
         .split("\0")
         .filter(Boolean)
+        .filter(
+          (file) => !lstatSync(resolve(root, file), { throwIfNoEntry: false }),
+        )
         .map((file) => relative(repository, resolve(root, file))),
     ]),
   ].filter((file) => dirtyFiles.has(file));
@@ -7111,6 +7114,7 @@ async function requireCleanPatchPullRequestBase(
 }
 
 interface GitPatchState {
+  root: string;
   trees: Map<string, string>;
 }
 
@@ -7125,11 +7129,12 @@ async function changedPatchFiles(
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
   }
+  const root = typeof base === "string" ? repository : base.root;
   const bases = typeof base === "string" ? new Map([["", base]]) : base.trees;
   const heads =
     typeof base === "string"
       ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
-      : (await snapshotGitPatchState(repository, dependencies)).trees;
+      : (await snapshotGitPatchState(root, dependencies)).trees;
   const files = new Set<string>();
   for (const [directory, tree] of bases) {
     const head = heads.get(directory);
@@ -7137,7 +7142,7 @@ async function changedPatchFiles(
     const output = await dependencies.runRepositoryCommand(
       "git",
       ["--literal-pathspecs", "diff", "--name-only", "-z", tree, head],
-      join(repository, directory),
+      join(root, directory),
       { trim: false },
     );
     for (const path of output.split("\0").filter(Boolean))
@@ -7150,12 +7155,13 @@ async function snapshotPatchState(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<GitPatchState | Map<string, string>> {
+  let root: string;
   try {
-    await dependencies.runRepositoryCommand(
+    root = await dependencies.runRepositoryCommand(
       "git",
       ["rev-parse", "--show-toplevel"],
       repository,
-      { environment: { LC_ALL: "C" } },
+      { trim: false, environment: { LC_ALL: "C" } },
     );
   } catch (error) {
     const message = errorMessage(error);
@@ -7166,7 +7172,7 @@ async function snapshotPatchState(
       throw error;
     return snapshotPatchDirectory(repository);
   }
-  return snapshotGitPatchState(repository, dependencies);
+  return snapshotGitPatchState(resolve(root.replace(/\n$/u, "")), dependencies);
 }
 
 async function snapshotGitPatchState(
@@ -7192,7 +7198,7 @@ async function snapshotGitPatchState(
     }
   };
   await visit("");
-  return { trees };
+  return { root: repository, trees };
 }
 
 // Literal patch inputs also work in directories without Git metadata.

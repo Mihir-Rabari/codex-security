@@ -5,7 +5,14 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -2345,7 +2352,7 @@ describe("scan and patch workflow", () => {
 });
 
 describe("patch publication integrity", () => {
-  const fixtures = createTemporaryDirectories();
+  const fixtures = createTemporaryDirectories(true);
   test("preserves direct patch scope when optional assessment or publication is enabled", async () => {
     const observations = [];
     for (const flag of [undefined, "--assess-patch-risk", "--create-pr"]) {
@@ -3070,3 +3077,104 @@ const runGitRepositoryCommand: NonNullable<
   });
   return options?.trim === false ? result : result.trim();
 };
+
+describe("patch change tracking", () => {
+  const fixtures = createTemporaryDirectories(true);
+  test.each([
+    "root",
+    "package",
+    ...(process.platform === "win32" ? [] : ["package-space"]),
+  ])("reports nested changes on one Git basis from %s", async (scope) => {
+    const parent = await fixtures.create("synthetic-nested-basis-");
+    const root = join(
+      parent,
+      scope === "package-space" ? "checkout " : "checkout",
+    );
+    const directory = join(root, "package");
+    const nested = join(directory, "nested");
+    await mkdir(nested, { recursive: true });
+    const git = repositoryGit(root);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    const inner = repositoryGit(nested);
+    inner("init", "--initial-branch=main");
+    inner("config", "user.name", "Synthetic User");
+    inner("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "unsafe\n");
+    inner("add", ".");
+    inner("commit", "-m", "Synthetic inner baseline");
+    await writeFile(join(directory, "app.ts"), "unsafe\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic outer baseline");
+    const target = scope === "root" ? root : directory;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: target,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        expect(output?.appServer?.directory).toBe(target);
+        await writeFile(join(directory, "app.ts"), "fixed\n");
+        await writeFile(join(nested, "app.ts"), "fixed\n");
+        output?.stdout.write("Fixed and checked.");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout).files).toEqual([
+      "package/app.ts",
+      "package/nested/app.ts",
+    ]);
+  });
+  test.each([
+    "regular",
+    ...(process.platform === "win32" ? [] : ["dangling-link"]),
+  ])(
+    "preserves a newly ignored %s while publishing the ignore rule",
+    async (kind) => {
+      const root = await fixtures.create("synthetic-ignore-transition-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(root, ".gitignore"), "# baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      if (kind === "regular")
+        await writeFile(join(root, "local.env"), "synthetic local file\n");
+      else await symlink("absent-synthetic-target", join(root, "local.env"));
+      const remote = await fixtures.create("synthetic-ignore-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = ".gitignore";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: root,
+          onWorkbench: () => savedScan(result, "scan-1", root),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? ""
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            await writeFile(join(root, ".gitignore"), "local.env\n");
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(git("show", "HEAD:.gitignore")).toBe("local.env");
+      if (kind === "regular")
+        expect(await readFile(join(root, "local.env"), "utf8")).toBe(
+          "synthetic local file\n",
+        );
+      else
+        expect(await readlink(join(root, "local.env"))).toBe(
+          "absent-synthetic-target",
+        );
+    },
+  );
+});
