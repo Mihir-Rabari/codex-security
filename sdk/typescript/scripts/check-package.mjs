@@ -10,6 +10,7 @@ import {
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { regularTarListingLines } from "./package-tar-listing.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -129,57 +130,20 @@ for (const file of required) {
 }
 
 const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-const { externalOwnedExact, shippedExact } = contract;
-if (
-  !Array.isArray(externalOwnedExact) ||
-  !externalOwnedExact.every((path) => typeof path === "string") ||
-  !Array.isArray(shippedExact) ||
-  !shippedExact.every((path) => typeof path === "string")
-) {
-  throw new Error("Plugin projection contract contains invalid paths.");
-}
-const publicManifest = ".codex-plugin/plugin.json";
-if (!externalOwnedExact.includes(publicManifest)) {
-  throw new Error(
-    "Plugin projection contract must declare the public manifest as externally owned.",
-  );
-}
-const pluginPaths = [
-  publicManifest,
-  ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-];
-const pluginFiles = new Set(pluginPaths);
-if (pluginFiles.size !== pluginPaths.length) {
+const pluginPaths = pluginContractFiles(contract);
+if (new Set(pluginPaths).size !== pluginPaths.length) {
   throw new Error("Plugin projection contract contains duplicate paths.");
 }
 
-const pluginEntries = new Set();
-const pluginDirectories = new Set(["package/_bundled_plugin"]);
-for (const file of pluginFiles) {
-  const archivePath = `package/_bundled_plugin/${file}`;
-  pluginEntries.add(archivePath);
-  if (!files.has(archivePath)) {
-    throw new Error(`npm tarball is missing ${archivePath}.`);
-  }
-  const parts = file.split("/");
-  for (let index = 1; index < parts.length; index++) {
-    pluginDirectories.add(
-      `package/_bundled_plugin/${parts.slice(0, index).join("/")}`,
-    );
-  }
-}
-
-const allowedRoot = new Set([
-  "package/package.json",
-  "package/README.md",
-  "package/docs/dedupe-records.md",
-  "package/LICENSE",
-  "package/bin/codex-security.mjs",
-  "package/schemas/project-config.schema.json",
-]);
-const distFiles = new Set(
-  [
+const allowedFiles = new Set([
+  ...required,
+  "package/dist/server/dashboard/index.html",
+  "package/dist/server/dashboard/app.js",
+  "package/dist/server/dashboard/app.css",
+  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+  ...[
     "api",
+    "artifact-export",
     "auth",
     "bulk-scan-discovery",
     "cli",
@@ -190,6 +154,7 @@ const distFiles = new Set(
     "severity-store",
     "cloud-publish",
     "codex-prompt",
+    "codex-sdk-environment",
     "component-plan",
     "component-scan",
     "config",
@@ -227,6 +192,7 @@ const distFiles = new Set(
     "publication-store",
     "publish",
     "result",
+    "record",
     "runtime",
     "scan-activity",
     "scan-comparison",
@@ -260,7 +226,6 @@ const distFiles = new Set(
     "server/dashboard",
     "server/dashboard-types",
     "server/errors",
-    "server/findings-service",
     "server/routes",
     "server/server",
     "server/serve",
@@ -270,6 +235,7 @@ const distFiles = new Set(
     "targets",
     "thread-source",
     "trusted-executable",
+    "value",
     "version",
     "windows-path",
     "worker-progress",
@@ -278,37 +244,25 @@ const distFiles = new Set(
       (extension) => `package/dist/${module}.${extension}`,
     ),
   ),
-);
-const dashboardFiles = new Set([
-  "package/dist/server/dashboard/index.html",
-  "package/dist/server/dashboard/app.js",
-  "package/dist/server/dashboard/app.css",
-  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
 ]);
-for (const file of dashboardFiles) {
-  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+for (const file of pluginPaths) {
+  const archivePath = `package/_bundled_plugin/${file}`;
+  allowedFiles.add(archivePath);
+  if (!files.has(archivePath)) {
+    throw new Error(`npm tarball is missing ${archivePath}.`);
+  }
 }
-for (const file of distFiles) {
+
+for (const file of [...allowedFiles]) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  const parts = file.split("/");
+  for (let index = 1; index < parts.length; index++) {
+    allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
+  }
 }
 const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
-  const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
-  const allowed = file.endsWith("/")
-    ? normalized === "package" ||
-      normalized === "package/bin" ||
-      normalized === "package/schemas" ||
-      normalized === "package/docs" ||
-      normalized === "package/dist" ||
-      normalized === "package/dist/server" ||
-      normalized === "package/dist/server/dashboard" ||
-      normalized === "package/dist/deduplication" ||
-      pluginDirectories.has(normalized)
-    : allowedRoot.has(normalized) ||
-      distFiles.has(normalized) ||
-      dashboardFiles.has(normalized) ||
-      pluginEntries.has(normalized);
-  if (!allowed || unsafePath.test(file) || file.includes("\\")) {
+  if (!allowedFiles.has(file) || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);
   }
 }
