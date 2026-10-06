@@ -17,6 +17,8 @@
 - align triage graders with supported behavior ([#1245](https://github.com/openai/codex-security/pull/1245))
 - recover incomplete staging and preserve bundles ([#1255](https://github.com/openai/codex-security/pull/1255))
 - preserve canonical parent IDs for scan reruns ([#1244](https://github.com/openai/codex-security/pull/1244))
+- keep workbench-derived fields out of worker draft guidance ([#1177](https://github.com/openai/codex-security/pull/1177))
+- reject SQL injection without an execution sink ([#1053](https://github.com/openai/codex-security/pull/1053))
 
 <!-- release-section: highlights:end -->
 
