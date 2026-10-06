@@ -300,3 +300,87 @@ describe("saved logs JSON output", () => {
     }
   });
 });
+
+test("saved logs include the privately recorded worker home after recovery", async () => {
+  const f = await fixture();
+  try {
+    const workerHome = join(f.state, "original-worker-home");
+    await mkdir(join(workerHome, "sessions"), { recursive: true });
+    const start = "2026-01-01T00:00:00Z";
+    await writeJsonLines(join(workerHome, "sessions", "worker.jsonl"), [
+      {
+        type: "session_meta",
+        payload: {
+          id: "original-worker",
+          source: {
+            subagent: { thread_spawn: { parent_thread_id: "thread-1" } },
+          },
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: start,
+        payload: { type: "task_started", turn_id: "worker-turn" },
+      },
+      {
+        type: "event_msg",
+        timestamp: start,
+        payload: {
+          type: "agent_message",
+          message: "Synthetic original worker activity",
+        },
+      },
+    ]);
+    const scan = {
+      scanId: "scan-1",
+      continuationThreadId: "thread-1",
+      mode: "deep",
+      executionAttribution: {
+        formatVersion: 1,
+        executionThreadIds: ["thread-1", "original-worker"],
+        owner: {
+          threadId: "thread-1",
+          turnId: "parent-turn",
+          startedAt: start,
+        },
+        startedAt: start,
+        completedAt: null,
+      },
+    };
+    let privateSettingsRequested = false;
+    f.deps.runWorkbench = async (
+      _args,
+      _input,
+      _signal,
+      _python,
+      privateSettings,
+    ) => {
+      privateSettingsRequested = privateSettings === true;
+      return {
+        scan: {
+          ...scan,
+          executionAttribution: {
+            ...scan.executionAttribution,
+            ...(privateSettings ? { codexHome: workerHome } : {}),
+          },
+        },
+      };
+    };
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scans", "logs", "scan-1", "--json"], f.deps)).toBe(0);
+    expect(privateSettingsRequested).toBe(true);
+    const logs = JSON.parse(stdout.text());
+    expect(
+      logs.sessions.map((session: { threadId: string }) => session.threadId),
+    ).toEqual(["thread-1", "original-worker"]);
+    expect(
+      logs.events.some(
+        (entry: { threadId: string }) => entry.threadId === "original-worker",
+      ),
+    ).toBe(true);
+    expect(logs).not.toHaveProperty("codexHome");
+    expect(stderr.text()).toBe("");
+  } finally {
+    await rm(f.state, { recursive: true, force: true });
+  }
+});

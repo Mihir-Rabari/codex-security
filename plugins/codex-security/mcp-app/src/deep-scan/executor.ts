@@ -43,6 +43,8 @@ export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
   cyberAccessProgram?: CyberAccessProgram;
+  /** Owner-supplied fallback; an empty snapshot preserves recorded omissions. */
+  runtimeSettings?: CodexSdkWorkerRuntimeSettings;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
 }
@@ -87,8 +89,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
-      const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+      const runtimeSettings =
+        this.modelSettings.runtimeSettings ??
+        (await (this.runtimeSettings ??= workerRuntimeSettings(childEnv)));
       if (resolved?.apiKey !== undefined)
         childEnv.CODEX_API_KEY = resolved.apiKey;
       // Snapshot per-scan selections once; a reconstructed owner can supply them.

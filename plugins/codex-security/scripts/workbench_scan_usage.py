@@ -409,7 +409,18 @@ def scan_execution_attribution(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
     ).fetchone()
     if run is None:
-        return None
+        executions = _scan_execution_thread_ids(connection, scan)
+        if scan["recipe_json"] is None or not executions:
+            return None
+        # The registered CLI parent is dedicated to this scan before it starts
+        # the coordinator. Its live usage already belongs to the scan window.
+        return {
+            "formatVersion": 1,
+            "executionThreadIds": executions,
+            "owner": capture_scan_usage_owner(connection, scan),
+            "startedAt": scan["started_at"],
+            "completedAt": scan["completed_at"],
+        }
     owner_json = run["usage_owner_json"] if "usage_owner_json" in run.keys() else None
     legacy = False
     if owner_json is None:
@@ -828,15 +839,16 @@ def _read_rollout_usage(
                 # A compaction before this scan changes its starting counter.
                 previous = snapshot
                 continue
+            if (completed_at is not None and timestamp > completed_at) or (
+                owner_turn_id is not None and current_turn_id != owner_turn_id
+            ):
+                previous = snapshot
+                continue
             if snapshot["totalTokens"] < previous["totalTokens"]:
                 warnings.add("token_counter_regressed")
                 continue
             delta = {key: max(0, value - previous[key]) for key, value in snapshot.items()}
             previous = snapshot
-            if completed_at is not None and timestamp > completed_at:
-                continue
-            if owner_turn_id is not None and current_turn_id != owner_turn_id:
-                continue
             usage_observed = True
             if not response_usage_observed:
                 local_models.setdefault(current_model, _empty_token_usage())

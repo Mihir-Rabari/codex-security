@@ -1011,14 +1011,6 @@ function readSessionEvent(
         ? ownUsage
         : subtractTokenUsage(ownUsage, session.previousUsage);
     if (
-      session.previousUsage !== null &&
-      ownUsage.total_tokens < session.previousUsage.total_tokens
-    ) {
-      session.counterRegressed = true;
-      return;
-    }
-    session.previousUsage = ownUsage;
-    if (
       attribution &&
       !isAttributedScanEvent(
         attribution,
@@ -1026,8 +1018,18 @@ function readSessionEvent(
         session.currentTurnId,
         event["timestamp"],
       )
-    )
+    ) {
+      session.previousUsage = ownUsage;
       return;
+    }
+    if (
+      session.previousUsage !== null &&
+      ownUsage.total_tokens < session.previousUsage.total_tokens
+    ) {
+      session.counterRegressed = true;
+      return;
+    }
+    session.previousUsage = ownUsage;
     if (delta !== null && !session.responseUsageObserved) {
       session.modelUsage.set(
         session.model,
@@ -1209,13 +1211,14 @@ function counterRemainder(
     ),
   };
   // Conflicting counter categories cannot remove exact response usage or
-  // classify the cache portion of additional, unpriced input.
+  // classify the cache and reasoning portions of the additional usage.
   return (
     tokenUsage(extra) ??
     tokenUsage({
       ...extra,
       cached_input_tokens: 0,
       cache_write_input_tokens: 0,
+      reasoning_output_tokens: 0,
     })!
   );
 }

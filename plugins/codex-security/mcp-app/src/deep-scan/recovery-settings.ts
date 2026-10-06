@@ -343,6 +343,7 @@ export function restoredDeepScanWorkerSettings(
   reasoningEffort?: string;
   cyberAccessProgram?: CyberAccessProgram;
   parentSandbox: DeepWorkerParentSandbox;
+  runtimeSettings?: Record<string, never>;
 } {
   const originalSandbox = settings.parentSandbox;
   const depths = [
@@ -362,6 +363,7 @@ export function restoredDeepScanWorkerSettings(
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
     cyberAccessProgram: settings.cyberAccessProgram,
+    ...(settings.codexHome === undefined ? {} : { runtimeSettings: {} }),
     parentSandbox: {
       filesystemDenies: [
         ...new Set([

@@ -1217,6 +1217,7 @@ interface CliDependencies {
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1302,7 +1303,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
+  runWorkbench: async (
+    args,
+    input,
+    signal,
+    pythonPath,
+    withExecutionSettings,
+  ) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1317,6 +1324,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,
+        withExecutionSettings,
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
@@ -1835,10 +1843,17 @@ export async function main(
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(args, undefined, undefined, pythonPath),
+        await dependencies.runWorkbench(
+          args,
+          undefined,
+          undefined,
+          pythonPath,
+          withExecutionSettings,
+        ),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
@@ -2198,10 +2213,13 @@ export async function main(
         const result = await history(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
-            const logs = await readSavedScanLogs(
-              value["scan"] as ScanLogSource,
+            const scan = value["scan"] as ScanLogSource;
+            const logs = await readSavedScanLogs(scan, [
               codexSecurityCredentialHome(dependencies.environment),
-            );
+              ...(scan.executionAttribution?.codexHome
+                ? [scan.executionAttribution.codexHome]
+                : []),
+            ]);
             // Incur owns filtering, envelopes and token controls. Keep those
             // requests on its formatter; plain JSON needs no aggregate string.
             if (
@@ -2216,6 +2234,8 @@ export async function main(
             }
             return logs as unknown as JsonObject;
           },
+          undefined,
+          true,
         );
         return streamedLogs === undefined ? result : undefined;
       },

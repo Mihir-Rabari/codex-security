@@ -2790,6 +2790,36 @@ def retain_unmerged_budget_coverage(
     )
 
 
+def _require_budget_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
+    prepared = _prepare_scan_finalization(
+        Path(scan["scan_dir"]),
+        expected_coverage_mode=db.expected_coverage_mode(scan),
+        completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
+        draft_documents=documents,
+    )
+    manifest = copy.deepcopy(documents[0])
+    manifest["scan"].setdefault("id", scan["id"])
+    manifest["scan"]["scope"] = {**prepared[2]["scan"]["scope"], **manifest["scan"]["scope"]}
+    db.verify_manifest_binding(scan, manifest)
+    require_selected_publication(db, connection, scan, prepared)
+
+
+def _write_budget_documents(scan_dir: Path, documents: Any) -> None:
+    for name, payload in (
+        ("findings.json", documents[1]),
+        ("coverage.json", documents[2]),
+        ("scan-manifest.json", documents[0]),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+
 def prepare_budget_draft(db: Any, connection: Any, scan: Any, warning: str) -> None:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
@@ -2802,25 +2832,31 @@ def prepare_budget_draft(db: Any, connection: Any, scan: Any, warning: str) -> N
     )
     try:
         if has_publication:
-            documents = tuple(
-                _read_scan_local_json(scan_dir, name, name)
-                for name in ("scan-manifest.json", "findings.json", "coverage.json")
-            )
-            prepared = _prepare_scan_finalization(
+            snapshot = f"drafts/{selection['publicationSha256']}.json"
+            try:
+                documents = tuple(
+                    _read_scan_local_json(scan_dir, name, name)
+                    for name in ("scan-manifest.json", "findings.json", "coverage.json")
+                )
+                _require_budget_publication(db, connection, scan, documents)
+            except (ContractError, OSError):
+                # Canonical files can outlive a failed digest commit. Replay only
+                # the saved projection bound to the still-committed selection.
+                saved = _read_scan_local_json(scan_dir, snapshot, "Saved budget publication")
+                documents = (saved["manifest"], saved["findings"], saved["coverage"])
+                _require_budget_publication(db, connection, scan, documents)
+                _write_budget_documents(scan_dir, documents)
+            write_scan_local_bytes(
                 scan_dir,
-                expected_coverage_mode=db.expected_coverage_mode(scan),
-                completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
-                draft_documents=documents,
+                snapshot,
+                _encoded(
+                    {
+                        "manifest": documents[0],
+                        "findings": documents[1],
+                        "coverage": documents[2],
+                    }
+                ),
             )
-            manifest = copy.deepcopy(documents[0])
-            manifest["scan"].setdefault("id", scan["id"])
-            # Budget drafts can omit host-owned scope fields until finalization.
-            manifest["scan"]["scope"] = {
-                **prepared[2]["scan"]["scope"],
-                **manifest["scan"]["scope"],
-            }
-            db.verify_manifest_binding(scan, manifest)
-            require_selected_publication(db, connection, scan, prepared)
         documents = db.budget_exhausted_draft(scan, scan_dir, candidates, warning)
         if documents is None:
             return
@@ -2850,21 +2886,7 @@ def prepare_budget_draft(db: Any, connection: Any, scan: Any, warning: str) -> N
             **manifest["scan"]["scope"],
         }
         db.verify_manifest_binding(scan, manifest)
-        for name, payload in (
-            ("findings.json", documents[1]),
-            ("coverage.json", documents[2]),
-            ("scan-manifest.json", documents[0]),
-        ):
-            try:
-                write_scan_local_bytes(
-                    scan_dir,
-                    name,
-                    (
-                        json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
-                    ).encode(),
-                )
-            except (ContractError, OSError, TypeError, ValueError) as exc:
-                raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+        _write_budget_documents(scan_dir, documents)
         if has_publication:
             documents = tuple(
                 _read_scan_local_json(scan_dir, name, name)

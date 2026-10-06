@@ -2770,6 +2770,7 @@ test.each([
   "history-gap",
   "pre-window-reset",
   "counter-categories",
+  "reasoning-categories",
   "foreign-before",
   "foreign-after-gap",
 ])(
@@ -2778,12 +2779,12 @@ test.each([
     const home = await codexHome();
     await mkdir(join(home, "sessions"));
     const start = "2026-01-01T00:00:00Z";
-    const tokens = (input: number, output = 0) => ({
+    const tokens = (input: number, output = 0, reasoning = 0) => ({
       input_tokens: input,
       cached_input_tokens: 0,
       cache_write_input_tokens: 0,
       output_tokens: output,
-      reasoning_output_tokens: 0,
+      reasoning_output_tokens: reasoning,
       total_tokens: input + output,
     });
     const event = <Payload>(
@@ -2811,10 +2812,15 @@ test.each([
         usage: tokens(input, output),
         thread_token_usage: tokens(cumulativeInput, cumulativeOutput),
       });
-    const counter = (second: number, input: number, output = 0) =>
+    const counter = (
+      second: number,
+      input: number,
+      output = 0,
+      reasoning = 0,
+    ) =>
       event(second, "event_msg", {
         type: "token_count",
-        info: { total_token_usage: tokens(input, output) },
+        info: { total_token_usage: tokens(input, output, reasoning) },
       });
     const events: unknown[] = [
       { type: "session_meta", payload: { id: "parent", model: "gpt-5.6-sol" } },
@@ -2844,7 +2850,10 @@ test.each([
         events.push(foreign, receipt(2, "owned", 20, 0, 940));
       else events.push(receipt(1, "owned", 20, 0, 940), foreign);
     } else
-      events.push(receipt(1, "owned", 100, 50, 100, 50), counter(2, 200, 10));
+      events.push(
+        receipt(1, "owned", 100, 50, 100, 50),
+        counter(2, 200, 10, scenario === "reasoning-categories" ? 10 : 0),
+      );
     const path = join(home, "sessions", "parent.jsonl");
     await writeFile(
       path,
@@ -2869,11 +2878,11 @@ test.each([
         coverage?: string;
       };
       expect(usage).toMatchObject(
-        scenario === "counter-categories" ? tokens(200, 50) : tokens(20),
+        scenario.endsWith("categories") ? tokens(200, 50) : tokens(20),
       );
       expect(usage.coverage).toBe(
         scenario === "history-gap" ||
-          scenario === "counter-categories" ||
+          scenario.endsWith("categories") ||
           scenario === "foreign-after-gap"
           ? "partial"
           : undefined,
@@ -2886,7 +2895,7 @@ test.each([
         expect(usage.modelUsage.reduce((sum, part) => sum + part[key], 0)).toBe(
           usage[key],
         );
-      if (scenario === "counter-categories") {
+      if (scenario.endsWith("categories")) {
         expect(snapshot.cost).toBeNull();
         const lowerBound = estimateScanCostLowerBound("gpt-5.6-sol", usage);
         expect(lowerBound).not.toBeNull();
@@ -2902,6 +2911,153 @@ test.each([
         expect(recovered.usage).toMatchObject(tokens(40));
         expect(recovered.usage).not.toHaveProperty("coverage", "partial");
       }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test("a zero counter before model metadata does not suppress a priced estimate", async () => {
+  const home = await codexHome();
+  await mkdir(join(home, "sessions"));
+  await writeFile(
+    join(home, "sessions", "parent.jsonl"),
+    jsonLines([
+      { type: "session_meta", payload: { id: "parent" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 0, output_tokens: 0 } },
+        },
+      },
+      { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 100, output_tokens: 0 } },
+        },
+      },
+    ]) + "\n",
+  );
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5.6-sol",
+  });
+  tracker.start("parent");
+  try {
+    const snapshot = await tracker.stop();
+    expect(snapshot.cost?.estimatedUsd).toBe(0.0004);
+    const measured = snapshot.usage as { modelUsage: unknown[] };
+    expect(measured.modelUsage).toHaveLength(2);
+    for (const invalid of [
+      { model: null, input_tokens: -1, output_tokens: 0 },
+      { model: null, input_tokens: 1, output_tokens: 0 },
+      {
+        model: null,
+        input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 1,
+      },
+    ])
+      expect(
+        estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 100,
+          output_tokens: 0,
+          modelUsage: [measured.modelUsage[1], invalid],
+        }),
+      ).toBeNull();
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test.each(["after-completion", "foreign-turn", "owned-turn", "pre-window"])(
+  "counter reset only affects coverage inside the owned scan window: %s",
+  async (scenario) => {
+    const home = await codexHome();
+    await mkdir(join(home, "sessions"));
+    const start = "2026-01-01T00:00:00Z";
+    const event = (second: number, type: string, payload: unknown) => ({
+      timestamp: new Date(Date.parse(start) + second * 1000).toISOString(),
+      type,
+      payload,
+    });
+    const counter = (second: number, input: number) =>
+      event(second, "event_msg", {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: input,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: input,
+          },
+        },
+      });
+    const events = [
+      { type: "session_meta", payload: { id: "parent" } },
+      event(-5, "turn_context", { turn_id: "scan-turn", model: "gpt-5.6-sol" }),
+      ...(scenario === "pre-window"
+        ? [counter(-3, 1000), counter(-2, 100), counter(1, 120)]
+        : [
+            counter(1, 100),
+            ...(scenario === "foreign-turn"
+              ? [event(2, "turn_context", { turn_id: "other-turn" })]
+              : []),
+            counter(scenario === "after-completion" ? 20 : 3, 60),
+          ]),
+    ];
+    const path = join(home, "sessions", "parent.jsonl");
+    await writeFile(path, jsonLines(events) + "\n");
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      owner: { threadId: "parent", turnId: "scan-turn", startedAt: start },
+      startedAt: start,
+      completedAt: "2026-01-01T00:00:10Z",
+    }));
+    tracker.start("parent");
+    try {
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: scenario === "pre-window" ? 20 : 100,
+      });
+      expect((snapshot.usage as { coverage?: string }).coverage).toBe(
+        scenario === "owned-turn" ? "partial" : undefined,
+      );
+      const python = spawnSync(
+        Bun.which("python3") ?? "python",
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, sys, runpy",
+            "from pathlib import Path",
+            "from datetime import datetime",
+            "runpy.run_path(sys.argv[1], run_name='scan_usage_reset_control')",
+            "reader = sys.modules['workbench_scan_usage']",
+            "usage, warnings = reader._read_rollout_usage(reader.RolloutSession('parent', None, Path(sys.argv[2])), started_at=datetime.fromisoformat('2026-01-01T00:00:00+00:00'), completed_at=datetime.fromisoformat('2026-01-01T00:00:10+00:00'), owner_turn_id='scan-turn')",
+            "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}))",
+          ].join("\n"),
+          join(BUNDLED_PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          path,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(python.status, python.stderr).toBe(0);
+      expect(JSON.parse(python.stdout)).toMatchObject({
+        usage: { inputTokens: scenario === "pre-window" ? 20 : 100 },
+        warnings: scenario === "owned-turn" ? ["token_counter_regressed"] : [],
+      });
     } finally {
       await tracker.stop();
     }

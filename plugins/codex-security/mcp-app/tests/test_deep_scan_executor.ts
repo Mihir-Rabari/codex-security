@@ -1399,10 +1399,17 @@ async function testWorkerCyberAccessSettings() {
     program?: string;
     serviceTier?: string;
     features?: Record<string, boolean>;
+    recorded?: boolean;
     configPath?: string;
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
   }[] = [
     { name: "unset", configuration: "" },
+    {
+      name: "recorded-omissions",
+      configuration:
+        'model_reasoning_summary = "detailed"\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+      recorded: true,
+    },
     {
       name: "blue",
       configuration:
@@ -1489,6 +1496,15 @@ async function testWorkerCyberAccessSettings() {
       testCase.configPath = path.join(fixture.root, `${testCase.name}.toml`);
       await writeFile(testCase.configPath, testCase.configuration);
       testCase.executor = new CodexSdkWorkerExecutor({
+        ...(testCase.recorded
+          ? restoredDeepScanWorkerSettings(
+              {
+                codexPath: process.execPath,
+                codexHome: fixture.root,
+              },
+              trustedParentSandbox,
+            )
+          : {}),
         model: testCase.name,
         parentSandbox: trustedParentSandbox,
       });
@@ -1514,11 +1530,26 @@ async function testWorkerCyberAccessSettings() {
           ({ args }) => args[0] === "exec",
         );
         assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, serviceTier, features = {} } of cases) {
+        for (const {
+          name,
+          program,
+          serviceTier,
+          features = {},
+          configPath,
+        } of cases) {
           const launch = workerLaunches.find(
             ({ args }) => args[args.indexOf("--model") + 1] === name,
           );
           const invocation = await readJson(launch!.markerPath);
+          assert.equal(invocation.configPath, configPath);
+          if (name === "recorded-omissions") {
+            assert.equal(
+              invocation.argv.some((arg: string) =>
+                arg.startsWith("model_reasoning_summary="),
+              ),
+              false,
+            );
+          }
           assert.deepEqual(
             invocation.argv.filter((arg: string) =>
               arg.startsWith("service_tier="),

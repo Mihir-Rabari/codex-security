@@ -1416,7 +1416,11 @@ export class CodexSecurity {
             model_reasoning_summary: summary,
           };
           if (runtime.configPath !== undefined)
-            await writeCodexConfig(runtime.configPath, preflightConfig);
+            await writeScanPreflightConfig(
+              runtime.configPath,
+              preflightConfig,
+              options.cyberAccessProgram,
+            );
         }
       }
 
@@ -3038,16 +3042,11 @@ export class CodexSecurity {
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, {
-          ...preflightConfig,
-          ...(options.cyberAccessProgram === undefined
-            ? {}
-            : {
-                codex_security: {
-                  cyber_access_program: options.cyberAccessProgram,
-                },
-              }),
-        });
+        await writeScanPreflightConfig(
+          runtime.configPath,
+          preflightConfig,
+          options.cyberAccessProgram,
+        );
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
@@ -3769,6 +3768,19 @@ export async function initialCredentialsAvailable(
   }
   if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   return await importer(ambientHome, isolatedHome);
+}
+
+async function writeScanPreflightConfig(
+  path: string,
+  config: JsonObject,
+  program: ScanSettings["cyberAccessProgram"],
+): Promise<void> {
+  await writeCodexConfig(path, {
+    ...config,
+    ...(program === undefined
+      ? {}
+      : { codex_security: { cyber_access_program: program } }),
+  });
 }
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the

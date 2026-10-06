@@ -6935,6 +6935,8 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             const result = await client.run(repository, {
               mode,
               postScanPrompt,
+              cyberAccessProgram:
+                name === "first" ? "daybreak_blue" : "daybreak_red",
             });
             expect(result.threadId).toBe(`fixture-${name}-thread`);
             expect(result.turnResult.usage).toBeNull();
@@ -6961,6 +6963,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             expect(parseToml(preflight)["model_reasoning_summary"]).toBe(
               summary,
             );
+            expect(parseToml(preflight)["codex_security"]).toEqual({
+              cyber_access_program:
+                name === "first" ? "daybreak_blue" : "daybreak_red",
+            });
             expect(preflight).not.toContain(`synthetic-${name}-key`);
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toBe(postScanPrompt);
