@@ -844,65 +844,116 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
   );
 
   test.skipIf(Bun.which("gh") === null).each([
-    ["github", "open"],
-    ["github", "closed"],
-    ["gitlab", "open"],
-    ["gitlab", "closed"],
+    ["github", "open", "host-only"],
+    ["github", "open", "explicit-host"],
+    ["github", "open", "token-only"],
+    ["github", "open", "second-push"],
+    ["github", "closed", "host-only"],
+    ["gitlab", "open", "host-only"],
+    ["gitlab", "closed", "host-only"],
   ])(
-    "checks actual request state and bounded metadata with %s: %s",
-    async (provider, state) => {
+    "checks actual request state and bounded metadata with %s: %s (%s)",
+    async (provider, state, context) => {
       const root = await temporaryDirectory("codex-security-gh-color-");
       const url = "https://forge.example.test/example/repository/pull/15";
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
-        fetch: () =>
-          Response.json([
-            ...(provider === "github"
-              ? [
-                  {
-                    url,
-                    state: "CLOSED",
-                    headRefOid: "unrelated-commit",
-                    headRepository: { id: "R_other" },
-                  },
-                ]
-              : []),
-            provider === "github"
-              ? {
-                  url,
-                  state: state === "open" ? "OPEN" : "CLOSED",
-                  headRefOid: "saved-commit",
-                  headRepository: { id: "R_synthetic" },
-                }
-              : {
-                  web_url: url,
-                  state: state === "open" ? "opened" : "closed",
-                  sha: "saved-commit",
-                  description: "synthetic description ".repeat(60_000),
-                },
-          ]),
+        fetch: (request) =>
+          new URL(request.url).pathname === "/identity"
+            ? Response.json({
+                id: new URL(request.url).searchParams.get("id"),
+                url,
+              })
+            : Response.json([
+                ...(provider === "github"
+                  ? [
+                      {
+                        url,
+                        state: "CLOSED",
+                        headRefOid: "unrelated-commit",
+                        headRepository: { id: "R_other" },
+                      },
+                    ]
+                  : []),
+                provider === "github"
+                  ? {
+                      url,
+                      state: state === "open" ? "OPEN" : "CLOSED",
+                      headRefOid: "saved-commit",
+                      headRepository: { id: "R_synthetic" },
+                    }
+                  : {
+                      web_url: url,
+                      state: state === "open" ? "opened" : "closed",
+                      sha: "saved-commit",
+                      description: "synthetic description ".repeat(60_000),
+                    },
+              ]),
       });
       try {
+        const environment = {
+          GH_REPO:
+            context === "host-only"
+              ? undefined
+              : "forge.example.test/example/repository",
+          GH_HOST:
+            context === "explicit-host"
+              ? "other.example.test"
+              : context === "token-only"
+                ? undefined
+                : "forge.example.test",
+          GH_ENTERPRISE_TOKEN: "synthetic-token",
+        };
         const outcome = await runWorkflow(
           ["patch", "--resume-pr", "codex-security/patch-scan-1"],
           {
-            onRepositoryCommand: async (command, args) => {
-              if (command === "git")
-                return args[0] === "remote"
-                  ? `https://${provider === "gitlab" ? "gitlab.com" : "github.example.test"}/example/repository.git`
+            environment,
+            onRepositoryCommand: async (command, args, _directory, options) => {
+              if (command === "git") {
+                expect(args[0]).not.toBe("push");
+                if (args[0] === "remote")
+                  return args[1] === "get-url"
+                    ? context === "second-push"
+                      ? "https://forge.example.test/first/repository.git\nhttps://forge.example.test/example/repository.git"
+                      : `https://${provider === "gitlab" ? "gitlab.com" : "forge.example.test"}/example/repository.git`
+                    : "origin";
+                return args.includes("--sq-quote")
+                  ? args.slice(2).join(" ")
                   : "saved-commit";
-              if (command === "gh" && args[0] === "repo")
-                return args[1] === "set-default"
-                  ? "example/repository"
-                  : JSON.stringify({ id: "R_synthetic", url });
+              }
+              const identity = command === "gh" && args[0] === "repo";
+              if (identity) {
+                const effectiveEnvironment = {
+                  ...environment,
+                  ...options?.environment,
+                };
+                expect(effectiveEnvironment.GH_HOST).toBe("forge.example.test");
+                expect(effectiveEnvironment.GH_REPO).toBe("");
+                if (args[1] === "set-default") return "example/repository";
+              }
+              const endpoint = new URL(
+                identity ? "identity" : "fixture",
+                server.url,
+              );
+              if (identity)
+                endpoint.searchParams.set(
+                  "id",
+                  context === "second-push" &&
+                    options?.environment?.GIT_CONFIG_PARAMETERS?.includes(
+                      "remote.codex-security-push.url=https://forge.example.test/first/repository.git",
+                    )
+                    ? "R_first"
+                    : "R_synthetic",
+                );
               const { stdout } = await promisify(execFile)(
                 Bun.which("gh")!,
                 [
                   "api",
-                  new URL("fixture", server.url).href,
-                  "--jq",
-                  args[args.indexOf("--jq") + 1]!,
+                  endpoint.href,
+                  ...(args.includes("--jq")
+                    ? ["--jq", args[args.indexOf("--jq") + 1]!]
+                    : []),
                 ],
                 {
                   env: {
@@ -913,7 +964,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     GH_CONFIG_DIR: join(root, "gh"),
                     GH_TOKEN: "synthetic-token",
                     GH_NO_UPDATE_NOTIFIER: "1",
-                    CLICOLOR_FORCE: provider === "github" ? "1" : "0",
+                    CLICOLOR_FORCE:
+                      provider === "github" && context !== "second-push"
+                        ? "1"
+                        : "0",
                   },
                   encoding: "utf8",
                 },

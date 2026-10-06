@@ -6873,50 +6873,53 @@ async function patchPublicationDestination(
   if (candidates.length > 0) {
     const names = (await run("git", ["remote"])).split("\n");
     let lookup = "codex-security-push";
-    while (names.includes(lookup)) lookup += "-";
-    const config = await run("git", [
-      "rev-parse",
-      "--sq-quote",
-      ...names.map((name) => `remote.${name}.gh-resolved=`),
-      `remote.${lookup}.url=${remote}`,
-      `remote.${lookup}.gh-resolved=base`,
-    ]);
-    const options = {
-      environment: {
-        GIT_CONFIG_PARAMETERS: [
-          dependencies.environment["GIT_CONFIG_PARAMETERS"],
-          config,
-        ]
-          .filter(Boolean)
-          .join(" "),
-        GH_REPO: "",
-      },
-    };
-    if (
-      !(await dependencies.runRepositoryCommand(
-        "gh",
-        ["repo", "set-default", "--view"],
-        repository,
-        options,
-      ))
-    ) {
-      throw new CodexSecurityError(
-        "GitHub CLI could not resolve the patch push repository on the selected host.",
+    while (names.some((name) => name.startsWith(lookup))) lookup += "-";
+    for (const pushRemote of remotes) {
+      const config = await run("git", [
+        "rev-parse",
+        "--sq-quote",
+        ...names.map((name) => `remote.${name}.gh-resolved=`),
+        `remote.${lookup}.url=${pushRemote}`,
+        `remote.${lookup}context.url=${new URL("..", candidates[0]!.url)}`,
+        `remote.${lookup}.gh-resolved=base`,
+      ]);
+      const options = {
+        environment: {
+          GIT_CONFIG_PARAMETERS: [
+            dependencies.environment["GIT_CONFIG_PARAMETERS"],
+            config,
+          ]
+            .filter(Boolean)
+            .join(" "),
+          GH_REPO: "",
+          GH_HOST: new URL(candidates[0]!.url).host,
+        },
+      };
+      if (
+        !(await dependencies.runRepositoryCommand(
+          "gh",
+          ["repo", "set-default", "--view"],
+          repository,
+          options,
+        ))
+      ) {
+        continue;
+      }
+      const headRepository = JSON.parse(
+        await dependencies.runRepositoryCommand(
+          "gh",
+          ["repo", "view", "--json", "id,url", "--jq", "tojson"],
+          repository,
+          options,
+        ),
+      ) as { id: string; url: string };
+      found = candidates.find(
+        (candidate) =>
+          candidate.repositoryId === headRepository.id &&
+          new URL(candidate.url).host === new URL(headRepository.url).host,
       );
+      if (found) break;
     }
-    const headRepository = JSON.parse(
-      await dependencies.runRepositoryCommand(
-        "gh",
-        ["repo", "view", "--json", "id,url"],
-        repository,
-        options,
-      ),
-    ) as { id: string; url: string };
-    found = candidates.find(
-      (candidate) =>
-        candidate.repositoryId === headRepository.id &&
-        new URL(candidate.url).host === new URL(headRepository.url).host,
-    );
   }
   return {
     remote,
