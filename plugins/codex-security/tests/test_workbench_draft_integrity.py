@@ -2322,3 +2322,43 @@ def test_parent_history_preserves_opaque_provenance_during_worker_recovery(
     findings = scan["findings"]
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "worker_metadata", [{"description": "same metadata"}, ["same metadata"], "bound-string", None]
+)
+def test_saved_optional_worker_metadata_keeps_bound_sibling_owners(
+    tmp_path, retry, worker_metadata
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    for index in range(2):
+        worker_id, path = accepted_standard_worker(
+            state, home, scan_dir, scan_id, name=f"bound-worker-{index}"
+        )
+        document = json.loads(path.read_text())
+        finding = copy.deepcopy(original)
+        finding["provenance"]["candidateId"] = "shared-candidate"
+        finding["provenance"]["workerId"] = (
+            worker_id if worker_metadata == "bound-string" else copy.deepcopy(worker_metadata)
+        )
+        if index == 0:
+            finding["identity"] = {"anchor": "explicit-observation"}
+        else:
+            finding.pop("identity", None)
+        document["findings"] = [finding]
+        path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 2
+    assert len({row["findingId"] for row in scan["findings"]}) == 2
+    anchors = {row["identity"]["anchor"] for row in scan["findings"]}
+    assert len(anchors) == 2
+    assert "explicit-observation" in anchors
+    findings = scan["findings"]
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings

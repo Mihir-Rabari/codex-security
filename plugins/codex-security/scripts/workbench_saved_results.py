@@ -625,6 +625,11 @@ def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> N
     finding["identity"] = {"anchor": anchor}
 
 
+def _saved_worker_owner(provenance: Any, owner: str | None) -> str | None:
+    worker_id = provenance.get("workerId") if isinstance(provenance, dict) else None
+    return worker_id if isinstance(worker_id, str) and worker_id else owner
+
+
 def _retained_findings(
     finding: dict[str, Any], owner: str | None = None
 ) -> Iterator[tuple[dict[str, Any], str | None]]:
@@ -639,7 +644,7 @@ def _retained_findings(
         seen.add(marker)
         provenance = current.get("provenance")
         if isinstance(provenance, dict):
-            owner = provenance.get("workerId") or owner
+            owner = _saved_worker_owner(provenance, owner)
         yield current, owner
         if not isinstance(provenance, dict):
             continue
@@ -1349,8 +1354,8 @@ def merge_saved_results(
         current_provenance = current_provenance if isinstance(current_provenance, dict) else {}
         previous_provenance = previous.get("provenance")
         previous_provenance = previous_provenance if isinstance(previous_provenance, dict) else {}
-        current_owner = current_provenance.get("workerId") or current_owner
-        previous_owner = previous_provenance.get("workerId") or previous_owner
+        current_owner = _saved_worker_owner(current_provenance, current_owner)
+        previous_owner = _saved_worker_owner(previous_provenance, previous_owner)
         current_owner = current_owner if isinstance(current_owner, str) else None
         previous_owner = previous_owner if isinstance(previous_owner, str) else None
         if (
@@ -1462,7 +1467,7 @@ def merge_saved_results(
         candidate = finding_candidate_id(finding)
         return _digest(
             [
-                provenance.get("workerId") or owner,
+                _saved_worker_owner(provenance, owner),
                 candidate,
                 _finding_content(finding),
             ]
@@ -1483,7 +1488,7 @@ def merge_saved_results(
                     if recovered := recovered_finding(retained):
                         key = _finding_key(recovered)
                         candidate = finding_candidate_id(retained)
-                        finding_owner = retained["provenance"].get("workerId") or retained_owner
+                        finding_owner = _saved_worker_owner(retained["provenance"], retained_owner)
                         if candidate:
                             owners = candidate_owners.setdefault((key, candidate), set())
                             if isinstance(finding_owner, str) and finding_owner:
@@ -1736,7 +1741,7 @@ def merge_saved_results(
         extensions = recovered.get("extensions", {})
         return _digest(
             [
-                provenance.get("workerId") or owner,
+                _saved_worker_owner(provenance, owner),
                 finding_candidate_id(finding),
                 recovered["ruleId"],
                 recovered["identity"].get("anchor"),
