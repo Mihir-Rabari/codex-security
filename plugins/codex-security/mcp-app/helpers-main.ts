@@ -9,7 +9,7 @@ import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { rankShardsCommand } from "./src/helpers/rank-shards";
 import { rankPoolCommand } from "./src/helpers/rank-pool";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
-import { escapeControls } from "./src/helpers/json";
+import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
 let commandLine = process.argv.slice(2);
@@ -61,23 +61,34 @@ if (command === "resolve-security-md") {
   process.exitCode = rankPoolCommand(command, args, posixHome);
 } else if (command === "bind-repo-scopes") {
   process.exitCode = bindRepoScopesCommand(args, posixHome);
-} else if (command === "database-info") {
+} else if (
+  ["database-info", "store-findings", "list-stored-findings"].includes(command)
+) {
   void (async () => {
-    const { values } = parseArgs({
-      args,
-      options: { help: { type: "boolean", short: "h" } },
-    });
-    if (values.help) {
-      console.log(
-        "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+    let result: unknown;
+    if (command === "database-info") {
+      const { values } = parseArgs({
+        args,
+        options: { help: { type: "boolean", short: "h" } },
+      });
+      if (values.help) {
+        console.log(
+          "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+        );
+        return;
+      }
+      const { databaseInfo } = await import("./src/workbench/database");
+      result = await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0))));
+    } else {
+      const { findingsCommand } = await import("./src/workbench/commands");
+      result = await findingsCommand(
+        command,
+        args,
+        decodeUtf8(readFileSync(0)),
       );
-      return;
     }
-    const { databaseInfo } = await import("./src/workbench/database");
     console.log(
-      JSON.stringify(
-        await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0)))),
-      ).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+      stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
         character
           .split("")
           .map(
