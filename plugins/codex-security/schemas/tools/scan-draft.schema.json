@@ -724,9 +724,6 @@
         },
         "candidateId": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
-        },
-        "sourceWorkerId": {
-          "$ref": "#/$defs/text"
         }
       },
       "required": ["label", "disposition"],
@@ -789,9 +786,6 @@
               },
               "surfaceIds": {
                 "$ref": "#/$defs/textList"
-              },
-              "sourceWorkerId": {
-                "$ref": "#/$defs/text"
               },
               "candidate": {
                 "type": "object",

@@ -1,10 +1,82 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
-import { fixture } from "./scan-draft-recovery-fixture.ts";
+import { draftApi, fixture } from "./scan-draft-recovery-fixture.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
+
+const {
+  deepReductionScanDraft,
+  discoveryReductionInput,
+  reconcileDeepReduction,
+  validateDiscoveryArtifacts,
+} = await importSource(
+  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
+);
+
+const savedOwners = [null, ["legacy-worker"], { worker: "legacy-worker" }, "", " ", "legacy-worker"];
+
+for (const mode of ["standard", "diff", "worker"] as const) {
+  for (const source of ["published", "checkpoint"] as const) {
+    for (const field of ["surfaces", "deferred"] as const) {
+      for (const [index, owner] of savedOwners.entries()) {
+        test(`updates saved ${mode}/${source}/${field} owner metadata ${index}`, async (t) => {
+          const f = await fixture(t, mode);
+          const row = field === "surfaces"
+            ? { id: "legacy-surface", label: "Saved review", disposition: "needs_follow_up" }
+            : { id: "legacy-gap", reason: "Retain the saved proof gap." };
+          const legacyCoverage = { [field]: [{ ...row, sourceWorkerId: owner }] };
+          await f.write(f.draft({ [field]: [{ ...row, sourceWorkerId: "legacy-worker" }] }));
+          if (source === "checkpoint") {
+            await draftApi.saveScanDraftCheckpoint(f.context, f.draft(legacyCoverage));
+          } else {
+            const file = path.join(f.root, mode === "worker" ? "result.json" : "coverage.json");
+            const saved = JSON.parse(await readFile(file, "utf8"));
+            const coverage = mode === "worker" ? saved.coverage : saved;
+            coverage[field][0].sourceWorkerId = owner;
+            await writeFile(file, JSON.stringify(saved, null, 2) + "\n");
+          }
+          const checkpointRoot = path.join(f.root, "checkpoints");
+          const checkpoints = await Promise.all((await readdir(checkpointRoot)).map(async (name) => [name, await readFile(path.join(checkpointRoot, name), "utf8")] as const));
+          await f.write(f.draft({ deferred: [{ id: "independent-gap", reason: "Independent unfinished work." }] }));
+          for (const [name, contents] of checkpoints) assert.equal(await readFile(path.join(checkpointRoot, name), "utf8"), contents);
+          const restored = await f.read();
+          assert.ok(restored[field].some((saved: { sourceWorkerId?: unknown }) =>
+            JSON.stringify(saved.sourceWorkerId) === JSON.stringify(owner)));
+          assert.ok(restored.deferred.some((saved: { id: string }) => saved.id === "independent-gap"));
+        });
+      }
+    }
+  }
+}
+
+for (const field of ["surfaces", "deferred"] as const) {
+  for (const [index, owner] of savedOwners.entries()) {
+    test(`recovers persisted Deep worker ${field} owner metadata ${index}`, async (t) => {
+      const f = await fixture(t, "worker");
+      await f.write({
+        ...f.draft({
+          surfaces: [{ id: "legacy-surface", label: "Saved review", disposition: "needs_follow_up", sourceWorkerId: "legacy-worker" }],
+          deferred: [{ id: "legacy-gap", candidateId: "legacy-gap", reason: "Retain the saved proof gap.", sourceWorkerId: "legacy-worker" }],
+        }, true),
+        complete: true,
+      });
+      const resultPath = path.join(f.root, "result.json");
+      const saved = JSON.parse(await readFile(resultPath, "utf8"));
+      saved.coverage[field][0].sourceWorkerId = owner;
+      const contents = JSON.stringify(saved, null, 2) + "\n";
+      await writeFile(resultPath, contents);
+      const restored = await validateDiscoveryArtifacts({
+        scanDir: path.dirname(f.root), workersRoot: path.dirname(f.root), dedupRoot: path.join(path.dirname(f.root), "dedup"),
+      }, resultPath, f.context.scanId);
+      assert.deepEqual(restored.coverage[field][0].sourceWorkerId, owner);
+      assert.deepEqual(discoveryReductionInput(restored, "actual-worker").unresolvedCandidates,
+        [{ ...saved.coverage.deferred[0], sourceWorkerId: "actual-worker" }]);
+      assert.equal(await readFile(resultPath, "utf8"), contents);
+    });
+  }
+}
 
 for (const mode of ["standard", "diff", "worker"] as const) {
   for (const outcome of ["reported", "rejected"] as const) {
@@ -96,13 +168,6 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
 } = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
-);
-const {
-  deepReductionScanDraft,
-  discoveryReductionInput,
-  reconcileDeepReduction,
-} = await importSource(
-  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
 );
 
 test("publishes colliding worker-local deferred IDs without changing their evidence", async (t) => {
