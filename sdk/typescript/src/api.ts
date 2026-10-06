@@ -1346,35 +1346,10 @@ export class CodexSecurity {
       };
       let previousOutput: { scanId: string | null } | null = null;
       if (requestedOutput !== null && options.archiveExisting === true) {
-        const history = await workbench(
-          {
-            ...workbenchOptions,
-            failureMessage:
-              "Could not inspect the previous Codex Security scan",
-          },
-          ["list-scans", "--scan-root", requestedOutput],
+        previousOutput = await this.#previousScanOutput(
+          workbenchOptions,
+          requestedOutput,
         );
-        const scans = history["scans"];
-        const previous = Array.isArray(scans)
-          ? scans.filter(
-              (scan): scan is JsonObject =>
-                isRecord(scan) && scan["scanDir"] === requestedOutput,
-            )
-          : null;
-        const previousScanId = previous?.[0]?.["scanId"];
-        if (
-          previous === null ||
-          previous.length > 1 ||
-          (previous.length === 1 &&
-            (typeof previousScanId !== "string" || previousScanId.length === 0))
-        ) {
-          throw new CodexSecurityError(
-            "The Codex Security workbench returned invalid previous scan history.",
-          );
-        }
-        previousOutput = {
-          scanId: typeof previousScanId === "string" ? previousScanId : null,
-        };
       }
       const scanOutputRoot =
         requestedOutput === null &&
@@ -2355,43 +2330,7 @@ export class CodexSecurity {
       if (archiveRecovery.pending !== null) {
         const archive = archiveRecovery.pending;
         archiveRecovery.pending = null;
-        try {
-          const recovery = await workbench(
-            {
-              ...archive.options,
-              signal: undefined,
-              failureMessage:
-                "Could not restore the previous Codex Security scan",
-            },
-            [
-              "restore-cli-scan-archive",
-              "--scan-dir",
-              archive.scanDir,
-              "--archived-scan-dir",
-              archive.archivedScanDir,
-              ...(archive.previousScanId === null
-                ? ["--previous-scan-absent"]
-                : ["--previous-scan-id", archive.previousScanId]),
-            ],
-          );
-          if (
-            recovery["scanDir"] !== archive.scanDir ||
-            recovery["archivedScanDir"] !== archive.archivedScanDir ||
-            (recovery["disposition"] !== "restored" &&
-              recovery["disposition"] !== "already-recorded")
-          ) {
-            throw new CodexSecurityError(
-              `Previous scan output remains archived at ${archive.archivedScanDir}; its ownership could not be reconciled.`,
-            );
-          }
-        } catch (recoveryError) {
-          notifyObserver(
-            "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            `Could not restore previous scan output: ${errorMessage(recoveryError)}`,
-          );
-        }
+        await this.#restoreScanArchive(archive, options);
       }
       if (
         failure instanceof ScanCostLimitExceededError &&
@@ -3132,6 +3071,89 @@ export class CodexSecurity {
     };
   }
 
+  async #previousScanOutput(
+    commandOptions: WorkbenchCommandOptions,
+    output: string,
+  ): Promise<{ scanId: string | null }> {
+    const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const history = await workbench(
+      {
+        ...commandOptions,
+        failureMessage: "Could not inspect the previous Codex Security scan",
+      },
+      ["list-scans", "--scan-root", output],
+    );
+    const scans = history["scans"];
+    const previous = Array.isArray(scans)
+      ? scans.filter(
+          (scan): scan is JsonObject =>
+            isRecord(scan) && scan["scanDir"] === output,
+        )
+      : null;
+    const previousScanId = previous?.[0]?.["scanId"];
+    if (
+      previous === null ||
+      previous.length > 1 ||
+      (previous.length === 1 &&
+        (typeof previousScanId !== "string" || previousScanId.length === 0))
+    ) {
+      throw new CodexSecurityError(
+        "The Codex Security workbench returned invalid previous scan history.",
+      );
+    }
+    return {
+      scanId: typeof previousScanId === "string" ? previousScanId : null,
+    };
+  }
+
+  async #restoreScanArchive(
+    archive: {
+      scanDir: string;
+      archivedScanDir: string;
+      previousScanId: string | null;
+      options: WorkbenchCommandOptions;
+    },
+    options: ScanOptions,
+  ): Promise<void> {
+    const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    try {
+      const recovery = await workbench(
+        {
+          ...archive.options,
+          signal: undefined,
+          failureMessage: "Could not restore the previous Codex Security scan",
+        },
+        [
+          "restore-cli-scan-archive",
+          "--scan-dir",
+          archive.scanDir,
+          "--archived-scan-dir",
+          archive.archivedScanDir,
+          ...(archive.previousScanId === null
+            ? ["--previous-scan-absent"]
+            : ["--previous-scan-id", archive.previousScanId]),
+        ],
+      );
+      if (
+        recovery["scanDir"] !== archive.scanDir ||
+        recovery["archivedScanDir"] !== archive.archivedScanDir ||
+        (recovery["disposition"] !== "restored" &&
+          recovery["disposition"] !== "already-recorded")
+      ) {
+        throw new CodexSecurityError(
+          `Previous scan output remains archived at ${archive.archivedScanDir}; its ownership could not be reconciled.`,
+        );
+      }
+    } catch (recoveryError) {
+      notifyObserver(
+        "onWarning",
+        options.onWarning,
+        options.onObserverError,
+        `Could not restore previous scan output: ${errorMessage(recoveryError)}`,
+      );
+    }
+  }
+
   async #runMock(
     repository: string,
     options: ScanOptions,
@@ -3154,6 +3176,12 @@ export class CodexSecurity {
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     let activeScan:
       { id: string; options: WorkbenchCommandOptions } | undefined;
+    let archive: {
+      scanDir: string;
+      archivedScanDir: string;
+      previousScanId: string | null;
+      options: WorkbenchCommandOptions;
+    } | null = null;
     let scanDir = "";
     try {
       const pluginRoot = await resolvePluginPath(
@@ -3193,6 +3221,20 @@ export class CodexSecurity {
               basename(local.repository),
             )
           : undefined;
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot,
+        environment: {
+          ...this.#dependencies.environment,
+          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the mock scan",
+      };
+      const previousOutput =
+        local.outputDir !== null && options.archiveExisting === true
+          ? await this.#previousScanOutput(workbenchOptions, local.outputDir)
+          : null;
       let archivedScanDir: string | undefined;
       scanDir = await prepareOutputDir(
         local.outputDir ?? undefined,
@@ -3200,7 +3242,16 @@ export class CodexSecurity {
         outputRoot,
         (path) => requireOutputOutsideRepository(local.protectedRoot, path),
         options.archiveExisting,
-        archiveObserver(options, (path) => (archivedScanDir = path)),
+        archiveObserver(options, (path) => {
+          archivedScanDir = path;
+          if (local.outputDir !== null && previousOutput !== null)
+            archive = {
+              scanDir: local.outputDir,
+              archivedScanDir: path,
+              previousScanId: previousOutput.scanId,
+              options: workbenchOptions,
+            };
+        }),
       );
       requireModelSafeOutputDir(scanDir);
       notifyObserver(
@@ -3214,16 +3265,7 @@ export class CodexSecurity {
         ...DEFAULT_CODEX_CONFIG,
         ...this.config.codexOverrides,
       });
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot,
-        environment: {
-          ...this.#dependencies.environment,
-          CODEX_SECURITY_STATE_DIR: local.stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the mock scan",
-      };
+
       const registration = await workbench(
         workbenchOptions,
         [
@@ -3276,6 +3318,7 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      archive = null;
       notifyObserver(
         "onScanStarted",
         options.onScanStarted,
@@ -3353,6 +3396,7 @@ export class CodexSecurity {
       )) as RepositoryFinding[] | undefined;
       return result;
     } catch (error) {
+      if (archive !== null) await this.#restoreScanArchive(archive, options);
       if (activeScan !== undefined) {
         await workbench({ ...activeScan.options, signal: undefined }, [
           "fail-scan",
