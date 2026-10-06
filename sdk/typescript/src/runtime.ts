@@ -1627,13 +1627,13 @@ export async function runWorkbench(
           const stateDirectory = codexSecurityStateDirectory(
             options.environment,
           );
-          if (
-            isWithin(scanDir, stateDirectory) ||
-            isWithin(scanDir, await canonicalConfigPath(stateDirectory))
-          ) {
-            throw new Error(
-              "The scan artifact directory cannot contain the active workbench database.",
-            );
+          for (let path = stateDirectory; ; path = dirname(path)) {
+            if (isWithin(scanDir, await canonicalConfigPath(path))) {
+              throw new Error(
+                "The scan artifact directory cannot contain the active workbench database.",
+              );
+            }
+            if (dirname(path) === path) break;
           }
           const savedScans = await savedScanIdentities(scanDir);
           await rename(scanDir, archiveDir);

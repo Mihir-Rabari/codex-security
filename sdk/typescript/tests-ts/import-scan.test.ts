@@ -554,25 +554,36 @@ test.each(["bundled", "legacy"])(
   },
 );
 
-test.each(["root", "child", "linked", "inverse"])(
+test.each(["root", "child", "linked", "inverse", "aliased", "aliased-child"])(
   "legacy archive preserves the active workbench at a %s state path",
   async (layout) => {
     const context = await fixture();
     const outputDir = join(context.root, "results");
     await mkdir(outputDir, { mode: 0o700 });
-    const stateDirectory =
+    let stateDirectory =
       layout === "root"
         ? outputDir
         : layout === "inverse"
           ? context.stateDirectory
           : join(outputDir, "state");
-    if (layout === "linked") {
+    if (layout === "linked" || layout.startsWith("aliased")) {
       await mkdir(context.stateDirectory, { mode: 0o700 });
       await symlink(
         context.stateDirectory,
         stateDirectory,
         process.platform === "win32" ? "junction" : "dir",
       );
+    }
+    if (layout.startsWith("aliased")) {
+      const alias = join(context.root, "alias");
+      await symlink(
+        context.root,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      stateDirectory = join(alias, "results", "state");
+      if (layout === "aliased-child")
+        stateDirectory = join(stateDirectory, "child");
     }
     if (layout === "inverse") {
       const inside = join(outputDir, "state");

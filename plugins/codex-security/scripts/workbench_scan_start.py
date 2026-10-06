@@ -136,9 +136,11 @@ def archive_scan(
     try:
         if archived_scan_dir is None:
             database_path = connection.execute("PRAGMA database_list").fetchone()[2]
-            if state_dir(canonical=False).is_relative_to(scan_dir) or (
-                database_path and scan_dir in Path(database_path).resolve().parents
-            ):
+            configured_state = state_dir(canonical=False)
+            if any(
+                path.resolve().is_relative_to(scan_dir)
+                for path in (configured_state, *configured_state.parents)
+            ) or (database_path and scan_dir in Path(database_path).resolve().parents):
                 raise SystemExit(
                     "The scan artifact directory cannot contain the active workbench database."
                 )
