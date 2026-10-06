@@ -821,3 +821,70 @@ def test_budget_resume_keeps_explicit_stop_and_unselected_guards(
                 }.items()
             },
         )
+
+
+@pytest.mark.parametrize("changed", [False, True], ids=["unchanged", "changed-publication"])
+def test_budget_selection_binds_publication_in_its_commit(
+    workbench_api, workbench_db, publication_scan, tmp_path, changed
+):
+    scan = publication_scan()
+    accept_reducer(workbench_db, scan)
+    with workbench_db:
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', phase = 'discovery', "
+            "workflow_version = 'deep-security-scan/v2', finalization_input_json = NULL"
+        )
+    database = tmp_path / "budget-commit.sqlite3"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+    child_program = """
+import json, os, runpy, sqlite3, sys
+from argparse import Namespace
+from types import SimpleNamespace
+api = runpy.run_path(sys.argv[1], run_name="budget_publication_commit_loss")
+api["deep_scan"].configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
+class CrashConnection(sqlite3.Connection):
+    def commit(self):
+        super().commit()
+        os._exit(73)
+connection = sqlite3.connect(sys.argv[2], factory=CrashConnection)
+connection.row_factory = sqlite3.Row
+connection.execute("PRAGMA foreign_keys = ON")
+api["complete_budget_exhausted_scan"](connection, Namespace(scan_id=sys.argv[3], cost_json=sys.argv[4], message=None))
+raise AssertionError("budget selection did not commit")
+"""
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child_program,
+            workbench_api["__file__"],
+            str(database),
+            scan.scan_id,
+            json.dumps(BUDGET_COST),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 73, child.stderr
+    findings_path = scan.scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    assert findings["findings"]
+    if changed:
+        findings["findings"][0]["title"] = "Synthetic substituted publication finding"
+        findings_path.write_text(json.dumps(findings))
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        args = Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None)
+        if changed:
+            with pytest.raises(SystemExit, match="selected Deep Scan publication"):
+                workbench_api["complete_budget_exhausted_scan"](connection, args)
+            assert connection.execute("SELECT status FROM scans").fetchone()[0] == "running"
+        else:
+            completed = workbench_api["complete_budget_exhausted_scan"](connection, args)
+            assert completed["scan"]["scanId"] == scan.scan_id
+            assert connection.execute("SELECT status FROM scans").fetchone()[0] == "complete"

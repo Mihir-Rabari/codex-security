@@ -462,6 +462,8 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
       if (!usages.has(threadId)) usages.set(threadId, null);
+    }
+    for (const [threadId, session] of usageSessions) {
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
         session.expectedResponseTokens > session.responseTokens

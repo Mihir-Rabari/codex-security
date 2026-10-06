@@ -6787,12 +6787,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
   });
 
   test.each([
-    ["standard", false],
-    ["deep", false],
-    ["deep", true],
+    ["standard", false, false],
+    ["deep", false, false],
+    ["deep", false, true],
+    ["deep", true, true],
   ] as const)(
-    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%s)",
-    async (mode, captureSummary) => {
+    "isolates concurrent managed %s sessions at the Codex child boundary (capture=%s, program=%s)",
+    async (mode, captureSummary, selectedProgram) => {
       const clients: TestClient[] = [];
       try {
         const outcomes = await Promise.allSettled(
@@ -6918,9 +6919,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
             );
             clients.push(client);
             const postScanPrompt = "Summarize the completed synthetic scan.";
+            const program = name === "first" ? "daybreak_blue" : "daybreak_red";
             const result = await client.run(repository, {
               mode,
               postScanPrompt,
+              ...(selectedProgram ? { cyberAccessProgram: program } : {}),
             });
             expect(result.threadId).toBe(`fixture-${name}-thread`);
             expect(result.turnResult.usage).toBeNull();
@@ -6948,6 +6951,11 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               summary,
             );
             expect(preflight).not.toContain(`synthetic-${name}-key`);
+            if (selectedProgram)
+              expect(parseToml(preflight)).toMatchObject({
+                codex_security: { cyber_access_program: program },
+              });
+            else expect(parseToml(preflight)["codex_security"]).toBeUndefined();
             expect(children).toHaveLength(2);
             expect(children[1].prompt).toBe(postScanPrompt);
             expect(children[1].args).toContain("resume");
@@ -6961,6 +6969,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
               expect(child.home).toBe(codexHome);
               expect(child.key).toBe(`synthetic-${name}-key`);
               expect(child.value).toBe(name);
+              if (selectedProgram) {
+                const programIndex = child.args.indexOf(
+                  "--cyber-access-program",
+                );
+                expect(
+                  child.args.slice(programIndex, programIndex + 2),
+                ).toEqual(["--cyber-access-program", program]);
+              } else expect(child.args).not.toContain("--cyber-access-program");
               expect(child.args).toContain(`model=${JSON.stringify(model)}`);
               expect(child.args).toContain(
                 `model_provider=${JSON.stringify(provider)}`,

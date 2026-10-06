@@ -26,6 +26,7 @@ from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
 from workbench_saved_results import (
     _restore_published_outputs,
+    _selected_publication_digest_for_documents,
     _snapshot_published_outputs,
     _worker_checkpoint_head,
 )
@@ -2474,6 +2475,13 @@ def prepare_budget_exhausted_deep_scan(
             ):
                 raise SystemExit("Budget completion requires the accepted complete reducer.")
         write_draft(accepted, unmerged)
+        documents = tuple(
+            _read_scan_local_json(scan_dir, name, name)
+            for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        )
+        selection["publicationSha256"] = _selected_publication_digest_for_documents(
+            dependencies(), scan, documents
+        )
         timestamp = dependencies().now()
         cancel_active_workers(connection, scan["id"], timestamp)
         connection.execute(

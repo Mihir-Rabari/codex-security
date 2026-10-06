@@ -2662,6 +2662,10 @@ describe("recorded Deep worker homes", () => {
     ["prefix-first", true],
     ["prefix-last", false],
     ["prefix-last", true],
+    ["truncated-first", false],
+    ["truncated-first", true],
+    ["truncated-last", false],
+    ["truncated-last", true],
   ] as const)(
     "prices copied response records (%s, attribution: %s)",
     async (copy, attributed) => {
@@ -2705,6 +2709,9 @@ describe("recorded Deep worker homes", () => {
           .join("\n") + "\n";
       if (copy === "prefix-first") await writeFile(path, prefix);
       if (copy === "prefix-last") await writeFile(copiedPath, prefix);
+      const truncated = prefix + '{"type":"token_usage_record"';
+      if (copy === "truncated-first") await writeFile(path, truncated);
+      if (copy === "truncated-last") await writeFile(copiedPath, truncated);
       const tracker = new ScanCostTracker({
         codexHome: home,
         scanDirectory,
@@ -2730,6 +2737,7 @@ describe("recorded Deep worker homes", () => {
           output_tokens: 15,
           total_tokens: 165,
         });
+        expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
         expect(
           Object.fromEntries(
             snapshot.cost!.modelCosts!.map((part) => [

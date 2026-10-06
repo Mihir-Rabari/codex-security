@@ -861,7 +861,8 @@ def _read_rollout_usage(
 
     if counter_total["totalTokens"] > total["totalTokens"]:
         remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
-        total = dict(counter_total)
+        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+        _add_token_usage(total, remainder)
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
     if response_usage_observed:
         warnings.discard("token_counter_regressed")

@@ -2967,19 +2967,23 @@ def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
         )
 
 
-def record_selected_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
-    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
-    selection = db.deep_scan.deep_scan_finalization_input(run)
-    if selection is None:
-        return
-    _require_selected_result(scan, selection)
+def _selected_publication_digest_for_documents(db: Any, scan: Any, documents: Any) -> str:
     prepared = _prepare_scan_finalization(
         Path(scan["scan_dir"]),
         expected_coverage_mode=db.expected_coverage_mode(scan),
         completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
         draft_documents=documents,
     )
-    selection["publicationSha256"] = _selected_publication_digest(prepared)
+    return _selected_publication_digest(prepared)
+
+
+def record_selected_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
+    run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run)
+    if selection is None:
+        return
+    _require_selected_result(scan, selection)
+    selection["publicationSha256"] = _selected_publication_digest_for_documents(db, scan, documents)
     with connection:
         connection.execute(
             "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",

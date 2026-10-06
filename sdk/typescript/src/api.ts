@@ -1416,7 +1416,16 @@ export class CodexSecurity {
             model_reasoning_summary: summary,
           };
           if (runtime.configPath !== undefined)
-            await writeCodexConfig(runtime.configPath, preflightConfig);
+            await writeCodexConfig(runtime.configPath, {
+              ...preflightConfig,
+              ...(options.cyberAccessProgram === undefined
+                ? {}
+                : {
+                    codex_security: {
+                      cyber_access_program: options.cyberAccessProgram,
+                    },
+                  }),
+            });
         }
       }
 

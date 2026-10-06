@@ -1272,3 +1272,46 @@ def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workb
     assert total == _counts(110, 0, 0)
     assert warnings == set()
     assert models == {"gpt-5.6-sol": _counts(110, 0, 0)}
+
+
+@pytest.mark.parametrize(
+    "receipt,counter,expected",
+    [
+        ((150, 15), (100, 200), (150, 200)),
+        ((100, 50), (200, 10), (200, 50)),
+        ((100, 10), (100, 10), (100, 10)),
+    ],
+    ids=["counter-output", "counter-input", "equal-control"],
+)
+def test_completion_retains_receipt_and_counter_categories(tmp_path, receipt, counter, expected):
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    response = _event(
+        counted,
+        "token_usage_record",
+        {
+            "response_id": "category-response",
+            "thread_id": "scan-parent",
+            "model": "gpt-5.6-sol",
+            "usage": {
+                "input_tokens": receipt[0],
+                "output_tokens": receipt[1],
+                "total_tokens": sum(receipt),
+            },
+            "thread_token_usage": {
+                "input_tokens": counter[0],
+                "output_tokens": counter[1],
+                "total_tokens": sum(counter),
+            },
+        },
+    )
+    parent = _rollout(tmp_path, "scan-parent", [response, _token_event(counted, *counter)])
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert (usage["inputTokens"], usage["outputTokens"], usage["totalTokens"]) == (
+        *expected,
+        sum(expected),
+    )
+    for category in ("inputTokens", "outputTokens", "totalTokens"):
+        assert sum(row[category] for row in usage["modelUsage"]) == usage[category]
+    assert usage["coverage"] == ("complete" if receipt == counter else "partial")
