@@ -34,6 +34,15 @@ class RolloutSession:
     path: Path
 
 
+@dataclass
+class _ResponseCounterRecord:
+    start: int
+    end: int
+    timestamp: datetime
+    kind: str
+    offset: int = 0
+
+
 def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     """Project measured usage without changing the existing legacy cost contract."""
 
@@ -720,27 +729,64 @@ def _read_rollout_usage(
     response_tokens = 0
     expected_response_tokens = 0
     response_baseline_tokens = 0
-    response_counter_offset = 0
-    response_counter_tokens = 0
-    response_counter_records: dict[str, tuple[int, int, int]] = {}
+    response_counter_baseline: tuple[int, datetime] | None = None
+    response_counter_records: dict[str, _ResponseCounterRecord] = {}
 
-    def receipt_counter_total(response_id: str, tokens: int, cumulative: int) -> int:
-        nonlocal response_counter_offset, response_counter_tokens
+    def receipt_counter_total(
+        response_id: str, tokens: int, cumulative: int, timestamp: datetime, kind: str
+    ) -> int:
+        nonlocal response_baseline_tokens, expected_response_tokens, excluded_response_tokens
         recorded = response_counter_records.get(response_id)
         if recorded is not None:
-            return recorded[1] + recorded[2]
-        start = cumulative - tokens
-        # Overlapping distinct receipts belong to separate reset windows;
-        # disjoint delayed receipts can complete an earlier gap.
-        if any(
-            offset == response_counter_offset and start < end and cumulative > begin
-            for begin, end, offset in response_counter_records.values()
-        ):
-            response_counter_offset += response_counter_tokens
-            response_counter_tokens = 0
-        response_counter_tokens = max(response_counter_tokens, cumulative)
-        response_counter_records[response_id] = (start, cumulative, response_counter_offset)
-        return response_counter_offset + cumulative
+            return recorded.offset + recorded.end
+        current = _ResponseCounterRecord(cumulative - tokens, cumulative, timestamp, kind)
+        response_counter_records[response_id] = current
+        timeline = [
+            (identity, record, False) for identity, record in response_counter_records.items()
+        ]
+        if response_counter_baseline is not None:
+            tokens, baseline_timestamp = response_counter_baseline
+            timeline.insert(
+                0,
+                (
+                    None,
+                    _ResponseCounterRecord(tokens, tokens, baseline_timestamp, "baseline"),
+                    True,
+                ),
+            )
+        # Native timestamps place delayed receipts in the original reset window.
+        timeline.sort(key=lambda item: item[1].timestamp)
+        offset = window_tokens = baseline = expected = 0
+        intervals: list[_ResponseCounterRecord] = []
+        excluded: dict[str, tuple[int, int]] = {}
+        for identity, record, anchor in timeline:
+            if anchor:
+                if record.end < window_tokens:
+                    offset += window_tokens
+                    intervals = []
+                window_tokens = record.end
+                baseline = offset + record.end
+                continue
+            if (not intervals and record.end < window_tokens) or any(
+                record.start < prior.end and record.end > prior.start for prior in intervals
+            ):
+                offset += window_tokens
+                window_tokens = 0
+                intervals = []
+            record.offset = offset
+            intervals.append(record)
+            window_tokens = max(window_tokens, record.end)
+            end = offset + record.end
+            if record.kind == "baseline":
+                baseline = max(baseline, end)
+            elif record.kind == "owned":
+                expected = max(expected, end)
+            else:
+                excluded[identity] = (record.end - record.start, end)
+        response_baseline_tokens = baseline
+        expected_response_tokens = expected
+        excluded_response_tokens = excluded
+        return current.offset + current.end
 
     excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
@@ -831,7 +877,16 @@ def _read_rollout_usage(
                     continue
                 cumulative_tokens = (
                     receipt_counter_total(
-                        response_id, usage["totalTokens"], cumulative["totalTokens"]
+                        response_id,
+                        usage["totalTokens"],
+                        cumulative["totalTokens"],
+                        timestamp,
+                        "baseline"
+                        if timestamp < started_at
+                        else "excluded"
+                        if owner_turn_id is not None
+                        and payload.get("turn_id", current_turn_id) != owner_turn_id
+                        else "owned",
                     )
                     if cumulative is not None
                     else None
@@ -880,8 +935,7 @@ def _read_rollout_usage(
                 # A compaction before this scan changes its starting counter.
                 previous = snapshot
                 response_baseline_tokens = snapshot["totalTokens"]
-                response_counter_offset = 0
-                response_counter_tokens = snapshot["totalTokens"]
+                response_counter_baseline = (snapshot["totalTokens"], timestamp)
                 response_counter_records.clear()
                 continue
             if (completed_at is not None and timestamp > completed_at) or (

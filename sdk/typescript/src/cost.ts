@@ -65,11 +65,16 @@ interface SessionUsage {
   responseTokens: number;
   expectedResponseTokens: number;
   responseBaselineTokens: number;
-  responseCounterOffset: number;
-  responseCounterTokens: number;
+  responseCounterBaseline: { tokens: number; timestamp: number | null } | null;
   responseCounterRecords: Map<
     string,
-    { start: number; end: number; offset: number }
+    {
+      start: number;
+      end: number;
+      offset: number;
+      timestamp: number | null;
+      kind: "baseline" | "owned" | "excluded";
+    }
   >;
   excludedResponseTokens: Map<string, { tokens: number; cumulative: number }>;
   counterRegressed: boolean;
@@ -133,8 +138,7 @@ function createSessionUsage(): SessionUsage {
     responseTokens: 0,
     expectedResponseTokens: 0,
     responseBaselineTokens: 0,
-    responseCounterOffset: 0,
-    responseCounterTokens: 0,
+    responseCounterBaseline: null,
     responseCounterRecords: new Map(),
     excludedResponseTokens: new Map(),
     counterRegressed: false,
@@ -439,7 +443,11 @@ export class ScanCostTracker {
       if (
         previous === undefined ||
         (session.usage?.total_tokens ?? -1) >
-          (previous.usage?.total_tokens ?? -1)
+          (previous.usage?.total_tokens ?? -1) ||
+        ((session.usage?.total_tokens ?? -1) ===
+          (previous.usage?.total_tokens ?? -1) &&
+          (session.counterUsage?.total_tokens ?? -1) >
+            (previous.counterUsage?.total_tokens ?? -1))
       ) {
         usageSessions.set(threadId, session);
       }
@@ -863,6 +871,20 @@ function readSessionEvent(
             responseId,
             usage.total_tokens,
             cumulative.total_tokens,
+            timestamp,
+            attribution &&
+              timestamp !== null &&
+              timestamp < Date.parse(attribution.startedAt)
+              ? "baseline"
+              : attribution &&
+                  !isAttributedScanEvent(
+                    attribution,
+                    session.threadId!,
+                    turnId,
+                    event["timestamp"],
+                  )
+                ? "excluded"
+                : "owned",
           )
         : null;
     if (
@@ -1074,8 +1096,10 @@ function readSessionEvent(
       session.previousUsage = ownUsage;
       // The last pre-scan counter is this window's baseline, including resets.
       session.responseBaselineTokens = ownUsage.total_tokens;
-      session.responseCounterOffset = 0;
-      session.responseCounterTokens = ownUsage.total_tokens;
+      session.responseCounterBaseline = {
+        tokens: ownUsage.total_tokens,
+        timestamp,
+      };
       session.responseCounterRecords.clear();
       return;
     }
@@ -1132,33 +1156,81 @@ function receiptCounterTotal(
   responseId: string,
   tokens: number,
   cumulative: number,
+  timestamp: number | null,
+  kind: "baseline" | "owned" | "excluded",
 ): number {
   const previous = session.responseCounterRecords.get(responseId);
   if (previous) return previous.offset + previous.end;
-  const start = cumulative - tokens;
-  // Distinct exact receipts cannot cover the same counter interval. An overlap
-  // starts a reset window; disjoint delayed receipts fill the earlier gaps.
-  if (
-    [...session.responseCounterRecords.values()].some(
-      (record) =>
-        record.offset === session.responseCounterOffset &&
-        start < record.end &&
-        cumulative > record.start,
-    )
-  ) {
-    session.responseCounterOffset += session.responseCounterTokens;
-    session.responseCounterTokens = 0;
-  }
-  session.responseCounterTokens = Math.max(
-    session.responseCounterTokens,
-    cumulative,
-  );
-  session.responseCounterRecords.set(responseId, {
-    start,
+  const current = {
+    start: cumulative - tokens,
     end: cumulative,
-    offset: session.responseCounterOffset,
-  });
-  return session.responseCounterOffset + cumulative;
+    offset: 0,
+    timestamp,
+    kind,
+  };
+  session.responseCounterRecords.set(responseId, current);
+  const timeline = [...session.responseCounterRecords].map(([id, record]) => ({
+    id: id as string | null,
+    record,
+    anchor: false,
+  }));
+  if (session.responseCounterBaseline) {
+    const baseline = session.responseCounterBaseline;
+    timeline.unshift({
+      id: null,
+      anchor: true,
+      record: {
+        start: baseline.tokens,
+        end: baseline.tokens,
+        offset: 0,
+        timestamp: baseline.timestamp,
+        kind: "baseline",
+      },
+    });
+  }
+  // Native timestamps place delayed receipts in their original reset window.
+  // Older records without timestamps retain their existing source order.
+  if (timeline.every(({ record }) => record.timestamp !== null))
+    timeline.sort((a, b) => a.record.timestamp! - b.record.timestamp!);
+  let offset = 0,
+    windowTokens = 0,
+    baseline = 0,
+    expected = 0;
+  let intervals: Array<{ start: number; end: number }> = [];
+  const excluded = new Map<string, { tokens: number; cumulative: number }>();
+  for (const { id, record, anchor } of timeline) {
+    if (anchor) {
+      if (record.end < windowTokens) {
+        offset += windowTokens;
+        intervals = [];
+      }
+      windowTokens = record.end;
+      baseline = offset + record.end;
+      continue;
+    }
+    if (
+      (intervals.length === 0 && record.end < windowTokens) ||
+      intervals.some(
+        (prior) => record.start < prior.end && record.end > prior.start,
+      )
+    ) {
+      offset += windowTokens;
+      windowTokens = 0;
+      intervals = [];
+    }
+    record.offset = offset;
+    intervals.push(record);
+    windowTokens = Math.max(windowTokens, record.end);
+    const end = offset + record.end;
+    if (record.kind === "baseline") baseline = Math.max(baseline, end);
+    else if (record.kind === "owned") expected = Math.max(expected, end);
+    else
+      excluded.set(id!, { tokens: record.end - record.start, cumulative: end });
+  }
+  session.responseBaselineTokens = baseline;
+  session.expectedResponseTokens = expected;
+  session.excludedResponseTokens = excluded;
+  return current.offset + current.end;
 }
 
 function uuid7Order(value: unknown): bigint | null {

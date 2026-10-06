@@ -3063,3 +3063,148 @@ test.each(["after-completion", "foreign-turn", "owned-turn", "pre-window"])(
     }
   },
 );
+
+test.each([
+  "chronological-reset",
+  "delayed-before-reset",
+  "legacy-baseline-gap",
+  "legacy-baseline-complete",
+  "copied-prefix-first",
+  "copied-continuation-first",
+])(
+  "receipt completeness preserves native timeline evidence: %s",
+  async (scenario) => {
+    const home = await codexHome();
+    const directory = join(home, "sessions");
+    await mkdir(directory);
+    const start = "2026-01-01T00:00:00Z";
+    const tokens = (input: number) => ({
+      input_tokens: input,
+      output_tokens: 0,
+      total_tokens: input,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      reasoning_output_tokens: 0,
+    });
+    const event = (second: number, type: string, payload: unknown) => ({
+      timestamp: new Date(Date.parse(start) + second * 1000).toISOString(),
+      type,
+      payload,
+    });
+    const receipt = (
+      second: number,
+      id: string,
+      input: number,
+      cumulative: number,
+    ) =>
+      event(second, "token_usage_record", {
+        thread_id: "parent",
+        turn_id: "scan-turn",
+        response_id: id,
+        model: "gpt-5.6-sol",
+        usage: tokens(input),
+        thread_token_usage: tokens(cumulative),
+      });
+    const counter = (second: number, input: number) =>
+      event(second, "event_msg", {
+        type: "token_count",
+        info: { total_token_usage: tokens(input) },
+      });
+    const header = [
+      { type: "session_meta", payload: { id: "parent", model: "gpt-5.6-sol" } },
+      event(-5, "turn_context", { turn_id: "scan-turn", model: "gpt-5.6-sol" }),
+    ];
+    let events: unknown[];
+    let expected: number;
+    let partial: boolean;
+    const copied = scenario.startsWith("copied");
+    if (copied) {
+      events = [...header, receipt(1, "one", 100, 100)];
+      const continuation = [...events, counter(2, 200)];
+      await writeFile(
+        join(directory, "a-first.jsonl"),
+        jsonLines(scenario === "copied-prefix-first" ? events : continuation) +
+          "\n",
+      );
+      await writeFile(
+        join(directory, "z-second.jsonl"),
+        jsonLines(scenario === "copied-prefix-first" ? continuation : events) +
+          "\n",
+      );
+      expected = 200;
+      partial = true;
+    } else if (scenario.startsWith("legacy-baseline")) {
+      events = [
+        ...header,
+        counter(-1, 900),
+        receipt(1, "one", 20, scenario.endsWith("gap") ? 40 : 20),
+      ];
+      expected = 20;
+      partial = scenario.endsWith("gap");
+    } else {
+      const first = receipt(1, "one", 100, 100),
+        delayed = receipt(2, "two", 50, 150),
+        reset = receipt(3, "three", 20, 20);
+      events = [
+        ...header,
+        first,
+        ...(scenario === "delayed-before-reset"
+          ? [reset, delayed]
+          : [delayed, reset]),
+      ];
+      expected = 170;
+      partial = false;
+    }
+    const path = join(directory, "parent.jsonl");
+    if (!copied) await writeFile(path, jsonLines(events) + "\n");
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      owner: { threadId: "parent", turnId: "scan-turn", startedAt: start },
+      startedAt: start,
+      completedAt: null,
+    }));
+    tracker.start("parent");
+    try {
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject(tokens(expected));
+      expect((snapshot.usage as { coverage?: string }).coverage).toBe(
+        partial ? "partial" : undefined,
+      );
+      if (!copied) {
+        const python = spawnSync(
+          Bun.which("python3") ?? "python",
+          [
+            "-I",
+            "-B",
+            "-c",
+            [
+              "import json, sys, runpy",
+              "from pathlib import Path",
+              "from datetime import datetime",
+              "runpy.run_path(sys.argv[1], run_name='receipt_timeline_control')",
+              "reader = sys.modules['workbench_scan_usage']",
+              "usage, warnings = reader._read_rollout_usage(reader.RolloutSession('parent', None, Path(sys.argv[2])), started_at=datetime.fromisoformat('2026-01-01T00:00:00+00:00'), completed_at=None, owner_turn_id='scan-turn')",
+              "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}))",
+            ].join("\n"),
+            join(BUNDLED_PLUGIN_ROOT, "scripts", "workbench_db.py"),
+            path,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(python.status).toBe(0);
+        const measured = JSON.parse(python.stdout);
+        expect(measured.usage.inputTokens).toBe(expected);
+        expect(measured.warnings.includes("token_receipts_incomplete")).toBe(
+          partial,
+        );
+      }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
