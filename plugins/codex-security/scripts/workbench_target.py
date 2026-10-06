@@ -570,10 +570,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
-        if (
-            nested_repository_root is not None
-            and Path(nested_repository_root).samefile(path)
-        ):
+        if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
                 paths.extend(nested_paths)
