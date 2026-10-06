@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -13,32 +21,52 @@ const bundle = await build({
       export * from "./src/artifact-scan-draft.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
-  bundle: true, format: "esm", platform: "node", write: false,
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  write: false,
   footer: { js: "//# sourceURL=deep-scan-finalization-contract.js" },
 });
-const { publishSelectedDeepScan, readSelectedDeepScanDraft, createDeepScanArtifacts, saveScanDraftCheckpoint } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`,
+const {
+  publishSelectedDeepScan,
+  readSelectedDeepScanDraft,
+  createDeepScanArtifacts,
+  saveScanDraftCheckpoint,
+} = await import(
+  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const scanId = "4e7b4acb-ac80-4d68-98cd-3d5ac5581cd1";
 
 for (const terminalReason of ["capped", "saturated"]) {
   test(`replays the selected ${terminalReason} input after replaceable results change`, async () => {
-    const scanDir = await realpath(await mkdtemp(path.join(tmpdir(), "selected-finalization-")));
+    const scanDir = await realpath(
+      await mkdtemp(path.join(tmpdir(), "selected-finalization-")),
+    );
     try {
       const artifacts = createDeepScanArtifacts(scanDir);
       const root = path.join(artifacts.dedupRoot, "dedup-0001", "output");
       await mkdir(root, { recursive: true });
       const draft = {
-        scanId, complete: true, findings: [],
+        scanId,
+        complete: true,
+        findings: [],
         coverage: {
-          completeness: "partial", surfaces: [], explicitExclusions: [],
-          deferred: [{ id: "review", reason: "A dependency remains unreviewed." }],
+          completeness: "partial",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [
+            { id: "review", reason: "A dependency remains unreviewed." },
+          ],
         },
       };
       const { coverage, ...reduction } = draft;
-      await saveScanDraftCheckpoint({ root, repoRoot: scanDir, layout: "reducer" }, {
-        ...reduction, sourceCoverage: coverage,
-      });
+      await saveScanDraftCheckpoint(
+        { root, repoRoot: scanDir, layout: "reducer" },
+        {
+          ...reduction,
+          sourceCoverage: coverage,
+        },
+      );
       const [name] = await readdir(path.join(root, "checkpoints"));
       const checkpoint = path.join(root, "checkpoints", name);
       const contents = await readFile(checkpoint);
@@ -46,18 +74,36 @@ for (const terminalReason of ["capped", "saturated"]) {
         version: 1,
         resultPath: path.relative(scanDir, checkpoint),
         resultSha256: createHash("sha256").update(contents).digest("hex"),
-        terminalReason, omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z",
+        terminalReason,
+        omittedWorkerIds: [],
+        selectedAt: "2026-01-01T00:00:00Z",
       };
       // A replacement result is not a new finalization selection.
-      await writeFile(path.join(root, "result.json"), JSON.stringify({ ...draft, complete: false }));
-      assert.deepEqual(await readSelectedDeepScanDraft(artifacts, scanId, selection), draft);
-      assert.deepEqual(await readSelectedDeepScanDraft(artifacts, scanId, selection), draft);
+      await writeFile(
+        path.join(root, "result.json"),
+        JSON.stringify({ ...draft, complete: false }),
+      );
+      assert.deepEqual(
+        await readSelectedDeepScanDraft(artifacts, scanId, selection),
+        draft,
+      );
+      assert.deepEqual(
+        await readSelectedDeepScanDraft(artifacts, scanId, selection),
+        draft,
+      );
       await assert.rejects(
-        readSelectedDeepScanDraft(artifacts, "e14e9229-653a-4385-bec0-8745f0b037cb", selection),
+        readSelectedDeepScanDraft(
+          artifacts,
+          "e14e9229-653a-4385-bec0-8745f0b037cb",
+          selection,
+        ),
         /complete result for this scan/,
       );
       await writeFile(checkpoint, JSON.stringify({ ...draft, findings: [] }));
-      await assert.rejects(readSelectedDeepScanDraft(artifacts, scanId, selection), /changed after acceptance/);
+      await assert.rejects(
+        readSelectedDeepScanDraft(artifacts, scanId, selection),
+        /changed after acceptance/,
+      );
     } finally {
       await rm(scanDir, { recursive: true, force: true });
     }
@@ -66,53 +112,98 @@ for (const terminalReason of ["capped", "saturated"]) {
 
 test("recreates only partial coverage for a persisted zero-success deadline selection", async () => {
   const selection = {
-    version: 1, resultPath: null, resultSha256: null, terminalReason: "capped",
-    omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z",
+    version: 1,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: [],
+    selectedAt: "2026-01-01T00:00:00Z",
   };
-  const result = await readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, selection);
+  const result = await readSelectedDeepScanDraft(
+    createDeepScanArtifacts("unused"),
+    scanId,
+    selection,
+  );
   assert.equal(result.scanId, scanId);
   assert.deepEqual(result.findings, []);
   assert.equal(result.coverage.completeness, "partial");
   assert.equal(result.coverage.deferred.length, 1);
   await assert.rejects(
-    readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, { ...selection, terminalReason: "saturated" }),
+    readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {
+      ...selection,
+      terminalReason: "saturated",
+    }),
     /recorded discovery deadline/,
   );
 });
 
 for (const status of ["failed", "canceled", "interrupted"]) {
   test(`saved selection does not turn a ${status} scan into success`, async () => {
-    await assert.rejects(publishSelectedDeepScan({
-      run: { scanId, scanDir: "unused", workflowVersion: "deep-security-scan/v2", status, finalizationInput: {
-        version: 1, resultPath: null, resultSha256: null, terminalReason: "capped",
-        omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z",
-      } },
-      artifacts: createDeepScanArtifacts("unused"), signal: new AbortController().signal,
-      publish: async () => assert.fail("Stopped work cannot publish successful results"),
-      finish: async () => assert.fail("Stopped work cannot finish successfully"),
-    }), /Stopped Deep Scan/);
+    await assert.rejects(
+      publishSelectedDeepScan({
+        run: {
+          scanId,
+          scanDir: "unused",
+          workflowVersion: "deep-security-scan/v2",
+          status,
+          finalizationInput: {
+            version: 1,
+            resultPath: null,
+            resultSha256: null,
+            terminalReason: "capped",
+            omittedWorkerIds: [],
+            selectedAt: "2026-01-01T00:00:00Z",
+          },
+        },
+        artifacts: createDeepScanArtifacts("unused"),
+        signal: new AbortController().signal,
+        publish: async () =>
+          assert.fail("Stopped work cannot publish successful results"),
+        finish: async () =>
+          assert.fail("Stopped work cannot finish successfully"),
+      }),
+      /Stopped Deep Scan/,
+    );
   });
 }
 
 test("cancellation prevents selected publication and preserves its input", async () => {
   const controller = new AbortController();
   controller.abort("cost limit or user cancellation");
-  const selection = { version: 1, resultPath: null, resultSha256: null, terminalReason: "capped",
-    omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z" };
-  await assert.rejects(publishSelectedDeepScan({
-    run: { scanId, scanDir: "unused", workflowVersion: "deep-security-scan/v2", status: "running", finalizationInput: selection },
-    artifacts: createDeepScanArtifacts("unused"), signal: controller.signal,
-    publish: async () => assert.fail("Canceled work cannot publish"),
-    finish: async () => assert.fail("Canceled work cannot finish"),
-  }), (error) => error === controller.signal.reason);
+  const selection = {
+    version: 1,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: [],
+    selectedAt: "2026-01-01T00:00:00Z",
+  };
+  await assert.rejects(
+    publishSelectedDeepScan({
+      run: {
+        scanId,
+        scanDir: "unused",
+        workflowVersion: "deep-security-scan/v2",
+        status: "running",
+        finalizationInput: selection,
+      },
+      artifacts: createDeepScanArtifacts("unused"),
+      signal: controller.signal,
+      publish: async () => assert.fail("Canceled work cannot publish"),
+      finish: async () => assert.fail("Canceled work cannot finish"),
+    }),
+    (error) => error === controller.signal.reason,
+  );
   assert.equal(selection.terminalReason, "capped");
 });
 
 for (const parentStatus of ["running", "complete", "invalid-seal"]) {
   test(`recovery verifies the ${parentStatus} parent after a succeeded child`, async () => {
-    const root = await realpath(await mkdtemp(path.join(tmpdir(), "selected-parent-")));
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "selected-parent-")),
+    );
     const { resumeSelectedDeepScan } = await import(
-      `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`,
+      `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
     );
     const resultPath = "selected.json";
     await writeFile(path.join(root, resultPath), "{}\n");
@@ -120,28 +211,77 @@ for (const parentStatus of ["running", "complete", "invalid-seal"]) {
     const runWorkbench = async (args) => {
       const [command] = args;
       calls.push(command);
-      if (command === "get-deep-scan") return { deepScan: {
-        scanId, scanDir: root, targetPath: root, scope: ".",
-        workflowVersion: "deep-security-scan/v2", status: "succeeded", phase: "terminal",
-        coordinatorGeneration: 2, dispatchedCount: 2, noNewStreak: 0,
-        config: { workers: 1, subagents: 0, stopAfterNoNew: 1, maxDiscoveryRuns: 2 },
-        finalizationInput: { version: 1, resultPath, resultSha256: "0".repeat(64),
-          terminalReason: "capped", omittedWorkerIds: [], selectedAt: "2026-01-01T00:00:00Z" },
-      } };
-      if (command === "get-scan") return { scan: {
-        scanId, scanDir: root, targetPath: root,
-        progress: { status: parentStatus === "running" ? "running" : "complete" },
-      } };
-      assert.deepEqual(args, ["prepare-scan-completion", "--scan-id", scanId, "--claim-token", "current-claim"]);
-      if (parentStatus === "running") throw new Error("Selected input changed after acceptance");
-      if (parentStatus === "invalid-seal") throw new Error("Recorded seal does not match");
+      if (command === "get-deep-scan")
+        return {
+          deepScan: {
+            scanId,
+            scanDir: root,
+            targetPath: root,
+            scope: ".",
+            workflowVersion: "deep-security-scan/v2",
+            status: "succeeded",
+            phase: "terminal",
+            coordinatorGeneration: 2,
+            dispatchedCount: 2,
+            noNewStreak: 0,
+            config: {
+              workers: 1,
+              subagents: 0,
+              stopAfterNoNew: 1,
+              maxDiscoveryRuns: 2,
+            },
+            finalizationInput: {
+              version: 1,
+              resultPath,
+              resultSha256: "0".repeat(64),
+              terminalReason: "capped",
+              omittedWorkerIds: [],
+              selectedAt: "2026-01-01T00:00:00Z",
+            },
+          },
+        };
+      if (command === "get-scan")
+        return {
+          scan: {
+            scanId,
+            scanDir: root,
+            targetPath: root,
+            progress: {
+              status: parentStatus === "running" ? "running" : "complete",
+            },
+          },
+        };
+      assert.deepEqual(args, [
+        "prepare-scan-completion",
+        "--scan-id",
+        scanId,
+        "--claim-token",
+        "current-claim",
+      ]);
+      if (parentStatus === "running")
+        throw new Error("Selected input changed after acceptance");
+      if (parentStatus === "invalid-seal")
+        throw new Error("Recorded seal does not match");
       return {};
     };
     try {
-      const recover = () => resumeSelectedDeepScan({ scanId, threadId: "original-parent",
-        pluginRoot: root, runWorkbench, handoffClaimToken: "current-claim", signal: new AbortController().signal });
+      const recover = () =>
+        resumeSelectedDeepScan({
+          scanId,
+          threadId: "original-parent",
+          pluginRoot: root,
+          runWorkbench,
+          handoffClaimToken: "current-claim",
+          signal: new AbortController().signal,
+        });
       if (parentStatus === "complete") await recover();
-      else await assert.rejects(recover(), parentStatus === "running" ? /changed after acceptance/ : /Recorded seal/);
+      else
+        await assert.rejects(
+          recover(),
+          parentStatus === "running"
+            ? /changed after acceptance/
+            : /Recorded seal/,
+        );
       assert.equal(calls.includes("prepare-scan-completion"), true);
       assert.equal(await readFile(path.join(root, resultPath), "utf8"), "{}\n");
     } finally {

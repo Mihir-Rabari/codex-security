@@ -486,6 +486,7 @@ def test_standard_publication_preserves_deliberately_partial_coverage(
 
     complete(workbench_api, workbench_db, scan)
 
+    scan.coverage["reviews"] = []
     assert_published_aggregate(scan)
 
 
