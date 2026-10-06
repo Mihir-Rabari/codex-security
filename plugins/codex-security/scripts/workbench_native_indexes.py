@@ -242,7 +242,10 @@ def _indexed_findings(
             and (
                 latest["scan_sequence"] > decision["decision_scan_sequence"]
                 if decision["decision_scan_sequence"] is not None
-                else latest["scan_started_at"] > decision["decision_updated_at"]
+                else (
+                    latest["scan_sequence"] > decision["scan_sequence"]
+                    and latest["scan_started_at"] > decision["decision_updated_at"]
+                )
             )
         ):
             status = "open"

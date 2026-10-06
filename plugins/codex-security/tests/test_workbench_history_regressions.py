@@ -699,3 +699,36 @@ def test_clock_rollback_keeps_a_new_decision_until_a_new_scan_is_admitted(
     assert len(findings) == 1
     assert findings[0]["scanId"] == later["scanId"]
     assert findings[0]["status"] == "open"
+
+
+def test_historical_latest_decision_does_not_reopen_without_a_later_scan(history) -> None:
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = '2099-10-06T10:00:00Z' WHERE id = ?", (first["scanId"],)
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic historical dismissal",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        # Rows preserved by the append-only migration have no recorded admission boundary.
+        connection.execute("UPDATE finding_decisions SET scan_sequence = NULL")
+    assert (
+        run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0][
+            "status"
+        ]
+        == "closed"
+    )
