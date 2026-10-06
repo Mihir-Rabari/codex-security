@@ -3794,13 +3794,17 @@ describe("patch publication integrity", () => {
     },
   );
 
-  test.each([
-    "staged",
-    "unstaged",
-    "assume-unchanged",
-    "clean",
-    "deleted-before",
-  ])("handles a renamed file with %s pre-patch state", async (dirty) => {
+  test.each(
+    [
+      "staged",
+      "unstaged",
+      "assume-unchanged",
+      "clean",
+      "deleted-before",
+    ].flatMap((dirty) =>
+      ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
+    ),
+  )("handles a renamed %s file at %s", async (dirty, file) => {
     const directory = await fixtures.create("patch-renamed-local-edits-");
     const git = repositoryGit(directory);
     git("init", "--initial-branch=main");
@@ -3837,14 +3841,15 @@ describe("patch publication integrity", () => {
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
           await rm(join(directory, "old.ts"), { force: true });
-          await writeFile(join(directory, "new.ts"), `fixed\n${content}\n`);
+          await mkdir(dirname(join(directory, file)), { recursive: true });
+          await writeFile(join(directory, file), `fixed\n${content}\n`);
           output?.stdout.write(
             JSON.stringify({
               patches: [
                 {
                   occurrenceId: "occ_1",
                   status: "verified",
-                  files: ["new.ts"],
+                  files: [file],
                   verification: "Synthetic regression passed.",
                 },
               ],
@@ -3861,10 +3866,10 @@ describe("patch publication integrity", () => {
       expect(git("write-tree")).toBe(index);
       expect(git("ls-remote", "origin")).toBe("");
     } else {
-      expect(git("show", "HEAD:new.ts")).toBe(`fixed\n${content}`);
+      expect(git("show", `HEAD:${file}`)).toBe(`fixed\n${content}`);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
     }
-    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+    expect(await readFile(join(directory, file), "utf8")).toBe(
       `fixed\n${content}\n`,
     );
   });
@@ -6678,6 +6683,7 @@ describe("patch change tracking", () => {
   }
   test.each([
     "regular",
+    "gitlink",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),
   ])(
     "preserves a newly ignored %s while publishing the ignore rule",
@@ -6690,9 +6696,16 @@ describe("patch change tracking", () => {
       await writeFile(join(root, ".gitignore"), "# baseline\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
+      const head = git("rev-parse", "HEAD");
       if (kind === "regular")
         await writeFile(join(root, "local.env"), "synthetic local file\n");
+      else if (kind === "gitlink")
+        git("clone", "--local", root, join(root, "local.env"));
       else await symlink("absent-synthetic-target", join(root, "local.env"));
+      const nestedIgnore =
+        kind === "gitlink"
+          ? await readFile(join(root, "local.env/.gitignore"))
+          : undefined;
       const remote = await fixtures.create("synthetic-ignore-remote-");
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
@@ -6722,7 +6735,14 @@ describe("patch change tracking", () => {
         expect(await readFile(join(root, "local.env"), "utf8")).toBe(
           "synthetic local file\n",
         );
-      else
+      else if (kind === "gitlink") {
+        expect(
+          repositoryGit(join(root, "local.env"))("rev-parse", "HEAD"),
+        ).toBe(head);
+        expect(await readFile(join(root, "local.env/.gitignore"))).toEqual(
+          nestedIgnore!,
+        );
+      } else
         expect(await readlink(join(root, "local.env"))).toBe(
           "absent-synthetic-target",
         );
