@@ -1656,6 +1656,19 @@ def merge_saved_results(
 
     projected_sources: dict[tuple[str, str], tuple[str, dict[str, Any], tuple[int, int]]] = {}
     accepted_pending_candidates: set[tuple[str, int, str]] = set()
+    selected_reported_candidates: dict[tuple[str, str], tuple[int, int]] = {}
+    for relative, draft, worker_id in sources:
+        if relative not in selected_observations:
+            continue
+        for finding in draft["findings"]:
+            if isinstance(finding, dict) and valid_finding(finding):
+                candidate_id = finding_candidate_id(finding)
+                if candidate_id:
+                    key = (worker_id, candidate_id)
+                    selected_reported_candidates[key] = max(
+                        selected_reported_candidates.get(key, source_order[relative]),
+                        source_order[relative],
+                    )
     for relative, draft, worker_id in sources:
         if relative not in accepted_sources:
             continue
@@ -1674,6 +1687,8 @@ def merge_saved_results(
                     field == "deferred"
                     and isinstance(candidate_id := row.get("candidateId"), str)
                     and candidate_id not in reported
+                    and selected_reported_candidates.get((worker_id, candidate_id), (-1, -1))
+                    < source_order[relative]
                 ):
                     accepted_pending_candidates.add((worker_id, worker["attempt"], candidate_id))
                 projected = project_missing_record(field, row, index, worker, draft["coverage"])

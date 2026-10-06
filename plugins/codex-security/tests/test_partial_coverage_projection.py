@@ -1121,8 +1121,15 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
 
 @pytest.mark.parametrize("claimed_worker", [False, True])
 @pytest.mark.parametrize("retry_publication", [False, True])
+@pytest.mark.parametrize("selected_checkpoint", [False, True])
 def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
-    workbench_api, workbench_db, publication_scan, monkeypatch, claimed_worker, retry_publication
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    claimed_worker,
+    retry_publication,
+    selected_checkpoint,
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1140,6 +1147,29 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
             }
         )
     )
+    originals = {result: result.read_bytes()}
+    if selected_checkpoint:
+        checkpoint = write_checkpoint(result.parent / "checkpoints", json.loads(result.read_text()))
+        head = result.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        pending_result = json.loads(result.read_text())
+        pending_result["findings"] = []
+        pending_result["coverage"] = {
+            **scan.coverage,
+            "completeness": "partial",
+            "deferred": [
+                {
+                    "id": "source-review",
+                    "candidateId": "source-candidate",
+                    "reason": "Verify source evidence.",
+                }
+            ],
+        }
+        result.write_text(json.dumps(pending_result))
+        os.utime(result, ns=(100, 100))
+        os.utime(checkpoint, ns=(300, 300))
+        os.utime(head, ns=(300, 300))
+        originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
     rejection = {
         "id": "parent-review",
         "candidateId": "source-candidate",
@@ -1162,7 +1192,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
             }
         )
     )
-    original = result.read_bytes()
+    os.utime(scan.scan_dir / "coverage.json", ns=(400, 400))
     with monkeypatch.context() as interrupted:
         if retry_publication:
 
@@ -1185,7 +1215,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
     assert recovered["resultsRecoveryNeeded"] is False
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [row["summary"] for row in findings] == [finding["summary"]]
-    assert result.read_bytes() == original
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("other_worker", [False, True])
