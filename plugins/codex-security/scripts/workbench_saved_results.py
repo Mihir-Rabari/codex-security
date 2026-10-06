@@ -1239,16 +1239,8 @@ def merge_saved_results(
             directory = directory.parent
         _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
-    other_head_times: dict[str, int] = {}
-    for head, checkpoint in saved_heads.items():
-        directory = _checkpoint_head_directory(head)
-        key = directory.as_posix()
-        selected = (directory / "checkpoints" / checkpoint).as_posix()
-        if key in checkpoint_heads and checkpoint_heads[key] != selected:
-            other_head_times[key] = max(
-                other_head_times.get(key, source_order[head][1]), source_order[head][1]
-            )
     selected_observations: dict[str, tuple[int, int]] = {}
+    authoritative_heads: set[str] = set()
     parent_heads: list[tuple[int, str]] = []
     for head, checkpoint in saved_heads.items():
         directory = _checkpoint_head_directory(head)
@@ -1259,14 +1251,14 @@ def merge_saved_results(
         if directory == Path("."):
             order = (0, max(source_order[selected][1], observed))
             parent_heads.append((observed, selected))
+            authoritative_heads.add(selected)
         else:
             key = directory.as_posix()
             if key in checkpoint_heads and checkpoint_heads[key] is None:
                 continue
             _, attempt = worker_attempts[key]
-            # Reselection supersedes older head observations, not newer pending evidence.
-            if checkpoint_heads.get(key) == selected and key in other_head_times:
-                observed = max(observed, other_head_times[key] + 1)
+            if key not in checkpoint_heads or checkpoint_heads[key] == selected:
+                authoritative_heads.add(selected)
             order = (attempt, observed)
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
     source_order.update(selected_observations)
@@ -1624,8 +1616,19 @@ def merge_saved_results(
         for relative, owner, candidate_id, _ in outcomes
         if owner is not None and relative in selected_observations
     )
-    # Reopened work and selected checkpoint outcomes follow the saved source order.
+    selected_head_candidates = {
+        (Path(relative).parent, candidate_id)
+        for relative, _, candidate_id, _ in outcomes
+        if relative in authoritative_heads
+    }
+    # A selected partial draft can leave independent historical outcomes intact.
     for relative, owner, candidate_id, disposition in outcomes:
+        if (
+            relative in selected_observations
+            and relative not in authoritative_heads
+            and (Path(relative).parent, candidate_id) in selected_head_candidates
+        ):
+            continue
         key = (owner, candidate_id)
         if key not in ordered_candidates:
             if relative == "parent" or relative in current_results:
@@ -1871,7 +1874,8 @@ def merge_saved_results(
                 selected_models = [
                     path
                     for path in selected_observations
-                    if Path(path).parent == checkpoint_dir
+                    if path in authoritative_heads
+                    and Path(path).parent == checkpoint_dir
                     and isinstance(drafts_by_path[path].get("threatModel"), dict)
                 ]
                 if selected_models:

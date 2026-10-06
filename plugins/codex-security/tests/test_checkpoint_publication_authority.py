@@ -446,6 +446,157 @@ def test_recovery_uses_live_selection_regardless_of_head_timestamp(
     assert recovered["resultsRecoveryNeeded"] is False
 
 
+@pytest.mark.parametrize("pending_offset", [-100, 0, 100], ids=["older", "tied", "newer"])
+@pytest.mark.parametrize("head_time", [100, 300], ids=["older-selection", "tied-selection"])
+@pytest.mark.parametrize("generic", [False, True], ids=["candidate", "generic-task"])
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_head_reselection_preserves_equal_or_newer_pending_evidence(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    pending_offset,
+    head_time,
+    generic,
+    reverse_order,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(50, 50))
+    head = result.parent / "checkpoint-head.json"
+    os.utime(head, ns=(300, 300))
+    saved = workbench_api["saved_results"]
+    saved._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    selected = save_disposition(scan, result.parent, "rejected")
+    if generic:
+        selected["coverage"]["resolvedDeferred"] = [
+            {"id": "review-task", "reason": "Review completed."}
+        ]
+        checkpoint = write_checkpoint(result.parent / "checkpoints", selected)
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(head_time, head_time))
+    identity = {"id": "review-task"} if generic else {"candidateId": "candidate-disposition"}
+    pending = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                **scan.coverage,
+                "deferred": [
+                    {**identity, "reason": "Validation remains pending.", "paths": ["app.py"]}
+                ],
+            },
+        },
+    )
+    pending_time = head_time + pending_offset
+    os.utime(pending, ns=(pending_time, pending_time))
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
+    )
+
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    key, value = next(iter(identity.items()))
+    pending_rows = [row for row in coverage["deferred"] if row.get(key) == value]
+    assert bool(pending_rows) is (pending_offset >= 0)
+
+
+@pytest.mark.parametrize("head_time", [100, 300], ids=["older-selection", "tied-selection"])
+@pytest.mark.parametrize("result_time", [50, 400], ids=["older-result", "newer-result"])
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_reselection_keeps_the_selected_model_and_newer_result_precedence(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    head_time,
+    result_time,
+    reverse_order,
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    saved = workbench_api["saved_results"]
+    head = result.parent / "checkpoint-head.json"
+    draft = save_disposition(scan, result.parent, "reported")
+    draft["threatModel"] = {"summary": "The current result model."}
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(result_time, result_time))
+    for summary, observed in (("The earlier model.", 300), ("The selected model.", head_time)):
+        draft["threatModel"] = {"summary": summary}
+        checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        if summary == "The earlier model.":
+            saved._capture_saved_source(
+                scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+            )
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
+    )
+
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    expected = "The current result model." if result_time > head_time else "The selected model."
+    assert manifest["threatModel"]["summary"] == expected
+
+
+@pytest.mark.parametrize("head_time", [100, 300], ids=["older-selection", "tied-selection"])
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_partial_reselection_keeps_independent_accepted_dispositions(
+    workbench_api, workbench_db, publication_scan, monkeypatch, head_time, reverse_order
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(50, 50))
+    selected = save_disposition(scan, result.parent, "rejected")
+    head = result.parent / "checkpoint-head.json"
+    os.utime(head, ns=(300, 300))
+    saved = workbench_api["saved_results"]
+    saved._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    selected["complete"] = False
+    selected["coverage"]["surfaces"][0]["candidateId"] = "independent-candidate"
+    checkpoint = write_checkpoint(result.parent / "checkpoints", selected)
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(head_time, head_time))
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
+    )
+
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+
+    assert stopped["findingCount"] == 0
+
+
 def test_publication_metadata_uses_the_captured_head(
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
