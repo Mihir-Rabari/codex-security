@@ -642,6 +642,96 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     assert bool(pending) is (decision != "not_applicable")
 
 
+@pytest.mark.parametrize("edited_field", [None, "reason", "paths", "surfaceIds", "candidate"])
+def test_budget_exhaustion_refreshes_generated_pending_evidence_after_resume(
+    tmp_path: Path, workbench_api: dict[str, Any], edited_field: str | None
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
+        tmp_path,
+        extra_files={
+            "authored.py": "# authored review location\n",
+            "updated.py": "# current candidate location\n",
+        },
+    )
+    original = {
+        **json.loads(ledger.read_text()),
+        "context": "Retained discovery context.",
+        "validation": {"disposition": "deferred"},
+    }
+    run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+    assert (
+        run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", scan_id)["scanId"] == scan_id
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    pending = coverage["deferred"][0]
+    original_id = pending["id"]
+    independent = {
+        **pending,
+        "id": "independent-worker-review",
+        "sourceWorkerId": "worker-other",
+    }
+    generic = {
+        "id": "shared-review",
+        "reason": "Independent review remains on the shared surface.",
+        "surfaceIds": list(pending["surfaceIds"]),
+    }
+    coverage["deferred"].extend([independent, generic])
+    coverage["surfaces"].append(
+        {
+            "id": "authored-surface",
+            "label": "Authored review",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+    )
+    if edited_field is not None:
+        pending[edited_field] = {
+            "reason": "Authored follow-up reason.",
+            "paths": ["authored.py"],
+            "surfaceIds": ["authored-surface"],
+            "candidate": {**original, "evidence": "Authored evidence."},
+        }[edited_field]
+    saved_pending = json.loads(json.dumps(pending))
+    coverage_path.write_text(json.dumps(coverage))
+    current = {
+        **original,
+        "summary": "Current candidate review",
+        "evidence": "Current candidate evidence.",
+        "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+        "validation": {"disposition": "reportable"},
+        "attack_path": {
+            "decision": "deferred",
+            "proof_gap": "Current reachability remains unknown.",
+        },
+    }
+    current.pop("context")
+    ledger.write_text(json.dumps(current) + "\n")
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    preserved = json.loads(coverage_path.read_text())
+    assert independent in preserved["deferred"]
+    assert generic in preserved["deferred"]
+    refreshed = next(row for row in preserved["deferred"] if row["id"] == original_id)
+    if edited_field is not None:
+        assert refreshed == saved_pending
+    else:
+        assert refreshed["candidate"] == {**current, "context": original["context"]}
+        assert refreshed["paths"] == ["updated.py"]
+        assert refreshed["surfaceIds"] == saved_pending["surfaceIds"]
+        assert "Current candidate review" in refreshed["reason"]
+        assert "Current candidate evidence." in refreshed["reason"]
+        report = (scan_dir / "report.md").read_text()
+        assert "Current candidate review" in report
+        assert "Current candidate evidence." in report
+
+
 @pytest.mark.parametrize("field", ["label", "notes"])
 @pytest.mark.parametrize("started_pending", [False, True])
 def test_budget_exhaustion_preserves_authored_changes_to_generated_decisions(

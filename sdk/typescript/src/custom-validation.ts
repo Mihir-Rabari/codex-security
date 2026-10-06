@@ -460,7 +460,9 @@ export async function runCustomValidation(options: {
       validation.disposition === "not_applicable"
     ) {
       const previous =
-        key === undefined ? undefined : previousDeferred.get(key);
+        key !== undefined && candidateIdentityCounts.get(key) === 1
+          ? previousDeferred.get(key)
+          : undefined;
       if (previous !== undefined) {
         const baseId = `custom-validation-${candidate.candidateId}`;
         let id = baseId;

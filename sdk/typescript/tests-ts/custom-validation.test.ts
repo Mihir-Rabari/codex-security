@@ -730,6 +730,24 @@ describe("custom validation", () => {
       siblings: true,
       staleDeferred: true,
     },
+    {
+      scenario: "siblings-reportable-suppressed",
+      dispositions: ["reportable", "suppressed"],
+      siblings: true,
+      staleDeferred: true,
+    },
+    {
+      scenario: "siblings-reportable-not-applicable",
+      dispositions: ["reportable", "not_applicable"],
+      siblings: true,
+      staleDeferred: true,
+    },
+    {
+      scenario: "siblings-terminal",
+      dispositions: ["suppressed", "not_applicable"],
+      siblings: true,
+      staleDeferred: true,
+    },
   ];
   test.each(completionScenarios)(
     "SDK owns real workbench completion: $scenario",
@@ -1061,7 +1079,7 @@ describe("custom validation", () => {
           expect(report).not.toContain("Older candidate payload");
           if (expectedPending > 0)
             expect(report).toContain("The required service was unavailable.");
-          else
+          else if (!siblings)
             expect(completed.coverage.surfaces).toContainEqual(
               expect.objectContaining({
                 candidateId: "candidate-shared",
@@ -1073,16 +1091,26 @@ describe("custom validation", () => {
                     : "not_applicable",
               }),
             );
+          else
+            expect(completed.coverage.surfaces).not.toContainEqual(
+              expect.objectContaining({
+                candidateId: "candidate-shared",
+                candidate: { title: "Older candidate payload" },
+              }),
+            );
           for (const [index, disposition] of dispositions.entries()) {
             if (disposition === "deferred")
               expect(report).toContain(`Fixture ${index}`);
           }
         }
         if (siblings) {
-          const expectedPending = count - expectedReported;
+          const expectedPending = dispositions.filter(
+            (value) => value === "deferred",
+          ).length;
           expect(completed.unresolvedCandidateCount).toBe(expectedPending);
           expect(completed.coverage.deferred).toHaveLength(expectedPending);
-          expect(completed.coverage.completeness).toBe("partial");
+          if (expectedPending > 0)
+            expect(completed.coverage.completeness).toBe("partial");
           expect(
             new Set(
               completed.unresolvedCandidates.map((item) => item.candidateId),

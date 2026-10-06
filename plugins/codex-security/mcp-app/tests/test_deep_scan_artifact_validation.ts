@@ -13,11 +13,9 @@ const {
   reconcileDeepReduction,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
-} =
-  await importSource(
-    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-      .pathname,
-  );
+} = await importSource(
+  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
+);
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
@@ -171,7 +169,11 @@ async function testUnresolvedCandidates(root: string) {
   assert.deepEqual(published.coverage.deferred, resolved.unresolvedCandidates);
   assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
 
-  const artifacts = await createLayout(path.join(root, "pending-candidates"));
+  const { artifacts } = await createWorker(
+    path.join(root, "pending-candidates"),
+    "worker-pending",
+    draft([]),
+  );
   const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
   await mkdir(artifactDir, { recursive: true });
   const resultPath = path.join(artifactDir, "result.json");
@@ -187,8 +189,6 @@ async function testUnresolvedCandidates(root: string) {
   );
 }
 
-async function testDiscoveryValidation(root) {
-  const artifacts = await createLayout(path.join(root, "discovery"));
 async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {
     threatModel: { summary: "Requests reach shared code." },

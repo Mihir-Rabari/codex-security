@@ -19,7 +19,10 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  coverage: Record<string, unknown> & { surfaces: { disposition: string }[] };
+  coverage: Record<string, unknown> & {
+    surfaces: { candidateId?: string; disposition: string }[];
+    deferred: { candidateId: string; candidate: { evidence: string } }[];
+  };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 type WorkspaceResult = {
@@ -220,7 +223,7 @@ async function testCompactDiffScanCompletion(
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
     );
     const candidates = requireSuccessfulTool<{
-      rows: { candidate_id: string }[];
+      rows: { candidate_id: string; instance?: string; evidence: string }[];
     }>(
       await call("list_codex_security_candidates", { scanId }),
       `${runtimeLabel}: read compact diff candidates`,
@@ -228,13 +231,15 @@ async function testCompactDiffScanCompletion(
     const pending = candidates.rows.find(
       (row) => row.instance === "pending-review",
     );
+    const reviewed = candidates.rows.find((row) => !row.instance);
+    assert.ok(pending);
+    assert.ok(reviewed);
     requireSuccessfulTool(
       await call("record_codex_security_candidate_validations", {
         scanId,
         validations: [
           {
-            candidateId: candidates.rows.find((row) => !row.instance)
-              .candidate_id,
+            candidateId: reviewed.candidate_id,
             validation: {
               disposition: "suppressed",
               method: "Static review of the changed handler.",

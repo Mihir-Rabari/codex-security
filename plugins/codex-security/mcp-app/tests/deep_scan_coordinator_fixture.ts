@@ -526,7 +526,9 @@ export class FakeExecutor {
           );
           if (this.options.discoveryDeferred?.length) {
             draft.coverage.completeness = "partial";
-            draft.coverage.deferred = structuredClone(this.options.discoveryDeferred);
+            draft.coverage.deferred = structuredClone(
+              this.options.discoveryDeferred,
+            );
           }
           await writeJson(
             path.join(artifactContext.root, "result.json"),
@@ -733,7 +735,7 @@ export function standardScanDraft(
         },
       ],
       explicitExclusions: [],
-      deferred: [],
+      deferred: [] as Record<string, unknown>[],
     },
   };
 }

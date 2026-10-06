@@ -807,6 +807,18 @@ def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
     )
 
 
+def _budget_candidate_deferred(candidate: dict[str, Any], surface_ids: list[str]) -> dict[str, Any]:
+    return {
+        "candidate": candidate,
+        "reason": (
+            "Validation was deferred because the scan reached its cost limit: "
+            f"{candidate['summary']}. Evidence: {candidate['evidence']}"
+        ),
+        "paths": list(dict.fromkeys(location["path"] for location in candidate["locations"])),
+        "surfaceIds": surface_ids,
+    }
+
+
 def preserve_budget_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]], candidates: list[dict[str, Any]]
 ) -> None:
@@ -890,24 +902,46 @@ def preserve_budget_candidates(
         disposition = dispositions[key]
         # An interrupted budget completion can leave generated candidate rows.
         # Refresh them before retaining pending work, including shared surfaces.
-        for surface in surfaces_by_candidate.get(key, []):
-            if _generated_budget_candidate_surface(surface):
-                surface.update(
-                    label=candidate["summary"],
-                    disposition=disposition,
-                    notes=candidate["evidence"],
-                    candidate={
-                        **{
-                            k: v
-                            for k, v in surface["candidate"].items()
-                            if k not in {"validation", "attack_path"}
-                        },
-                        **candidate,
+        generated_surfaces = [
+            surface
+            for surface in surfaces_by_candidate.get(key, [])
+            if _generated_budget_candidate_surface(surface)
+        ]
+        previous_candidates = [surface["candidate"] for surface in generated_surfaces]
+        generated_surface_ids = [
+            surface["id"] for surface in generated_surfaces if isinstance(surface.get("id"), str)
+        ]
+        for surface in generated_surfaces:
+            surface.update(
+                label=candidate["summary"],
+                disposition=disposition,
+                notes=candidate["evidence"],
+                candidate={
+                    **{
+                        k: v
+                        for k, v in surface["candidate"].items()
+                        if k not in {"validation", "attack_path"}
                     },
-                )
+                    **candidate,
+                },
+            )
         if disposition == "needs_follow_up" and deferred:
             for item in deferred:
-                item.setdefault("candidate", candidate)
+                previous = item.get("candidate")
+                if isinstance(previous, dict) and previous in previous_candidates:
+                    generated = _budget_candidate_deferred(previous, generated_surface_ids)
+                    if all(item.get(field) == value for field, value in generated.items()):
+                        refreshed = {
+                            **{
+                                field: value
+                                for field, value in previous.items()
+                                if field not in {"validation", "attack_path"}
+                            },
+                            **candidate,
+                        }
+                        item.update(_budget_candidate_deferred(refreshed, generated_surface_ids))
+                else:
+                    item.setdefault("candidate", candidate)
             continue
         # A surface may also carry evidence for unfinished work from another
         # candidate or owner. Preserve those shared rows and add a dedicated decision.
@@ -955,18 +989,11 @@ def preserve_budget_candidates(
                         surface["previousFindings"].append(finding)
         if disposition != "needs_follow_up":
             continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
         coverage["deferred"].append(
             {
                 "id": available_id(candidate_id, "deferred"),
                 "candidateId": candidate_id,
-                "candidate": candidate,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface["id"] for surface in surfaces],
+                **_budget_candidate_deferred(candidate, [surface["id"] for surface in surfaces]),
             }
         )
 

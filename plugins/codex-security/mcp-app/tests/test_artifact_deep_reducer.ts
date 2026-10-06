@@ -510,8 +510,13 @@ function reduction(findings: Record<string, unknown>[], extra = {}) {
 function withSourceRefs(worker: Awaited<ReturnType<typeof createWorker>>) {
   const { coverage, ...result } = worker.result;
   const unresolvedCandidates = coverage.deferred
-    .filter((item: Record<string, unknown>) => typeof item.candidateId === "string")
-    .map((item: Record<string, unknown>) => ({ ...item, sourceWorkerId: worker.id }));
+    .filter(
+      (item: Record<string, unknown>) => typeof item.candidateId === "string",
+    )
+    .map((item: Record<string, unknown>) => ({
+      ...item,
+      sourceWorkerId: worker.id,
+    }));
   return {
     ...result,
     ...(unresolvedCandidates.length > 0 ? { unresolvedCandidates } : {}),

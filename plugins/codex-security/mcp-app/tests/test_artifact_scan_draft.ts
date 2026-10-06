@@ -1699,7 +1699,7 @@ try {
         recordCodexSecurityScanDraftViaWorkbench(
           interruptedContext,
           currentInput,
-          async (arguments_) => {
+          async (arguments_: string[]) => {
             const staged = JSON.parse(
               await readFile(
                 arguments_[arguments_.indexOf("--draft-path") + 1],
@@ -1714,11 +1714,14 @@ try {
             );
             assert.ok(
               staged.coverage.deferred.some(
-                (item) => item.reason === historicalWork.reason,
+                (item: { reason?: string }) =>
+                  item.reason === historicalWork.reason,
               ),
             );
             assert.deepEqual(
-              snapshot.coverage.deferred.map((item) => item.candidateId),
+              snapshot.coverage.deferred.map(
+                (item: { candidateId?: string }) => item.candidateId,
+              ),
               [pending.candidate_id],
               "the current checkpoint includes enrichment without merged history",
             );
@@ -1736,7 +1739,10 @@ try {
     );
     const savedPending = checkpoints
       .flatMap((snapshot) => snapshot.coverage.deferred)
-      .filter((item) => item.candidateId === pending.candidate_id);
+      .filter(
+        (item: Record<string, unknown>) =>
+          item.candidateId === pending.candidate_id,
+      );
     assert.equal(savedPending.length, 1);
     assert.deepEqual(savedPending[0].candidate, pending);
     assert.equal(
@@ -1753,8 +1759,11 @@ try {
     const restored = await readJson(interruptedRoot, "coverage.json");
     assert.deepEqual(
       restored.deferred
-        .filter((item) => item.candidateId === pending.candidate_id)
-        .map((item) => item.candidate),
+        .filter(
+          (item: Record<string, unknown>) =>
+            item.candidateId === pending.candidate_id,
+        )
+        .map((item: Record<string, unknown>) => item.candidate),
       [pending],
       "pending evidence restores from its checkpoint without rereading the ledger",
     );
@@ -2178,11 +2187,11 @@ try {
   for (const [field, metadata] of [
     ["workerId", ["worker-one", "worker-two"]],
     ["sourceWorkerId", { group: "synthetic-group", index: 1 }],
-  ]) {
+  ] as [string, unknown][]) {
     const metadataRoot = path.join(root, `owner-metadata-${field}`);
     await mkdir(metadataRoot);
     const metadataContext = { ...context, root: metadataRoot };
-    const metadataFinding = {
+    const metadataFinding: FixtureFinding = {
       ...finding,
       provenance: { ...finding.provenance, [field]: metadata },
     };

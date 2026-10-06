@@ -139,7 +139,10 @@ export async function recordCodexSecurityScanDraft(
           scanDraftCheckpointName(checkpoint),
           candidates,
         );
-    const reconciled = preserveUnresolvedDiffCandidates(preserved.input, candidates);
+    const reconciled = preserveUnresolvedDiffCandidates(
+      preserved.input,
+      candidates,
+    );
     if (finalDeepDraft && !publishDraft && reconciled !== parsed)
       await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
@@ -507,33 +510,32 @@ async function preserveScanDraft(
       : undefined;
   if (retainedFinal) {
     result = structuredClone(retainedFinal.input);
-      if (diffCandidates !== undefined) {
-        sources.unshift(input);
-        const currentDecisionKeys = collectResolvedCandidateKeys(
-          { ...input, findings: [] },
-          owner,
-        );
-        for (const section of ["surfaces", "explicitExclusions"]) {
-          result.coverage[section] = [
-            ...(input.coverage[section] as JsonObject[]).filter(
-              isTerminalCandidateDecision,
-            ),
-            ...(result.coverage[section] as JsonObject[]).filter(
-              (item) =>
-                !isTerminalCandidateDecision(item) ||
-                !currentDecisionKeys.has(coverageKey(item)!),
-            ),
-          ];
-        }
-        if (
-          input.coverage.completeness === "partial" &&
-          input.coverage.completenessBeforeCandidates === undefined
-        ) {
-          result.coverage.completeness = "partial";
-          delete result.coverage.completenessBeforeCandidates;
-        }
+    if (diffCandidates !== undefined) {
+      sources.unshift(input);
+      const currentDecisionKeys = collectResolvedCandidateKeys(
+        { ...input, findings: [] },
+        owner,
+      );
+      for (const section of ["surfaces", "explicitExclusions"]) {
+        result.coverage[section] = [
+          ...(input.coverage[section] as JsonObject[]).filter(
+            isTerminalCandidateDecision,
+          ),
+          ...(result.coverage[section] as JsonObject[]).filter(
+            (item) =>
+              !isTerminalCandidateDecision(item) ||
+              !currentDecisionKeys.has(coverageKey(item)!),
+          ),
+        ];
       }
-
+      if (
+        input.coverage.completeness === "partial" &&
+        input.coverage.completenessBeforeCandidates === undefined
+      ) {
+        result.coverage.completeness = "partial";
+        delete result.coverage.completenessBeforeCandidates;
+      }
+    }
   }
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
@@ -724,7 +726,8 @@ async function preserveScanDraft(
           preserveFindingDetails(finding, pending.finding);
       } else {
         const candidateRow = candidateRows.find(
-          (item) => !keepsGenericWork(item) && coverageKey(item) === candidateId,
+          (item) =>
+            !keepsGenericWork(item) && coverageKey(item) === candidateId,
         );
         if (candidateRow) {
           for (const field of ["candidate", "finding"] as const) {
@@ -769,7 +772,9 @@ async function preserveScanDraft(
     const representedCandidateKeys = new Set(
       [
         ...result.findings.map((finding) => findingKey(finding)),
-        ...candidateRows.filter((item) => !keepsGenericWork(item)).map((item) => coverageKey(item)),
+        ...candidateRows
+          .filter((item) => !keepsGenericWork(item))
+          .map((item) => coverageKey(item)),
       ].filter((value): value is string => typeof value === "string"),
     );
     const currentSurfaces = result.coverage.surfaces as JsonObject[];
@@ -794,21 +799,31 @@ async function preserveScanDraft(
       deferred: (source.coverage.deferred as JsonObject[]).filter((item) => {
         const candidateId = coverageKey(item);
         return (
-          (keepsGenericWork(item) || typeof candidateId !== "string" ||
+          (keepsGenericWork(item) ||
+            typeof candidateId !== "string" ||
             !representedCandidateKeys.has(candidateId)) &&
           !closedDeferredIds.has(item.id as string) &&
-          !coverageEntryPresent(result.coverage.deferred as unknown[], item, ambiguousDeferredIds)
+          !coverageEntryPresent(
+            result.coverage.deferred as unknown[],
+            item,
+            ambiguousDeferredIds,
+          )
         );
       }),
       surfaces: (source.coverage.surfaces as JsonObject[]).filter((surface) => {
         if (resolvedSurfaces.has(surface)) return false;
         const candidateId = coverageKey(surface);
         if (
-          coverageEntryPresent(result.coverage.surfaces as unknown[], surface, ambiguousDeferredIds)
+          coverageEntryPresent(
+            result.coverage.surfaces as unknown[],
+            surface,
+            ambiguousDeferredIds,
+          )
         )
           return false;
         return (
-          (keepsGenericWork(surface) || typeof candidateId !== "string" ||
+          (keepsGenericWork(surface) ||
+            typeof candidateId !== "string" ||
             !representedCandidateKeys.has(candidateId)) &&
           !(
             surface.disposition === "needs_follow_up" &&

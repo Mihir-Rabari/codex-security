@@ -98,11 +98,14 @@ def budget_scan_fixture(
     paths: list[str] | None = None,
     terminal: bool = True,
     terminal_reason: str = "saturated",
+    extra_files: dict[str, str] | None = None,
 ) -> tuple[Path, Path, Path, str, Path]:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("value = request.args['value']\n")
+    for relative_path, content in (extra_files or {}).items():
+        (target / relative_path).write_text(content)
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     registered = run_workbench(
@@ -140,7 +143,9 @@ def budget_scan_fixture(
     )
     discovery = scan_dir / "artifacts" / "02_discovery"
     discovery.mkdir(parents=True, exist_ok=True)
-    (discovery / "in_scope_files.txt").write_text("app.py\n")
+    (discovery / "in_scope_files.txt").write_text(
+        "\n".join(["app.py", *(extra_files or {})]) + "\n"
+    )
     ledger = discovery / "candidate_ledger.jsonl"
     rows = (
         candidates
