@@ -9,7 +9,10 @@ import {
 } from "./artifact-candidates.js";
 import type { ArtifactContext } from "./artifact-context.js";
 import { readArtifactJsonl } from "./artifact-io.js";
-import type { ScanDraftInput } from "./artifact-scan-draft.js";
+import {
+  preserveFindingDetails,
+  type ScanDraftInput,
+} from "./artifact-scan-draft.js";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
 type JsonObject = Record<string, unknown>;
@@ -176,7 +179,9 @@ export function refreshDiffCandidateHistory(
     source.findings = source.findings.filter((finding) => {
       const pending = reopened.get(findingCandidateKey(finding) ?? "");
       if (!pending) return true;
-      pending.finding ??= finding;
+      if (object(pending.finding))
+        preserveFindingDetails(pending.finding as JsonObject, finding);
+      else pending.finding = finding;
       return false;
     });
   }

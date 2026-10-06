@@ -46,13 +46,39 @@ def preserve_budget_candidates(
         if isinstance(finding, dict) and (key := finding_candidate_key(finding)) is not None
     }
 
+    candidates_by_surface_id = {
+        f"candidate-{candidate['candidate_id']}": candidate for candidate in candidates
+    }
+    legacy_generated = set()
+    for surface in coverage["surfaces"]:
+        if not isinstance(surface, dict):
+            continue
+        surface_id = surface.get("id")
+        candidate = (
+            candidates_by_surface_id.get(surface_id) if isinstance(surface_id, str) else None
+        )
+        if (
+            candidate is not None
+            and surface.get("candidateId") is None
+            and surface.get("candidate") is None
+            and surface.get("sourceWorkerId") is None
+            and surface.get("label") == candidate["summary"]
+            and surface.get("notes") == candidate["evidence"]
+            and surface.get("disposition") in ("needs_follow_up", "rejected", "not_applicable")
+        ):
+            surface["candidateId"] = candidate["candidate_id"]
+            legacy_generated.add(id(surface))
+
+    def generated_surface(item: dict[str, Any]) -> bool:
+        return id(item) in legacy_generated or _generated_budget_candidate_surface(item)
+
     terminal_decisions = {
         coverage_candidate_key(item): item["disposition"]
         for field in ("surfaces", "explicitExclusions")
         for item in coverage[field]
         if isinstance(item, dict)
         and item.get("disposition") in ("rejected", "not_applicable")
-        and (field != "surfaces" or not _generated_budget_candidate_surface(item))
+        and (field != "surfaces" or not generated_surface(item))
     }
     dispositions = {
         (None, candidate["candidate_id"]): (
@@ -120,11 +146,13 @@ def preserve_budget_candidates(
         # An interrupted budget completion can leave generated candidate rows.
         # Refresh them before retaining pending work, including shared surfaces.
         generated_surfaces = [
-            surface
-            for surface in surfaces_by_candidate.get(key, [])
-            if _generated_budget_candidate_surface(surface)
+            surface for surface in surfaces_by_candidate.get(key, []) if generated_surface(surface)
         ]
-        previous_candidates = [surface["candidate"] for surface in generated_surfaces]
+        previous_candidates = [
+            surface["candidate"]
+            for surface in generated_surfaces
+            if isinstance(surface.get("candidate"), dict)
+        ]
         generated_surface_ids = [
             surface["id"] for surface in generated_surfaces if isinstance(surface.get("id"), str)
         ]
@@ -136,7 +164,7 @@ def preserve_budget_candidates(
                 candidate={
                     **{
                         k: v
-                        for k, v in surface["candidate"].items()
+                        for k, v in (surface.get("candidate") or {}).items()
                         if k not in {"validation", "attack_path"}
                     },
                     **candidate,

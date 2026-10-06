@@ -775,9 +775,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
       assert.deepEqual(independent, {
         ...raw,
         id: independent.id,
-        ...(payload === "generic" || layout === "worker"
-          ? {}
-          : { candidateId: independent.id }),
+        ...(payload === "generic" ? {} : { candidateId: independent.id }),
       });
       const outcome =
         payload === "generic"
@@ -1454,7 +1452,10 @@ for (const payload of ["generic", "candidate"] as const) {
     assert.ok(saved.deferred.length > 0);
     for (const { id, ...row } of saved.deferred) {
       assert.notEqual(id, named.id);
-      assert.deepEqual(row, raw);
+      assert.deepEqual(row, {
+        ...raw,
+        ...(payload === "candidate" ? { candidateId: id } : {}),
+      });
     }
   });
 }

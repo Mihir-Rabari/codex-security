@@ -1391,3 +1391,140 @@ describe("custom validation", () => {
 });
 
 const unexpectedValidation = rejecting("unexpected validation");
+
+for (const disposition of [
+  "reportable",
+  "deferred",
+  "suppressed",
+  "not_applicable",
+] as const) {
+  for (const sameOwner of [false, true]) {
+    for (const shared of [false, true]) {
+      test(`saved unmapped follow-up reconciles custom ${disposition}, sameOwner=${sameOwner}, shared=${shared}`, async () => {
+        const f = await fixture();
+        const finding = f.findings.findings[0]!;
+        finding.provenance["candidateId"] = "validated-candidate";
+        finding.provenance["sourceWorkerId"] = "worker-current";
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        const previous = {
+          id: "saved-follow-up",
+          candidateId: "validated-candidate",
+          sourceWorkerId: sameOwner ? "worker-current" : "worker-other",
+          label: "Saved candidate review",
+          disposition: "needs_follow_up" as const,
+          notes: "Saved review evidence remains available.",
+          receiptRefs: [],
+          annotation: "Retain this saved annotation.",
+        };
+        coverage.surfaces.push(previous);
+        coverage.completeness = "partial";
+        coverage.deferred = [
+          {
+            id: "saved-pending",
+            candidateId: "validated-candidate",
+            sourceWorkerId: "worker-current",
+            reason: "Earlier candidate proof gap.",
+            surfaceIds: [previous.id],
+          },
+        ];
+        if (shared)
+          coverage.deferred.push({
+            id: "independent-review",
+            reason: "Independent work still needs this surface.",
+            surfaceIds: [previous.id],
+          });
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        const retained = saved.coverage.surfaces.find(
+          (row) => row.id === previous.id,
+        )!;
+        expect(retained).toBeDefined();
+        expect(retained["annotation"]).toBe(previous.annotation);
+        expect(retained.notes).toBe(previous.notes);
+        const resolved = sameOwner && !shared && disposition !== "deferred";
+        expect(retained.disposition).toBe(
+          resolved
+            ? disposition === "reportable"
+              ? "reported"
+              : disposition === "suppressed"
+                ? "rejected"
+                : "not_applicable"
+            : "needs_follow_up",
+        );
+        if (shared)
+          expect(saved.coverage.deferred).toContainEqual({
+            id: "independent-review",
+            reason: "Independent work still needs this surface.",
+            surfaceIds: [previous.id],
+          });
+      });
+    }
+  }
+}
+
+for (const prior of ["rejected", "not_applicable"] as const) {
+  for (const disposition of [
+    "reportable",
+    "deferred",
+    "suppressed",
+    "not_applicable",
+  ] as const) {
+    for (const sameCandidate of [true, false]) {
+      test(`custom validation preserves shared terminal ${prior} after ${disposition}, sameCandidate=${sameCandidate}`, async () => {
+        const f = await fixture();
+        f.findings.findings[0]!.provenance["candidateId"] =
+          "validated-candidate";
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        coverage.surfaces[0]!.candidateId = sameCandidate
+          ? "validated-candidate"
+          : "independent-candidate";
+        coverage.surfaces[0]!.disposition = prior;
+        coverage.surfaces[0]!["annotation"] = "Saved terminal annotation.";
+        coverage.completeness = "partial";
+        coverage.deferred = [
+          {
+            id: "old-independent-gap",
+            candidateId: coverage.surfaces[0]!.candidateId,
+            reason: "Historical saved proof gap.",
+            surfaceIds: [coverage.surfaces[0]!.id],
+          },
+        ];
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        if (!sameCandidate) {
+          const retained = saved.coverage.surfaces.find(
+            (row) =>
+              row.candidateId === "independent-candidate" &&
+              row.disposition === prior,
+          );
+          expect(retained).toBeDefined();
+          expect(retained!["annotation"]).toBe("Saved terminal annotation.");
+        } else {
+          expect(saved.coverage.surfaces[0]!.disposition).toBe(
+            disposition === "reportable"
+              ? "reported"
+              : disposition === "deferred"
+                ? "needs_follow_up"
+                : disposition === "suppressed"
+                  ? "rejected"
+                  : "not_applicable",
+          );
+        }
+      });
+    }
+  }
+}

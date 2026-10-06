@@ -470,7 +470,33 @@ export async function runCustomValidation(options: {
       }
       candidate.finding.provenance["originalCandidates"] = originals;
     }
-    for (const id of candidate.surfaceIds) {
+    const surfaceIds = new Set(candidate.surfaceIds);
+    if (key !== undefined && candidateIdentityCounts.get(key) === 1) {
+      const previousSurfaceIds = new Set(
+        (previousDeferred.get(key) ?? []).flatMap(
+          (row) => row.surfaceIds ?? [],
+        ),
+      );
+      const sharedSurfaceIds = new Set(
+        coverage.deferred.flatMap((row) => row.surfaceIds ?? []),
+      );
+      for (const surface of coverage.surfaces) {
+        if (
+          surface.disposition !== "needs_follow_up" ||
+          sharedSurfaceIds.has(surface.id)
+        )
+          continue;
+        const sameCandidate =
+          typeof surface.candidateId === "string"
+            ? candidateIdentity(surface.candidateId, surface.sourceWorkerId) ===
+              key
+            : previousSurfaceIds.has(surface.id) &&
+              (typeof surface.sourceWorkerId !== "string" ||
+                surface.sourceWorkerId === sourceWorkerId);
+        if (sameCandidate) surfaceIds.add(surface.id);
+      }
+    }
+    for (const id of surfaceIds) {
       const values = decisions.get(id) ?? [];
       values.push(update);
       decisions.set(id, values);
@@ -552,9 +578,26 @@ export async function runCustomValidation(options: {
     delete finding.extensions?.["customValidationSurfaceIds"];
     reported.push(finding);
   }
+  const independentDecisions: CoverageDocument["surfaces"] = [];
   for (const surface of coverage.surfaces) {
     const updates = decisions.get(surface.id);
     if (updates === undefined) continue;
+    if (
+      typeof surface.candidateId === "string" &&
+      (surface.disposition === "rejected" ||
+        surface.disposition === "not_applicable") &&
+      !surfaceCandidateKeys
+        .get(surface.id)
+        ?.has(candidateIdentity(surface.candidateId, surface.sourceWorkerId))
+    ) {
+      const baseId = `${surface.id}-decision`;
+      let id = baseId;
+      let suffix = 2;
+      while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+      reservedIds.add(id);
+      independentDecisions.push({ ...structuredClone(surface), id });
+      delete surface.candidateId;
+    }
     const values = updates.map((update) => update.validation.disposition);
     surface.disposition = values.includes("reportable")
       ? "reported"
@@ -580,6 +623,7 @@ export async function runCustomValidation(options: {
       ]),
     ];
   }
+  coverage.surfaces.push(...independentDecisions);
   if (coverage.surfaces.length === 0) {
     coverage.surfaces.push({
       id: "custom-validation",

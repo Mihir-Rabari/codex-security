@@ -251,7 +251,7 @@ export function reconcileDeepReduction(
       );
   }
   const currentWorkers = new Set(discoveries.map((source) => source.workerId));
-  const pending = new Map<string, UnresolvedCandidate>();
+  const pending: UnresolvedCandidate[] = [];
   for (const candidate of [
     ...(previous?.unresolvedCandidates ?? []).filter(
       (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
@@ -260,13 +260,11 @@ export function reconcileDeepReduction(
       (source) => source.result.unresolvedCandidates ?? [],
     ),
   ]) {
-    pending.set(
-      JSON.stringify([candidate.sourceWorkerId, candidate.candidateId]),
-      structuredClone(candidate),
-    );
+    if (!pending.some((previous) => isDeepStrictEqual(previous, candidate)))
+      pending.push(structuredClone(candidate));
   }
   delete result.unresolvedCandidates;
-  if (pending.size > 0) result.unresolvedCandidates = [...pending.values()];
+  if (pending.length > 0) result.unresolvedCandidates = pending;
   validateRetainedFindings(
     result,
     discoveries.map((discovery) => discovery.result),

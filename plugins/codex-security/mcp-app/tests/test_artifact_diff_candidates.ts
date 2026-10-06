@@ -31,7 +31,7 @@ const {
 } = await loadModule("artifact-diff-candidates.ts");
 const { recordCodexSecurityScanDraft, recordCodexSecurityWorkerScanDraft } =
   await loadModule("artifact-scan-draft.ts");
-const { discoveryReductionInput } = await loadModule(
+const { discoveryReductionInput, reconcileDeepReduction } = await loadModule(
   "deep-scan/artifact-validation.ts",
 );
 const { recordCodexSecurityCandidateValidations } = await loadModule(
@@ -626,7 +626,12 @@ test("final findings and explicit candidate resolutions are not reopened", async
     { candidateId: "rejected", disposition: "rejected" },
     { candidateId: "not-applicable", disposition: "not_applicable" },
   ];
-  assert.deepEqual(await reconcileDiffCandidates(context, input), input);
+  assert.deepEqual(await reconcileDiffCandidates(context, input), {
+    ...input,
+    findings: [
+      { ...input.findings[0], provenance: { diffCandidateDecision: {} } },
+    ],
+  });
 });
 
 test("pending diff candidates retain their authored follow-up surfaces", async (t) => {
@@ -2353,5 +2358,166 @@ for (const remaining of [
         complete: false,
       });
     }
+  });
+}
+
+for (const legacy of [true, false]) {
+  for (const resolution of ["finding", "rejected"] as const) {
+    test(`loaded payload-linked deferral legacy=${legacy} resolves ${resolution}`, async (t) => {
+      const context = await fixture(t);
+      const evidence = {
+        candidate_id: "saved-review",
+        evidence: "Retain saved candidate evidence.",
+      };
+      const initial = {
+        ...draft([
+          {
+            id: "saved-review",
+            candidateId: "saved-review",
+            candidate: evidence,
+            reason: "Saved proof gap.",
+            analystNote: "Saved annotation.",
+          },
+        ]),
+        complete: false,
+      };
+      initial.coverage.completeness = "partial";
+      await recordCodexSecurityScanDraft(context, initial);
+      if (legacy) {
+        const coveragePath = path.join(context.root, "coverage.json");
+        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+        coverage.deferred.forEach(
+          (row: FixtureObject) => delete row.candidateId,
+        );
+        await writeFile(coveragePath, JSON.stringify(coverage));
+        for (const name of await readdir(
+          path.join(context.root, "checkpoints"),
+        )) {
+          const checkpointPath = path.join(context.root, "checkpoints", name);
+          const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+          checkpoint.coverage.deferred.forEach(
+            (row: FixtureObject) => delete row.candidateId,
+          );
+          await writeFile(checkpointPath, JSON.stringify(checkpoint));
+        }
+      }
+      const next = { ...draft(), complete: true };
+      if (resolution === "finding") next.findings = [finding("saved-review")];
+      else
+        next.coverage.surfaces.push({
+          candidateId: "saved-review",
+          label: "Current review",
+          disposition: "rejected",
+          notes: "Resolved saved candidate.",
+        });
+      await recordCodexSecurityScanDraft(context, next);
+      const saved = await readCoverage(context);
+      assert.equal(saved.deferred.length, 0);
+      const savedFindings = JSON.parse(
+        await readFile(path.join(context.root, "findings.json"), "utf8"),
+      );
+      assert.ok(
+        JSON.stringify(
+          resolution === "finding" ? savedFindings : saved.surfaces,
+        ).includes(evidence.evidence),
+      );
+    });
+  }
+}
+
+for (const legacyId of ["review/auth", "review\\auth", "review-auth"]) {
+  test(`legacy task ID remains readable ${legacyId}`, async (t) => {
+    const context = await fixture(t);
+    const initial = {
+      ...draft([
+        {
+          id: legacyId,
+          candidate: { evidence: "Saved legacy payload." },
+          reason: "Pending validation.",
+        },
+      ]),
+      complete: false,
+    };
+    initial.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, initial);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: false,
+    });
+    const saved = await readCoverage(context);
+    assert.equal(saved.deferred[0].id, legacyId);
+    assert.equal(saved.deferred[0].candidate.evidence, "Saved legacy payload.");
+  });
+}
+
+for (const changed of [true, false]) {
+  test(`reopened sibling findings retain all evidence changed=${changed}`, async (t) => {
+    const reviewed = candidate("sibling-review", "reportable");
+    const context = await fixture(t, [reviewed]);
+    const first = {
+      ...finding(reviewed.candidate_id),
+      identity: { anchor: "shared-anchor", instance: "first" },
+      summary: "First saved sibling evidence.",
+    };
+    const second = {
+      ...finding(reviewed.candidate_id),
+      identity: { anchor: "shared-anchor", instance: "second" },
+      summary: "Second saved sibling evidence.",
+    };
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: true,
+      findings: [first, second],
+    });
+    if (changed)
+      await writeLedger(context, [
+        candidate(reviewed.candidate_id, "deferred"),
+      ]);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: false,
+      });
+      const text = changed
+        ? JSON.stringify((await readCoverage(context)).deferred)
+        : await readFile(path.join(context.root, "findings.json"), "utf8");
+      assert.ok(text.includes(first.summary));
+      assert.ok(text.includes(second.summary));
+    }
+  });
+}
+
+for (const sharedCandidate of [true, false]) {
+  test(`Deep reduction retains distinct proof gaps sharedCandidate=${sharedCandidate}`, () => {
+    const rows = [
+      {
+        id: "first-gap",
+        candidateId: "same-review",
+        sourceWorkerId: "worker-one",
+        reason: "First proof gap.",
+        candidate: { evidence: "First source evidence." },
+      },
+      {
+        id: "second-gap",
+        candidateId: sharedCandidate ? "same-review" : "different-review",
+        sourceWorkerId: "worker-one",
+        reason: "Second proof gap.",
+        candidate: { evidence: "Second source evidence." },
+      },
+    ];
+    const discovery = {
+      ...draft(),
+      complete: true,
+      unresolvedCandidates: rows,
+    };
+    delete (discovery as FixtureObject).coverage;
+    const reducer = { ...draft(), complete: true };
+    delete (reducer as FixtureObject).coverage;
+    const actual = reconcileDeepReduction(
+      reducer,
+      [{ workerId: "worker-one", result: discovery }],
+      null,
+    );
+    assert.deepEqual(actual.unresolvedCandidates, rows);
   });
 }

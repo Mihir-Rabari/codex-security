@@ -95,6 +95,12 @@ export const scanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
+const coverageCandidateIdSchema = loadArtifactZodSchema(
+  schemaDocuments,
+  commonSchema.$id,
+  "candidateId",
+);
+
 export const completedScanInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   scanDraftDocument.$id,
@@ -2043,7 +2049,11 @@ export function parsePersistedScanDraft(
     if (!isObject(finding)) continue;
     normalizePersistedFindingDetails(finding);
   }
-  return parseScanDraftDocument(compatible);
+  const parsed = parseScanDraftDocument(compatible);
+  parsed.coverage.deferred = (parsed.coverage.deferred as JsonObject[]).map(
+    normalizeLegacyCandidateEntry,
+  );
+  return parsed;
 }
 
 function parsePersistedCheckpoint(
@@ -2568,6 +2578,17 @@ function normalizeCheckpointCoverage(coverage: JsonObject): JsonObject {
   return normalized;
 }
 
+function normalizeLegacyCandidateEntry(item: JsonObject): JsonObject {
+  if (
+    item.candidateId === undefined &&
+    typeof item.id === "string" &&
+    (isObject(item.candidate) || isObject(item.finding)) &&
+    coverageCandidateIdSchema.safeParse(item.id).success
+  )
+    return { ...item, candidateId: item.id };
+  return item;
+}
+
 function normalizeCoverageEntries(coverage: JsonObject): JsonObject {
   const surfaces = coverage.surfaces as JsonObject[];
   const reservedSurfaceIds = new Set(
@@ -2611,12 +2632,7 @@ function normalizeCoverageEntries(coverage: JsonObject): JsonObject {
     ),
   );
   const normalizedDeferred = deferred.map((item) => {
-    if (
-      item.candidateId === undefined &&
-      typeof item.id === "string" &&
-      (isObject(item.candidate) || isObject(item.finding))
-    )
-      item = { ...item, candidateId: item.id };
+    item = normalizeLegacyCandidateEntry(item);
     const linked = Array.isArray(item.surfaceIds)
       ? {
           ...item,

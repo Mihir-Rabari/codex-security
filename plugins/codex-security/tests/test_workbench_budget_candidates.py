@@ -797,3 +797,62 @@ def test_budget_exhaustion_preserves_authored_changes_to_generated_decisions(
     assert surface["disposition"] == "not_applicable"
     assert surface[field] == "Authored decision detail."
     assert coverage["deferred"] == []
+
+
+@pytest.mark.parametrize("original_decision", ["deferred", "suppressed"])
+@pytest.mark.parametrize("decision", ["deferred", "suppressed", "not_applicable"])
+@pytest.mark.parametrize("edited_field", [None, "label", "notes"])
+def test_legacy_budget_surface_reconciles_generated_identity(
+    workbench_api: dict[str, Any], original_decision: str, decision: str, edited_field: str | None
+) -> None:
+    preserve_budget_candidates = workbench_api["saved_results"].preserve_budget_candidates
+
+    candidate = {
+        "candidate_id": "legacy-review",
+        "summary": "Saved synthetic candidate review",
+        "evidence": "Saved synthetic source evidence.",
+        "locations": [{"path": "app.py", "startLine": 1}],
+        "validation": {"disposition": original_decision},
+    }
+    # The previous budget writer emitted this ID, label and evidence without a payload.
+    surface = {
+        "id": "candidate-legacy-review",
+        "label": candidate["summary"],
+        "disposition": "needs_follow_up" if original_decision == "deferred" else "rejected",
+        "notes": candidate["evidence"],
+        "receiptRefs": [],
+        "annotation": "Retain this saved annotation.",
+    }
+    if edited_field is not None:
+        surface[edited_field] = "Authored review detail remains authoritative."
+    original = dict(surface)
+    deferred = []
+    if original_decision == "deferred":
+        deferred.append(
+            {
+                "id": candidate["candidate_id"],
+                "candidateId": candidate["candidate_id"],
+                "reason": "Validation was deferred because the scan reached its cost limit: "
+                f"{candidate['summary']}. Evidence: {candidate['evidence']}",
+                "paths": ["app.py"],
+                "surfaceIds": [surface["id"]],
+            }
+        )
+    coverage = {"surfaces": [surface], "explicitExclusions": [], "deferred": deferred}
+    updated = {**candidate, "validation": {"disposition": decision}}
+    preserve_budget_candidates(coverage, [], [updated])
+    retained = next(row for row in coverage["surfaces"] if row["id"] == original["id"])
+    if edited_field is not None:
+        assert retained == original
+        return
+    assert len(coverage["surfaces"]) == 1
+    assert retained["candidateId"] == candidate["candidate_id"]
+    assert retained["disposition"] == (
+        "needs_follow_up"
+        if decision == "deferred"
+        else "not_applicable"
+        if decision == "not_applicable"
+        else "rejected"
+    )
+    assert retained["annotation"] == original["annotation"]
+    assert retained["candidate"] == updated
