@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
 from workbench_findings import find_potential_duplicates, store_dedupe_groups
 
@@ -124,3 +128,7 @@ def prepare(
             }
         )
     return {"entries": entries}
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()

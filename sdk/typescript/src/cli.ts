@@ -4030,7 +4030,9 @@ export async function main(
           errorOutput.write(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
-                ? "Deduplication canceled. Findings are unchanged."
+                ? options.findingsUrl === undefined
+                  ? "Deduplication canceled. Completed local preparation is saved for retry."
+                  : "Deduplication canceled. Findings are unchanged."
                 : diagnosticValue(error)
             }\n`,
           );
