@@ -14,11 +14,15 @@ import {
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import fc from "fast-check";
-import { ContractValidationError, loadContract } from "../src/index.js";
+import {
+  ContractValidationError,
+  loadContract,
+  ScanResult,
+} from "../src/index.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { runPython } from "./support/python-probe.js";
+import { runPython, runPythonJsonProbe } from "./support/python-probe.js";
 import { propertyOptions } from "./support/property.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
@@ -1555,6 +1559,8 @@ describe("canonical scan contract", () => {
 
 for (const sourceWorkerId of [
   "",
+  " ",
+  "worker-a",
   { worker: "synthetic-worker" },
   ["synthetic-worker"],
   null,
@@ -1567,6 +1573,7 @@ for (const sourceWorkerId of [
     coverage["deferred"] = [
       {
         id: "historical-review",
+        candidateId: "historical-candidate",
         reason: "Historical saved review remains pending.",
         sourceWorkerId,
         surfaceIds: [coverage["surfaces"][0]["id"]],
@@ -1582,6 +1589,20 @@ for (const sourceWorkerId of [
     expect(loaded.coverage.deferred[0]!["sourceWorkerId"]).toEqual(
       sourceWorkerId,
     );
+    const pythonPending = runPythonJsonProbe(
+      "import json,sys; sys.path.insert(0,sys.argv[1]); from candidate_identity import unresolved_candidates; value=json.loads(sys.argv[2]); print(json.dumps(unresolved_candidates(value['coverage'],value['findings'])))",
+      { coverage: loaded.coverage, findings: loaded.findings.findings },
+    );
+    const result = new ScanResult({
+      ...loaded,
+      scanDir,
+      threadId: "saved-thread",
+      turnResult: {},
+    });
+    expect(result.unresolvedCandidates).toEqual(pythonPending);
+    expect(result.toJSON()).toMatchObject({
+      unresolvedCandidateCount: (pythonPending as unknown[]).length,
+    });
     const exported = pythonExport(scanDir);
     expect(exported.exitCode).toBe(0);
     expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);

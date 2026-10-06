@@ -221,6 +221,29 @@ describe("ScanResult", () => {
     },
   );
 
+  test.each(
+    [null, [], { imported: "worker" }, "", " ", "worker-a"].map((owner) => ({
+      owner,
+    })),
+  )("projects saved deferred owner metadata consistently: %j", ({ owner }) => {
+    const result = fakeResult([]);
+    result.coverage.deferred = [
+      {
+        id: "saved-gap",
+        candidateId: "pending",
+        sourceWorkerId: owner,
+        reason: "Saved proof gap remains open.",
+      },
+    ];
+    const saved = structuredClone(result.coverage);
+    const expected = owner === null || typeof owner === "string" ? 1 : 0;
+    expect(result.unresolvedCandidateCount).toBe(expected);
+    expect(result.toJSON()).toMatchObject({
+      unresolvedCandidateCount: expected,
+    });
+    expect(result.coverage).toEqual(saved);
+  });
+
   test("excludes blank candidate identities without changing saved deferred work", () => {
     const result = fakeResult([]);
     result.coverage.deferred = [

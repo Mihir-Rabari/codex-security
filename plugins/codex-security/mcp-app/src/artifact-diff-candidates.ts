@@ -294,6 +294,14 @@ export function preserveDiffCandidateDecisions(
     }
   }
   const dismissed = new Set<string>();
+  for (const item of [
+    ...(input.coverage.surfaces as JsonObject[]),
+    ...(input.coverage.explicitExclusions as JsonObject[]),
+  ]) {
+    if (!isTerminalCandidateDecision(item)) continue;
+    const key = coverageCandidateKey(item)!;
+    if (!accepted.has(key)) dismissed.add(key);
+  }
   const retainDecision = (item: JsonObject) =>
     !isTerminalCandidateDecision(item) ||
     !accepted.has(coverageCandidateKey(item));

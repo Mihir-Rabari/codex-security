@@ -685,6 +685,13 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
             )
 
 
+def _append_finding_history(value: dict[str, Any], finding: dict[str, Any]) -> None:
+    if not isinstance(value.get("previousFindings"), list):
+        value["previousFindings"] = []
+    if finding not in value["previousFindings"]:
+        value["previousFindings"].append(finding)
+
+
 def _bind_finding_worker(
     finding: dict[str, Any], worker_id: str, original: dict[str, Any] | None = None
 ) -> None:
@@ -692,10 +699,7 @@ def _bind_finding_worker(
     if "sourceWorkerId" in provenance and provenance["sourceWorkerId"] != worker_id:
         # Imported ownership remains evidence; the bound source owns the candidate.
         previous = copy.deepcopy(original if original is not None else finding)
-        if not isinstance(provenance.get("previousFindings"), list):
-            provenance["previousFindings"] = []
-        if previous not in provenance["previousFindings"]:
-            provenance["previousFindings"].append(previous)
+        _append_finding_history(provenance, previous)
     provenance["sourceWorkerId"] = worker_id
     provenance.setdefault("workerId", worker_id)
 
@@ -1080,26 +1084,17 @@ def _reconcile_stopped_diff_sources(
                     and isinstance(current_marker, dict)
                     and marker != current_marker
                 ):
-                    if not isinstance(state[1]["provenance"].get("previousFindings"), list):
-                        state[1]["provenance"]["previousFindings"] = []
-                    history = state[1]["provenance"]["previousFindings"]
-                    if finding not in history:
-                        history.append(finding)
+                    _append_finding_history(state[1]["provenance"], finding)
                 else:
                     retained.append(finding)
             elif state[0] == "deferred":
-                retained_finding = state[1].setdefault("finding", finding)
+                retained_finding = state[1].get("finding")
+                if not isinstance(retained_finding, dict):
+                    retained_finding = state[1]["finding"] = finding
                 if finding not in _retained_findings(retained_finding):
-                    provenance = retained_finding.setdefault("provenance", {})
-                    if not isinstance(provenance.get("previousFindings"), list):
-                        provenance["previousFindings"] = []
-                    history = provenance["previousFindings"]
-                    if finding not in history:
-                        history.append(finding)
+                    _append_finding_history(retained_finding.setdefault("provenance", {}), finding)
             else:
-                history = state[1].setdefault("previousFindings", [])
-                if finding not in history:
-                    history.append(finding)
+                _append_finding_history(state[1], finding)
         result["findings"] = retained
         for field in ("surfaces", "explicitExclusions", "deferred"):
             items = result["coverage"].get(field)

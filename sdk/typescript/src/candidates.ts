@@ -71,7 +71,9 @@ export function unresolvedCandidates(
   for (const candidate of coverage.deferred) {
     if (
       typeof candidate.candidateId !== "string" ||
-      !candidate.candidateId.trim()
+      !candidate.candidateId.trim() ||
+      (candidate["sourceWorkerId"] != null &&
+        typeof candidate["sourceWorkerId"] !== "string")
     )
       continue;
     const key = candidateIdentity(

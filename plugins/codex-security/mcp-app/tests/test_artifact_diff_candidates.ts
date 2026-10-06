@@ -2657,3 +2657,63 @@ print(json.dumps(started))
     });
   }
 }
+
+for (const disposition of ["rejected", "not_applicable"]) {
+  for (const ledgerDisposition of ["reportable", undefined]) {
+    for (const renewedFinding of [false, true]) {
+      test(`authored checkpoint ${disposition} supersedes saved finding with ledger=${ledgerDisposition ?? "unreviewed"}, renewed=${renewedFinding}`, async (t) => {
+        const reviewed = candidate("checkpoint-dismissal", ledgerDisposition);
+        const context = await fixture(t, [reviewed]);
+        await recordCodexSecurityScanDraft(context, {
+          ...draft(),
+          complete: true,
+          findings: [finding(reviewed.candidate_id)],
+        });
+        const next = { ...draft(), complete: false };
+        next.coverage.surfaces.push({
+          candidateId: reviewed.candidate_id,
+          label: "Authored checkpoint review",
+          disposition,
+          notes: "Current authored terminal rationale.",
+        });
+        if (renewedFinding) next.findings = [finding(reviewed.candidate_id)];
+        await recordCodexSecurityScanDraft(context, next);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const findings = JSON.parse(
+            await readFile(path.join(context.root, "findings.json"), "utf8"),
+          ).findings;
+          const saved = await readCoverage(context);
+          assert.equal(findings.length, renewedFinding ? 1 : 0);
+          const decisions = saved.surfaces.filter(
+            (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+          );
+          if (renewedFinding) {
+            assert.equal(
+              decisions.filter((row: FixtureObject) =>
+                ["rejected", "not_applicable"].includes(row.disposition),
+              ).length,
+              0,
+            );
+          } else {
+            assert.equal(decisions.length, 1);
+            assert.equal(decisions[0].disposition, disposition);
+            assert.equal(
+              decisions[0].notes,
+              "Current authored terminal rationale.",
+            );
+            assert.ok(
+              JSON.stringify(decisions[0]).includes(
+                "The synthetic review has reached a final finding.",
+              ),
+            );
+          }
+          if (attempt === 0)
+            await recordCodexSecurityScanDraft(context, {
+              ...draft(),
+              complete: true,
+            });
+        }
+      });
+    }
+  }
+}

@@ -856,3 +856,49 @@ def test_legacy_budget_surface_reconciles_generated_identity(
     )
     assert retained["annotation"] == original["annotation"]
     assert retained["candidate"] == updated
+
+
+@pytest.mark.parametrize("snapshot", ["authored-partial", "generated-complete"])
+def test_budget_completion_preserves_authored_partial_candidate_snapshot(
+    tmp_path: Path, workbench_api: dict[str, Any], snapshot: str
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    original = json.loads(ledger.read_text())
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    partial = {field: original[field] for field in ("candidate_id", "summary", "evidence")}
+    if snapshot == "authored-partial":
+        for field in ("surfaces", "deferred"):
+            coverage[field][0]["candidate"] = partial
+        coverage["deferred"][0]["reason"] = "Keep the authored proof gap."
+        coverage_path.write_text(json.dumps(coverage))
+    current = {**original, "summary": "Updated review", "evidence": "Updated source evidence."}
+    ledger.write_text(json.dumps(current) + "\n")
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["candidates"]["unresolved"] == 1
+    restored = json.loads(coverage_path.read_text())
+    pending = next(
+        row for row in restored["deferred"] if row.get("candidateId") == original["candidate_id"]
+    )
+    surface = next(
+        row for row in restored["surfaces"] if row.get("candidateId") == original["candidate_id"]
+    )
+    if snapshot == "authored-partial":
+        assert pending["candidate"] == partial
+        assert pending["reason"] == "Keep the authored proof gap."
+        assert surface["candidate"] == partial
+        assert surface["label"] == original["summary"]
+        assert surface["notes"] == original["evidence"]
+    else:
+        assert pending["candidate"] == current
+        assert surface["candidate"] == current
+        assert surface["label"] == current["summary"]
+        assert surface["notes"] == current["evidence"]
+        assert pending["paths"] == ["app.py"]

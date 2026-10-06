@@ -1405,3 +1405,63 @@ def test_stopped_diff_retains_generic_exclusion_extensions(
     assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
     assert (scan_dir / "report.md").is_file()
     assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
+
+
+@pytest.mark.parametrize("decision", ["deferred", "rejected", "not_applicable"])
+@pytest.mark.parametrize("saved_shape", ["null", "scalar", "canonical"])
+def test_stopped_diff_recovers_nullable_authored_finding_history(
+    tmp_path: Path, decision: str, saved_shape: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original = saved.read_bytes()
+    value = None if saved_shape == "null" else "Legacy annotation."
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], explicitExclusions=[], deferred=[])
+    if decision == "deferred":
+        coverage["deferred"] = [
+            {
+                "id": "authored-gap",
+                "candidateId": candidate["candidate_id"],
+                "reason": "Authored proof gap remains open.",
+                "finding": finding if saved_shape == "canonical" else value,
+            }
+        ]
+    else:
+        coverage["surfaces"] = [
+            {
+                "id": "authored-terminal",
+                "candidateId": candidate["candidate_id"],
+                "label": "Authored terminal review",
+                "disposition": decision,
+                "receiptRefs": [],
+                "notes": "Authored terminal rationale.",
+                "previousFindings": [finding] if saved_shape == "canonical" else value,
+            }
+        ]
+    coverage_path.write_text(json.dumps(coverage))
+    ledger.unlink()
+
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    for attempt in range(2):
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 0
+        assert scan["progress"]["candidates"]["unresolved"] == int(decision == "deferred")
+        restored = json.loads(coverage_path.read_text())
+        rows = restored["deferred" if decision == "deferred" else "surfaces"]
+        row = next(item for item in rows if item.get("candidateId") == candidate["candidate_id"])
+        if decision == "deferred":
+            assert row["finding"] == finding
+            assert row["reason"] == "Authored proof gap remains open."
+        else:
+            assert row["previousFindings"] == [finding]
+            assert row["disposition"] == decision
+            assert row["notes"] == "Authored terminal rationale."
+        if attempt == 0:
+            run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert saved.read_bytes() == original

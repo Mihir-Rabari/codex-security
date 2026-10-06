@@ -17,6 +17,11 @@ def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
     candidate = item.get("candidate")
     return (
         isinstance(candidate, dict)
+        and isinstance(candidate.get("locations"), list)
+        and all(
+            isinstance(location, dict) and isinstance(location.get("path"), str)
+            for location in candidate["locations"]
+        )
         and item.get("candidateId") == candidate.get("candidate_id")
         and item.get("disposition") == (diff_candidate_disposition(candidate) or "needs_follow_up")
         and item.get("label") == candidate.get("summary")
