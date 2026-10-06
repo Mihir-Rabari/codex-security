@@ -368,6 +368,8 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
         expected = absolute.lstat()
         canonical = absolute.resolve(strict=True)
     except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise
         raise _invalid_path(scan_dir, "expected an existing scan directory") from exc
     if _normalized_windows_path(absolute) != _normalized_windows_path(canonical):
         raise _invalid_path(scan_dir, "scan directory must be canonical and non-reparse")

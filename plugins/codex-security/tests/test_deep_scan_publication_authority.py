@@ -7,7 +7,6 @@ import os
 import sys
 import uuid
 from argparse import Namespace
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -224,14 +223,17 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False)
     backend = finalizer._windows_scan_local_files()
     paths = {}
     pending_deletions = set()
-
-    @contextmanager
-    def locked_parent(scan_dir, relative_path, **kwargs):
-        parts = backend._validated_parts(relative_path)
-        yield scan_dir.joinpath(*parts[:-1]), parts[-1]
+    next_directory_handle = -1
 
     def create_file(path, **kwargs):
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        nonlocal next_directory_handle
+        if kwargs["disposition"] == backend._OPEN_EXISTING:
+            if kwargs.get("missing_ok") and not path.exists():
+                return None
+            descriptor = next_directory_handle
+            next_directory_handle -= 1
+        else:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         paths[descriptor] = path
         return backend._OwnedHandle(descriptor)
 
@@ -240,27 +242,29 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False)
         paths[handle] = destination
 
     def close_handle(handle):
-        os.close(handle)
+        if handle >= 0:
+            os.close(handle)
         if handle in pending_deletions:
             paths[handle].unlink()
 
+    def attributes(handle):
+        path = paths[handle]
+        flags = backend._FILE_ATTRIBUTE_DIRECTORY if path.is_dir() else 0
+        if path.is_symlink() or (reparse_point and not path.is_dir()):
+            flags |= backend._FILE_ATTRIBUTE_REPARSE_POINT
+        return SimpleNamespace(FileAttributes=flags)
+
     monkeypatch.setattr(finalizer, "_descriptor_relative_writes_available", lambda: False)
     monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
-    monkeypatch.setattr(backend, "_locked_parent", locked_parent)
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
     monkeypatch.setattr(backend, "_validate_existing_output", lambda path: None)
     monkeypatch.setattr(backend, "_create_file", create_file)
     monkeypatch.setattr(backend, "_close_handle", close_handle)
-    monkeypatch.setattr(
-        backend,
-        "_attributes",
-        lambda handle: SimpleNamespace(
-            FileAttributes=backend._FILE_ATTRIBUTE_REPARSE_POINT if reparse_point else 0
-        ),
-    )
+    monkeypatch.setattr(backend, "_attributes", attributes)
     monkeypatch.setattr(
         backend, "_GetFileType", lambda handle: backend._FILE_TYPE_DISK, raising=False
     )
-    monkeypatch.setattr(backend, "_verify_handle_path", lambda *args: None)
+    monkeypatch.setattr(backend, "_final_path", lambda handle, **kwargs: str(paths[handle]))
     monkeypatch.setattr(backend, "_write_all", os.write)
     monkeypatch.setattr(backend, "_rename_handle", rename_handle)
     monkeypatch.setattr(backend, "_mark_handle_for_deletion", pending_deletions.add)
@@ -397,6 +401,104 @@ def test_receipt_io_failure_preserves_successful_publication(
     assert len(failures) == 1
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
     assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
+@pytest.mark.parametrize("operation", ["lstat", "resolve"])
+@pytest.mark.parametrize("failure", ["io", "missing", "not-directory", "loop"])
+def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    tmp_path,
+    workflow,
+    operation,
+    failure,
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
+            "WHERE scan_id = ?",
+            (workflow, scan.scan_id),
+        )
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    bad_root = tmp_path / "invalid-root"
+    if failure == "not-directory":
+        bad_root.write_text("ordinary file")
+        bad_root /= "child"
+    elif failure == "loop":
+        try:
+            bad_root.symlink_to(bad_root, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"creating a synthetic symlink loop requires host support: {exc}")
+        bad_root /= "child"
+    saved = workbench_api["saved_results"]
+    original_write = saved.write_scan_local_bytes
+    finalizer = sys.modules[original_write.__module__]
+    published = {}
+    probes = []
+
+    def write_file(scan_dir, filename, contents):
+        if not filename.endswith(".accepted.json"):
+            return original_write(scan_dir, filename, contents)
+        published.update(
+            (path, path.read_bytes())
+            for path in scan_dir.rglob("*.json")
+            if "drafts" not in path.parts
+        )
+        assert json.loads(published[scan_dir / "findings.json"])["findings"][0]["title"] == (
+            "Accepted aggregate"
+        )
+        with monkeypatch.context() as patch:
+            backend = emulate_windows_atomic_write(patch, finalizer)
+            original_probe = backend._canonical_scan_directory
+            original_operation = getattr(Path, operation)
+
+            def fail_root(path, *args, **kwargs):
+                if path == scan_dir:
+                    probes.append(operation)
+                    if failure == "io":
+                        raise OSError(errno.EIO, "Synthetic receipt root I/O failure", str(path))
+                    # Exercise actual missing, non-directory, and loop errors without
+                    # changing the already accepted canonical artifacts.
+                    return original_operation(bad_root, *args, **kwargs)
+                return original_operation(path, *args, **kwargs)
+
+            def probe_root(path):
+                # The common finalizer root check has succeeded. Keep the real
+                # Windows locked-parent and canonical probe in the call path.
+                with monkeypatch.context() as probe_patch:
+                    probe_patch.setattr(Path, operation, fail_root)
+                    return original_probe(path)
+
+            patch.setattr(backend, "_canonical_scan_directory", probe_root)
+            return original_write(scan_dir, filename, contents)
+
+    monkeypatch.setattr(saved, "write_scan_local_bytes", write_file)
+    if failure == "io":
+        assert saved.write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+        ) == {"scanId": scan.scan_id, "status": "draft_written"}
+    else:
+        # Python versions before 3.13 report resolve loops as RuntimeError.
+        expected_errors = (
+            (finalizer.ContractError, RuntimeError)
+            if failure == "loop" and operation == "resolve"
+            else finalizer.ContractError
+        )
+        with pytest.raises(expected_errors, match="existing scan directory|Symlink loop"):
+            saved.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
+    assert probes == [operation]
+    assert published
+    assert {path: path.read_bytes() for path in published} == published
+    assert not list((scan.scan_dir / "drafts").glob("*.accepted.json"))
 
 
 @pytest.mark.parametrize("failure", ["validation", "unsafe-path", "windows-reparse-emulated"])
