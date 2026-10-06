@@ -169,6 +169,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       scenario === "text-only" ||
       scenario === "refusal-text" ||
       scenario === "policy-refusal-text" ||
+      scenario === "policy-first-refusal-text" ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -186,9 +187,11 @@ for await (const line of createInterface({ input: process.stdin })) {
             text:
               scenario === "refusal-text"
                 ? "I'm sorry, but I can't assist with that request."
-                : scenario === "policy-refusal-text"
-                  ? "This request was refused because of the safety policy."
-                  : '{"decision":"SAME"}',
+                : scenario === "policy-first-refusal-text"
+                  ? "Cybersecurity policy: this request is refused."
+                  : scenario === "policy-refusal-text"
+                    ? "This request was refused because of the safety policy."
+                    : '{"decision":"SAME"}',
           },
         },
       });

@@ -30,6 +30,7 @@ const failureReasons: Record<string, string> = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-refusal-text":
     "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -503,6 +504,9 @@ test.each([
   "This request was refused because of the safety policy.",
   "The content policy requires refusal of this request.",
   "Under the safety policy, this request is refused.",
+  "Cybersecurity policy: this request is refused.",
+  "Content policy: your request has been blocked.",
+  "Safety policy: the request was refused.",
   "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
@@ -527,6 +531,8 @@ test.each([
   "Connection refused",
   "Connection refused while fetching content-policy.ts",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
+  "Cybersecurity policy: this request is invalid.",
+  "Content policy: connection refused while fetching the source.",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(false);
