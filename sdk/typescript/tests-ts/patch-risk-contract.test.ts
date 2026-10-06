@@ -702,13 +702,20 @@ describe("patch risk assessment contract", () => {
     expect(result.stderr).toContain(`duplicate JSON object key: ${key}`);
   });
 
-  test("preserves decoded duplicate-key diagnostic text", () => {
-    const key = "field\u001b";
-    const encoded = JSON.stringify(key);
-    const result = validateText(`{${encoded}:1,${encoded}:2}`);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toBe(`duplicate JSON object key: ${key}\n`);
-  });
+  test.each([
+    ["ordinary", 'field "quoted"', 'field "quoted"'],
+    ["escape", "field\u001b[2J", "field\\u001b[2J"],
+    ["C1", "field\u009b2J", "field\\u009b2J"],
+    ["bidirectional", "field\u202e", "field\\u202e"],
+  ])(
+    "preserves duplicate-key diagnostic text with escaped controls: %s",
+    (_label, key, display) => {
+      const encoded = JSON.stringify(key);
+      const result = validateText(`{${encoded}:1,${encoded}:2}`);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(`duplicate JSON object key: ${display}\n`);
+    },
+  );
 
   test("allows repeated names in separate objects and key-like string contents", () => {
     const payload = assessment();

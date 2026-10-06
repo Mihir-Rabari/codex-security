@@ -8,7 +8,7 @@ import {
   readFile,
 } from "./helper-files";
 import { decodePosixBytes } from "./posix-path";
-import { object, parseJson } from "./json";
+import { escapeControls, object, parseJson } from "./json";
 
 interface Assessment {
   recommendation: "merge" | "revise" | "no_op" | "block" | "hold_for_evidence";
@@ -156,7 +156,8 @@ function readAssessment(path: string): unknown {
         if (!/^\s*:/u.test(text.slice(index + 1))) continue;
         const key = JSON.parse(text.slice(start, index + 1)) as string;
         const keys = objects.at(-1)!;
-        if (keys.has(key)) throw new Error(`duplicate JSON object key: ${key}`);
+        if (keys.has(key))
+          throw new Error(`duplicate JSON object key: ${escapeControls(key)}`);
         keys.add(key);
       }
     }
