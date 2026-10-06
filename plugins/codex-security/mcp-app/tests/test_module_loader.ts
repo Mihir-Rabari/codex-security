@@ -1,27 +1,47 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { importSource } from "./import-module.ts";
+import { promisify } from "node:util";
 
-test("loads modules and relative dependencies from paths containing spaces", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "test module paths "));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(
-    path.join(root, "dependency.ts"),
-    "export const value: number = 42;",
+const exec = promisify(execFile);
+
+test("loads the coordinator fixture from a checkout path containing spaces", async (t) => {
+  const checkout = await mkdtemp(path.join(tmpdir(), "test module paths "));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
+  const tests = path.join(checkout, "tests");
+  await mkdir(tests);
+  for (const entry of [
+    "deep_scan_coordinator_fixture.ts",
+    "import-module.ts",
+    "support",
+  ]) {
+    await cp(
+      path.join(applicationRoot, "tests", entry),
+      path.join(tests, entry),
+      { recursive: true },
+    );
+  }
+  for (const entry of ["src", "node_modules"]) {
+    await symlink(
+      path.join(applicationRoot, entry),
+      path.join(checkout, entry),
+      "junction",
+    );
+  }
+  const fixture = pathToFileURL(
+    path.join(tests, "deep_scan_coordinator_fixture.ts"),
   );
-  await writeFile(path.join(root, "note.md"), "Résumé with spaces");
-  const entry = path.join(root, "entry.ts");
-  await writeFile(
-    entry,
-    'export { value } from "./dependency.ts"; export { default as note } from "./note.md";',
-  );
-  const module = await importSource(fileURLToPath(pathToFileURL(entry)), {
-    loader: { ".md": "text" },
-  });
-  assert.equal(module.value, 42);
-  assert.equal(module.note, "Résumé with spaces");
+  const { stdout } = await exec(process.execPath, [
+    "--experimental-strip-types",
+    "--input-type=module",
+    "-e",
+    'const fixture = await import(process.argv[1]); if (typeof fixture.DeepScanCoordinator !== "function") throw new Error("Coordinator fixture was not loaded.");',
+    fixture.href,
+  ]);
+  assert.equal(stdout, "");
 });
