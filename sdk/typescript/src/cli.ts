@@ -1876,7 +1876,7 @@ export async function main(
         if (tokenArguments.length > 0) {
           const formatted = captureOutput();
           let handled = false;
-          await Cli.create("codex-security")
+          await Cli.create("codex-security-argument-error")
             .command("scan", {
               run({ error: incurError }) {
                 handled = true;
@@ -5930,25 +5930,21 @@ export async function main(
   }
 
   let notice: UpdateNotice | undefined;
+  const frameworkArguments = argv.flatMap((argument) => {
+    if (
+      !/^--(?:format|filter-output|token-limit|token-offset)=/u.test(argument)
+    )
+      return [argument];
+    const separator = argument.indexOf("=");
+    return [argument.slice(0, separator), argument.slice(separator + 1)];
+  });
   try {
-    await cli.serve(
-      argv.flatMap((argument) => {
-        if (
-          !/^--(?:format|filter-output|token-limit|token-offset)=/u.test(
-            argument,
-          )
-        )
-          return [argument];
-        const separator = argument.indexOf("=");
-        return [argument.slice(0, separator), argument.slice(separator + 1)];
-      }),
-      {
-        stdout: frameworkCapture.stream.write,
-        exit: (code) => {
-          frameworkExit = code;
-        },
+    await cli.serve(frameworkArguments, {
+      stdout: frameworkCapture.stream.write,
+      exit: (code) => {
+        frameworkExit = code;
       },
-    );
+    });
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);
     }
@@ -5962,8 +5958,35 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
+      let argumentFailure = frameworkOutput;
+      if (
+        scanJsonFormat !== undefined &&
+        (/^\d+\s*$/u.test(argumentFailure) ||
+          argumentFailure.includes("[truncated: showing tokens"))
+      ) {
+        // A rendered count or slice cannot retain the validation diagnostic.
+        // Validation already failed before the handler; replay it without the
+        // valid output transforms, then normalize and render the failure once.
+        const rawFailure = captureOutput();
+        const validationArguments: string[] = [];
+        for (let index = 0; index < frameworkArguments.length; index++) {
+          const argument = frameworkArguments[index]!;
+          if (argument === "--token-count") continue;
+          if (/^--token-(?:limit|offset)=/u.test(argument)) continue;
+          if (argument === "--token-limit" || argument === "--token-offset") {
+            index++;
+            continue;
+          }
+          validationArguments.push(argument);
+        }
+        await cli.serve(validationArguments, {
+          stdout: rawFailure.stream.write,
+          exit: () => undefined,
+        });
+        argumentFailure = rawFailure.text();
+      }
       return reportArgumentError(
-        errorMessage(incurErrorMessage(frameworkOutput, scanCommand)),
+        errorMessage(incurErrorMessage(argumentFailure, scanCommand)),
       );
     }
   }

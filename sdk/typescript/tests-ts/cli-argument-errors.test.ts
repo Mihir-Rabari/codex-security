@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Cli, Skill, SyncSkills } from "incur";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
@@ -173,4 +174,137 @@ describe("argument failure token output", () => {
       }
     },
   );
+});
+
+test.each([{ args: ["--mode", "bogus"] }, { args: ["--unknown-option"] }])(
+  "framework validation token operations use the normalized failure: $args",
+  async ({ args }) => {
+    for (const formatArgs of [
+      ["--format", "json"],
+      ["--format=json"],
+      ["--format", "jsonl"],
+      ["--json"],
+    ]) {
+      const format = formatArgs.includes("jsonl") ? "jsonl" : "json";
+      for (const fullOutput of [false, true]) {
+        const deps = dependencies({
+          onConfig: () => {
+            throw new Error("Argument errors must not initialize the scanner.");
+          },
+        });
+        const ordinary = capture();
+        const ordinaryError = capture();
+        const common = [
+          "scan",
+          ...formatArgs,
+          ...(fullOutput ? ["--full-output"] : []),
+          ...args,
+        ];
+        expect(
+          await main(common, ordinary.stream, ordinaryError.stream, deps),
+        ).toBe(2);
+        const value = JSON.parse(ordinary.text());
+        const error = fullOutput ? value.error : value;
+        for (const tokens of [
+          ["--token-count"],
+          ["--token-limit", "4"],
+          ["--token-offset", "4", "--token-limit", "4"],
+        ]) {
+          const expected = capture();
+          await Cli.create("synthetic-token-contract")
+            .command("scan", {
+              run({ error: fail }) {
+                return fullOutput
+                  ? fail({
+                      code: error.code,
+                      message: error.message,
+                      exitCode: 2,
+                    })
+                  : value;
+              },
+            })
+            .serve(
+              [
+                "scan",
+                "--format",
+                format,
+                ...(fullOutput ? ["--full-output"] : []),
+                ...tokens,
+              ],
+              { stdout: expected.stream.write, exit: () => undefined },
+            );
+          const actual = capture();
+          const diagnostic = capture();
+          expect(
+            await main(
+              [...common, ...tokens],
+              actual.stream,
+              diagnostic.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(diagnostic.text()).toContain(error.message);
+          if (fullOutput && !tokens.includes("--token-count")) {
+            const a = JSON.parse(actual.text());
+            const e = JSON.parse(expected.text());
+            delete a.meta.duration;
+            delete e.meta.duration;
+            expect(a).toEqual(e);
+          } else expect(actual.text()).toBe(expected.text());
+        }
+      }
+    }
+  },
+);
+
+test("early token errors do not compare the renderer with installed CLI skills", async () => {
+  const originalHash = Skill.hash;
+  let fullHash: string | undefined;
+  const hash = spyOn(Skill, "hash").mockImplementation((entries) => {
+    const result = originalHash(entries);
+    if (entries.length > 1) fullHash = result;
+    return result;
+  });
+  const stored = spyOn(SyncSkills, "readHash").mockImplementation((name) =>
+    name === "codex-security"
+      ? (fullHash ?? "initial-fixture-hash")
+      : undefined,
+  );
+  const installed = spyOn(SyncSkills, "hasInstalledSkills").mockReturnValue(
+    true,
+  );
+  try {
+    // Capture the real complete registry hash; execution stays behind the fixture.
+    await main(
+      ["scan", "--dry-run", "--json"],
+      capture().stream,
+      capture().stream,
+      dependencies({
+        onConfig: () => {
+          throw new Error("Synthetic registry capture");
+        },
+      }),
+    );
+    expect(fullHash).toBeDefined();
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--token-limit", "999999", "--path"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onConfig: () => {
+            throw new Error("Argument errors must not initialize the scanner.");
+          },
+        }),
+      ),
+    ).toBe(2);
+    const failure = JSON.parse(stdout.text());
+    expect(failure.message).toContain("Missing value");
+    expect(failure).not.toHaveProperty("cta");
+  } finally {
+    hash.mockRestore();
+    stored.mockRestore();
+    installed.mockRestore();
+  }
 });
