@@ -339,6 +339,7 @@ function retainSourceFindings(
 ): void {
   type Finding = Record<string, unknown>;
   const sources = new Map<string, Finding>();
+  const workers = new Set(inputs.discoveries.map((source) => source.workerId));
   for (const discovery of inputs.discoveries) {
     for (const [index, finding] of discovery.result.findings.entries()) {
       const original = structuredClone(finding);
@@ -395,6 +396,29 @@ function retainSourceFindings(
       id,
       finding: structuredClone(sources.get(id)!),
     }));
+    const candidateId = findingCandidateId(finding);
+    if (candidateId !== undefined) {
+      const owners = new Set(
+        refs.flatMap((id) => {
+          const owner = id.slice(0, id.lastIndexOf(":"));
+          return findingCandidateId(sources.get(id)!) === candidateId
+            ? [owner]
+            : [];
+        }),
+      );
+      if (owners.size === 1 && workers.has([...owners][0]!)) {
+        const owner = [...owners][0]!;
+        const previous = structuredClone(finding);
+        const previousOwner = findingCandidateOwner(finding);
+        const previousSource = provenance.sourceWorkerId;
+        provenance.sourceWorkerId = owner;
+        if (
+          (previousOwner !== undefined && previousOwner !== owner) ||
+          (previousSource !== undefined && previousSource !== owner)
+        )
+          preserveFindingDetails(finding, previous);
+      }
+    }
   }
   const missing = [...sources.keys()].filter((id) => !claimed.has(id));
   if (missing.length)

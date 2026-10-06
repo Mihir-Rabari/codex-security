@@ -3,6 +3,8 @@ import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import assert from "node:assert/strict";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
@@ -536,4 +538,156 @@ function retainedFinding(
       sourceFindings,
     },
   };
+}
+
+for (const kind of ["correct", "imported", "merged"]) {
+  const importedOwner = kind !== "correct";
+  const merged = kind === "merged";
+  test(`live two-worker reduction binds retained source ownership ${kind}`, async () => {
+    const root = await temporaryDirectory("deep-live-source-owner-", true);
+    try {
+      const { recordCodexSecurityWorkerScanDraft } = await importSource(
+        fileURLToPath(
+          new URL("../src/artifact-scan-draft.ts", import.meta.url),
+        ),
+      );
+      const { unresolvedCandidates } = await importSource(
+        fileURLToPath(
+          new URL(
+            "../../../../sdk/typescript/src/candidates.ts",
+            import.meta.url,
+          ),
+        ),
+      );
+      const firstFinding = {
+        ...finding("shared-candidate", "src/shared.ts"),
+        provenance: { source: "local_plugin", candidateId: "candidate-shared" },
+      };
+      const pending = {
+        id: "pending-review",
+        candidateId: "candidate-shared",
+        reason: "Independent second worker proof gap.",
+        paths: ["src/shared.ts"],
+      };
+      const workersRoot = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+      );
+      const claimed = [];
+      const originals = new Map<string, string>();
+      for (const [index, findings] of [
+        [0, [firstFinding]],
+        [1, merged ? [firstFinding] : []],
+      ] as const) {
+        const output = path.join(
+          workersRoot,
+          `discovery-000${index + 1}`,
+          "output",
+        );
+        await mkdir(output, { recursive: true });
+        const source = workerDraft([...findings], {
+          complete: true,
+          ...(index === 1 && !merged
+            ? {
+                coverage: {
+                  completeness: "partial",
+                  surfaces: [],
+                  explicitExclusions: [],
+                  deferred: [pending],
+                },
+              }
+            : {}),
+        });
+        await recordCodexSecurityWorkerScanDraft(
+          { root: output, repoRoot: root, layout: "worker", scanId },
+          source,
+        );
+        const resultPath = path.join(output, "result.json");
+        claimed.push({
+          id: index === 0 ? "worker-a" : "worker-b",
+          attempt: 1,
+          resultPath,
+        });
+        originals.set(resultPath, await readFile(resultPath, "utf8"));
+      }
+      const output = path.join(
+        root,
+        "artifacts",
+        "deep_discovery",
+        "dedup",
+        "dedup-0001",
+        "output",
+      );
+      await mkdir(output, { recursive: true });
+      const aggregate = {
+        ...firstFinding,
+        provenance: {
+          ...firstFinding.provenance,
+          sourceWorkerId: importedOwner ? "worker-b" : "worker-a",
+          sourceFindingIds: merged
+            ? ["worker-a:0", "worker-b:0"]
+            : ["worker-a:0"],
+        },
+      };
+      await recordCodexSecurityDeepReduction(
+        {
+          root: output,
+          repoRoot: root,
+          layout: "reducer",
+          scanId,
+          deepReducer: { scanRoot: root, claimedWorkers: claimed },
+        },
+        { scanId, findings: [aggregate] },
+      );
+      const saved = await readJson(path.join(output, "result.json"));
+      if (merged) {
+        assert.equal(saved.unresolvedCandidates, undefined);
+        assert.equal(
+          saved.findings[0].provenance.sourceWorkerId,
+          "worker-b",
+          "two source owners preserve authored merged ownership",
+        );
+        assert.deepEqual(saved.findings[0].provenance.sourceFindingIds, [
+          "worker-a:0",
+          "worker-b:0",
+        ]);
+        for (const [file, bytes] of originals)
+          assert.equal(await readFile(file, "utf8"), bytes);
+        return;
+      }
+      assert.equal(saved.unresolvedCandidates.length, 1);
+      assert.equal(saved.unresolvedCandidates[0].sourceWorkerId, "worker-b");
+      assert.equal(
+        unresolvedCandidates(
+          {
+            surfaces: [],
+            explicitExclusions: [],
+            deferred: saved.unresolvedCandidates,
+          },
+          saved.findings,
+        ).length,
+        1,
+        "worker A confirmation does not resolve worker B proof gap",
+      );
+      assert.equal(saved.findings[0].provenance.sourceWorkerId, "worker-a");
+      assert.deepEqual(saved.findings[0].provenance.sourceFindingIds, [
+        "worker-a:0",
+      ]);
+      if (importedOwner)
+        assert.equal(
+          saved.findings[0].provenance.previousFindings.some(
+            (row: { provenance: { sourceWorkerId?: string } }) =>
+              row.provenance.sourceWorkerId === "worker-b",
+          ),
+          true,
+          "imported provenance remains evidence",
+        );
+      for (const [file, bytes] of originals)
+        assert.equal(await readFile(file, "utf8"), bytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 }

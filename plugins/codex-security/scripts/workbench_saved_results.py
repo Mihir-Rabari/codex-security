@@ -1878,6 +1878,7 @@ def merge_saved_results(
 
     candidate_ids: set[tuple[str | None, str]] = set()
     accepted_deferred_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
+    pending_times = {}
     active_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
     coverage_schema = _read_json(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
@@ -1919,6 +1920,11 @@ def merge_saved_results(
                     accepted_deferred_orders[key] = max(
                         accepted_deferred_orders.get(key, order), order
                     )
+                    if (
+                        item_owner is None
+                        and (candidate := coverage_candidate_key(item)) is not None
+                    ):
+                        pending_times[candidate] = max(pending_times.get(candidate, 0), order[1])
         for closure in _resolved_deferred_rows(draft, coverage_schema["resolvedDeferred"]):
             key = (owner, closure["id"])
             previous = closed_deferred.get(key)
@@ -2636,6 +2642,15 @@ def merge_saved_results(
         ]
 
     reopened_candidates = {key for _, key in inactive_outcomes if key not in resolved}
+    reopened_candidates.update(
+        key
+        for relative, draft, owner in all_sources
+        for value in draft["findings"]
+        if valid_finding(value)
+        and (key := finding_candidate_key(value, owner)) not in resolved
+        and key in pending_times
+        and pending_times[key] >= source_order[relative][1]
+    )
     identities: dict[str, str] = {}
     for finding in findings:
         if not valid_finding(finding):
