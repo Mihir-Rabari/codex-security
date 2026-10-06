@@ -56,7 +56,7 @@ for (const resume of [false, true]) {
             (item) => item.id !== "scan-stopped",
           );
           assert.ok(records.length > 0, field);
-          for (const item of records) {
+          for (const [index, item] of records.entries()) {
             const review = coverage.reviews.find(
               (review) => review.workerId === item.provenance.workerId,
             );
@@ -66,7 +66,7 @@ for (const resume of [false, true]) {
               details: { evidence: ["source review"] },
               workerId: review.workerId,
               attempt: review.attempt,
-              ...(field === "surfaces" ? { sourceId: "shared-surface" } : {}),
+              ...(field === "surfaces" ? { sourceId: index % 2 === 0 ? "shared-surface" : "shared-surface-2" } : {}),
               ...(field === "deferred"
                 ? { sourceId: "same-id", candidateId: "candidate-1" }
                 : {}),

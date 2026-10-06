@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from argparse import Namespace
 
 import pytest
@@ -806,3 +807,71 @@ def test_stopped_recovery_keeps_current_parent_projection(
     published = (scan.scan_dir / "coverage.json").read_bytes()
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
+
+
+@pytest.mark.parametrize("select_head", [False, True])
+def test_matching_accepted_checkpoint_preserves_receipt_path(
+    workbench_api, workbench_db, publication_scan, select_head
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    result = (
+        scan.scan_dir
+        / "artifacts"
+        / "deep_discovery"
+        / "workers"
+        / worker_id
+        / "output"
+        / "result.json"
+    )
+    result.parent.mkdir(parents=True)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(result.parent), str(result), worker_id),
+        )
+    receipt = result.parent / "artifacts" / "evidence.txt"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text("Synthetic source-review evidence.")
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "complete",
+            "deferred": [],
+            "surfaces": [
+                {
+                    "id": "source-review",
+                    "label": "Accepted source review",
+                    "disposition": "no_issue_found",
+                    "receiptRefs": ["artifacts/evidence.txt"],
+                }
+            ],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+    os.utime(result, ns=(100, 100))
+    os.utime(checkpoint, ns=(150, 150))
+    head = result.parent / "checkpoint-head.json"
+    if select_head:
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(200, 200))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    matching = [row for row in coverage["surfaces"] if row.get("label") == "Accepted source review"]
+    assert matching
+    assert all(
+        row["receiptRefs"] == [receipt.relative_to(scan.scan_dir).as_posix()] for row in matching
+    )
+    assert len(matching) == 1
+    assert matching[0]["disposition"] == "no_issue_found"
+    assert receipt.read_text() == "Synthetic source-review evidence."

@@ -103,7 +103,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     return JSON.parse(stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  let { run } = await store.begin({
+  let run = await store.begin({
     targetPath,
     scope: ".",
     threadId,

@@ -16,6 +16,7 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
+import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
   readJsonObject,
@@ -27,6 +28,7 @@ import {
   deepReductionForPersistence,
   parseDeepReduction,
   projectDiscoveryCoverage,
+  parseStoredScanDraft,
   reconcileDeepReduction,
   type DeepReductionInput,
   type DeepReductionSources,
@@ -88,6 +90,8 @@ export async function readDeepReductionSources(
           "Accepted Standard worker " + worker.id,
           bound.scanId,
           parsePersistedScanDraft,
+          " has an invalid Standard scan result: ",
+          " belongs to a different scan.",
         );
         if (result.complete === false)
           throw new Error(
@@ -126,11 +130,6 @@ export async function readDeepReductionSources(
         );
       }
     }
-    if (previous && previous.scanId !== scanId) {
-      throw new Error(
-        "The previous accepted Deep reduction belongs to a different scan.",
-      );
-    }
     return { discoveries, previous };
   });
 }
@@ -142,6 +141,7 @@ export async function recordCodexSecurityDeepReduction(
 ): Promise<{
   findingCount: number;
   consumedWorkerIds: string[];
+  warnings?: string[];
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
@@ -170,9 +170,14 @@ export async function recordCodexSecurityDeepReduction(
     const persisted = deepReductionForPersistence(reduction);
     await saveScanDraftCheckpoint(context, persisted);
     await writeJsonAtomic(bound.resultPath, persisted);
+    const documentWarning = await saveThreatModelDocument(
+      context,
+      reduction.threatModel,
+    );
     return {
       findingCount: reduction.findings.length,
       consumedWorkerIds: bound.state.claimedWorkers.map((worker) => worker.id),
+      ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
     };
   });
 }
@@ -229,28 +234,9 @@ async function readPreviousReduction(
     "The previous accepted Deep reduction",
     bound.scanId,
     (value) => parseDeepReduction(value, true),
+    " has an invalid Standard scan result: ",
+    " belongs to a different scan.",
   );
-}
-
-function parseStoredScanDraft<Result extends DeepReductionInput>(
-  value: Record<string, unknown>,
-  label: string,
-  expectedScanId: string | undefined,
-  parse: (input: Record<string, unknown>) => Result,
-): Result {
-  let parsed: Result;
-  try {
-    parsed = parse(value);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(label + " has an invalid Standard scan result: " + detail, {
-      cause: error,
-    });
-  }
-  if (expectedScanId !== undefined && parsed.scanId !== expectedScanId) {
-    throw new Error(label + " belongs to a different scan.");
-  }
-  return parsed;
 }
 
 async function withLogicalReducerErrors<Result>(
