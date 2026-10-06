@@ -2044,7 +2044,7 @@ describe("CLI", () => {
     expect(text).toContain(
       "100 uncached input, 0 cache reads, 0 cache writes, 10 output, 110 total",
     );
-    expect(text).toContain("unavailable (model pricing missing)");
+    expect(text).toContain("unavailable (model pricing or usage missing)");
   });
 
   test("omits stage and file counts from interactive Deep scan dashboards", async () => {
