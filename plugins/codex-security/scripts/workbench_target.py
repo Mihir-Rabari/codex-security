@@ -51,7 +51,11 @@ def git_output(
     work_tree: Path | None = None,
 ) -> str | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
-    output = os.fsdecode(completed.stdout).removesuffix("\n")
+    output = os.fsdecode(completed.stdout)
+    if sys.platform == "win32" and output.endswith("\r\n"):
+        output = output[:-2]
+    else:
+        output = output.removesuffix("\n")
     return output if completed.returncode == 0 and output else None
 
 
@@ -709,9 +713,13 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
     excluded_relative = []
     for path in excluded:
         try:
-            excluded_relative.append(path.relative_to(repository))
+            relative_path = path.relative_to(repository)
         except ValueError:
-            continue
+            try:
+                relative_path = Path(pathspec) / path.relative_to(source)
+            except ValueError:
+                continue
+        excluded_relative.append(relative_path)
     destination.mkdir()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))

@@ -92,6 +92,54 @@ def test_git_output_decodes_repository_paths_as_utf8(
     assert Path(output) == target
 
 
+@pytest.mark.parametrize("suffix", ["", " ", "\t", "\r", "\n"])
+def test_git_worktree_preserves_path_whitespace(tmp_path: Path, suffix: str) -> None:
+    if os.name == "nt" and suffix:
+        pytest.skip("Windows does not support these trailing path characters")
+    target = tmp_path / f"target{suffix}"
+    revision = initialize_git_repository(target)
+    nested = target / "src"
+    nested.mkdir()
+
+    assert WORKBENCH_TARGET["git_worktree_context"](target) == (target.resolve(), ".")
+    assert WORKBENCH_TARGET["git_worktree_context"](nested) == (target.resolve(), "src")
+    metadata = WORKBENCH_TARGET["git_target_metadata"](target)
+    assert metadata["reviewChangesSupported"] is True
+    assert metadata["revision"] == revision
+    assert metadata["branch"] == "main"
+
+    original_digest = worktree_content_digest(target)
+    (target / "README.md").write_text("changed after commit\n")
+    assert worktree_content_digest(target) != original_digest
+
+
+@pytest.mark.parametrize(
+    ("platform", "stdout", "expected"),
+    [
+        ("linux", b"/repo\r\n", "/repo\r"),
+        ("linux", b"/repo\n\n", "/repo\n"),
+        ("win32", b"C:/repo\r\n", "C:/repo"),
+        ("win32", b"C:/repo\n", "C:/repo"),
+    ],
+)
+def test_git_output_removes_only_the_record_terminator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    stdout: bytes,
+    expected: str,
+) -> None:
+    git_output = WORKBENCH_TARGET["git_output"]
+    monkeypatch.setitem(git_output.__globals__, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setitem(
+        git_output.__globals__,
+        "git_command",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=stdout),
+    )
+
+    assert git_output(tmp_path, "rev-parse", "--show-toplevel") == expected
+
+
 def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)
@@ -471,3 +519,54 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
     with pytest.raises(SystemExit, match="inside its Git working tree"):
         WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("scope", [".", "component"])
+@pytest.mark.parametrize("alias_kind", ["original", "symlink", "case"])
+def test_copy_retains_alias_rooted_gitlink_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, alias_kind: str
+) -> None:
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    scoped = repository / scope
+    scoped.mkdir(exist_ok=True)
+    (scoped / "fixture.py").write_text("synthetic = True\n")
+    submodule = scoped / "submodule"
+    submodule.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    selected = scoped
+    if alias_kind != "original":
+        alias = tmp_path / ("selected-alias" if alias_kind == "symlink" else "REPOSITORY")
+        if alias_kind == "symlink":
+            alias.symlink_to(repository, target_is_directory=True)
+        elif not alias.exists():
+            pytest.skip("filesystem does not support case aliases")
+        selected = alias / scope
+    entries = WORKBENCH_TARGET["git_submodule_entries"](selected)
+    WORKBENCH_TARGET["require_clean_submodule_worktrees"](selected)
+    copy = WORKBENCH_TARGET["copy_git_worktree_files"]
+    calls = []
+
+    def checked_copy(source: Path, destination: Path, excluded: tuple[Path, ...]) -> Path:
+        assert not source.samefile(submodule), "An excluded uninitialized gitlink was traversed"
+        calls.append(source)
+        return copy(source, destination, excluded)
+
+    monkeypatch.setitem(copy.__globals__, "copy_git_worktree_files", checked_copy)
+    selected_exclusions = tuple(path for path, _ in entries)
+    for index, excluded in enumerate({selected_exclusions, (submodule,)}):
+        calls.clear()
+        copied = checked_copy(selected, tmp_path / f"copied-{index}", excluded)
+        assert len(calls) == 1
+        assert (copied / "fixture.py").read_text() == "synthetic = True\n"
+        assert not (copied / "submodule").exists()
