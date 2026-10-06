@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, local
 from unittest import mock
 
 import pytest
@@ -227,14 +227,16 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
 
 
 @pytest.mark.parametrize("target_changes", [False, True])
-def test_prompt_scan_revalidates_target_after_database_lock_wait(
-    tmp_path: Path, target_changes: bool
+@pytest.mark.parametrize("existing_scan", [False, True])
+def test_prompt_scan_revalidates_target_after_concurrent_database_write(
+    tmp_path: Path, target_changes: bool, existing_scan: bool
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     target.mkdir()
     source = target / "fixture.py"
     source.write_text("original\n")
+    saved = create_saved_workspace(state_dir, target)
     namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_lock_test")
     start = namespace["_start_prompt_driven_scan"]
     globals_ = start.__globals__
@@ -257,61 +259,104 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
         reasoning_effort=None,
     )
 
-    acquiring = Event()
-
     def inspect_identity(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 1:
-            # Initial hashing does not need the database writer lock.
-            with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
-                other.execute("BEGIN IMMEDIATE")
-        return identity(*args, **kwargs)
+        result = identity(*args, **kwargs)
+        # Both hashes allow another writer; the final hash must not hold its lock.
+        with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
+            other.execute("BEGIN IMMEDIATE")
+            if calls == 2:
+                other.execute(
+                    "UPDATE workspaces SET target_summary = ? WHERE id = ?",
+                    ("Concurrent setup update", saved["id"]),
+                )
+                if existing_scan:
+                    other.execute("UPDATE scans SET status = 'failed'")
+                if target_changes:
+                    source.write_text("changed after hashing\n")
+        return result
 
-    with mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}):
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+    ):
         connection = globals_["connect"]()
-        blocker = sqlite3.connect(state_dir / "workbench.sqlite3", check_same_thread=False)
-
-        class ContendedConnection:
-            def __getattr__(self, name):
-                return getattr(connection, name)
-
-            def execute(self, sql, *parameters):
-                if sql == "BEGIN IMMEDIATE":
-                    blocker.execute("BEGIN IMMEDIATE")
-                    acquiring.set()
-                return connection.execute(sql, *parameters)
-
-        def release_writer():
-            assert acquiring.wait(timeout=10)
-            if target_changes:
-                source.write_text("changed during lock acquisition\n")
-            blocker.commit()
-
+        if existing_scan:
+            start(connection, args, headless_standard=False)
         try:
-            with (
-                ThreadPoolExecutor(max_workers=1) as pool,
-                mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}),
-            ):
-                released = pool.submit(release_writer)
+            with mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}):
                 if target_changes:
                     with pytest.raises(SystemExit, match="target changed"):
-                        start(ContendedConnection(), args, headless_standard=False)
+                        start(connection, args, headless_standard=False)
                 else:
-                    assert (
-                        start(ContendedConnection(), args, headless_standard=False)[
-                            "startDisposition"
-                        ]
-                        == "created"
+                    assert start(connection, args, headless_standard=False)["startDisposition"] == (
+                        "created"
                     )
-                released.result()
-            count = connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
-            assert count == (0 if target_changes else 1)
+                count = connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+                assert count == int(existing_scan) + (0 if target_changes else 1)
+            assert not connection.in_transaction
         finally:
-            acquiring.set()
-            blocker.close()
             connection.close()
-    assert calls == 2
+    assert calls == 3
+
+
+@pytest.mark.parametrize("headless_standard", [False, True])
+def test_concurrent_prompt_scan_starts_join_the_winner(
+    tmp_path: Path, headless_standard: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "fixture.py").write_text("original\n")
+    create_saved_workspace(state_dir, target)
+    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_concurrent_test")
+    start = namespace["_start_prompt_driven_scan"]
+    globals_ = start.__globals__
+    identity = globals_["scan_target_identity"]
+    ready = Barrier(2)
+    caller = local()
+    args = argparse.Namespace(
+        thread_id="thread-fixture",
+        target_path=str(target),
+        scope=".",
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+        user_context=None,
+        user_context_stdin=False,
+        target_summary=None,
+        scan_root=str(tmp_path / "scans"),
+        model=None,
+        reasoning_effort=None,
+    )
+
+    def synchronized_identity(*args, **kwargs):
+        caller.calls = getattr(caller, "calls", 0) + 1
+        result = identity(*args, **kwargs)
+        if caller.calls == 2:
+            ready.wait(timeout=10)
+        return result
+
+    def begin():
+        connection = globals_["connect"]()
+        try:
+            return start(connection, args, headless_standard=headless_standard)
+        finally:
+            connection.close()
+
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+        mock.patch.dict(globals_, {"scan_target_identity": synchronized_identity}),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        futures = [pool.submit(begin) for _ in range(2)]
+        results = [future.result(timeout=20) for future in futures]
+    assert sorted(result["startDisposition"] for result in results) == ["created", "joined"]
+    assert results[0]["scan"]["scanId"] == results[1]["scan"]["scanId"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1
 
 
 def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:

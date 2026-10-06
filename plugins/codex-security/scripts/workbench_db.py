@@ -943,130 +943,142 @@ def _start_prompt_driven_scan(
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
 
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        current_target = require_remediation_target(target_path)
-        current_diff_target = (
-            require_diff_target(
-                current_target,
-                args.diff_target_kind,
-                args.diff_base_revision,
-                args.diff_head_revision,
-                args.diff_content_digest,
-            )
-            if args.mode == "diff"
-            else None
-        )
-        if (
-            scan_target_identity(current_target, current_diff_target) != target_identity
-            or scan_diff_identity(current_diff_target) != diff_identity
-        ):
-            raise SystemExit(
-                "The selected scan target changed while the scan was starting. Try again."
-            )
-        existing = connection.execute(
-            """
-            SELECT scans.* FROM scans
-            JOIN workspaces ON workspaces.active_scan_id = scans.id
-            WHERE workspaces.thread_id = ? AND workspaces.target_path = ?
-                AND workspaces.default_scope = ? AND workspaces.default_mode = ?
-                AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
-                AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
-                AND workspaces.diff_head_revision IS ? AND workspaces.diff_content_digest IS ?
-                AND workspaces.submitted = 1 AND scans.target_revision = ?
-                AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
-                AND scans.target_inode = ? AND scans.status = 'running'
-                AND scans.handoff_status = 'delivered'
-                AND (
-                    (? = 0 AND scans.handoff_claim_token IS NULL)
-                    OR (
-                        ? = 1 AND scans.handoff_claim_token IS NOT NULL
-                        AND scans.continuation_thread_id = ?
-                    )
-                )
-            ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
-            """,
-            (
-                thread_id,
-                target_path,
-                scope,
-                args.mode,
-                user_context,
-                target_summary,
-                *diff_identity,
-                *target_identity,
-                int(headless_standard),
-                int(headless_standard),
-                thread_id,
-            ),
-        ).fetchone()
-        if existing is not None:
-            connection.commit()
-            return {
-                **scan_context(connection, existing["id"]),
-                "startDisposition": "joined",
-            }
-        create_private_directory(target_root)
-        workspace_id = str(uuid.uuid4())
-        scan_id = str(uuid.uuid4())
-        timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
-                default_mode, user_context, diff_target_kind, diff_base_revision,
-                diff_head_revision, diff_content_digest, submitted, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (
-                workspace_id,
-                thread_id,
-                target_id,
-                target_path,
-                target.name,
-                target_summary,
-                scope,
-                args.mode,
-                user_context,
-                *diff_identity,
-                timestamp,
-                timestamp,
-            ),
-        )
-        workspace = require_workspace(connection, workspace_id)
-        insert_running_scan(
-            connection,
-            scan_id=scan_id,
-            workspace=workspace,
-            target=target,
-            scope=scope,
-            diff_target=diff_target,
-            target_identity=target_identity,
-            target_root=target_root,
-            target_summary=target_summary,
-            scope_file_count=scope_file_count,
-            timestamp=timestamp,
-            handoff_status="delivered",
-            model=args.model,
-            reasoning_effort=args.reasoning_effort,
-        )
-        if headless_standard:
-            claimed = connection.execute(
+    # Pin the database snapshot before hashing without occupying its writer slot.
+    # A stale read-to-write upgrade retries against the original target identity.
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        connection.execute("BEGIN")
+        try:
+            existing = connection.execute(
                 """
-                UPDATE scans
-                SET handoff_claim_token = ?, continuation_thread_id = ?
-                WHERE id = ? AND status = 'running' AND handoff_status = 'delivered'
-                    AND handoff_claim_token IS NULL AND continuation_thread_id IS NULL
+                SELECT scans.* FROM scans
+                JOIN workspaces ON workspaces.active_scan_id = scans.id
+                WHERE workspaces.thread_id = ? AND workspaces.target_path = ?
+                    AND workspaces.default_scope = ? AND workspaces.default_mode = ?
+                    AND workspaces.user_context IS ? AND workspaces.target_summary IS ?
+                    AND workspaces.diff_target_kind IS ? AND workspaces.diff_base_revision IS ?
+                    AND workspaces.diff_head_revision IS ? AND workspaces.diff_content_digest IS ?
+                    AND workspaces.submitted = 1 AND scans.target_revision = ?
+                    AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
+                    AND scans.target_inode = ? AND scans.status = 'running'
+                    AND scans.handoff_status = 'delivered'
+                    AND (
+                        (? = 0 AND scans.handoff_claim_token IS NULL)
+                        OR (
+                            ? = 1 AND scans.handoff_claim_token IS NOT NULL
+                            AND scans.continuation_thread_id = ?
+                        )
+                    )
+                ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
                 """,
-                (str(uuid.uuid4()), thread_id, scan_id),
+                (
+                    thread_id,
+                    target_path,
+                    scope,
+                    args.mode,
+                    user_context,
+                    target_summary,
+                    *diff_identity,
+                    *target_identity,
+                    int(headless_standard),
+                    int(headless_standard),
+                    thread_id,
+                ),
+            ).fetchone()
+            current_target = require_remediation_target(target_path)
+            current_diff_target = (
+                require_diff_target(
+                    current_target,
+                    args.diff_target_kind,
+                    args.diff_base_revision,
+                    args.diff_head_revision,
+                    args.diff_content_digest,
+                )
+                if args.mode == "diff"
+                else None
             )
-            if claimed.rowcount != 1:
-                raise SystemExit("Codex Security headless scan ownership could not be recorded.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
+            if (
+                scan_target_identity(current_target, current_diff_target) != target_identity
+                or scan_diff_identity(current_diff_target) != diff_identity
+            ):
+                raise SystemExit(
+                    "The selected scan target changed while the scan was starting. Try again."
+                )
+            if existing is not None:
+                connection.execute("UPDATE scans SET id = id WHERE id = ?", (existing["id"],))
+                connection.commit()
+                return {
+                    **scan_context(connection, existing["id"]),
+                    "startDisposition": "joined",
+                }
+            create_private_directory(target_root)
+            workspace_id = str(uuid.uuid4())
+            scan_id = str(uuid.uuid4())
+            timestamp = now()
+            target_id = ensure_security_target(connection, target_path)
+            connection.execute(
+                """
+                INSERT INTO workspaces (
+                    id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
+                    default_mode, user_context, diff_target_kind, diff_base_revision,
+                    diff_head_revision, diff_content_digest, submitted, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    thread_id,
+                    target_id,
+                    target_path,
+                    target.name,
+                    target_summary,
+                    scope,
+                    args.mode,
+                    user_context,
+                    *diff_identity,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            workspace = require_workspace(connection, workspace_id)
+            insert_running_scan(
+                connection,
+                scan_id=scan_id,
+                workspace=workspace,
+                target=target,
+                scope=scope,
+                diff_target=diff_target,
+                target_identity=target_identity,
+                target_root=target_root,
+                target_summary=target_summary,
+                scope_file_count=scope_file_count,
+                timestamp=timestamp,
+                handoff_status="delivered",
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+            )
+            if headless_standard:
+                claimed = connection.execute(
+                    """
+                    UPDATE scans
+                    SET handoff_claim_token = ?, continuation_thread_id = ?
+                    WHERE id = ? AND status = 'running' AND handoff_status = 'delivered'
+                        AND handoff_claim_token IS NULL AND continuation_thread_id IS NULL
+                    """,
+                    (str(uuid.uuid4()), thread_id, scan_id),
+                )
+                if claimed.rowcount != 1:
+                    raise SystemExit(
+                        "Codex Security headless scan ownership could not be recorded."
+                    )
+            connection.commit()
+            break
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                raise
+            time.sleep(0.05 * (2**attempt))
+        except BaseException:
+            connection.rollback()
+            raise
     return {**scan_context(connection, scan_id), "startDisposition": "created"}
 
 
