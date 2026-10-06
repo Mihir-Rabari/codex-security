@@ -1889,7 +1889,11 @@ def merge_saved_results(
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
                 ):
                     if (pending := coverage_candidate(owner, item)) is not None:
-                        if pending[0] == owner and pending[1] in reported_candidates:
+                        if (
+                            owner is not None
+                            and pending[0] == owner
+                            and pending[1] in reported_candidates
+                        ):
                             continue
                         pending_candidates.add(pending)
                         order = candidate_order(relative, pending[0])
