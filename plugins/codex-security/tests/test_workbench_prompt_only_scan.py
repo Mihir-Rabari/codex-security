@@ -226,10 +226,11 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     assert next_phase["scan"]["userContext"] == updated_context
 
 
+@pytest.mark.parametrize("headless_standard", [False, True])
 @pytest.mark.parametrize("target_changes", [False, True])
 @pytest.mark.parametrize("existing_scan", [False, True])
 def test_prompt_scan_revalidates_target_after_concurrent_database_write(
-    tmp_path: Path, target_changes: bool, existing_scan: bool
+    tmp_path: Path, target_changes: bool, existing_scan: bool, headless_standard: bool
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -262,42 +263,150 @@ def test_prompt_scan_revalidates_target_after_concurrent_database_write(
     def inspect_identity(*args, **kwargs):
         nonlocal calls
         calls += 1
-        result = identity(*args, **kwargs)
-        # Both hashes allow another writer; the final hash must not hold its lock.
+        # Unrelated progress commits during every hash must not prevent startup.
         with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
             other.execute("BEGIN IMMEDIATE")
+            other.execute(
+                "UPDATE workspaces SET target_summary = ? WHERE id = ?",
+                (f"Concurrent setup update {calls}", saved["id"]),
+            )
             if calls == 2:
-                other.execute(
-                    "UPDATE workspaces SET target_summary = ? WHERE id = ?",
-                    ("Concurrent setup update", saved["id"]),
-                )
                 if existing_scan:
                     other.execute("UPDATE scans SET status = 'failed'")
                 if target_changes:
-                    source.write_text("changed after hashing\n")
-        return result
+                    source.write_text("changed during hashing\n")
+        return identity(*args, **kwargs)
 
     with (
         mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
     ):
         connection = globals_["connect"]()
+        connection.execute("PRAGMA busy_timeout = 1375")
         if existing_scan:
-            start(connection, args, headless_standard=False)
+            start(connection, args, headless_standard=headless_standard)
         try:
             with mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}):
                 if target_changes:
                     with pytest.raises(SystemExit, match="target changed"):
-                        start(connection, args, headless_standard=False)
+                        start(connection, args, headless_standard=headless_standard)
                 else:
-                    assert start(connection, args, headless_standard=False)["startDisposition"] == (
-                        "created"
-                    )
+                    assert start(connection, args, headless_standard=headless_standard)[
+                        "startDisposition"
+                    ] == ("created")
                 count = connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
                 assert count == int(existing_scan) + (0 if target_changes else 1)
             assert not connection.in_transaction
+            assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 1375
         finally:
             connection.close()
-    assert calls == 3
+    assert calls == 2
+
+
+@pytest.mark.parametrize("target_changes", [False, True])
+@pytest.mark.parametrize("writer_arrival", ["before_hash", "during_hash"])
+def test_prompt_scan_revalidates_target_after_database_lock_wait(
+    tmp_path: Path, target_changes: bool, writer_arrival: str
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "fixture.py"
+    source.write_text("original\n")
+    namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_lock_test")
+    start = namespace["_start_prompt_driven_scan"]
+    globals_ = start.__globals__
+    identity = globals_["scan_target_identity"]
+    calls = 0
+    args = argparse.Namespace(
+        thread_id="thread-fixture",
+        target_path=str(target),
+        scope=".",
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+        user_context=None,
+        user_context_stdin=False,
+        target_summary=None,
+        scan_root=str(tmp_path / "scans"),
+        model=None,
+        reasoning_effort=None,
+    )
+
+    acquiring = Event()
+
+    def inspect_identity(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Initial hashing does not need the database writer lock.
+            with sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0) as other:
+                other.execute("BEGIN IMMEDIATE")
+        result = identity(*args, **kwargs)
+        if calls == 2 and writer_arrival == "during_hash":
+            blocker.execute("BEGIN IMMEDIATE")
+            if target_changes:
+                source.write_text("changed before writer admission\n")
+        return result
+
+    with mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}):
+        connection = globals_["connect"]()
+        blocker = sqlite3.connect(state_dir / "workbench.sqlite3", check_same_thread=False)
+
+        class ContendedConnection:
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+            def execute(self, sql, *parameters):
+                if (
+                    writer_arrival == "before_hash"
+                    and sql == "BEGIN IMMEDIATE"
+                    and not acquiring.is_set()
+                ):
+                    blocker.execute("BEGIN IMMEDIATE")
+                    acquiring.set()
+                try:
+                    return connection.execute(sql, *parameters)
+                except sqlite3.OperationalError:
+                    if writer_arrival == "during_hash" and blocker.in_transaction:
+                        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+                        blocker.commit()
+                    raise
+
+        def release_writer():
+            assert acquiring.wait(timeout=10)
+            if target_changes:
+                source.write_text("changed during lock acquisition\n")
+            blocker.commit()
+
+        try:
+            with (
+                ThreadPoolExecutor(max_workers=1) as pool,
+                mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}),
+            ):
+                released = pool.submit(release_writer) if writer_arrival == "before_hash" else None
+                if target_changes:
+                    with pytest.raises(SystemExit, match="target changed"):
+                        start(ContendedConnection(), args, headless_standard=False)
+                else:
+                    assert (
+                        start(ContendedConnection(), args, headless_standard=False)[
+                            "startDisposition"
+                        ]
+                        == "created"
+                    )
+                if released is not None:
+                    released.result()
+            count = connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+            assert count == (0 if target_changes else 1)
+            assert not connection.in_transaction
+            assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        finally:
+            acquiring.set()
+            blocker.close()
+            connection.close()
+    assert calls == (2 if writer_arrival == "before_hash" else 3)
 
 
 @pytest.mark.parametrize("headless_standard", [False, True])

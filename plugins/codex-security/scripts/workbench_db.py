@@ -943,11 +943,37 @@ def _start_prompt_driven_scan(
     target_identity = scan_target_identity(target, diff_target)
     target_root = scan_target_root(args.scan_root, target)
 
-    # Pin the database snapshot before hashing without occupying its writer slot.
-    # A stale read-to-write upgrade retries against the original target identity.
+    busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
-        connection.execute("BEGIN")
         try:
+            # Wait before hashing, then release the writer slot while reading the target.
+            connection.execute("BEGIN IMMEDIATE")
+            connection.rollback()
+            current_target = require_remediation_target(target_path)
+            current_diff_target = (
+                require_diff_target(
+                    current_target,
+                    args.diff_target_kind,
+                    args.diff_base_revision,
+                    args.diff_head_revision,
+                    args.diff_content_digest,
+                )
+                if args.mode == "diff"
+                else None
+            )
+            if (
+                scan_target_identity(current_target, current_diff_target) != target_identity
+                or scan_diff_identity(current_diff_target) != diff_identity
+            ):
+                raise SystemExit(
+                    "The selected scan target changed while the scan was starting. Try again."
+                )
+            # If another writer arrived during hashing, retry without waiting on a stale hash.
+            connection.execute("PRAGMA busy_timeout = 0")
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            finally:
+                connection.execute(f"PRAGMA busy_timeout = {busy_timeout}")
             existing = connection.execute(
                 """
                 SELECT scans.* FROM scans
@@ -984,27 +1010,7 @@ def _start_prompt_driven_scan(
                     thread_id,
                 ),
             ).fetchone()
-            current_target = require_remediation_target(target_path)
-            current_diff_target = (
-                require_diff_target(
-                    current_target,
-                    args.diff_target_kind,
-                    args.diff_base_revision,
-                    args.diff_head_revision,
-                    args.diff_content_digest,
-                )
-                if args.mode == "diff"
-                else None
-            )
-            if (
-                scan_target_identity(current_target, current_diff_target) != target_identity
-                or scan_diff_identity(current_diff_target) != diff_identity
-            ):
-                raise SystemExit(
-                    "The selected scan target changed while the scan was starting. Try again."
-                )
             if existing is not None:
-                connection.execute("UPDATE scans SET id = id WHERE id = ?", (existing["id"],))
                 connection.commit()
                 return {
                     **scan_context(connection, existing["id"]),
