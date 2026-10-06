@@ -7400,7 +7400,7 @@ async function changedPatchFiles(
   );
   const files = new Set<string>();
   const rootFiles: string[] = [];
-  for (const [directory, tree] of base.trees) {
+  for (const [directory, originalTree] of base.trees) {
     const head = heads.get(directory);
     if (
       head === undefined ||
@@ -7410,6 +7410,26 @@ async function changedPatchFiles(
     const gitDependencies = directory
       ? await nestedPatchGitDependencies(repository, dependencies)
       : dependencies;
+    let tree = originalTree;
+    if (directory && tree !== "HEAD") {
+      try {
+        await gitDependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--verify", "--quiet", `${tree}^{tree}`],
+          join(repository, directory),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== 1 ||
+          !("stderr" in error) ||
+          error.stderr !== ""
+        )
+          throw error;
+        tree = "HEAD";
+      }
+    }
     if (dirtyFiles?.size) {
       const renamed = (
         await gitDependencies.runRepositoryCommand(
