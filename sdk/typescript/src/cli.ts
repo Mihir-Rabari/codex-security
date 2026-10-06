@@ -8676,11 +8676,11 @@ async function executeScan(
             const message = errorMessage(error);
             validation = { ...validation, status: "failed", message };
             errorOutput.write(
-              `codex-security: Validation failed: ${message}\n`,
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
             );
             if (validation["reportPath"] !== undefined) {
               errorOutput.write(
-                `Partial validation report: ${validation["reportPath"]}\n`,
+                `Partial validation report: ${diagnosticValue(validation["reportPath"])}\n`,
               );
             }
           }

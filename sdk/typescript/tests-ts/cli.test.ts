@@ -254,32 +254,44 @@ describe("CLI", () => {
     }
   });
 
-  test("retains a completed scan when follow-up validation fails", async () => {
-    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
-    const stdout = capture();
-    try {
-      expect(
-        await main(
-          ["scan", ".", "--validate", "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            result: scanResultAt(scanDir, ["high"]),
-            currentDirectory: await realpath(tmpdir()),
-            onValidate: async () => {
-              throw new Error("validation failed");
-            },
-          }),
-        ),
-      ).toBe(2);
-      expect(JSON.parse(stdout.text())).toMatchObject({
-        manifest: { scan: { status: "completed" } },
-        validation: { status: "failed", message: "validation failed" },
-      });
-    } finally {
-      await rm(scanDir, { recursive: true, force: true });
-    }
-  });
+  test.each([
+    ["ordinary", "validation failed"],
+    ["terminal controls", "synthetic\u001b[31m failure\u0007"],
+  ])(
+    "retains a completed scan and escapes validation diagnostics: %s",
+    async (_kind, message) => {
+      const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+      const stdout = capture();
+      const stderr = capture();
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--json"],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              result: scanResultAt(scanDir, ["high"]),
+              currentDirectory: await realpath(tmpdir()),
+              onValidate: async () => {
+                throw new Error(message);
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { status: "completed" } },
+          validation: { status: "failed", message },
+        });
+        expect(stderr.text()).not.toContain("\u001b");
+        expect(stderr.text()).not.toContain("\u0007");
+        expect(stderr.text()).toContain(
+          message.startsWith("synthetic") ? "failure" : "validation failed",
+        );
+      } finally {
+        await rm(scanDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("skips standalone model calls when the scan has no findings", async () => {
     let validations = 0;

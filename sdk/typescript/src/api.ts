@@ -675,12 +675,22 @@ export class CodexSecurity {
         temporaryRoot,
       );
       const { runtime, approvalPolicy } = session;
+      const git = await inspectTrustedExecutable(
+        "git",
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          session.modelProvider,
+        ),
+        (await gitMarkerRoot(inputs.repository, signal, "outermost")) ??
+          inputs.repository,
+      );
       const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
       const workbenchOptions: WorkbenchCommandOptions = {
         python: session.python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...runtime.environment,
+          ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
         },
         signal,
@@ -780,6 +790,7 @@ export class CodexSecurity {
           CODEX_SECURITY_SURFACE: this.#surface,
         },
         options.auth,
+        git,
       );
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,

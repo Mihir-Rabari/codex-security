@@ -440,6 +440,7 @@ describe("CodexSecurity finding validation", () => {
     pluginRoot = PLUGIN_ROOT,
     pythonPath = "/managed/python",
     fixtureRoot?: string,
+    environmentOverrides: Record<string, string> = {},
   ) {
     const root = fixtureRoot ?? (await temporaryDirectory());
     const repository = join(root, "repository");
@@ -469,6 +470,7 @@ describe("CodexSecurity finding validation", () => {
       ),
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       OPENAI_API_KEY: "synthetic-validation-key",
+      ...environmentOverrides,
     };
     const client = new TestClient(
       {
@@ -869,6 +871,119 @@ describe("CodexSecurity finding validation", () => {
       }
       expect(readSavedAssessment).toBe(true);
       expect(modelCalls).toBe(1);
+    },
+  );
+
+  test.each(["canonical", "repository alias"])(
+    "validates an unchanged recorded Git target with %s tool paths",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      const hostGit = Bun.which("git");
+      expect(hostGit).not.toBeNull();
+      const tools = join(root, "external-tools");
+      await mkdir(tools);
+      const selectedGit = join(
+        tools,
+        process.platform === "win32" ? "git.exe" : "git",
+      );
+      await symlink(await realpath(hostGit!), selectedGit);
+      const alias = join(repository, "tools");
+      await symlink(
+        tools,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await writeFile(join(repository, ".gitignore"), "tools\n");
+      await writeFile(
+        join(repository, "source.ts"),
+        "export const value = 'original';\n",
+      );
+      gitText(["init", "--initial-branch=main"], { cwd: repository });
+      gitText(
+        [
+          "-c",
+          "user.name=Synthetic User",
+          "-c",
+          "user.email=synthetic@example.test",
+          "add",
+          ".",
+        ],
+        { cwd: repository },
+      );
+      gitText(
+        [
+          "-c",
+          "user.name=Synthetic User",
+          "-c",
+          "user.email=synthetic@example.test",
+          "commit",
+          "-m",
+          "Synthetic validation baseline",
+        ],
+        { cwd: repository },
+      );
+      const python = await resolvePluginPython();
+      const fixture = await validationClient(
+        undefined,
+        PLUGIN_ROOT,
+        python,
+        root,
+        {
+          PATH: kind === "canonical" ? tools : alias,
+        },
+      );
+      await using client = fixture.client;
+      const environment = {
+        PATH: tools,
+        CODEX_SECURITY_GIT: selectedGit,
+        CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
+      };
+      const scanDir = join(root, "scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const registration = await runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        [
+          "register-cli-scan",
+          "--repository",
+          repository,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json",
+          JSON.stringify({
+            repository,
+            mode: "standard",
+            target: { kind: "repository", paths: [] },
+            config: {},
+          }),
+        ],
+      );
+      const workflowId = "git-tool-validation";
+      await new FindingWorkflow(
+        workflowId,
+        environment,
+        runWorkbench,
+        python,
+      ).bind({ repositoryPath: repository });
+      fixture.workbench.mockImplementation(runWorkbench);
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        scanId: registration["scanId"] as string,
+        workflowId,
+      };
+      const first = await client.validate(request);
+      expect(await client.validate(request)).toEqual(first);
+      expect(first.disposition).toBe(assessment.disposition);
+      for (const [options] of fixture.workbench.mock.calls) {
+        expect(options.environment?.["CODEX_SECURITY_GIT"]).toBe(selectedGit);
+        expect(options.environment?.["PATH"]).toBe(tools);
+      }
+      expect(fixture.captured.codex?.env?.["CODEX_SECURITY_GIT"]).toBe(
+        selectedGit,
+      );
+      expect(fixture.captured.codex?.env?.["PATH"]).toContain(tools);
     },
   );
 
