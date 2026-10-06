@@ -4361,7 +4361,11 @@ describe("patch change tracking", () => {
                   ? join(root, ".git")
                   : gitEnvironment.GIT_DIR,
               );
-              expect(environment["GIT_WORK_TREE"]).toBe(
+              expect(
+                environment["GIT_WORK_TREE"] === undefined
+                  ? undefined
+                  : resolve(environment["GIT_WORK_TREE"]),
+              ).toBe(
                 settings === "relative" ||
                   (target !== root &&
                     (cwd === root || args.includes("--absolute-git-dir")))
