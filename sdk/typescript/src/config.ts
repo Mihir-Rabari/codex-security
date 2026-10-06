@@ -309,8 +309,6 @@ export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
   let contents: string;
   try {
     contents = stringify(config);
@@ -319,6 +317,15 @@ export async function writeCodexConfig(
       cause: error,
     });
   }
+  await writeCodexConfigContents(path, contents);
+}
+
+export async function writeCodexConfigContents(
+  path: string,
+  contents: string | Uint8Array,
+): Promise<void> {
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
   let created = false;
   try {

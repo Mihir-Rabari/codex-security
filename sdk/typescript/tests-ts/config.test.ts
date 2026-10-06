@@ -1031,3 +1031,36 @@ test.each([false, true])(
     }
   },
 );
+
+test.each([
+  ["missing", undefined],
+  ["plain", 'model = "previous-model"\n'],
+  [
+    "comments",
+    '# Preserve this user comment.\r\nmodel   =   "previous-model" # inline note\r\n',
+  ],
+  ["spacing", 'model="previous-model"\n\n# Keep custom formatting.\n'],
+] as const)(
+  "execution configuration restores original bytes (%s)",
+  async (_label, original) => {
+    const home = await temporaryDirectory();
+    const path = join(home, "config.toml");
+    if (original !== undefined)
+      await writeFile(path, original, { mode: 0o600 });
+    const release = await lockExecutionConfiguration(home, {
+      model: "selected-model",
+    });
+    expect(parse(await readFile(path, "utf8")).model).toBe("selected-model");
+    await release();
+    await release();
+    if (original === undefined) {
+      expect(
+        await stat(path).catch((error: NodeJS.ErrnoException) => error.code),
+      ).toBe("ENOENT");
+    } else {
+      expect(await readFile(path)).toEqual(Buffer.from(original));
+      if (process.platform !== "win32")
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
+  },
+);

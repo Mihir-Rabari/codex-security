@@ -1515,3 +1515,43 @@ describe("CLI workbench", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 });
+
+test.each([false, true])(
+  "scan history preserves saved diagnostic configuration (json: %p)",
+  async (json) => {
+    const config = {
+      model_provider: "synthetic",
+      model_providers: {
+        synthetic: {
+          base_url: "https://provider.example.test/v1",
+          wire_api: "responses",
+          env_key: "SYNTHETIC_PROVIDER_KEY",
+        },
+      },
+      synthetic_diagnostic: "Original diagnostic setting.",
+      approval_policy: "never",
+    };
+    const recipe = { repository: "/synthetic/repository", config };
+    const saved = {
+      scan: { scanId: "synthetic-scan", status: "complete", mode: "standard" },
+      recipe,
+    };
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        ["scans", "show", "synthetic-scan", ...(json ? ["--json"] : [])],
+        dependencies({ onWorkbench: () => saved }),
+      ),
+    ).toBe(0);
+    if (json) expect(JSON.parse(stdout.text()).recipe.config).toEqual(config);
+    else
+      for (const value of [
+        "https://provider.example.test/v1",
+        "responses",
+        "SYNTHETIC_PROVIDER_KEY",
+        config.synthetic_diagnostic,
+      ])
+        expect(stdout.text()).toContain(value);
+    expect(saved.recipe).toEqual(recipe);
+  },
+);

@@ -16,6 +16,7 @@ import {
   providerProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
+  writeCodexConfigContents,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
@@ -189,21 +190,19 @@ export async function lockExecutionConfiguration(
   );
   const path = join(codexHome, "config.toml");
   try {
-    const previous = await readFile(path, "utf8").catch(
+    const previous = await readFile(path).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
         throw error;
       },
     );
-    const saved =
-      previous === null ? null : (parseToml(previous) as JsonObject);
     await writeCodexConfig(path, config);
     let restoration: Promise<void> | undefined;
     return () =>
       (restoration ??= (async () => {
         try {
-          if (saved === null) await rm(path, { force: true });
-          else await writeCodexConfig(path, saved);
+          if (previous === null) await rm(path, { force: true });
+          else await writeCodexConfigContents(path, previous);
         } finally {
           await release();
         }

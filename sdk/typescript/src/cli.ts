@@ -71,7 +71,6 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
-  scanPreflightCodexConfig,
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
@@ -1844,30 +1843,12 @@ export async function main(
     pythonPath?: string,
   ): Promise<JsonObject> => {
     try {
-      let result = await dependencies.runWorkbench(
+      const result = await dependencies.runWorkbench(
         args,
         undefined,
         undefined,
         pythonPath,
       );
-      const recipe = result["recipe"];
-      if (recipe !== undefined && isJsonObject(recipe)) {
-        const config = recipe["config"];
-        if (config !== undefined && isJsonObject(config)) {
-          result = {
-            ...result,
-            recipe: {
-              ...recipe,
-              config: {
-                ...scanPreflightCodexConfig(config),
-                ...(config["approval_policy"] === undefined
-                  ? {}
-                  : { approval_policy: config["approval_policy"] }),
-              },
-            },
-          };
-        }
-      }
       return await select(result);
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
