@@ -483,6 +483,43 @@ def test_stopped_finding_keeps_explicit_identity_across_line_move(
 
 
 @pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("discriminator", ["reportId", "ledgerRowId"])
+@pytest.mark.parametrize("independent", [False, True])
+def test_explicit_replay_preserves_child_report_identity(
+    tmp_path: Path, retry: bool, discriminator: str, independent: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    finding["identity"] = {"anchor": "shared-report-identity"}
+    finding["provenance"]["candidateId"] = "shared-candidate"
+    finding["extensions"] = {discriminator: "report-a"}
+    finding["locations"][0].update(startLine=1, endLine=1)
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan_id, findings=[finding])
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    finding["extensions"][discriminator] = "report-b" if independent else "report-a"
+    finding["locations"][0].update(startLine=2, endLine=2)
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == (2 if independent else 1)
+    assert {row["extensions"][discriminator] for row in findings} == (
+        {"report-a", "report-b"} if independent else {"report-a"}
+    )
+    if independent:
+        assert {row["locations"][0]["startLine"] for row in findings} == {1, 2}
+        assert len({row["findingId"] for row in findings}) == 2
+    else:
+        assert findings[0]["identity"] == finding["identity"]
+        assert findings[0]["locations"] == finding["locations"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
 def test_parent_candidates_keep_their_own_moved_checkpoint_history(tmp_path: Path, retry: bool):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path)
     path = scan_dir / "findings.json"

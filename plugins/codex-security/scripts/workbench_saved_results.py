@@ -1701,12 +1701,15 @@ def merge_saved_results(
         if recovered is None:
             return None
         provenance = finding.get("provenance", {})
+        extensions = recovered.get("extensions", {})
         return _digest(
             [
                 provenance.get("workerId") or owner,
                 finding_candidate_id(finding),
                 recovered["ruleId"],
                 recovered["identity"],
+                extensions.get("reportId"),
+                extensions.get("ledgerRowId"),
             ]
         )
 

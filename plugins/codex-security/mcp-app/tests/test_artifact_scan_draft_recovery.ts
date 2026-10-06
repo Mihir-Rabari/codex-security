@@ -2416,6 +2416,35 @@ for (const layout of ["standard", "diff"] as const) {
     { note: "synthetic metadata" },
     ["synthetic metadata"],
   ]) {
+    test(`${layout}: structured metadata matches equivalent unowned finding, array=${Array.isArray(workerId)}`, async (t) => {
+      const f = await fixture(t, layout);
+      const stronger = {
+        ...findingFor("shared-candidate"),
+        severity: { level: "high" },
+        provenance: {
+          ...findingFor("shared-candidate").provenance,
+          workerId,
+        },
+      };
+      await f.write({
+        ...f.draft({}, true),
+        findings: [findingFor("shared-candidate"), stronger],
+      });
+      for (const stopped of [false, "first", true] as const) {
+        const findings = await recoverPublishedFindings(f, stopped);
+        assert.equal(findings.length, 1);
+        assert.equal(findings[0]!.severity.level, "high");
+        assert.deepEqual(findings[0]!.provenance.workerId, workerId);
+      }
+    });
+  }
+}
+
+for (const layout of ["standard", "diff"] as const) {
+  for (const workerId of [
+    { note: "synthetic metadata" },
+    ["synthetic metadata"],
+  ]) {
     for (const history of [false, true]) {
       test(`${layout}: structured worker metadata remains recoverable, array=${Array.isArray(workerId)}, history=${history}`, async (t) => {
         const f = await fixture(t, layout);
