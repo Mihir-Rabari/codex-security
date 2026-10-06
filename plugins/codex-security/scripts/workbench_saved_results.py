@@ -2387,23 +2387,17 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
-def _read_staged_scan_draft(scan_dir: Path, draft_path: str) -> dict[str, Any]:
-    try:
-        relative = Path(draft_path).relative_to(scan_dir).as_posix()
-    except ValueError as exc:
-        raise SystemExit("Scan draft must be inside the registered scan drafts directory.") from exc
-    if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
-        raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
-    return _read_scan_local_json(scan_dir, relative, "Staged scan draft")
-
-
 def _require_current_deep_publication(
     db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
 ) -> None:
-    publication = draft.get("deepScanPublication")
-    if publication is None and draft["manifest"]["scan"].get("complete") is False:
-        return
     run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and run["status"] == "running"
+    ):
+        return
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
@@ -2457,7 +2451,15 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        draft = _read_staged_scan_draft(scan_dir, args.draft_path)
+        try:
+            relative = Path(args.draft_path).relative_to(scan_dir).as_posix()
+        except ValueError as exc:
+            raise SystemExit(
+                "Scan draft must be inside the registered scan drafts directory."
+            ) from exc
+        if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
+            raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
+        draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         accepted_input = copy.deepcopy(draft)
         accepted_checkpoint = None
         if scan["mode"] == "deep":

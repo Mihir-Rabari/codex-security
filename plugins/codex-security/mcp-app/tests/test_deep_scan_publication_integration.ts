@@ -328,6 +328,80 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
   });
 }
 
+test("partial drafts cannot replace a terminal aggregate awaiting completion replay", async (t) => {
+  const fixture = await createFixture(t);
+  const { run, store, call, runWorkbench, instant } = fixture;
+  const claimed = await store.claimCoordinator({
+    scanId: run.scanId,
+    threadId: owner,
+  });
+  const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+    requireRunning: true,
+  });
+  const elapsedSeconds = ((run.config.maxTimeHours ?? 1) + 1) * 3_600;
+  fixture.setTime(elapsedSeconds);
+  const deadline = Date.parse(instant) + elapsedSeconds * 1_000;
+  const coordinator = new DeepScanCoordinator({
+    run: claimed.run,
+    store,
+    pluginRoot,
+    executor: {
+      run() {
+        throw new Error("Expired coordinator must not start a worker.");
+      },
+    },
+    clock: { now: () => deadline, sleep: async () => {} },
+    onComplete: (draft, signal, publication) =>
+      recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft,
+        runWorkbench,
+        signal,
+        publication,
+      ).then(() => {}),
+  });
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 30_000);
+  assert.equal(
+    terminal?.status,
+    "succeeded",
+    terminal?.error ?? "Coordinator did not succeed",
+  );
+  assert.equal(terminal?.terminalReason, "capped");
+
+  const report = path.join(run.scanDir, "report.html");
+  await mkdir(report);
+  assertToolError(
+    await call("complete_codex_security_scan", { scanId: run.scanId }),
+    /report\.html/,
+  );
+  await rm(report, { recursive: true });
+  const interrupted = await snapshot(run);
+  assert.equal(
+    JSON.parse(interrupted.files["coverage.json"]).completeness,
+    "partial",
+  );
+  assertToolError(
+    await call(
+      "record_codex_security_scan_draft",
+      partial(run, "late-progress"),
+    ),
+    /current coordinator lease/,
+  );
+  assert.deepEqual(await snapshot(run), interrupted);
+  assertSuccess(
+    await call("complete_codex_security_scan", { scanId: run.scanId }),
+  );
+  const completed = await snapshot(run);
+  assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
+  assert.deepEqual(
+    JSON.parse(completed.files["coverage.json"]),
+    JSON.parse(interrupted.files["coverage.json"]),
+  );
+  assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
+  assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
+});
+
 async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "deep-publication-"));
   let client: Client | undefined;
