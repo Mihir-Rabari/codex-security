@@ -10,6 +10,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -29,6 +30,8 @@ import {
 } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
 const SAVED_REPOSITORY = resolve("/saved/repository");
@@ -3238,6 +3241,134 @@ test.each([
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories();
   afterEach(fixtures.cleanup);
+  for (const publish of [false, true]) {
+    test.skipIf(process.platform === "win32")(
+      `assesses a saved target replaced by a committed directory link; publish=${publish}`,
+      async () => {
+        const root = await fixtures.create("patch-saved-directory-link-");
+        const repository = join(root, "repository");
+        const component = join(repository, "component");
+        const scanDir = join(root, "scan");
+        await mkdir(join(component, "src"), { recursive: true });
+        await mkdir(scanDir, { mode: 0o700 });
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(component, "src/extract.py"), "unsafe\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const environment = {
+          ...process.env,
+          CODEX_HOME: join(root, "codex-home"),
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        };
+        const python = await resolvePluginPython();
+        const workbench = (args: readonly string[]) =>
+          runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
+        const registered = await workbench([
+          "register-cli-scan",
+          "--repository",
+          component,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json",
+          JSON.stringify({
+            config: {},
+            mode: "standard",
+            repository: component,
+            target: { kind: "repository", paths: [] },
+          }),
+        ]);
+        const scanId = registered["scanId"] as string;
+        await copyCompletedScanFixture(scanDir);
+        for (const name of ["scan-manifest", "findings", "coverage"]) {
+          const path = join(scanDir, `${name}.json`);
+          const document = JSON.parse(await readFile(path, "utf8"));
+          if (name === "scan-manifest") {
+            document.scan.id = scanId;
+            delete document.scan.target.kind;
+            delete document.scan.sealedAt;
+            delete document.scan.artifacts;
+          } else document.scanId = scanId;
+          await writeFile(path, JSON.stringify(document));
+        }
+        await workbench(["complete-scan", "--scan-id", scanId]);
+        const saved = await workbench(["get-scan", "--scan-id", scanId]);
+        expect((saved["scan"] as JsonObject)["targetPath"]).toBe(
+          await realpath(component),
+        );
+        git("mv", "component", "source");
+        await symlink("source", component, "dir");
+        git("add", ".");
+        git("commit", "-m", "Move component and retain its directory link");
+        const originalHead = git("rev-parse", "HEAD");
+        const remote = await fixtures.create("patch-saved-directory-remote-");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        let assessments = 0;
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            "--scan",
+            scanId,
+            "--assess-patch-risk",
+            ...(publish ? ["--create-pr"] : []),
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            environment,
+            onWorkbench: (args) => workbench(args),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (args, output) => {
+              if (
+                output?.appServer?.prompt.includes(
+                  "$codex-security:assess-patch-risk",
+                )
+              ) {
+                const artifact = JSON.parse(
+                  output.appServer.prompt
+                    .split("\n")
+                    .find((line) => line.startsWith('{"path":'))!,
+                ) as { path: string; changedFiles: string[] };
+                expect(artifact.changedFiles).toEqual([
+                  "source/src/extract.py",
+                ]);
+                expect(await readFile(artifact.path, "utf8")).toContain(
+                  "+fixed",
+                );
+                assessments += 1;
+                output.stdout.write(patchRiskAssessment().report);
+              } else {
+                await writeFile(join(component, "src/extract.py"), "fixed\n");
+                completePatches(args, output);
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(assessments).toBe(1);
+        expect(JSON.parse(outcome.stdout).patchRisk.report).toContain(
+          patchRiskSummary(),
+        );
+        if (publish) {
+          expect(git("diff", "--name-only", originalHead, "HEAD")).toBe(
+            "source/src/extract.py",
+          );
+          expect(git("ls-files", "--stage", "component")).toStartWith(
+            "120000 ",
+          );
+        } else expect(git("rev-parse", "HEAD")).toBe(originalHead);
+      },
+    );
+  }
   for (const [command, fileLink, dirty] of [
     ["inline", false, false],
     ["saved", false, false],
