@@ -600,6 +600,7 @@ describe("canonical scan contract", () => {
     ["taxonomy.category", " \t\n", false],
     ["provenance.source", " \t\n", false],
     ["severity.scoringSystem", " \t\n", false],
+    ["severity.scoringSystem", undefined, false],
     ["title", "\u0085\u001c", false],
     ["title", "\ufeff", true],
     ["title", "  Synthetic required text. \n", true],

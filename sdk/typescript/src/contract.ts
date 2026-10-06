@@ -477,7 +477,7 @@ function validateCanonicalContract(
       [`${context}.severity.scoringSystem`]:
         finding.severity.score === undefined
           ? undefined
-          : finding.severity.scoringSystem,
+          : (finding.severity.scoringSystem ?? ""),
       [`${context}.taxonomy.category`]: finding.taxonomy.category,
       [`${context}.provenance.source`]: finding.provenance.source,
     });
