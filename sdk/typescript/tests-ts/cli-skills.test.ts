@@ -1309,6 +1309,14 @@ process.stdout.write(JSON.stringify({
         "403 model access denied /private/repository",
         "selected model is unavailable",
       ],
+      [
+        "You do not have permission to use this model",
+        "selected model is unavailable",
+      ],
+      [
+        "You do not have permissions to use the model",
+        "selected model is unavailable",
+      ],
       ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
       [
         "tokens per minute limit exceeded sk-proj-SYNTHETIC_SECRET",
@@ -1456,6 +1464,28 @@ process.stdout.write(JSON.stringify({
       expect(stderr.text()).toBe(
         `codex-security: validate failed with exit code 7.\n${prefix}${" ".repeat(33)}${suffix}\n`,
       );
+    },
+  );
+
+  test.each(["validate", "patch", "verify-fix"] as const)(
+    "preserves token-per-minute advice from a %s child failure",
+    async (command) => {
+      const detail = "tokens per minute limit exceeded token=SYNTHETIC_VALUE";
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("Wait and retry.");
+      expect(stderr.text()).toContain(detail);
     },
   );
 

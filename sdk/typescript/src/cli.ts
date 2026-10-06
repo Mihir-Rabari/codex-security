@@ -1936,7 +1936,7 @@ export async function main(
           : interrupted === "SIGTERM"
             ? "Finding matching terminated by SIGTERM. Saved comparisons are preserved."
             : errorMessage(error);
-      errorOutput.write(`codex-security: ${message}\n`);
+      errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
       throw error;
     } finally {
       removeListeners();
@@ -4367,7 +4367,7 @@ export async function main(
         } catch (error) {
           stopDashboard();
           exitCode = interruptedExitCode(controller.signal) ?? 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         } finally {
           stopDashboard();
           signalHandlers(dependencies, "remove", onInterrupt, onTerminate);
@@ -5900,7 +5900,7 @@ export async function main(
     } else {
       if (exitCode !== 0) return exitCode;
       errorOutput.write(
-        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+        `codex-security: ${diagnosticValue(incurErrorMessage(frameworkOutput))}\n`,
       );
       return 2;
     }
@@ -7970,10 +7970,11 @@ export function skillCommandFailure(
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
-    classification === "forbidden" &&
-    /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b|\bpermissions? to use (?:this |the )?model\b/iu.test(
-      detail,
-    )
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    (classification === "forbidden" &&
+      /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
+        detail,
+      ))
   ) {
     advice = "The selected model is unavailable for the current credentials.";
   } else if (

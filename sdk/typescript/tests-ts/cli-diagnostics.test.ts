@@ -1,7 +1,10 @@
 import { stripVTControlCharacters } from "node:util";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { readCodexHomeConfig } from "../src/auth.js";
+import { matchScanFindings } from "../src/scan-comparison.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
   warningResult,
@@ -12,8 +15,179 @@ import {
 import { throwing } from "./support/errors.js";
 
 import { createCliTest } from "./support/cli-run.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 describe("CLI diagnostics", () => {
+  test.skipIf(process.platform === "win32")(
+    "escapes terminal controls from public export errors",
+    async () => {
+      const directory = await temporaryDirectory("codex-security-export-cli-");
+      try {
+        const home = join(directory, "home");
+        await mkdir(home, { mode: 0o700 });
+        const scan = join(
+          directory,
+          "missing-\u001b[2J\u009b2J-token=SYNTHETIC_VALUE",
+        );
+        const result = await runCommand(
+          process.execPath,
+          [
+            join(import.meta.dir, "..", "src", "cli.ts"),
+            "export",
+            scan,
+            "--output",
+            join(directory, "results.sarif"),
+          ],
+          {
+            env: {
+              ...process.env,
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+            },
+            cwd: directory,
+            timeout: 30_000,
+          },
+        );
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain(
+          "expected an existing non-symlink directory",
+        );
+        expect(result.stderr).toContain("No such file or directory");
+        expect(result.stderr).toContain("token=SYNTHETIC_VALUE");
+        expect(result.stderr).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("escapes malformed configuration source from automatic component planning", async () => {
+    const directory = await temporaryDirectory(
+      "codex-security-component-config-",
+    );
+    try {
+      const home = join(directory, "home");
+      const repository = join(directory, "repository");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "synthetic.ts"),
+        "export const value = 1;\n",
+      );
+      await writeFile(
+        join(home, "config.toml"),
+        'synthetic = "\u001b[2J\u009b2J-token=SYNTHETIC_VALUE',
+      );
+      const result = await runCommand(
+        process.execPath,
+        [
+          join(import.meta.dir, "..", "src", "cli.ts"),
+          "scan-components",
+          repository,
+          "--auto",
+          "--plan-only",
+          "--headless",
+          "--output-dir",
+          join(directory, "output"),
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          },
+          cwd: directory,
+          timeout: 30_000,
+        },
+      );
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("Could not read Codex configuration");
+      expect(result.stderr).toContain("token=SYNTHETIC_VALUE");
+      expect(result.stderr).not.toMatch(/[\u001b\u009b]/u);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    {
+      label: "matching",
+      args: ["scans", "match", "synthetic-before", "synthetic-after"],
+    },
+    { label: "feedback", args: ["feedback", "--reason", "Synthetic feedback"] },
+  ])(
+    "escapes malformed configuration source in $label diagnostics",
+    async ({ args }) => {
+      const directory = await temporaryDirectory(
+        "codex-security-config-source-",
+      );
+      try {
+        const home = join(directory, "home");
+        await mkdir(home, { mode: 0o700 });
+        await writeFile(
+          join(home, "config.toml"),
+          'synthetic = "\u001b[2J\u009b2J-token=SYNTHETIC_VALUE',
+        );
+        const { stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          currentDirectory: directory,
+          environment: {
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          },
+          onMatch: matchScanFindings,
+          onWorkbench: () => ({
+            scans: [],
+            matchingInputs: {
+              before: [{ occurrenceId: "synthetic-before" }],
+              after: [{ occurrenceId: "synthetic-after" }],
+            },
+          }),
+        });
+        expect(await runCli(args, deps)).toBe(2);
+        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain("token=SYNTHETIC_VALUE");
+        expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "escapes controls in expanded validation configuration diagnostics",
+    async () => {
+      const directory = await temporaryDirectory(
+        "codex-security-config-diagnostic-",
+      );
+      try {
+        const home = join(
+          directory,
+          "synthetic-\u001b[2J\u009b2J-token=SYNTHETIC_VALUE-home",
+        );
+        await mkdir(home);
+        await writeFile(join(home, "config.toml"), "synthetic = [");
+        const { stderr, runCli } = createCliTest(main);
+        const deps = dependencies({
+          environment: { CODEX_HOME: home, OPENAI_API_KEY: "SYNTHETIC_VALUE" },
+          onCodex: async (_args, _output, environment) => {
+            await readCodexHomeConfig(environment!);
+            return 0;
+          },
+        });
+
+        expect(await runCli(["validate", "Synthetic finding"], deps)).toBe(2);
+        expect(stderr.text()).toContain("Could not read Codex configuration");
+        expect(stderr.text()).toContain("token=SYNTHETIC_VALUE-home");
+        expect(stderr.text()).not.toMatch(/[\u001b\u009b]/u);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([{ flags: [] }, { flags: ["--json"] }])(
     "reports rerun history failures once: $flags",
     async ({ flags }) => {

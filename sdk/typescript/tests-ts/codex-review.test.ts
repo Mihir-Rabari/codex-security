@@ -30,6 +30,9 @@ const failureReasons: Record<string, string> = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -43,6 +46,8 @@ const failureReasons: Record<string, string> = {
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error-policy-file":
+    "Required review check could not be completed: Connection refused while fetching content-policy.ts",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -499,6 +504,13 @@ test.each([
   "Request refused by cybersecurity policy.",
   "Request refusal due to the safety policy.",
   "Request was refused because of the safety policy.",
+  "This request was refused because of the safety policy.",
+  "The content policy requires refusal of this request.",
+  "Under the safety policy, this request is refused.",
+  "Cybersecurity policy: this request is refused.",
+  "Content policy: your request has been blocked.",
+  "Safety policy: the request was refused.",
+  "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
   "I'm not able to help with that.",
@@ -522,7 +534,10 @@ test.each([
   "Connection refused",
   "Ordinary safety policy documentation",
   "Network request failed due to connectivity policy.",
+  "Connection refused while fetching content-policy.ts",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
+  "Cybersecurity policy: this request is invalid.",
+  "Content policy: connection refused while fetching the source.",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(false);

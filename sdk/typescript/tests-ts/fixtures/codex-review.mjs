@@ -7,6 +7,9 @@ const refusalMessages = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
+  "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
 };
 const turnFailures = {
   "policy-turn-code": {
@@ -218,7 +221,9 @@ for await (const line of createInterface({ input: process.stdin })) {
           reason:
             scenario === "policy-reported-error"
               ? "Request refusal due to the safety policy."
-              : "Required source revision could not be read.",
+              : scenario === "required-source-error-policy-file"
+                ? "Connection refused while fetching content-policy.ts"
+                : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );
