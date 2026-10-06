@@ -2237,3 +2237,53 @@ def test_stopped_explicit_replay_ignores_optional_identity_metadata(
         previous["locations"][0]["startLine"] == 1
         for previous in findings[0]["provenance"]["previousFindings"]
     )
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("current_identity", ["anchor", "instance", "same"])
+@pytest.mark.parametrize("candidate", ["shared", "independent"])
+def test_parent_alias_metadata_preserves_independent_worker(
+    tmp_path, retry, current_identity, candidate
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    first = document["findings"][0]
+    first["identity"] = {"anchor": "current-parent-observation"}
+    first["provenance"]["candidateId"] = "parent-candidate"
+    first["provenance"]["preservedIdentity"] = {
+        "anchor": "historical-observation",
+        "note": "Initial metadata.",
+    }
+    second = copy.deepcopy(first)
+    if current_identity == "anchor":
+        second["identity"]["anchor"] = "independent-worker-observation"
+    elif current_identity == "instance":
+        second["identity"]["instance"] = "independent-worker"
+    if candidate == "independent":
+        second["provenance"]["candidateId"] = "worker-candidate"
+    second["provenance"]["preservedIdentity"]["note"] = "Later metadata."
+    path.write_text(json.dumps(document))
+    _, worker_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    worker_document = json.loads(worker_path.read_text())
+    worker_document["findings"] = [second]
+    worker_path.write_text(json.dumps(worker_document))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    expected = 1 if current_identity == "same" and candidate == "shared" else 2
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == expected
+    if current_identity != "same":
+        assert {json.dumps(row["identity"], sort_keys=True) for row in scan["findings"]} == {
+            json.dumps(row["identity"], sort_keys=True) for row in (first, second)
+        }
+    if candidate == "independent":
+        assert {row["provenance"]["candidateId"] for row in scan["findings"]} == {
+            "parent-candidate",
+            "worker-candidate",
+        }
+    assert len({row["findingId"] for row in scan["findings"]}) == expected
+    findings = scan["findings"]
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings

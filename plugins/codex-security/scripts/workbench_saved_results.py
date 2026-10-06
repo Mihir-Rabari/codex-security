@@ -2113,6 +2113,14 @@ def merge_saved_results(
                 historical_contents = represented_candidate_history.get(candidate_key, set())
             elif key in represented:
                 mapped_key = represented[key]
+                if (
+                    mapped_key is not None
+                    and candidate_key not in canonical_candidates
+                    and distinct_candidates(finding, findings[finding_positions[mapped_key]])
+                ):
+                    # A shared historical alias cannot absorb an independent
+                    # current candidate without an explicit parent source link.
+                    mapped_key = None
                 mapped_candidate = mapped_key
                 historical_contents = represented_history.get(key, set())
             elif (
