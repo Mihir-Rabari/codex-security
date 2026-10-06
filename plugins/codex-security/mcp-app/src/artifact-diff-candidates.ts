@@ -466,6 +466,7 @@ export function preserveUnresolvedDiffCandidates(
       .filter(
         (surface) =>
           isTerminalCandidateDecision(surface) &&
+          !confirmed.has(coverageCandidateKey(surface)) &&
           Array.isArray(surface.receiptRefs) &&
           surface.receiptRefs.length > 0,
       )

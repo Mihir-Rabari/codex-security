@@ -98,8 +98,23 @@ def preserve_budget_candidates(
             and surface.get("candidateId") is None
             and surface.get("candidate") is None
             and surface.get("sourceWorkerId") is None
-            and surface.get("label") == candidate["summary"]
-            and surface.get("notes") == candidate["evidence"]
+            and (
+                (
+                    surface.get("label") == candidate["summary"]
+                    and surface.get("notes") == candidate["evidence"]
+                )
+                or any(
+                    isinstance(row, dict)
+                    and coverage_candidate_key(row) == (None, candidate["candidate_id"])
+                    and row.get("surfaceIds") == [surface_id]
+                    and row.get("reason")
+                    == (
+                        "Validation was deferred because the scan reached its cost limit: "
+                        f"{surface.get('label')}. Evidence: {surface.get('notes')}"
+                    )
+                    for row in coverage["deferred"]
+                )
+            )
             and surface.get("disposition") in ("needs_follow_up", "rejected", "not_applicable")
         ):
             surface["candidateId"] = candidate["candidate_id"]
@@ -210,7 +225,14 @@ def preserve_budget_candidates(
             for item in deferred:
                 previous = item.get("candidate")
                 if isinstance(previous, dict) and previous in previous_candidates:
-                    generated = _budget_candidate_deferred(previous, generated_surface_ids)
+                    saved_ids = item.get("surfaceIds")
+                    if not (
+                        isinstance(saved_ids, list)
+                        and saved_ids
+                        and all(surface_id in generated_surface_ids for surface_id in saved_ids)
+                    ):
+                        continue
+                    generated = _budget_candidate_deferred(previous, saved_ids)
                     if all(item.get(field) == value for field, value in generated.items()):
                         refreshed = {
                             **{
@@ -220,7 +242,7 @@ def preserve_budget_candidates(
                             },
                             **candidate,
                         }
-                        item.update(_budget_candidate_deferred(refreshed, generated_surface_ids))
+                        item.update(_budget_candidate_deferred(refreshed, saved_ids))
                 else:
                     item.setdefault("candidate", candidate)
             continue

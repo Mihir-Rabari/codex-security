@@ -970,3 +970,142 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
         )
     else:
         assert any(row["receiptRefs"] == surface["receiptRefs"] for row in saved["surfaces"])
+
+
+@pytest.mark.parametrize("edited_field", [None, "reason", "paths", "surfaceIds", "candidate"])
+def test_budget_generated_dedicated_surface_refresh_keeps_saved_reference_context(
+    tmp_path: Path, workbench_api: dict[str, Any], edited_field: str | None
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
+        tmp_path,
+        extra_files={"updated.py": "# updated review\n", "authored.py": "# authored review\n"},
+    )
+    original = {**json.loads(ledger.read_text()), "validation": {"disposition": "suppressed"}}
+    run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
+    coverage_path = scan_dir / "coverage.json"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+        coverage = json.loads(coverage_path.read_text())
+        generic = {
+            "id": "independent-review",
+            "reason": "Keep independent unfinished work.",
+            "surfaceIds": [coverage["surfaces"][0]["id"]],
+        }
+        coverage["deferred"].append(generic)
+        coverage_path.write_text(json.dumps(coverage))
+        reopened = {**original, "validation": {"disposition": "deferred"}}
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [reopened], "Cost limit reached.")
+    coverage = json.loads(coverage_path.read_text())
+    pending = next(
+        row for row in coverage["deferred"] if row.get("candidateId") == original["candidate_id"]
+    )
+    generated_ids = [
+        row["id"]
+        for row in coverage["surfaces"]
+        if row.get("candidateId") == original["candidate_id"]
+    ]
+    assert len(generated_ids) == 2
+    assert len(pending["surfaceIds"]) == 1
+    coverage["surfaces"].append(
+        {
+            "id": "authored-review",
+            "label": "Independent authored surface",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+    )
+    if edited_field is not None:
+        pending[edited_field] = {
+            "reason": "Authored proof gap.",
+            "paths": ["authored.py"],
+            "surfaceIds": ["authored-review"],
+            "candidate": {**reopened, "evidence": "Authored source evidence."},
+        }[edited_field]
+    saved = json.loads(json.dumps(pending))
+    coverage_path.write_text(json.dumps(coverage))
+    current = {
+        **reopened,
+        "summary": "Current reopened review",
+        "evidence": "Current reopened source evidence.",
+        "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+    }
+    ledger.write_text(json.dumps(current) + "\n")
+    complete_budget_scan(state_dir, scan_id)
+    published = json.loads(coverage_path.read_text())
+    assert generic in published["deferred"]
+    actual = next(row for row in published["deferred"] if row.get("id") == saved["id"])
+    if edited_field is not None:
+        assert actual == saved
+    else:
+        assert actual["candidate"] == current
+        assert actual["surfaceIds"] == saved["surfaceIds"]
+        assert actual["paths"] == ["updated.py"]
+        assert current["evidence"] in actual["reason"]
+        assert current["evidence"] in (scan_dir / "report.md").read_text()
+
+
+@pytest.mark.parametrize("edited_field", [None, "label", "notes"])
+@pytest.mark.parametrize("decision", ["suppressed", "not_applicable"])
+def test_budget_legacy_saved_pending_surface_refresh_uses_original_evidence(
+    tmp_path: Path, edited_field: str | None, decision: str
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    original = {**json.loads(ledger.read_text()), "validation": {"disposition": "deferred"}}
+    # This is the canonical row emitted by the previous budget writer.
+    surface = {
+        "id": f"candidate-{original['candidate_id']}",
+        "label": original["summary"],
+        "disposition": "needs_follow_up",
+        "notes": original["evidence"],
+        "receiptRefs": [],
+        "annotation": "Keep this original annotation.",
+    }
+    if edited_field is not None:
+        surface[edited_field] = "Authored review detail remains authoritative."
+    saved_surface = dict(surface)
+    pending = {
+        "id": original["candidate_id"],
+        "candidateId": original["candidate_id"],
+        "reason": f"Validation was deferred because the scan reached its cost limit: {original['summary']}. Evidence: {original['evidence']}",
+        "paths": [row["path"] for row in original["locations"]],
+        "surfaceIds": [surface["id"]],
+    }
+    current = {
+        **original,
+        "summary": "Updated legacy review",
+        "evidence": "Updated legacy source evidence.",
+        "validation": {"disposition": decision},
+    }
+    ledger.write_text(json.dumps(current) + "\n")
+    target = tmp_path / "target"
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"].pop("sealedAt", None)
+    manifest["scan"].pop("artifacts", None)
+    manifest_path.write_text(json.dumps(manifest))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(completeness="partial", surfaces=[surface], deferred=[pending])
+    coverage_path.write_text(json.dumps(coverage))
+    complete_budget_scan(state_dir, scan_id)
+    published = json.loads(coverage_path.read_text())
+    retained = next(row for row in published["surfaces"] if row["id"] == surface["id"])
+    if edited_field is not None:
+        assert retained == saved_surface
+    else:
+        assert retained["disposition"] == (
+            "rejected" if decision == "suppressed" else "not_applicable"
+        )
+        assert retained["label"] == current["summary"]
+        assert retained["notes"] == current["evidence"]
+        assert retained["annotation"] == saved_surface["annotation"]
+        assert len(published["surfaces"]) == 1

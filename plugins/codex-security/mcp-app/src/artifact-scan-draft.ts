@@ -747,6 +747,26 @@ async function preserveScanDraft(
             if (pending[field] !== undefined)
               candidateRow[field] ??= structuredClone(pending[field]);
           }
+          if (isObject(pending.finding) && isObject(candidateRow.finding)) {
+            if (isObject(candidateRow.finding.provenance))
+              preserveFindingDetails(candidateRow.finding, pending.finding);
+            else if (
+              !containsSavedFinding(candidateRow.finding, pending.finding)
+            )
+              candidateRow.previousFindings = exactUnion(
+                Array.isArray(candidateRow.previousFindings)
+                  ? candidateRow.previousFindings
+                  : [],
+                [pending.finding],
+              );
+          }
+          if (Array.isArray(pending.previousFindings))
+            candidateRow.previousFindings = exactUnion(
+              Array.isArray(candidateRow.previousFindings)
+                ? candidateRow.previousFindings
+                : [],
+              pending.previousFindings,
+            );
         }
       }
     }

@@ -3037,3 +3037,136 @@ for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
     });
   }
 }
+
+for (const payload of ["complete", "compact", "omitted"] as const) {
+  test(`reopened Diff submission retains earlier finding evidence: ${payload}`, async (t) => {
+    const original = candidate(
+      "reopened-submission",
+      "reportable",
+      "reportable",
+    );
+    const context = await fixture(t, [original]);
+    const earlier = finding(original.candidate_id);
+    earlier.summary = "Earlier validated finding evidence.";
+    earlier.provenance.reviewEvidence =
+      "Original synthetic validation details.";
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: true,
+      findings: [earlier],
+    });
+    const checkpointRoot = path.join(context.root, "checkpoints");
+    const checkpoints = await Promise.all(
+      (await readdir(checkpointRoot)).map(
+        async (name) =>
+          [
+            name,
+            await readFile(path.join(checkpointRoot, name), "utf8"),
+          ] as const,
+      ),
+    );
+    await writeLedger(context, [candidate(original.candidate_id, "deferred")]);
+    const newer: FixtureObject =
+      payload === "compact"
+        ? { title: "Current authored annotation." }
+        : {
+            ...finding(original.candidate_id),
+            summary: "Current authored finding detail.",
+          };
+    const submitted = draft([
+      {
+        id: "current-proof-gap",
+        candidateId: original.candidate_id,
+        reason: "The reopened review still needs proof.",
+        ...(payload === "omitted" ? {} : { finding: newer }),
+      },
+    ]);
+    submitted.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, {
+      ...submitted,
+      complete: true,
+    });
+    const published = await readCoverage(context);
+    const pending = published.deferred.find(
+      (row: FixtureObject) => row.candidateId === original.candidate_id,
+    );
+    assert.ok(pending);
+    const containsEarlier = (value: unknown): boolean => {
+      if (Array.isArray(value)) return value.some(containsEarlier);
+      if (value === null || typeof value !== "object") return false;
+      const row = value as FixtureObject;
+      return (
+        (row.summary === earlier.summary &&
+          row.provenance?.reviewEvidence ===
+            earlier.provenance.reviewEvidence) ||
+        Object.values(row).some(containsEarlier)
+      );
+    };
+    assert.ok(
+      containsEarlier(pending),
+      "published candidate details retain earlier validation evidence",
+    );
+    if (payload !== "omitted")
+      assert.equal(
+        payload === "compact" ? pending.finding.title : pending.finding.summary,
+        payload === "compact" ? newer.title : newer.summary,
+      );
+    for (const [name, bytes] of checkpoints)
+      assert.equal(
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+        bytes,
+      );
+  });
+}
+
+for (const confirmed of [false, true]) {
+  test(`receipt holdback preserves only a surviving Diff terminal decision: finding=${confirmed}`, async (t) => {
+    const reviewed = candidate("receipt-confirmation", "deferred");
+    const context = await fixture(t, [reviewed]);
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const saved = await readCoverage(context);
+    await writeFile(
+      path.join(context.root, "artifacts", "review-receipt.txt"),
+      "Synthetic verified source review.\n",
+    );
+    saved.surfaces.push({
+      id: "receipt-terminal",
+      candidateId: reviewed.candidate_id,
+      label: "Earlier terminal review",
+      disposition: "rejected",
+      notes: "Earlier terminal rationale.",
+      receiptRefs: ["artifacts/review-receipt.txt"],
+    });
+    if (confirmed)
+      await writeLedger(context, [
+        candidate(reviewed.candidate_id, "reportable", "reportable"),
+      ]);
+    const {
+      mode: _mode,
+      includePaths: _include,
+      excludePaths: _exclude,
+      inventoryStrategy: _inventory,
+      ...submittedCoverage
+    } = saved;
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: true,
+      coverage: submittedCoverage,
+      findings: confirmed ? [finding(reviewed.candidate_id)] : [],
+    });
+    const published = await readCoverage(context);
+    assert.equal(
+      published.deferred.filter(
+        (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+      ).length,
+      confirmed ? 0 : 1,
+    );
+    if (confirmed) assert.equal(published.completeness, "complete");
+    else
+      assert.ok(
+        published.surfaces.some(
+          (row: FixtureObject) => row.id === "receipt-terminal",
+        ),
+      );
+  });
+}
