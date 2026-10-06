@@ -1696,3 +1696,66 @@ for (const mapped of [false, true]) {
     expect(saved.coverage.deferred).toEqual([]);
   });
 }
+
+for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
+  for (const disposition of ["reportable", "deferred", "suppressed", "not_applicable"] as const) {
+    test(`historical structured deferred remains independent: ${Array.isArray(owner) ? "array" : "object"}/${disposition}`, async () => {
+      const f = await fixture();
+      f.findings.findings[0]!.provenance["candidateId"] = "validated-candidate";
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(join(f.scanDir, "coverage.json"));
+      const historical = {
+        id: "historical-deferred", candidateId: "validated-candidate", sourceWorkerId: owner,
+        reason: "Independent historical review remains.", surfaceIds: [coverage.surfaces[0]!.id],
+      };
+      coverage.deferred = [historical];
+      coverage.completeness = "partial";
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({ ...f, run: async () => JSON.stringify(result(disposition)) });
+      const saved = await loadResult(f.scanDir);
+      expect(saved.coverage.deferred).toContainEqual(historical);
+      expect(saved.unresolvedCandidates).toHaveLength(disposition === "deferred" ? 1 : 0);
+      if (disposition === "deferred") {
+        const current = saved.unresolvedCandidates[0]!;
+        expect(current["sourceWorkerId"]).toBeUndefined();
+        expect(current.reason).toBe("The required service was unavailable.");
+      }
+    });
+  }
+}
+for (const outcomes of [
+  ["reportable", "reportable"], ["suppressed", "not_applicable"], ["reportable", "suppressed"],
+  ["deferred", "suppressed"],
+] as const) {
+  for (const independent of [false, true]) {
+    test(`sibling outcomes reconcile consumed historical follow-up: ${outcomes.join("/")}/${independent}`, async () => {
+      const f = await fixture(2);
+      for (const [index, finding] of f.findings.findings.entries()) {
+        finding.provenance["candidateId"] = "validated-candidate";
+        finding.provenance["sourceWorkerId"] = "worker-current";
+        finding.identity = { ...finding.identity, instance: `sibling-${index}` };
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(join(f.scanDir, "coverage.json"));
+      const historical = {
+        id: "historical-follow-up", candidateId: "validated-candidate", sourceWorkerId: "worker-current",
+        label: "Historical sibling review", disposition: "needs_follow_up" as const, receiptRefs: [],
+        notes: "Preserve the historical review evidence.",
+      };
+      coverage.surfaces.push(historical);
+      coverage.deferred = [{ id: "historical-gap", candidateId: "validated-candidate", sourceWorkerId: "worker-current", reason: "Prior sibling proof gap.", surfaceIds: [historical.id] }];
+      const shared = { id: "independent-gap", reason: "Other work uses the historical evidence.", surfaceIds: [historical.id] };
+      if (independent) coverage.deferred.push(shared);
+      coverage.completeness = "partial";
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({ ...f, run: async () => JSON.stringify(result(...outcomes)) });
+      const saved = await loadResult(f.scanDir);
+      const historicalSurface = saved.coverage.surfaces.find(row => row.id === historical.id)!;
+      expect(historicalSurface.notes).toBe(historical.notes);
+      expect(historicalSurface.disposition).toBe(independent ? "needs_follow_up" : outcomes.includes("reportable" as never) ? "reported" : outcomes.includes("deferred" as never) ? "needs_follow_up" : "rejected");
+      expect(saved.coverage.deferred.some(row => row.id === "historical-gap")).toBe(false);
+      if (independent) expect(saved.coverage.deferred).toContainEqual(shared);
+      expect(saved.unresolvedCandidates).toHaveLength(outcomes.includes("deferred" as never) ? 1 : 0);
+    });
+  }
+}

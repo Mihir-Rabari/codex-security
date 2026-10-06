@@ -408,7 +408,10 @@ export async function runCustomValidation(options: {
   ]);
   const previousDeferred = new Map<string, DeferredCoverage[]>();
   coverage.deferred = coverage.deferred.filter((item) => {
-    if (item.candidateId === undefined) return true;
+    if (
+      item.candidateId === undefined ||
+      (item["sourceWorkerId"] != null && typeof item["sourceWorkerId"] !== "string")
+    ) return true;
     const key = candidateIdentity(item.candidateId, item["sourceWorkerId"]);
     if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDeferred.get(key) ?? [];
@@ -480,7 +483,7 @@ export async function runCustomValidation(options: {
       candidate.finding.provenance["originalCandidates"] = originals;
     }
     const surfaceIds = new Set(candidate.surfaceIds);
-    if (key !== undefined && candidateIdentityCounts.get(key) === 1) {
+    if (key !== undefined) {
       const previousSurfaceIds = new Set(
         (previousDeferred.get(key) ?? []).flatMap(
           (row) => row.surfaceIds ?? [],

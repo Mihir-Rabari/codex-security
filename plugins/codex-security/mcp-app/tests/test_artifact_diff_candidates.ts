@@ -2717,3 +2717,30 @@ for (const disposition of ["rejected", "not_applicable"]) {
     }
   }
 }
+
+for (const validation of ["suppressed", "not_applicable"]) {
+  for (const siblings of [1, 2]) {
+    test(`ledger dismissals archive every explicit sibling: ${validation}/${siblings}`, async (t) => {
+      const reviewed = candidate("sibling-dismissal", "reportable");
+      const context = await fixture(t, [reviewed]);
+      const previous = Array.from({ length: siblings }, (_, index) => ({
+        ...finding(reviewed.candidate_id),
+        identity: { ruleId: "synthetic-review", anchor: "shared-candidate", instance: `sibling-${index}` },
+        summary: `Distinct saved evidence ${index}.`,
+      }));
+      await recordCodexSecurityScanDraft(context, { ...draft(), complete: true, findings: previous });
+      await writeLedger(context, [candidate(reviewed.candidate_id, validation)]);
+      await recordCodexSecurityScanDraft(context, { ...draft(), complete: false });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const saved = await readCoverage(context);
+        const decisions = saved.surfaces.filter((row: FixtureObject) => row.candidateId === reviewed.candidate_id);
+        assert.equal(decisions.length, 1);
+        assert.equal(decisions[0].disposition, validation === "suppressed" ? "rejected" : "not_applicable");
+        const historical = [decisions[0].finding, ...(decisions[0].finding.provenance.previousFindings ?? [])];
+        for (const finding of previous) assert.ok(historical.some((row: FixtureObject) => row.identity.instance === finding.identity.instance && row.summary === finding.summary));
+        assert.equal(JSON.parse(await readFile(path.join(context.root, "findings.json"), "utf8")).findings.length, 0);
+        if (attempt === 0) await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+      }
+    });
+  }
+}

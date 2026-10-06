@@ -756,7 +756,9 @@ async function preserveScanDraft(
           ? undefined
           : dispositions.find((item) => coverageKey(item) === candidateId);
       if (disposition) {
-        disposition.finding ??= structuredClone(finding);
+        if (isObject(disposition.finding))
+          preserveFindingDetails(disposition.finding, finding);
+        else disposition.finding = structuredClone(finding);
         continue;
       }
       const matches = result.findings.filter((current) =>
