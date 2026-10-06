@@ -1,3 +1,5 @@
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScan } from "./plugin-root.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -6,13 +8,9 @@ import { build } from "esbuild";
 import { runScanEvents } from "../src/api.js";
 import type { ScanDraftInput } from "../src/accepted-audit.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-} from "./support/api-events.js";
+import { completedEvents } from "./support/api-events.js";
 
-const { temporaryDirectory, copyCompletedScan, cleanup } =
-  createApiTestFixtures();
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 const bundle = await build({
@@ -321,18 +319,17 @@ async function observeStandardAdmission(
   await writeFile(
     helperPath,
     `import helpers from ${JSON.stringify(pathToFileURL(join(PLUGIN_ROOT, "mcp", "helpers.mjs")).href)};
-export const drafts = [];
-export let calls = 0;
-export default { ...helpers, parseCanonicalScanDraft(input) {
-  calls++;
+const observed = { drafts: [], calls: 0, parseCanonicalScanDraft(input) {
+  observed.calls++;
   const draft = helpers.parseCanonicalScanDraft(input);
-  drafts.push(draft);
+  observed.drafts.push(draft);
   return draft;
-} };`,
+} };
+export default observed;`,
   );
-  const observed: { drafts: ScanDraftInput[]; calls: number } = await import(
-    pathToFileURL(helperPath).href
-  );
+  const observed: { drafts: ScanDraftInput[]; calls: number } = (
+    await import(pathToFileURL(helperPath).href)
+  ).default;
   const finalization = new Error("The enclosing finalizer owns the next step.");
   let finalizations = 0;
   const error = await runScanEvents({

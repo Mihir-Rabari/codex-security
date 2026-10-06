@@ -63,10 +63,14 @@ def test_legacy_publication_compares_registered_accepted_reference(
     before = {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")}
 
     if selected:
-        workbench_api["write_scan_draft"](workbench_db, staged)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+        )
     else:
         with pytest.raises(SystemExit, match="aggregate"):
-            workbench_api["write_scan_draft"](workbench_db, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+            )
         assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
 
 
@@ -88,7 +92,8 @@ def test_stopped_recovery_uses_accepted_bytes_after_replaceable_output_disappear
     assert published["reviews"] == coverage["reviews"]
     assert coverage["deferred"][0] in published["deferred"]
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
-    workbench_api["preserve_scan_results"](
+    workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None

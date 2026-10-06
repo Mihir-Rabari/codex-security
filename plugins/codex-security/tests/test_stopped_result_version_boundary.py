@@ -71,7 +71,8 @@ def test_stopped_result_publication_requires_supported_protocol(
     error = None
     try:
         if operation == "preserve":
-            workbench_api["preserve_scan_results"](
+            workbench_api["saved_results"].preserve_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
                 workbench_db,
                 Namespace(
                     scan_id=scan.scan_id,

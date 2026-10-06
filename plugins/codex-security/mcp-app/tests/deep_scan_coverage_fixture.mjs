@@ -63,7 +63,7 @@ export async function publishCoverageFixture(root, completeness, {
     return JSON.parse(stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  let { run } = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
+  let run = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
   assert.equal(run.workflowVersion, "deep-security-scan/v1", "the prior reader starts the legacy workflow");
   if (selectedRecovery) {
     ({ run } = await store.claimCoordinator({ scanId: run.scanId, threadId }));

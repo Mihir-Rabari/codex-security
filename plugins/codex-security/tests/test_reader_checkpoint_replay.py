@@ -47,7 +47,8 @@ def stop(workbench_api, connection, scan):
 
 
 def preserve(workbench_api, connection, scan):
-    return workbench_api["preserve_scan_results"](
+    return workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         connection,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None

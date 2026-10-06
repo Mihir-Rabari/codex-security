@@ -107,7 +107,9 @@ def test_reader_republication_checks_identity_before_writing_checkpoints(
     with pytest.raises(
         workbench_api["ContractError"], match="publication|changed after acceptance"
     ):
-        workbench_api["write_scan_draft"](workbench_db, staged)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+        )
     assert {p: p.read_bytes() for p in scan.scan_dir.rglob("*.json")} == before
     assert "\n".join(workbench_db.iterdump()) == state
 

@@ -100,7 +100,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         target,
         str(started["scanId"]),
         Path(str(started["scanDir"])),
-        datetime.fromisoformat(row[0]),
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
         environment,
         mode,
         diff_target,
@@ -588,7 +588,7 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         target,
         scan_id,
         scan_dir,
-        datetime.fromisoformat(row[0]),
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
         environment,
         "deep",
     )

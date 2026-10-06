@@ -1,3 +1,4 @@
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,11 +15,7 @@ import {
   type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();

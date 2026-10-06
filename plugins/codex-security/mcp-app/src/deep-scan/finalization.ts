@@ -131,8 +131,12 @@ export async function resumeSelectedDeepScan(input: {
   const run = await store.get(input.scanId, input.threadId);
   selectedInput(run);
   const prepare = [
-    "prepare-scan-completion", "--scan-id", input.scanId,
-    ...(input.handoffClaimToken ? ["--claim-token", input.handoffClaimToken] : []),
+    "prepare-scan-completion",
+    "--scan-id",
+    input.scanId,
+    ...(input.handoffClaimToken
+      ? ["--claim-token", input.handoffClaimToken]
+      : []),
   ];
   if (run.status === "succeeded") {
     await input.runWorkbench(prepare);

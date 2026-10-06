@@ -48,7 +48,7 @@ else:
         if relative == boundary:
             os._exit(71)
     saved.write_scan_local_bytes = crash_after_write
-    api["write_scan_draft"](connection, args)
+    api["saved_results"].write_scan_draft(api["_WORKBENCH_DB_CONTEXT"], connection, args)
 raise AssertionError("publication never reached the requested crash boundary")
 """
 
@@ -92,7 +92,9 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         workbench_db.backup(connection)
         connection.row_factory = sqlite3.Row
         if boundary.startswith("sqlite-"):
-            workbench_api["write_scan_draft"](connection, current)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, current
+            )
 
     child = subprocess.run(
         [
@@ -128,11 +130,15 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         ]
 
         with pytest.raises(SystemExit, match="coordinator|stopped"):
-            workbench_api["write_scan_draft"](connection, stale)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, stale
+            )
         assert all(path.read_bytes() == contents for path, contents in interrupted.items())
 
         if not boundary.startswith("sqlite-"):
-            workbench_api["write_scan_draft"](connection, current)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, current
+            )
         completed = workbench_api["complete_scan"](
             connection, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
         )["scan"]

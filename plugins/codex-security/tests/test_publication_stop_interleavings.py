@@ -36,7 +36,11 @@ def saved_selection(connection, scan, accepted, omitted=None, *, reason="saturat
 
 def stop_scan(api, connection, scan, cause):
     if cause == "cancel":
-        return api["cancel_scan"](connection, Namespace(scan_id=scan.scan_id, thread_id=None))
+        return api["saved_results"].cancel_scan(
+            api["_WORKBENCH_DB_CONTEXT"],
+            connection,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
     return api["fail_scan"](
         connection,
         Namespace(
@@ -59,16 +63,24 @@ def published_bytes(scan):
 _CRASH_SELECTION_RECOVERY = """
 import os, runpy, sqlite3, sys
 from argparse import Namespace
+from types import SimpleNamespace
 
 api = runpy.run_path(sys.argv[1], run_name="selection_recovery_crash_test")
 deep = api["deep_scan"]
-deep.configure(deep.DeepScanDependencies(**{
-    name: api["preserve_stopped_results_after_transition"
-              if name == "preserve_stopped_results" else name]
-    for name in deep.DeepScanDependencies.__dataclass_fields__
-}))
+deep.configure(SimpleNamespace(
+    **api,
+    preserve_stopped_results=api["preserve_stopped_results_after_transition"],
+))
 
 class CrashConnection(sqlite3.Connection):
+    def __exit__(self, kind, error, traceback):
+        if kind is None:
+            if sys.argv[4] == "before":
+                os._exit(72)
+            super().__exit__(kind, error, traceback)
+            os._exit(73)
+        return super().__exit__(kind, error, traceback)
+
     def commit(self):
         if sys.argv[4] == "before":
             os._exit(72)
@@ -125,7 +137,9 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         if cut in {"published", "sealed"}:
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         complete_args = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
         if cut == "sealed":
             workbench_api["complete_scan"](connection, complete_args)
@@ -158,13 +172,16 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
             assert run["terminal_reason"] == "saturated"
         frozen = published_bytes(scan)
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         if cut == "sealed":
             workbench_api["complete_scan"](connection, complete_args)
         else:
             with pytest.raises(SystemExit):
                 workbench_api["complete_scan"](connection, complete_args)
-            workbench_api["preserve_scan_results"](
+            workbench_api["saved_results"].preserve_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
                 connection,
                 Namespace(
                     scan_id=scan.scan_id,
@@ -266,7 +283,9 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
         assert "\n".join(connection.iterdump()) == stable
         stale = stage_publication(scan, generation=3, result_path=accepted, title="Old coordinator")
         with pytest.raises(SystemExit, match="generation"):
-            workbench_api["write_scan_draft"](connection, stale)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, stale
+            )
         assert published_bytes(scan) == before
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
@@ -277,6 +296,8 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
         current = stage_publication(
             scan, generation=4, result_path=accepted, title="Recovered selected aggregate"
         )
-        workbench_api["write_scan_draft"](connection, current)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, current
+        )
         assert accepted.read_bytes() == before[accepted.relative_to(scan.scan_dir).as_posix()]
         assert "\n".join(connection.iterdump()) == stable

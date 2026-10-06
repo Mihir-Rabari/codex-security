@@ -71,15 +71,11 @@ def reconcile_completed_scan_cost(
             allow_nan=False,
         )
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
             (cost_json, scan["id"]),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
 
 
 def collect_scan_usage(
@@ -350,13 +346,11 @@ def _scan_root_thread_ids(
                 (scan["id"], scan["id"]),
             )
         )
-    roots: list[str] = []
-    seen: set[str] = set()
+    roots: dict[str, None] = {}
     for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip() and candidate not in seen:
-            roots.append(candidate)
-            seen.add(candidate)
-    return roots
+        if isinstance(candidate, str) and candidate.strip():
+            roots[candidate] = None
+    return list(roots)
 
 
 def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_workbench_deep_scan import (
@@ -34,7 +35,14 @@ def test_state_snapshot_does_not_mix_concurrent_acceptance(
     )
     database = state_dir / "workbench.sqlite3"
     deep_scan = sys.modules["deep_scan_workbench"]
-    monkeypatch.setattr(deep_scan, "require_scan", workbench_api["require_scan"])
+    monkeypatch.setattr(
+        deep_scan,
+        "_dependencies",
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
+        ),
+    )
     original = deep_scan.require_deep_scan_run
 
     def accept_after_read(connection, requested_scan_id):
@@ -67,7 +75,14 @@ def test_state_snapshot_preserves_its_callers_transaction(
     initial = begin_target_scan(tmp_path / "state", tmp_path / "codex", target, tmp_path / "scans")
     scan_id = initial["deepScan"]["scanId"]
     deep_scan = sys.modules["deep_scan_workbench"]
-    monkeypatch.setattr(deep_scan, "require_scan", workbench_api["require_scan"])
+    monkeypatch.setattr(
+        deep_scan,
+        "_dependencies",
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
+        ),
+    )
     with sqlite3.connect(tmp_path / "state" / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")

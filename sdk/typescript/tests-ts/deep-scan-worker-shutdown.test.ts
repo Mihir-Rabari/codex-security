@@ -17,7 +17,7 @@ type WorkerExecutorConstructor = new (settings: {
     subagents: number;
     signal: AbortSignal;
     onThreadStarted?: () => void;
-  }): Promise<{ finalResponse: string; threadId?: string }>;
+  }): Promise<{ threadId?: string }>;
 };
 
 async function bundledWorkerExecutor(
@@ -68,9 +68,9 @@ async function bundledWorkerExecutor(
     "snapshotWorkerEnvironment",
     "workerModelConfig",
     "workerModelSelection",
+    "workerRuntimeSettings",
     "environmentVariable",
     "preflightDeepScanWorkerPermissionProfile",
-    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "deepScanPermissionProfileFallbackError",
     "resolveCodexPath",
     "executablePathForSpawn",
@@ -86,9 +86,9 @@ async function bundledWorkerExecutor(
     async () => ({}),
     async () => ({}),
     () => ({}),
+    async () => ({}),
     () => undefined,
     preflight,
-    "codex_security_deep_scan_worker",
     () => undefined,
     () => "/fixture/codex",
     (path: string) => path,
@@ -163,7 +163,6 @@ test("settles completed bundled Deep Scan workers during coordinator cancellatio
     const result = await runWorker(WorkerExecutor, parentController.signal);
 
     expect(result).toEqual({
-      finalResponse: "worker completed",
       threadId: "fixture-worker-thread",
     });
     expect(iteratorClosed).toBe(true);

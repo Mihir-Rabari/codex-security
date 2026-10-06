@@ -35,7 +35,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         workbench_db.backup(connection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        workbench_api["write_scan_draft"](connection, staged)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+        )
         accepted_bytes = accepted.read_bytes()
         warning = "Scan stopped after reaching its configured cost limit."
         budget_args = Namespace(
@@ -43,7 +45,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         )
         cancel_args = Namespace(scan_id=scan.scan_id, thread_id=None)
         if cancel_first:
-            workbench_api["cancel_scan"](connection, cancel_args)
+            workbench_api["saved_results"].cancel_scan(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, cancel_args
+            )
             frozen = published_bytes(scan)
             with pytest.raises(SystemExit, match="running"):
                 workbench_api["complete_budget_exhausted_scan"](connection, budget_args)
@@ -51,7 +55,9 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
             workbench_api["complete_budget_exhausted_scan"](connection, budget_args)
             frozen = published_bytes(scan)
             with pytest.raises(SystemExit, match="running"):
-                workbench_api["cancel_scan"](connection, cancel_args)
+                workbench_api["saved_results"].cancel_scan(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"], connection, cancel_args
+                )
         assert published_bytes(scan) == frozen
 
     with sqlite3.connect(database_path) as connection:
@@ -72,5 +78,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert len(findings) == 1
         with pytest.raises(SystemExit, match="stopped"):
-            workbench_api["write_scan_draft"](connection, staged)
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, staged
+            )
         assert published_bytes(scan) == frozen

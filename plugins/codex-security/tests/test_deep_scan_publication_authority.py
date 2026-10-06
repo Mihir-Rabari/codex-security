@@ -61,7 +61,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     current = stage_publication(
         scan, generation=3, result_path=new_result, title="Current accepted aggregate"
     )
-    workbench_api["write_scan_draft"](workbench_db, current)
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, current
+    )
     saved = {
         path: path.read_bytes()
         for path in scan.scan_dir.rglob("*.json")
@@ -75,7 +77,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     )
 
     with pytest.raises(SystemExit, match="coordinator|aggregate"):
-        workbench_api["write_scan_draft"](workbench_db, old)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, old
+        )
 
     assert {
         path: path.read_bytes()

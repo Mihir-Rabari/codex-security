@@ -4,15 +4,12 @@ import {
   copyFile,
   cp,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
-  rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -21,14 +18,13 @@ import { transform } from "esbuild";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
-const temporaryDirectories: string[] = [];
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const temporaryDirectories = createTemporaryDirectories(false);
 const execFileAsync = promisify(execFile);
 
-async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "codex-security-plugin-"));
-  temporaryDirectories.push(directory);
-  return directory;
-}
+const temporaryDirectory = () =>
+  temporaryDirectories.create("codex-security-plugin-");
 
 async function writeFixture(
   root: string,
@@ -64,13 +60,7 @@ async function snapshot(root: string) {
   );
 }
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 describe("bundled plugin build", () => {
   test("bundles the native policy proof with only SDK dependencies", async () => {
@@ -196,6 +186,8 @@ describe("bundled plugin build", () => {
       "src",
       "scripts",
       "templates",
+      "tests/support/temporary-directories.ts",
+      "tests/support/json.ts",
     ]) {
       await cp(new URL(`mcp-app/${name}`, source), join(mcp, name), {
         recursive: true,
@@ -362,22 +354,21 @@ describe("bundled plugin build", () => {
       "package.json",
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
-    await writeFixture(
-      packageRoot,
-      "scripts/build-plugin.mjs",
-      await readFile(
-        new URL("../scripts/build-plugin.mjs", import.meta.url),
-        "utf8",
-      ),
-    );
-    await writeFixture(
-      packageRoot,
-      "scripts/check-plugin-source.mjs",
-      await readFile(
-        new URL("../scripts/check-plugin-source.mjs", import.meta.url),
-        "utf8",
-      ),
-    );
+    for (const script of [
+      "build-plugin",
+      "check-plugin-source",
+      "is-main",
+      "plugin-contract",
+    ]) {
+      await writeFixture(
+        packageRoot,
+        `scripts/${script}.mjs`,
+        await readFile(
+          new URL(`../scripts/${script}.mjs`, import.meta.url),
+          "utf8",
+        ),
+      );
+    }
     await writeFixture(
       source,
       "plugin-files.json",

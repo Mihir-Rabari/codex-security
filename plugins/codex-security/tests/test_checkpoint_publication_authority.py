@@ -135,7 +135,8 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
         )
     save_disposition(scan, result.parent, "rejected")
 
-    replayed = workbench_api["preserve_scan_results"](
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None

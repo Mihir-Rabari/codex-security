@@ -1,4 +1,5 @@
 import { isAbsolute, join, relative, sep } from "node:path";
+import { isRecord } from "./record.js";
 
 export interface ScanExecutionAttribution {
   formatVersion: 1;
@@ -97,8 +98,4 @@ export function isScanArtifactDirectory(
     components[0] !== ".." &&
     relative(join(workers, components[0]!, "output"), workingDirectory) === ""
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
