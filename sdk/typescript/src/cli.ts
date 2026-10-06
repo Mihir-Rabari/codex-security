@@ -6972,8 +6972,10 @@ async function patchPublicationDestination(
             ? pushRemote
             : `ssh://${pushRemote.replace(":", "/")}`,
         );
-        if (url.hostname.toLowerCase() === "ssh.github.com")
+        if (url.hostname.toLowerCase() === "ssh.github.com") {
           url.hostname = "github.com";
+          identityRemote = url.href.replace(/^ssh\+git:/u, "ssh:");
+        }
         if (
           ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol) &&
           url.hostname.toLowerCase().replace(/^www\./u, "") !==

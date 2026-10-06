@@ -6768,24 +6768,44 @@ process.exit(result.status ?? 1);
     );
   }
 
-  test.each(["named", "userless"])(
+  test.each([
+    "named",
+    "userless",
+    "canonical-host GIT_SSH",
+    "canonical-host Git PATH",
+    "canonical-host port",
+    "canonical-host ssh+git",
+  ])(
     "resumes publication with %s SSH available only in Git's subprocess PATH",
     async (kind) => {
-      const username = kind === "named" ? "git@" : "";
+      const canonicalHost = kind.startsWith("canonical-host");
+      const username = kind === "userless" ? "" : "git@";
+      const host = canonicalHost ? "ssh.github.com" : "GitHub-Work";
+      const ghExecutable = Bun.which("gh")!;
       const { directory, git } = await publicationRepository();
       const sshDirectory = await fixtures.create("patch-git-ssh-");
       await writeFile(
         join(sshDirectory, "ssh"),
-        `#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "${username}GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n`,
+        `#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "${username}${host}" ] || exit 1\nprintf "hostname github.com\\n"\n`,
         { mode: 0o755 },
       );
       const emptyPath = await fixtures.create("patch-no-ssh-");
+      const ghConfig = await fixtures.create("patch-gh-config-");
       const gitExecutable = Bun.which("git")!;
+      await symlink(
+        gitExecutable,
+        join(emptyPath, process.platform === "win32" ? "git.exe" : "git"),
+      );
       expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
       const environment = {
         PATH: emptyPath,
         GIT_EXEC_PATH: sshDirectory,
-        GIT_SSH: undefined,
+        GIT_SSH:
+          canonicalHost && kind !== "canonical-host Git PATH"
+            ? join(sshDirectory, "ssh")
+            : undefined,
+        GH_CONFIG_DIR: ghConfig,
+        GH_TOKEN: "synthetic-gh-test-token",
         GIT_SSH_COMMAND: undefined,
       };
       git(
@@ -6799,7 +6819,11 @@ process.exit(result.status ?? 1);
         "set-url",
         "--push",
         "origin",
-        `${username}GitHub-Work:example/repository.git`,
+        kind === "canonical-host port"
+          ? "ssh://git@ssh.github.com:443/example/repository.git"
+          : kind === "canonical-host ssh+git"
+            ? "ssh+git://git@ssh.github.com/example/repository.git"
+            : `${username}${host}:example/repository.git`,
       );
       const branch = "codex-security/saved-patch";
       const commit = git("rev-parse", "HEAD");
@@ -6850,13 +6874,30 @@ process.exit(result.status ?? 1);
                   encoding: "utf8",
                 },
               ).trim();
-              expect(selectedRemote).toBe(
-                "https://github.com/example/repository",
-              );
+              if (!canonicalHost)
+                expect(selectedRemote).toBe(
+                  "https://github.com/example/repository",
+                );
               expect(options?.environment?.["GH_REPO"]).toBe("");
               expect(options?.environment?.["GH_HOST"]).toBe("github.com");
               if (args[1] === "set-default") {
                 expect(args).toEqual(["repo", "set-default", "--view"]);
+                if (canonicalHost) {
+                  const { stdout } = await promisify(execFile)(
+                    ghExecutable,
+                    args,
+                    {
+                      cwd: options?.directory ?? cwd,
+                      env: {
+                        ...process.env,
+                        ...environment,
+                        ...options?.environment,
+                      },
+                      encoding: "utf8",
+                    },
+                  );
+                  return stdout.trim();
+                }
                 return "example/repository";
               }
               expect(args).toEqual([
@@ -6867,6 +6908,11 @@ process.exit(result.status ?? 1);
                 "--jq",
                 "tojson",
               ]);
+              expect(selectedRemote).toBe(
+                canonicalHost
+                  ? `ssh://git@github.com${kind === "canonical-host port" ? ":443" : ""}/example/repository.git`
+                  : "https://github.com/example/repository",
+              );
               repositoryLookups++;
               return JSON.stringify({
                 id: "synthetic-id",
@@ -7436,7 +7482,7 @@ process.exit(result.status ?? 1);
           ? "ancestor worktree"
           : sparseLink
             ? "outside the selected repository"
-            : "worktree root does not match",
+            : "Git metadata is not bound to the selected checkout",
       );
       expect(modelCalls).toBe(kind.endsWith("during") ? 1 : 0);
       expect(() => metadata("cat-file", "-e", blob)).toThrow();
