@@ -840,14 +840,18 @@ await withEvalState(() => createEvalHome(
 });
 `,
       );
-      const child = spawn(process.execPath, [driver], {
-        env: {
-          PATH: dirname(process.execPath),
-          HOME: directory,
-          TMPDIR: directory,
+      const child = spawn(
+        process.execPath,
+        ["--experimental-strip-types", driver],
+        {
+          env: {
+            PATH: dirname(process.execPath),
+            HOME: directory,
+            TMPDIR: directory,
+          },
+          stdio: ["ignore", "ignore", "pipe"],
         },
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      );
       let stderr = "";
       child.stderr.on("data", (chunk) => {
         stderr += chunk;

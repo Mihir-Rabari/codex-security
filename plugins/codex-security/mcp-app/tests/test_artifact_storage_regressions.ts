@@ -24,7 +24,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { importModule } from "./import-module.ts";
 import { applicationRoot, buildServer } from "./build-server.ts";
-import { build } from "esbuild";
 import { mcpBundleOptions } from "../scripts/bundle_options.mjs";
 
 const pluginRoot = path.dirname(applicationRoot);
