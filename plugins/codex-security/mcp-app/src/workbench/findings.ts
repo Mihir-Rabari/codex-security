@@ -37,6 +37,15 @@ export function transaction<T>(
 
 class FindingConflict extends Error {}
 
+function requireFiniteNumbers(value: unknown): void {
+  if (typeof value === "number" && !Number.isFinite(value))
+    throw new TypeError(
+      "Stored finding JSON cannot contain non-finite numbers.",
+    );
+  if (value !== null && typeof value === "object")
+    for (const item of Object.values(value)) requireFiniteNumbers(item);
+}
+
 export function storeFindings(
   database: DatabaseSync,
   entries: readonly EmbeddedFinding[],
@@ -78,6 +87,7 @@ export function storeFindings(
             "The stored finding identity cannot be replaced.",
           );
         }
+        requireFiniteNumbers([finding, entry.embedding.vector]);
         // Keep unchanged JSON text so mixed-runtime writes do not invalidate embeddings.
         const details =
           typeof current?.details_json === "string" &&

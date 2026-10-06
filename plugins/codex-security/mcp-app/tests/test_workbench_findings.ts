@@ -15,7 +15,7 @@ const { storeFindings, listStoredFindings } = (await importSource(
 const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
-const { stringifyJson } = await importSource("src/helpers/json.ts");
+const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -164,5 +164,38 @@ with sqlite3.connect(sys.argv[2]) as db:
     pythonUpsert({ ...changed, extensions: { foo: after } });
     assert.equal(JSON.parse(String(details())).extensions.foo, after);
     assert.equal(embeddingCount(), 0);
+  }
+});
+
+test("overflowing JSON numbers reject the entire import batch", (t) => {
+  const database = open(t);
+  const original = entry("existing");
+  original.finding.extensions = { opaqueId: 9007199254740993n };
+  storeFindings(database, [original], "initial", "original-repository");
+  const snapshot = () =>
+    ["findings", "finding_embeddings", "finding_repositories"].map((table) =>
+      database.prepare(`SELECT * FROM ${table}`).all(),
+    );
+  const before = snapshot();
+  for (const location of ["extension", "vector"]) {
+    const updated = structuredClone(original);
+    updated.finding.title = "Updated title";
+    updated.embedding.vector = [0, 1];
+    const invalid = entry("invalid");
+    const overflow = parseJson("1e400") as number;
+    if (location === "extension")
+      invalid.finding.extensions = { evidence: [overflow] };
+    else invalid.embedding.vector = [overflow, 0];
+    assert.throws(
+      () =>
+        storeFindings(
+          database,
+          [updated, entry("new"), invalid],
+          "later",
+          "new-repository",
+        ),
+      /non-finite/u,
+    );
+    assert.deepEqual(snapshot(), before);
   }
 });
