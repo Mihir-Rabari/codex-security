@@ -838,6 +838,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     ["github", "open", "explicit-host"],
     ["github", "open", "token-only"],
     ["github", "open", "second-push"],
+    ["github", "open", "later-page"],
     ["github", "closed", "host-only"],
     ["gitlab", "open", "host-only"],
     ["gitlab", "closed", "host-only"],
@@ -855,31 +856,37 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 id: new URL(request.url).searchParams.get("id"),
                 url,
               })
-            : Response.json([
-                ...(provider === "github"
-                  ? [
-                      {
+            : Response.json(
+                [
+                  ...(provider === "github"
+                    ? Array.from(
+                        { length: context === "later-page" ? 30 : 1 },
+                        (_, index) => ({
+                          url: url.replace("/15", `/${index + 100}`),
+                          state: "CLOSED",
+                          headRefOid: "unrelated-commit",
+                          headRepository: { id: "R_other" },
+                        }),
+                      )
+                    : []),
+                  provider === "github"
+                    ? {
                         url,
-                        state: "CLOSED",
-                        headRefOid: "unrelated-commit",
-                        headRepository: { id: "R_other" },
+                        state: state === "open" ? "OPEN" : "CLOSED",
+                        headRefOid: "saved-commit",
+                        headRepository: { id: "R_synthetic" },
+                      }
+                    : {
+                        web_url: url,
+                        state: state === "open" ? "opened" : "closed",
+                        sha: "saved-commit",
+                        description: "synthetic description ".repeat(60_000),
                       },
-                    ]
-                  : []),
-                provider === "github"
-                  ? {
-                      url,
-                      state: state === "open" ? "OPEN" : "CLOSED",
-                      headRefOid: "saved-commit",
-                      headRepository: { id: "R_synthetic" },
-                    }
-                  : {
-                      web_url: url,
-                      state: state === "open" ? "opened" : "closed",
-                      sha: "saved-commit",
-                      description: "synthetic description ".repeat(60_000),
-                    },
-              ]),
+                ].slice(
+                  0,
+                  Number(new URL(request.url).searchParams.get("limit") ?? 30),
+                ),
+              ),
       });
       try {
         const environment = {
@@ -926,11 +933,18 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 identity ? "identity" : "fixture",
                 server.url,
               );
+              if (!identity)
+                endpoint.searchParams.set(
+                  "limit",
+                  args.includes("--limit")
+                    ? args[args.indexOf("--limit") + 1]!
+                    : "30",
+                );
               if (identity)
                 endpoint.searchParams.set(
                   "id",
                   context === "second-push" &&
-                    options?.environment?.GIT_CONFIG_PARAMETERS?.includes(
+                    options?.environment?.["GIT_CONFIG_PARAMETERS"]?.includes(
                       "remote.codex-security-push.url=https://forge.example.test/first/repository.git",
                     )
                     ? "R_first"
@@ -955,7 +969,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     GH_TOKEN: "synthetic-token",
                     GH_NO_UPDATE_NOTIFIER: "1",
                     CLICOLOR_FORCE:
-                      provider === "github" && context !== "second-push"
+                      provider === "github" &&
+                      !["second-push", "later-page"].includes(context)
                         ? "1"
                         : "0",
                   },
