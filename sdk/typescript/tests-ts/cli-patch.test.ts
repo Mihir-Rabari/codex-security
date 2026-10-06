@@ -42,6 +42,7 @@ import {
   createTemporaryDirectories,
 } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -4435,6 +4436,133 @@ describe("patch publication integrity", () => {
       files: ["dependency/app.ts"],
     });
   });
+
+  test.each([false, true])(
+    "snapshots each canonical worktree once; enclosing gitlink alias=%p",
+    async (alias) => {
+      const repository = await fixtures.create("patch-enclosing-alias-");
+      const nested = join(repository, "dependency");
+      await mkdir(nested);
+      const git = repositoryGit(repository);
+      const inner = repositoryGit(nested);
+      for (const run of [git, inner]) {
+        run("init", "--initial-branch=main");
+        run("config", "user.name", "Synthetic User");
+        run("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "nested original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      if (alias) {
+        git("config", "core.sparseCheckout", "true");
+        await writeFile(
+          join(repository, ".git", "info", "sparse-checkout"),
+          "/*\n!/dependency\n",
+        );
+        git("update-index", "--skip-worktree", "dependency");
+        await rm(nested, { recursive: true });
+        await symlink(
+          repository,
+          nested,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: repository,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(join(repository, "app.ts"), "fixed\n");
+            if (!alias)
+              await writeFile(join(nested, "app.ts"), "nested fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: alias ? ["app.ts"] : ["app.ts", "dependency/app.ts"],
+      });
+    },
+  );
+
+  for (const source of ["GLOBAL", "SYSTEM"]) {
+    for (const relativeConfiguration of [false, true]) {
+      const name = `preserves ${source} Git configuration during nested binding; relative=${relativeConfiguration}`;
+      test(name, async () => {
+        if (runTestInSubprocess(import.meta.path, name)) return;
+        const repository = await fixtures.create("patch-nested-config-");
+        const nested = join(repository, "dependency");
+        await mkdir(nested);
+        const git = repositoryGit(repository);
+        const inner = repositoryGit(nested);
+        for (const run of [git, inner]) {
+          run("init", "--initial-branch=main");
+          run("config", "user.name", "Synthetic User");
+          run("config", "user.email", "synthetic@example.test");
+        }
+        await writeFile(join(nested, "app.ts"), "nested original\n");
+        inner("add", ".");
+        inner("commit", "-m", "Synthetic nested baseline");
+        await writeFile(join(repository, "app.ts"), "original\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic parent baseline");
+        // A changed gitlink lets the parent snapshot proceed without inspecting
+        // nested status; nested ownership is checked by the recursive snapshot.
+        await writeFile(join(nested, "app.ts"), "nested committed update\n");
+        inner("add", ".");
+        inner("commit", "-m", "Synthetic nested update");
+        const configuration = join(repository, ".git", "patch-trust");
+        for (const directory of [repository, nested])
+          git(
+            "config",
+            "--file",
+            configuration,
+            "--add",
+            "safe.directory",
+            directory,
+          );
+        const previous = { ...process.env };
+        try {
+          process.env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1";
+          delete process.env["GIT_CONFIG_NOSYSTEM"];
+          process.env["GIT_CONFIG_GLOBAL"] = "";
+          process.env["GIT_CONFIG_SYSTEM"] = "";
+          process.env[`GIT_CONFIG_${source}`] = relativeConfiguration
+            ? relative(repository, configuration)
+            : configuration;
+          expect(git("status", "--porcelain")).toContain("dependency");
+          const outcome = await runWorkflow(
+            ["patch", "Synthetic issue", "--json"],
+            {
+              currentDirectory: repository,
+              onRepositoryCommand: runGitRepositoryCommand,
+              onCodex: async (_args, output) => {
+                await writeFile(join(repository, "app.ts"), "fixed\n");
+                output?.stdout.write("Fixed and checked.");
+                return 0;
+              },
+            },
+          );
+          expect(outcome.exitCode, outcome.stderr).toBe(0);
+          expect(JSON.parse(outcome.stdout)).toMatchObject({
+            applied: true,
+            files: ["app.ts"],
+          });
+        } finally {
+          for (const key of Object.keys(process.env))
+            if (!(key in previous)) delete process.env[key];
+          Object.assign(process.env, previous);
+        }
+      });
+    }
+  }
 
   test("refuses a sparse gitlink redirected outside the patch checkout", async () => {
     const directory = await fixtures.create("patch-sparse-gitlink-");

@@ -7358,30 +7358,30 @@ async function snapshotGitPatchState(
   dependencies: CliDependencies,
 ): Promise<GitPatchState> {
   const trees = new Map<string, string>();
+  const visited = new Set<string>();
   let directoryRoot = repository;
   const visit = async (directory: string): Promise<void> => {
     const checkout = directory ? join(directoryRoot, directory) : repository;
+    const canonical = await realpath(checkout);
     if (directory) {
-      if (
-        isOutsidePath(
-          relative(await realpath(directoryRoot), await realpath(checkout)),
-        )
-      ) {
+      if (isOutsidePath(relative(await realpath(directoryRoot), canonical))) {
         throw new CodexSecurityError(
           "Nested Git checkout is outside the selected repository.",
         );
       }
-      await enclosingGitWorktreeRoot(checkout, undefined, {
-        requireIfPresent: true,
-        objectDirectory: await configuredPatchObjectDirectory(
-          repository,
-          dependencies,
-        ),
-      });
     }
+    if (visited.has(canonical)) return;
+    visited.add(canonical);
     const gitDependencies = directory
       ? await nestedPatchGitDependencies(repository, dependencies, checkout)
       : dependencies;
+    if (directory) {
+      await enclosingGitWorktreeRoot(checkout, undefined, {
+        requireIfPresent: true,
+        runGit: (args) =>
+          gitDependencies.runRepositoryCommand("git", args, checkout),
+      });
+    }
     const tree = await snapshotPatchTree(checkout, gitDependencies);
     trees.set(directory, tree);
     const entries = await gitDependencies.runRepositoryCommand(
@@ -7410,6 +7410,7 @@ async function snapshotGitPatchState(
         root.replace(/\n$/u, ""),
         prefix.replace(/\n$/u, ""),
       );
+      visited.add(await realpath(directoryRoot));
     }
     for (const entry of gitlinks) {
       const path = entry.slice(entry.indexOf("\t") + 1);

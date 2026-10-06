@@ -151,42 +151,38 @@ function requirePortableWindowsRepositoryPath(path: string): void {
   }
 }
 
+interface GitWorktreeContext {
+  objectDirectory?: string;
+  runGit?: (args: readonly string[]) => Promise<string>;
+}
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean; objectDirectory?: string } = {},
+  options: GitWorktreeContext & { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
   const objectEnvironment =
     options.objectDirectory === undefined
       ? {}
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
+  const output = (args: readonly string[]) =>
+    options.runGit?.(args) ??
+    gitOutput(repository, args, signal, objectEnvironment);
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
   let canonicalRoot: string;
   try {
     if (strict) {
-      if (
-        (await gitOutput(
-          repository,
-          ["rev-parse", "--is-inside-git-dir"],
-          signal,
-          objectEnvironment,
-        )) === "true"
-      ) {
+      if ((await output(["rev-parse", "--is-inside-git-dir"])) === "true") {
         throw new InvalidTargetError(
           "The selected path is inside Git metadata. Select a worktree directory instead.",
         );
       }
       if (markerRoot === null) return null;
     }
-    const root = await gitOutput(
-      repository,
-      ["rev-parse", "--show-toplevel"],
-      signal,
-      objectEnvironment,
-    );
+    const root = await output(["rev-parse", "--show-toplevel"]);
     canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
     throwIfAborted(signal);
@@ -211,11 +207,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(
-      canonicalRoot,
-      signal,
-      options.objectDirectory,
-    );
+    await requireGitWorktreeBinding(canonicalRoot, signal, options);
   return canonicalRoot;
 }
 
@@ -309,25 +301,17 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean; objectDirectory?: string } = {},
+  options: GitWorktreeContext & { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
   const environment =
     options.objectDirectory === undefined
       ? {}
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
+  const output = (args: readonly string[]) =>
+    options.runGit?.(args) ?? gitOutput(repository, args, signal, environment);
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(
-      repository,
-      ["rev-parse", "--absolute-git-dir"],
-      signal,
-      environment,
-    ),
-    gitOutput(
-      repository,
-      ["rev-parse", "--git-common-dir"],
-      signal,
-      environment,
-    ),
+    output(["rev-parse", "--absolute-git-dir"]),
+    output(["rev-parse", "--git-common-dir"]),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -437,14 +421,14 @@ export async function gitObjectDirectories(
 async function requireGitWorktreeBinding(
   repository: string,
   signal?: AbortSignal,
-  objectDirectory?: string,
+  options: GitWorktreeContext = {},
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
-      { objectDirectory },
+      options,
     );
     if (
       [directory, commonDirectory].every(
@@ -455,14 +439,15 @@ async function requireGitWorktreeBinding(
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
       if (
-        await gitOutput(
-          repository,
-          ["config", "--get", "core.worktree"],
-          signal,
-          objectDirectory === undefined
-            ? {}
-            : { GIT_OBJECT_DIRECTORY: objectDirectory },
-        )
+        await (options.runGit?.(["config", "--get", "core.worktree"]) ??
+          gitOutput(
+            repository,
+            ["config", "--get", "core.worktree"],
+            signal,
+            options.objectDirectory === undefined
+              ? {}
+              : { GIT_OBJECT_DIRECTORY: options.objectDirectory },
+          ))
       )
         return;
     } else {
