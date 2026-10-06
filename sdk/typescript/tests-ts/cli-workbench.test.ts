@@ -36,25 +36,38 @@ describe("CLI workbench", () => {
         process.platform === "win32" ? "junction" : "dir",
       );
       const canonical = await realpath(repository);
-      const stdout = captureCli(main, "stdout");
-      expect(
-        await stdout.run(
-          ["findings", "list", alias, "--json"],
-          dependencies({
-            onWorkbench: (args): JsonObject =>
-              args[0] === "list-repositories"
-                ? {
-                    repositories: [
-                      { targetId: "selected", targetPath: canonical },
-                    ],
-                  }
-                : { findings: [{ title: "Saved finding" }], nextOffset: null },
-          }),
-        ),
-      ).toBe(0);
-      expect(JSON.parse(stdout.text()).findings).toEqual([
-        { title: "Saved finding" },
-      ]);
+      for (const [requested, stored] of [
+        [alias, canonical],
+        [canonical, alias],
+        [alias, alias],
+      ]) {
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            ["findings", "list", requested!, "--json"],
+            dependencies({
+              onWorkbench: (args): JsonObject =>
+                args[0] === "list-repositories"
+                  ? {
+                      repositories: [
+                        {
+                          targetId: "other",
+                          targetPath: join(root, "missing"),
+                        },
+                        { targetId: "selected", targetPath: stored! },
+                      ],
+                    }
+                  : {
+                      findings: [{ title: "Saved finding" }],
+                      nextOffset: null,
+                    },
+            }),
+          ),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text()).findings).toEqual([
+          { title: "Saved finding" },
+        ]);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -2067,9 +2067,18 @@ export async function main(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
-              (entry) => entry["targetPath"] === repository,
-            );
+            let target: JsonObject | undefined;
+            for (const entry of value["repositories"] as JsonObject[]) {
+              const storedPath = entry["targetPath"] as string;
+              if (
+                storedPath === requestedRepository ||
+                (await realpath(storedPath).catch(() => storedPath)) ===
+                  repository
+              ) {
+                target = entry;
+                break;
+              }
+            }
             const findings =
               target === undefined
                 ? []
