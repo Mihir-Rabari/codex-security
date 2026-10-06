@@ -19,7 +19,7 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile", "native-profile"])(
+  test.each(["direct", "profile", "profile-partial", "native-profile"])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
       const profile = selection !== "direct";
@@ -65,7 +65,20 @@ describe("CodexSecurity orchestration", () => {
           : profile
             ? {
                 profile: "review",
-                profiles: { review: { model_provider: "synthetic.provider" } },
+                profiles: {
+                  review: {
+                    model_provider: "synthetic.provider",
+                    ...(selection === "profile-partial"
+                      ? {
+                          model_providers: {
+                            "synthetic.provider": {
+                              auth: { refresh_interval_ms: 2000 },
+                            },
+                          },
+                        }
+                      : {}),
+                  },
+                },
               }
             : { model_provider: "synthetic.provider" }),
         ...(nativeProfile
@@ -131,7 +144,13 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
           ...providerConfig,
-          auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
+          auth: {
+            ...auth,
+            cwd: profile ? join(home, "helpers") : home,
+            ...(selection === "profile-partial"
+              ? { refresh_interval_ms: 2000 }
+              : {}),
+          },
         };
         expect(parseToml(captured!.configOverrides![0]!)).toEqual({
           model_providers: { "synthetic.provider": provider },

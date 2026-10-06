@@ -3,6 +3,7 @@ import { assertFlagPair } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
+import { parse as parseToml } from "smol-toml";
 import childProcess, {
   spawnSync,
   type SpawnOptions,
@@ -1108,7 +1109,7 @@ async function testOpenAiCredentialsReachWorker() {
 }
 
 async function testWorkerRuntimeSettings() {
-  const cases: [string, string | undefined][] = [
+  const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
     ['model_reasoning_summary = "auto"\n', "auto"],
@@ -1124,6 +1125,7 @@ async function testWorkerRuntimeSettings() {
       'model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n',
       "none",
     ],
+    ['model_reasoning_summary = "concise"\n', "concise", true],
   ];
   const saved = [
     "PYTHON",
@@ -1143,7 +1145,7 @@ async function testWorkerRuntimeSettings() {
   try {
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
-    for (const [configuration, expected] of cases) {
+    for (const [configuration, expected, commandAuth] of cases) {
       const fixture = await fakeCodexFixture(
         deniedWorkerPermissionProfile,
         true,
@@ -1177,10 +1179,23 @@ model_provider = "synthetic"
 name = "Synthetic gateway"
 base_url = "https://gateway.example.test/v1"
 wire_api = "responses"
-env_key = "SYNTHETIC_GATEWAY_KEY"`,
+${commandAuth ? "" : 'env_key = "SYNTHETIC_GATEWAY_KEY"'}${
+          commandAuth
+            ? `
+[model_providers.synthetic.auth]
+command = "./synthetic-auth"
+cwd = ${JSON.stringify(path.join(codexHome, "helpers"))}
+refresh_interval_ms = 2000`
+            : ""
+        }`,
       );
       await writeFile(configPath, configuration!);
-      await writeFile(promptPath, "synthetic worker configuration fixture");
+      await writeFile(
+        promptPath,
+        commandAuth
+          ? "CAPTURE_SYNTHETIC_CODEX_CONFIG"
+          : "synthetic worker configuration fixture",
+      );
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = codexHome;
       process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
@@ -1320,6 +1335,23 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
+            if (commandAuth) {
+              assert.deepEqual(
+                parseToml(invocation.codexConfig).model_providers,
+                {
+                  synthetic: {
+                    name: "Synthetic gateway",
+                    base_url: "https://gateway.example.test/v1",
+                    wire_api: "responses",
+                    auth: {
+                      command: "./synthetic-auth",
+                      cwd: path.join(codexHome, "helpers"),
+                      refresh_interval_ms: 2000,
+                    },
+                  },
+                },
+              );
+            }
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
             assert.equal(
               process.env.SYNTHETIC_GATEWAY_KEY,
@@ -2229,7 +2261,8 @@ async function fakeCodexFixture(
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 const preflightProfile = ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
@@ -2277,11 +2310,12 @@ if (process.argv.includes('app-server')) {
 const stdin = (await process.stdin.toArray()).join('');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
+const codexConfig = stdin.includes('CAPTURE_SYNTHETIC_CODEX_CONFIG') ? readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') : undefined;
 const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, codexConfig, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

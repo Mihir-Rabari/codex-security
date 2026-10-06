@@ -140,10 +140,17 @@ export function resolveCommandAuthConfig(
     selectedProfile?.["model_providers"],
   ]) {
     if (!isObject(providers)) continue;
-    for (const provider of Object.values(providers)) {
+    for (const [name, provider] of Object.entries(providers)) {
       if (!isObject(provider) || !isObject(provider["auth"])) continue;
       const auth = provider["auth"];
-      const cwd = auth["cwd"];
+      const parentProvider = isObject(resolved["model_providers"])
+        ? resolved["model_providers"][name]
+        : undefined;
+      const parentAuth =
+        isObject(parentProvider) && isObject(parentProvider["auth"])
+          ? parentProvider["auth"]
+          : undefined;
+      const cwd = auth["cwd"] === undefined ? parentAuth?.["cwd"] : auth["cwd"];
       if (
         cwd === undefined ||
         (typeof cwd === "string" && !/^~(?:[/\\]|$)/u.test(cwd))

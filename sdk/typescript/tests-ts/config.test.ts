@@ -6,6 +6,7 @@ import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   type JsonObject,
   resolveCodexProfile,
+  resolveCommandAuthConfig,
   scanModelConfiguration,
   scanModelProvider,
 } from "../src/config.js";
@@ -193,6 +194,53 @@ describe("Codex configuration", () => {
     expect(scanModelProvider(config)).toBe("synthetic");
     expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
   });
+
+  test.each([undefined, "other helpers", "~/helpers"])(
+    "retains inherited command auth cwd unless the profile overrides it: %s",
+    async (cwd) => {
+      const home = await temporaryDirectory();
+      const config: JsonObject = {
+        profile: "review",
+        model_provider: "synthetic",
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: "helpers",
+              refresh_interval_ms: 1000,
+            },
+          },
+        },
+        profiles: {
+          review: {
+            model_providers: {
+              synthetic: {
+                auth: {
+                  refresh_interval_ms: 2000,
+                  ...(cwd === undefined ? {} : { cwd }),
+                },
+              },
+            },
+          },
+        },
+      };
+      const saved = structuredClone(config);
+      expect(
+        resolveCodexProfile(resolveCommandAuthConfig(config, home)),
+      ).toMatchObject({
+        model_providers: {
+          synthetic: {
+            auth: {
+              command: "./token",
+              cwd: cwd?.startsWith("~") ? cwd : join(home, cwd ?? "helpers"),
+              refresh_interval_ms: 2000,
+            },
+          },
+        },
+      });
+      expect(config).toEqual(saved);
+    },
+  );
 
   test("rejects invalid native profile names and owned settings", async () => {
     const home = await temporaryDirectory();

@@ -575,7 +575,11 @@ async function startReadOnlyCodexThread(
         environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
         undefined,
       ...(commandAuth
-        ? { configOverrides: modelProviderConfigOverride(providerConfig) }
+        ? {
+            configOverrides: modelProviderConfigOverride(
+              resolveCodexProfile(providerConfig),
+            ),
+          }
         : {}),
       config: {
         ...sdkConfig,
