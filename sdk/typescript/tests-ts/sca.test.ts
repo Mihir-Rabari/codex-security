@@ -1606,12 +1606,13 @@ test.each(["xdg", "explicit"] as const)(
 );
 
 test.skipIf(process.platform !== "win32")(
-  "dependency triage protects the Windows AppData GitHub credential directory",
+  "dependency triage protects Windows AppData GitHub stores alongside explicit configuration",
   async () => {
     const f = await fixture({
       homeVariable: "USERPROFILE",
       gitHubConfig: "appdata",
     });
+    f.environment.GH_CONFIG_DIR = join(dirname(f.repository), "explicit-gh");
     await using security = f.client;
     await security.scanDependencies({
       repositoryPath: f.repository,
@@ -1625,6 +1626,15 @@ test.skipIf(process.platform !== "win32")(
         join(f.environment.AppData!, "GitHub CLI")
       ],
     ).toEqual({ ".": "deny" });
+    const filesystem = permissions["codex_security_dependencies"]![
+      "filesystem"
+    ] as JsonObject;
+    expect(filesystem[f.environment.GH_CONFIG_DIR!]).toEqual({ ".": "deny" });
+    const hostAppData = process.env["AppData"] ?? process.env["APPDATA"];
+    if (hostAppData)
+      expect(filesystem[join(hostAppData, "GitHub CLI")]).toEqual({
+        ".": "deny",
+      });
   },
 );
 

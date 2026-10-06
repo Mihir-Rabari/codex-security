@@ -74,6 +74,12 @@ export function codexSecurityPrivatePaths(
     join(homedir(), ".ssh"),
     join(expandHome("~", environment), ".ssh"),
     join(homedir(), ".config", "gh"),
+    ...[process.env, environment].flatMap((source) => {
+      const appData = environmentEntry(source, "AppData");
+      return process.platform === "win32" && appData
+        ? [join(appData, "GitHub CLI")]
+        : [];
+    }),
     githubConfigDirectory || join(homedir(), ".config", "gh"),
     githubConfigDirectory ||
       join(expandHome("~", environment), ".config", "gh"),
