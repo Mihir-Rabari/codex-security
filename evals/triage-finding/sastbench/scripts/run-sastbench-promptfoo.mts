@@ -65,6 +65,9 @@ export function stageSkillRuntime() {
 }
 
 export function runPromptfoo(promptfooArgs: string[]) {
+  if (promptfooArgs.length === 0) {
+    throw new Error("Expected Promptfoo arguments");
+  }
   const runtimeRoot = stageSkillRuntime();
   const env = {
     ...process.env,
@@ -84,9 +87,5 @@ export function runPromptfoo(promptfooArgs: string[]) {
 }
 
 if (import.meta.filename === fs.realpathSync(process.argv[1])) {
-  const promptfooArgs = process.argv.slice(2);
-  if (promptfooArgs.length === 0) {
-    throw new Error("Expected Promptfoo arguments");
-  }
-  runPromptfoo(promptfooArgs);
+  runPromptfoo(process.argv.slice(2));
 }
