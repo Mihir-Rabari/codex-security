@@ -7031,15 +7031,19 @@ async function preparePatchPublication(
           "git",
           [
             ...settings,
+            `--config-env=url.${remote}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`,
             "-c",
-            `remote.${name}.url=${remote}`,
+            `remote.${name}.url=${name}`,
             "ls-remote",
             "--heads",
             "--",
             name,
           ],
           repository,
-          { maxBuffer: Infinity },
+          {
+            maxBuffer: Infinity,
+            environment: { CODEX_SECURITY_PREFLIGHT_ALIAS: name },
+          },
         );
         if (
           refs.split("\n").some((line) => conflicts(line.split("\t")[1] ?? ""))
@@ -7437,15 +7441,15 @@ async function createPatchPullRequest(
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
+  const isDeleted = (file: string) =>
+    [...sources.deleted].some((source) => relative(source, file) === "");
   const stageFiles = files.filter(
     (file) =>
-      !sources.deleted.has(file) &&
+      !isDeleted(file) &&
       !files.some((parent) => {
         const descendant = relative(parent, file);
         return (
-          descendant !== "" &&
-          !sources.deleted.has(parent) &&
-          !isOutsidePath(descendant)
+          descendant !== "" && !isDeleted(parent) && !isOutsidePath(descendant)
         );
       }),
   );
@@ -7474,9 +7478,10 @@ async function createPatchPullRequest(
   const temporaryIndex = await mkdtemp(
     join(tmpdir(), "codex-security-patch-index-"),
   );
-  const stage = (args: string[]) =>
+  const stage = (args: string[], input?: string) =>
     dependencies.runRepositoryCommand("git", args, repository, {
       environment: { GIT_INDEX_FILE: join(temporaryIndex, "index") },
+      input,
     });
   const removeSources = (command: typeof run) =>
     sources.deleted.size
@@ -7497,6 +7502,23 @@ async function createPatchPullRequest(
   try {
     await run(["switch", "-c", branch]);
     await stage(["read-tree", "HEAD"]);
+    await stage(
+      ["update-index", "-z", "--index-info"],
+      await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "--literal-pathspecs",
+          "ls-files",
+          "--stage",
+          "--full-name",
+          "-z",
+          "--",
+          ...stageFiles,
+        ],
+        repository,
+        { trim: false },
+      ),
+    );
     await stage(["--literal-pathspecs", "add", "--", ...stageFiles]);
     await removeSources(stage);
     await stage(["commit", "-m", PATCH_PR_TITLE]);
@@ -7626,28 +7648,49 @@ async function changedPatchFiles(
   if (typeof base !== "string" && typeof head !== "string") {
     const before = new Map(base.files);
     const after = new Map(head.files);
-    const hydrate = (
+    const hydrate = async (
       state: GitPatchState,
+      other: GitPatchState,
       directory: string,
       commit: string,
       entries: Map<string, string>,
-    ): void => {
-      const gitlink = state.gitlinks.get(directory);
-      if (gitlink?.commit !== commit || gitlink.committed === null) return;
-      for (const [path, entry] of gitlink.committed) {
+    ): Promise<void> => {
+      let committed = [state, other]
+        .map((snapshot) => snapshot.gitlinks.get(directory))
+        .find(
+          (gitlink) => gitlink?.commit === commit && gitlink.committed !== null,
+        )?.committed;
+      if (committed === undefined || committed === null) {
+        const tree = await patchGitlinkTree(
+          state,
+          other,
+          directory,
+          commit,
+          dependencies,
+        );
+        if (tree === undefined) return;
+        committed = await patchTreeEntries(root, root, tree, dependencies);
+      }
+      for (const [path, entry] of committed) {
         const nestedPath = `${directory}/${path}`;
         entries.set(nestedPath, entry);
         if (entry.startsWith("160000 "))
-          hydrate(state, nestedPath, entry.split(" ")[2]!, entries);
+          await hydrate(
+            state,
+            other,
+            nestedPath,
+            entry.split(" ")[2]!,
+            entries,
+          );
       }
     };
     for (const [directory, previous] of base.gitlinks) {
       const current = head.gitlinks.get(directory);
-      if (current === undefined || previous.commit !== current.commit) continue;
+      if (current === undefined) continue;
       if (!previous.initialized && current.initialized)
-        hydrate(head, directory, current.commit, before);
+        await hydrate(base, head, directory, previous.commit, before);
       if (!current.initialized && previous.initialized)
-        hydrate(base, directory, previous.commit, after);
+        await hydrate(head, base, directory, current.commit, after);
     }
     for (const path of new Set([...before.keys(), ...after.keys()])) {
       if (before.get(path) !== after.get(path)) files.add(path);
@@ -7708,6 +7751,61 @@ async function patchTreeEntries(
   );
 }
 
+async function retainPatchTrees(
+  repository: string,
+  checkout: string,
+  trees: string[],
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (checkout === repository) return;
+  const objects = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    repository,
+    { trim: false },
+  );
+  const pack = join(objects.replace(/\n$/u, ""), "pack");
+  await mkdir(pack, { recursive: true });
+  await dependencies.runRepositoryCommand(
+    "git",
+    ["-C", checkout, "pack-objects", "--revs", join(pack, "pack")],
+    repository,
+    {
+      environment: NESTED_PATCH_GIT_ENVIRONMENT,
+      input: trees.join("\n") + "\n",
+    },
+  );
+}
+
+async function patchGitlinkTree(
+  state: GitPatchState,
+  other: GitPatchState,
+  directory: string,
+  commit: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  for (const snapshot of [state, other]) {
+    const gitlink = snapshot.gitlinks.get(directory);
+    if (gitlink?.commit === commit && gitlink.committedTree !== undefined)
+      return gitlink.committedTree;
+  }
+  if (
+    !state.gitlinks.get(directory)?.initialized &&
+    !other.gitlinks.get(directory)?.initialized
+  )
+    return undefined;
+  const checkout = join(state.root, directory);
+  const tree = await dependencies.runRepositoryCommand(
+    "git",
+    ["-C", checkout, "rev-parse", "--revs-only", `${commit}^{tree}`],
+    state.root,
+    { environment: NESTED_PATCH_GIT_ENVIRONMENT },
+  );
+  if (!tree) return undefined;
+  await retainPatchTrees(state.root, checkout, [tree], dependencies);
+  return tree;
+}
+
 async function snapshotGitPatchState(
   repository: string,
   dependencies: CliDependencies,
@@ -7718,26 +7816,6 @@ async function snapshotGitPatchState(
   const gitlinks: GitPatchState["gitlinks"] = new Map();
   const trees = new Map<string, string>();
   const repositoryRoot = await realpath(repository);
-  const retain = async (checkout: string, trees: string[]): Promise<void> => {
-    if (!retainTrees || checkout === repository) return;
-    const objects = await dependencies.runRepositoryCommand(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-      repository,
-      { trim: false },
-    );
-    const pack = join(objects.replace(/\n$/u, ""), "pack");
-    await mkdir(pack, { recursive: true });
-    await dependencies.runRepositoryCommand(
-      "git",
-      ["-C", checkout, "pack-objects", "--revs", join(pack, "pack")],
-      repository,
-      {
-        environment: NESTED_PATCH_GIT_ENVIRONMENT,
-        input: trees.join("\n") + "\n",
-      },
-    );
-  };
   const visit = async (
     directory: string,
     snapshot: string,
@@ -7745,7 +7823,8 @@ async function snapshotGitPatchState(
   ): Promise<void> => {
     const checkout = join(repository, directory);
     trees.set(directory, snapshot);
-    await retain(checkout, [snapshot]);
+    if (retainTrees)
+      await retainPatchTrees(repository, checkout, [snapshot], dependencies);
     const entries = await patchTreeEntries(
       repository,
       checkout,
@@ -7793,13 +7872,19 @@ async function snapshotGitPatchState(
         );
         if (committedTree) {
           gitlink.committedTree = committedTree;
-          await retain(nested, [committedTree]);
           gitlink.committed = await patchTreeEntries(
             repository,
             nested,
             committedTree,
             dependencies,
           );
+          if (retainTrees)
+            await retainPatchTrees(
+              repository,
+              nested,
+              [committedTree],
+              dependencies,
+            );
         }
         await visit(
           nestedPath,
@@ -7983,12 +8068,15 @@ async function assessPatchRisk(
           if (entry.startsWith("160000 ")) {
             const commit = entry.split(" ")[2]!;
             const current = snapshot.gitlinks.get(fullPath);
-            const counterpart = other.gitlinks.get(fullPath);
             const nested =
               (working ? snapshot.trees.get(fullPath) : undefined) ??
-              (counterpart?.commit === commit
-                ? counterpart.committedTree
-                : undefined);
+              (await patchGitlinkTree(
+                snapshot,
+                other,
+                fullPath,
+                commit,
+                dependencies,
+              ));
             links[side].set(path, entry);
             if (nested !== undefined)
               await visit(
@@ -8149,18 +8237,32 @@ async function snapshotPatchTree(
     GIT_INDEX_FILE: join(root, "index"),
     ...(commandRoot === repository ? {} : NESTED_PATCH_GIT_ENVIRONMENT),
   };
-  const run = (args: string[]) =>
+  const run = (args: string[], input?: string) =>
     dependencies.runRepositoryCommand(
       "git",
       commandRoot === repository ? args : ["-C", repository, ...args],
       commandRoot,
       {
         environment,
+        input,
       },
     );
   try {
     const heads = await run(["rev-parse", "--revs-only", "HEAD"]);
     await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
+    const entries = await dependencies.runRepositoryCommand(
+      "git",
+      commandRoot === repository
+        ? ["ls-files", "--stage", "--full-name", "-z"]
+        : ["-C", repository, "ls-files", "--stage", "--full-name", "-z"],
+      commandRoot,
+      {
+        trim: false,
+        environment:
+          commandRoot === repository ? {} : NESTED_PATCH_GIT_ENVIRONMENT,
+      },
+    );
+    await run(["update-index", "-z", "--index-info"], entries);
     await run(["--literal-pathspecs", "add", "--all"]);
     return await run(["write-tree"]);
   } finally {

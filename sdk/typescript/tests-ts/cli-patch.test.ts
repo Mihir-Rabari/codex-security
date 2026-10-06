@@ -1574,7 +1574,7 @@ describe("scan and patch workflow", () => {
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (gitlab && args[0] === "remote") {
                 expect([
@@ -1584,15 +1584,17 @@ describe("scan and patch workflow", () => {
                 return origin;
               }
               if (gitlab && args.includes("ls-remote")) {
-                expect(
-                  args.some((value) => value.endsWith(`.url=${origin}`)),
-                ).toBe(true);
-                return git(
-                  ...args.map((value) =>
-                    value.endsWith(`.url=${origin}`)
-                      ? `${value.slice(0, -origin.length)}${remote}`
+                const mapping = `--config-env=url.${origin}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
+                expect(args).toContain(mapping);
+                return runGitRepositoryCommand(
+                  command,
+                  args.map((value) =>
+                    value === mapping
+                      ? `--config-env=url.${remote}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
                       : value,
                   ),
+                  cwd,
+                  options,
                 );
               }
               if (args[0] === "push") {
@@ -1602,7 +1604,7 @@ describe("scan and patch workflow", () => {
                   throw new Error("Synthetic push failure");
                 }
               }
-              return git(...args);
+              return runGitRepositoryCommand(command, args, cwd, options);
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[0] === "repo") return "synthetic-origin-id";
@@ -2733,15 +2735,27 @@ describe("patch publication integrity", () => {
           "clean-staged-rename-supplied",
           "clean-source-directory",
           "clean-ignored-directory",
-        ].map((state) => [state, "new.ts"] as const),
+        ].flatMap((state) =>
+          [
+            "new.ts",
+            ...(state.startsWith("clean-staged-rename")
+              ? [
+                  "src/new.ts",
+                  ...(process.platform === "win32" ? ["src\\new.ts"] : []),
+                ]
+              : []),
+          ].map((file) => [state, file] as const),
+        ),
       ),
   )("handles a renamed %s file at %s", async (dirty, file) => {
     const directory = await fixtures.create("patch-renamed-local-edits-");
     const git = repositoryGit(directory);
+    const source = /^src[/\\]/u.test(file) ? "src/old.ts" : "old.ts";
+    await mkdir(dirname(join(directory, source)), { recursive: true });
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
     git("config", "user.email", "synthetic@example.test");
-    await writeFile(join(directory, "old.ts"), "unsafe\noriginal\n");
+    await writeFile(join(directory, source), "unsafe\noriginal\n");
     git("add", ".");
     git("commit", "-m", "Synthetic baseline");
     const supplied = dirty === "clean-staged-rename-supplied";
@@ -2749,11 +2763,11 @@ describe("patch publication integrity", () => {
       !dirty.startsWith("clean") && dirty !== "deleted-before";
     const content = hasLocalEdits ? "synthetic local edit" : "original";
     if (hasLocalEdits)
-      await writeFile(join(directory, "old.ts"), `unsafe\n${content}\n`);
-    if (dirty === "deleted-before") await rm(join(directory, "old.ts"));
+      await writeFile(join(directory, source), `unsafe\n${content}\n`);
+    if (dirty === "deleted-before") await rm(join(directory, source));
     if (dirty === "staged") git("add", ".");
     if (dirty === "assume-unchanged")
-      git("update-index", "--assume-unchanged", "old.ts");
+      git("update-index", "--assume-unchanged", source);
     await writeFile(join(directory, "unrelated.ts"), "original\n");
     await writeFile(join(directory, "hidden.ts"), "hidden\n");
     git("add", "unrelated.ts", "hidden.ts");
@@ -2789,7 +2803,7 @@ describe("patch publication integrity", () => {
     git("init", "--bare", remote);
     git("remote", "add", "origin", remote);
     const result = resultWithFindings(["high"]);
-    result.findings.findings[0]!.locations[0]!.path = "old.ts";
+    result.findings.findings[0]!.locations[0]!.path = source;
     const outcome = await runWorkflow(
       [
         "patch",
@@ -2807,14 +2821,13 @@ describe("patch publication integrity", () => {
               ? "[]"
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
-          if (dirty.startsWith("clean-staged-rename"))
-            git("mv", "old.ts", file);
-          else await rm(join(directory, "old.ts"), { force: true });
+          if (dirty.startsWith("clean-staged-rename")) git("mv", source, file);
+          else await rm(join(directory, source), { force: true });
           if (
             dirty === "clean-source-directory" ||
             dirty === "clean-ignored-directory"
           ) {
-            await mkdir(join(directory, "old.ts"));
+            await mkdir(join(directory, source));
             await writeFile(
               join(directory, "old.ts/unverified.txt"),
               "unverified\n",
@@ -2854,7 +2867,7 @@ describe("patch publication integrity", () => {
       if (dirty.startsWith("clean"))
         expect(
           git("diff", "--name-status", "--no-renames", "HEAD^", "HEAD"),
-        ).toContain("D\told.ts");
+        ).toContain(`D\t${source}`);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
     }
     expect(
@@ -4195,6 +4208,206 @@ describe("patch change tracking", () => {
     },
   );
 
+  test.each([
+    ["insteadOf", "free"],
+    ["insteadOf", "decoy"],
+    ["insteadOf", "destination"],
+    ["pushInsteadOf", "free"],
+    ["pushInsteadOf", "decoy"],
+    ["pushInsteadOf", "destination"],
+  ] as const)(
+    "checks the once-rewritten push destination: %s, collision=%s",
+    async (rewrite, collision) => {
+      const { directory, git } = await publicationRepository();
+      const destination = await fixtures.create("patch-rewrite-destination=");
+      const decoy = await fixtures.create("patch-rewrite-decoy-");
+      for (const remote of [destination, decoy])
+        git("clone", "--bare", directory, remote);
+      const alias = join(directory, "rewrite-alias");
+      git("remote", "set-url", "origin", alias);
+      git("config", `url.${destination}.${rewrite}`, alias);
+      git("config", `url.${decoy}.insteadOf`, destination);
+      const branch = "codex-security/patch-scan-1";
+      const head = git("rev-parse", "HEAD");
+      if (collision !== "free")
+        git(
+          "--git-dir",
+          collision === "decoy" ? decoy : destination,
+          "update-ref",
+          `refs/heads/${branch}`,
+          head,
+        );
+      const decoyRefs = git("--git-dir", decoy, "show-ref");
+      const configuration = git("config", "--get-regexp", "^(remote|url)\\.");
+      expect(git("remote", "get-url", "--push", "origin")).toBe(destination);
+      const result = resultWithFindings(["high"]);
+      const onCodex = mock(
+        async (
+          args: readonly string[],
+          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+        ) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      );
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onCodex,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+        },
+      );
+      const blocked = collision === "destination";
+      expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+      expect(onCodex).toHaveBeenCalledTimes(blocked ? 0 : 1);
+      expect(git("--git-dir", decoy, "show-ref")).toBe(decoyRefs);
+      expect(git("config", "--get-regexp", "^(remote|url)\\.")).toBe(
+        configuration,
+      );
+      if (blocked) {
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(git("--git-dir", destination, "rev-parse", branch)).toBe(head);
+      } else {
+        expect(
+          git("--git-dir", destination, "show", `${branch}:src/finding-1.ts`),
+        ).toBe("fixed");
+      }
+    },
+  );
+
+  test.each(
+    ["root", "src"].flatMap((scope) =>
+      ["file", "directory"].map((selection) => ({ scope, selection })),
+    ),
+  )(
+    "preserves newly tracked ignored patch content from $scope with $selection selection",
+    async ({ scope, selection }) => {
+      const { directory, git, remote } = await publicationRepository();
+      await mkdir(join(directory, "src/nested"));
+      await writeFile(join(directory, "src/nested/app.ts"), "old\n");
+      await writeFile(join(directory, ".gitignore"), "generated.txt\n");
+      await writeFile(join(directory, "unrelated.txt"), "baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic ignored output baseline");
+      await writeFile(
+        join(directory, "unrelated.txt"),
+        "unrelated staged work\n",
+      );
+      git("add", "unrelated.txt");
+      const unrelated = git(
+        "ls-files",
+        "--stage",
+        "--debug",
+        "--",
+        "unrelated.txt",
+      );
+      const cwd = scope === "root" ? directory : join(directory, "src");
+      const prefix = scope === "root" ? "src/nested" : "nested";
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = `${prefix}/app.ts`;
+      let calls = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--create-pr",
+          "--assess-patch-risk",
+          "--json",
+        ],
+        {
+          currentDirectory: cwd,
+          onWorkbench: () => savedScan(result, "scan-1", cwd),
+          onRepositoryCommand: (command, args, repository, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, repository, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              expect(artifact.changedFiles).toEqual([
+                "src/nested/app.ts",
+                "src/nested/generated.txt",
+              ]);
+              const verification = await fixtures.create(
+                "ignored-staged-risk-apply-",
+              );
+              await mkdir(join(verification, "src/nested"), {
+                recursive: true,
+              });
+              await writeFile(join(verification, "src/nested/app.ts"), "old\n");
+              repositoryGit(verification)("apply", "--check", artifact.path);
+              repositoryGit(verification)("apply", artifact.path);
+              expect(
+                await readFile(join(verification, "src/nested/app.ts"), "utf8"),
+              ).toBe("fixed\n");
+              expect(
+                await readFile(
+                  join(verification, "src/nested/generated.txt"),
+                  "utf8",
+                ),
+              ).toBe("new generated fix\n");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await writeFile(join(directory, "src/nested/app.ts"), "fixed\n");
+            await writeFile(
+              join(directory, "src/nested/generated.txt"),
+              "new generated fix\n",
+            );
+            git("add", "-f", "src/nested/generated.txt");
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files:
+                      selection === "file"
+                        ? [`${prefix}/app.ts`, `${prefix}/generated.txt`]
+                        : [prefix],
+                    verification: "Synthetic check.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      const commit = git("rev-parse", "HEAD");
+      expect(
+        repositoryGit(remote)("show", `${commit}:src/nested/generated.txt`),
+      ).toBe("new generated fix");
+      expect(git("show", "HEAD:unrelated.txt")).toBe("baseline");
+      expect(git("ls-files", "--stage", "--debug", "--", "unrelated.txt")).toBe(
+        unrelated,
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("unrelated.txt");
+    },
+  );
+
   test.each([false, true])(
     "preserves remote proxy settings with collision=%s",
     async (collision) => {
@@ -4284,11 +4497,13 @@ describe("patch change tracking", () => {
                 return args[1] === "list"
                   ? "[]"
                   : "https://github.example.test/example/repository/pull/1";
-              const { stdout } = await promisify(execFile)("git", [...args], {
+              const child = promisify(execFile)("git", [...args], {
                 cwd,
                 env: { ...environment, ...options?.environment },
                 maxBuffer: options?.maxBuffer,
               });
+              child.child.stdin?.end(options?.input);
+              const { stdout } = await child;
               return options?.trim === false ? stdout : stdout.trim();
             },
             onCodex: async (_args, output) => {
@@ -5030,6 +5245,7 @@ describe("patch change tracking", () => {
         [
           "init",
           "init-edit",
+          "init-commit",
           "init-new",
           "init-delete",
           "deinit",
@@ -5051,6 +5267,10 @@ describe("patch change tracking", () => {
         git("config", "user.name", "Synthetic User");
         git("config", "user.email", "synthetic@example.test");
         await writeFile(join(directory, "app.ts"), "baseline\n");
+        if (operation === "init-commit") {
+          await writeFile(join(directory, "gone.ts"), "remove\n");
+          await writeFile(join(directory, "unchanged.ts"), "unchanged\n");
+        }
         git("add", ".");
         git("commit", "-m", "Synthetic baseline");
       }
@@ -5107,7 +5327,73 @@ describe("patch change tracking", () => {
           _args: readonly string[],
           output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
         ) => {
+          if (
+            output?.appServer?.prompt.includes(
+              "$codex-security:assess-patch-risk",
+            )
+          ) {
+            const artifact = JSON.parse(
+              output.appServer.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            ) as { path: string; changedFiles: string[] };
+            expect(artifact.changedFiles).not.toContain(
+              `${prefix}/unchanged.ts`,
+            );
+            expect(artifact.changedFiles).toContain(`${prefix}/gone.ts`);
+            const verification = await fixtures.create(
+              "initialized-risk-apply-",
+            );
+            await mkdir(join(verification, prefix), { recursive: true });
+            await writeFile(join(verification, prefix, "app.ts"), "baseline\n");
+            await writeFile(join(verification, prefix, "gone.ts"), "remove\n");
+            await writeFile(
+              join(verification, prefix, "unchanged.ts"),
+              "unchanged\n",
+            );
+            repositoryGit(verification)(
+              "apply",
+              "--check",
+              "--include=*.ts",
+              artifact.path,
+            );
+            repositoryGit(verification)(
+              "apply",
+              "--include=*.ts",
+              artifact.path,
+            );
+            expect(
+              await readFile(join(verification, prefix, "app.ts"), "utf8"),
+            ).toBe("fixed\n");
+            expect(
+              await readFile(join(verification, prefix, "gone.ts")).catch(
+                () => null,
+              ),
+            ).toBeNull();
+            expect(
+              await readFile(
+                join(verification, prefix, "unchanged.ts"),
+                "utf8",
+              ),
+            ).toBe("unchanged\n");
+            output.stdout.write(patchRiskAssessment().report);
+            return 0;
+          }
           if (operation.startsWith("init")) initialize();
+          if (operation === "init-commit") {
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+            await rm(join(nested, "gone.ts"));
+            const child = repositoryGit(nested);
+            child(
+              "-c",
+              "user.name=Synthetic User",
+              "-c",
+              "user.email=synthetic@example.test",
+              "commit",
+              "-am",
+              "Synthetic child change",
+            );
+          }
           if (operation === "init-edit")
             await writeFile(join(nested, "app.ts"), "fixed\n");
           if (operation === "init-new")
@@ -5120,7 +5406,12 @@ describe("patch change tracking", () => {
         },
       );
       const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
+        [
+          "patch",
+          "Synthetic issue",
+          ...(operation === "init-commit" ? ["--assess-patch-risk"] : []),
+          "--json",
+        ],
         {
           currentDirectory: scope === "root" ? root : join(root, "package"),
           onRepositoryCommand: runGitRepositoryCommand,
@@ -5133,13 +5424,17 @@ describe("patch change tracking", () => {
         applied: !clean,
         files: clean
           ? []
-          : operation === "init-new"
-            ? [`${prefix}/new.ts`]
-            : operation === "deinit-dirty"
-              ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
-              : [`${prefix}/app.ts`],
+          : operation === "init-commit"
+            ? [prefix, `${prefix}/app.ts`, `${prefix}/gone.ts`]
+            : operation === "init-new"
+              ? [`${prefix}/new.ts`]
+              : operation === "deinit-dirty"
+                ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
+                : [`${prefix}/app.ts`],
       });
-      expect(onCodex).toHaveBeenCalledTimes(1);
+      expect(onCodex).toHaveBeenCalledTimes(
+        operation === "init-commit" ? 2 : 1,
+      );
       expect(await readFile(join(root, ".git/index"))).toEqual(index);
       expect(git("diff", "--cached")).toBe(staged);
       expect(git("rev-parse", "HEAD")).toBe(head);
@@ -5461,9 +5756,7 @@ describe("patch change tracking", () => {
         let expectedIndex = git("write-tree");
         const result = resultWithFindings(["high"]);
         result.findings.findings[0]!.locations[0]!.path = file;
-        const blocked = forced
-          ? mode === "saved"
-          : !unchanged && !removed && kind !== "new";
+        const blocked = !unchanged && !removed && kind !== "new";
         const outcome = await runWorkflow(
           [
             "patch",
@@ -5536,14 +5829,10 @@ describe("patch change tracking", () => {
             git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
           ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
         }
-        if (unchanged || removed || (forced && !blocked))
+        if (unchanged || removed)
           expect(
             git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
           ).not.toContain(file);
-        if (forced && !blocked)
-          expect(git("diff", "--cached", "--name-only").split("\n")).toContain(
-            file,
-          );
         if (removed)
           await expect(
             readFile(join(root, file), "utf8"),
