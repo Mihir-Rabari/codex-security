@@ -2770,10 +2770,7 @@ describe("multiscan", () => {
       expect(resolvePython).toHaveBeenCalledWith(
         expect.objectContaining({
           protectedRoot: paths.output,
-          additionalProtectedRoots: expect.arrayContaining([
-            paths.output,
-            source.path,
-          ]),
+
           environment: runtime.pluginHelperEnvironment(process.env),
         }),
       );
@@ -4149,6 +4146,99 @@ test("original coordinates reuse an existing pinned scope checkout without refet
     const runs = mock(completeRun);
     const campaign = options(paths, client(runs), {
       recoverScan: async () => undefined,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+for (const recovery of [false, true]) {
+  for (const partial of ["empty", "missing subtree"] as const) {
+    test(`retained preparation completes ${recovery ? "recovery" : "normal"} checkout with ${partial}`, async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "partial-checkout-source");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+      );
+      if (recovery)
+        await runMultiscan(
+          options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+        );
+      const runs = mock(completeRun);
+      const campaign = options(
+        paths,
+        client(runs),
+        recovery ? { recoverScan: async () => undefined } : {},
+      );
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 0,
+      });
+      const checkout = recovery
+        ? join(paths.output, "recovery-checkouts", "repo", "attempt-2")
+        : join(paths.output, "checkouts", "repo");
+      if (partial === "empty")
+        await mkdir(checkout, { recursive: true, mode: 0o700 });
+      else {
+        git(paths.root, "clone", "--quiet", source.path, checkout);
+        await rm(join(checkout, "src"), { recursive: true });
+      }
+      const retained = join(checkout, "retained.txt");
+      await writeFile(retained, "Preserved interrupted checkout data.\n");
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(runs).toHaveBeenCalledTimes(1);
+      if (recovery)
+        expect(await readFile(retained, "utf8")).toBe(
+          "Preserved interrupted checkout data.\n",
+        );
+    });
+  }
+}
+
+testPosix(
+  "retained preparation preserves a configured source-local Python interpreter",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source-local-python");
+    const interpreter = join(source.path, ".venv", "bin", "python");
+    await mkdir(dirname(interpreter), { recursive: true });
+    await writeFile(
+      interpreter,
+      `#!/usr/bin/env node\nconst {spawnSync} = require("node:child_process");\nconst result = spawnSync(${JSON.stringify(PYTHON)}, process.argv.slice(2), {stdio: "inherit"});\nif (result.error) throw result.error;\nprocess.exit(result.status ?? 1);\n`,
+      { mode: 0o700 },
+    );
+    expect((await lstat(interpreter)).isFile()).toBe(true);
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: interpreter,
+          protectedRoot: checkout,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(interpreter);
+        return completedScan(settings.outputDir!, "complete", checkout);
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      config: { pythonPath: interpreter },
     });
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,

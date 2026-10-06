@@ -35,6 +35,7 @@ import type { ScanCost } from "./cost.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
   OutputDirectoryNotEmptyError,
+  InvalidTargetError,
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
@@ -51,7 +52,6 @@ import {
 } from "./runtime.js";
 import {
   DiffTarget,
-  gitMarkerRoot,
   normalizeTarget,
   type ScanMode,
   type ScanTarget,
@@ -283,30 +283,11 @@ async function runCampaign(
     try {
       // Configured historical archives may contain schemas without helper scripts.
       const [python, helperRoot] = await (reportRuntime ??= (async () => {
-        const repositories = tasks
-          .map((task) => task.repository)
-          .filter(isAbsolute);
-        const repositoryRoots = await Promise.all(
-          [...new Set(repositories)].map(async (repository) => {
-            const canonical = await realpath(repository).catch(() =>
-              resolve(repository),
-            );
-            const metadata = await lstat(canonical).catch(() => undefined);
-            return metadata?.isDirectory()
-              ? ((await gitMarkerRoot(
-                  canonical,
-                  options.signal,
-                  "outermost",
-                )) ?? canonical)
-              : canonical;
-          }),
-        );
         return await Promise.all([
           resolvePluginPythonCommand({
             configuredPath: options.config.pythonPath,
             environment: pluginHelperEnvironment(process.env),
             protectedRoot: output,
-            additionalProtectedRoots: [output, ...repositoryRoots],
             signal: options.signal,
           }),
           bundledPluginRoot(),
@@ -1263,9 +1244,22 @@ async function loadResumableScan(
       if (createdCheckout) {
         await checkoutRevision(receipt, matchedRoot, signal, githubHost);
       }
-      expectedPaths = [
-        ...(await normalizeTarget(matchedRoot, requestedPaths, signal)).paths,
-      ];
+      let normalized;
+      try {
+        normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
+      } catch (error) {
+        if (
+          createdCheckout ||
+          !(error instanceof InvalidTargetError) ||
+          !error.message.startsWith("Path target does not exist:")
+        ) {
+          throw error;
+        }
+        // Interrupted preparation or cleanup may leave a pinned checkout incomplete.
+        await checkoutRevision(receipt, matchedRoot, signal, githubHost, true);
+        normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
+      }
+      expectedPaths = [...normalized.paths];
     } finally {
       if (createdCheckout) {
         await rm(matchedRoot, { recursive: true, force: true });
@@ -1494,6 +1488,7 @@ async function checkoutRevision(
   path: string,
   signal?: AbortSignal,
   githubHost?: string,
+  restoreIncomplete = false,
 ): Promise<void> {
   const environment = { ...process.env };
   const repositoryVariables = new Set([
@@ -1543,7 +1538,13 @@ async function checkoutRevision(
     task.repository,
     task.revision,
   );
-  await git("checkout", "--quiet", "--detach", "FETCH_HEAD");
+  await git(
+    "checkout",
+    "--quiet",
+    ...(restoreIncomplete ? ["--force"] : []),
+    "--detach",
+    "FETCH_HEAD",
+  );
   if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }
