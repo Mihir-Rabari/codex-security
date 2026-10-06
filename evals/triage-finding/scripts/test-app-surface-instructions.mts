@@ -103,6 +103,9 @@ for (const answer of [
   `Use the connector [1](references/github-rest-intake.md).\n${JSON.stringify(connectorDecision)}`,
   `Use the connector [1](references/github-rest-intake.md).\n\`\`\`json\n${JSON.stringify(connectorDecision)}\n\`\`\``,
   `Use the connector [1][transport].\n${JSON.stringify(connectorDecision)}`,
+  `Use the connector [1][1].\n${JSON.stringify(connectorDecision)}`,
+  `Use the connector [1][].\n${JSON.stringify(connectorDecision)}`,
+  `Use the connector.\n[1]: references/github-rest-intake.md\n${JSON.stringify(connectorDecision)}`,
 ]) {
   const result = githubIntake(answer, connectorContext);
   assert.equal(result.pass, true, result.reason);
