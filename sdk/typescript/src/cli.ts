@@ -7341,6 +7341,7 @@ async function createPatchPullRequest(
     const included = await dependencies.runRepositoryCommand(
       "git",
       [
+        "--no-literal-pathspecs",
         "ls-files",
         "--full-name",
         "--cached",

@@ -6427,13 +6427,42 @@ describe("patch change tracking", () => {
     },
   );
   test.each([
-    { invocation: "root", file: "sub/local.env", unignore: true },
-    { invocation: "sub", file: "sub/local.env", unignore: true },
-    { invocation: "sub", file: "local.env", unignore: true },
-    { invocation: "sub", file: "sub/local.env", unignore: false },
+    {
+      invocation: "root",
+      file: "sub/local.env",
+      unignore: true,
+      literal: false,
+    },
+    {
+      invocation: "sub",
+      file: "sub/local.env",
+      unignore: true,
+      literal: false,
+    },
+    { invocation: "sub", file: "local.env", unignore: true, literal: false },
+    {
+      invocation: "sub",
+      file: "sub/local.env",
+      unignore: false,
+      literal: false,
+    },
+    {
+      invocation: "root",
+      file: "sub/local.env",
+      unignore: true,
+      literal: true,
+    },
+    { invocation: "sub", file: "sub/local.env", unignore: true, literal: true },
+    { invocation: "sub", file: "local.env", unignore: true, literal: true },
+    {
+      invocation: "sub",
+      file: "sub/local.env",
+      unignore: false,
+      literal: true,
+    },
   ])(
     "preserves ignored local data from publication context %j",
-    async ({ invocation, file, unignore }) => {
+    async ({ invocation, file, unignore, literal }) => {
       const { directory: root, git } = await publicationRepository();
       const sub = join(root, "sub");
       await mkdir(sub);
@@ -6448,9 +6477,19 @@ describe("patch change tracking", () => {
         ["patch", "Synthetic ignore update", "--create-pr", "--json"],
         {
           currentDirectory: invocation === "root" ? root : sub,
+          environment: {
+            ...process.env,
+            GIT_LITERAL_PATHSPECS: literal ? "1" : "0",
+          },
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
+              ? runGitRepositoryCommand(command, args, cwd, {
+                  ...options,
+                  environment: {
+                    GIT_LITERAL_PATHSPECS: literal ? "1" : "0",
+                    ...options?.environment,
+                  },
+                })
               : args[1] === "list"
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1",
