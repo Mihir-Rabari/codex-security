@@ -23,7 +23,6 @@ export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
 export interface DeepReductionSources {
   discoveries: {
     workerId: string;
-    attempt?: number;
     coverage?: ScanDraftInput["coverage"];
     result: DeepReductionInput;
   }[];
@@ -310,21 +309,37 @@ export function projectDiscoveryCoverage(
   coverage: ScanDraftInput["coverage"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
+  archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
-  const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const surfaces = coverage.surfaces as Record<string, unknown>[];
-  const surfaceIds = new Map(
-    surfaces.map((surface, index) => [
-      surface.id,
-      `${prefix}-surface-${index + 1}`,
-    ]),
+  const reviews = [{ ...provenance, completeness: coverage.completeness }];
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
   );
-  const project = (item: Record<string, unknown>) => {
+  const surfaces = coverage.surfaces as Record<string, unknown>[];
+  const prefix = (item: Record<string, unknown>) =>
+    `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
+  const project = (field: string, item: Record<string, unknown>) => {
+    const original = history.find((source) =>
+      ((source.coverage[field] as unknown[] | undefined) ?? []).some((saved) =>
+        isDeepStrictEqual(
+          typeof saved === "string" ? { question: saved } : saved,
+          item,
+        ),
+      ),
+    );
+    const origin = original
+      ? { workerId: worker.id, attempt: original.attempt }
+      : provenance;
+    if (
+      original &&
+      !reviews.some((review) => review.attempt === original.attempt)
+    )
+      reviews.push({ ...origin, completeness: original.coverage.completeness });
     const result = structuredClone(item);
     const descriptions = result.provenance;
     const projected =
@@ -337,7 +352,7 @@ export function projectDiscoveryCoverage(
       delete projected[key];
     result.provenance = {
       ...projected,
-      ...provenance,
+      ...origin,
       ...(item.id === undefined ? {} : { sourceId: item.id }),
       ...(item.candidateId === undefined
         ? {}
@@ -345,35 +360,48 @@ export function projectDiscoveryCoverage(
     };
     return result;
   };
-  return {
-    completeness: coverage.completeness,
-    reviews: [{ ...provenance, completeness: coverage.completeness }],
-    surfaces: surfaces.map((surface, index) => ({
-      ...project(surface),
-      id: `${prefix}-surface-${index + 1}`,
+  const projectedSurfaces = surfaces.map((surface, index) => {
+    const item = project("surfaces", surface);
+    return {
+      ...item,
+      id: `${prefix(item)}-surface-${index + 1}`,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (ref) =>
           ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
       ),
-    })),
+    };
+  });
+  const surfaceIds = new Map(
+    surfaces.map((surface, index) => [
+      surface.id,
+      projectedSurfaces[index]!.id,
+    ]),
+  );
+  return {
+    completeness: coverage.completeness,
+    reviews,
+    surfaces: projectedSurfaces,
     explicitExclusions: (
       coverage.explicitExclusions as Record<string, unknown>[]
-    ).map(project),
+    ).map((item) => project("explicitExclusions", item)),
     deferred: (coverage.deferred as Record<string, unknown>[]).map(
-      (item, index) => ({
-        ...project(item),
-        id: `${prefix}-deferred-${index + 1}`,
-        ...(item.candidateId === undefined
-          ? {}
-          : { candidateId: `${prefix}-candidate-${index + 1}` }),
-        ...(item.surfaceIds === undefined
-          ? {}
-          : {
-              surfaceIds: (item.surfaceIds as string[]).map(
-                (id) => surfaceIds.get(id) ?? id,
-              ),
-            }),
-      }),
+      (item, index) => {
+        const projected = project("deferred", item);
+        return {
+          ...projected,
+          id: `${prefix(projected)}-deferred-${index + 1}`,
+          ...(item.candidateId === undefined
+            ? {}
+            : { candidateId: `${prefix(projected)}-candidate-${index + 1}` }),
+          ...(item.surfaceIds === undefined
+            ? {}
+            : {
+                surfaceIds: (item.surfaceIds as string[]).map(
+                  (id) => surfaceIds.get(id) ?? id,
+                ),
+              }),
+        };
+      },
     ),
     ...(coverage.openQuestions === undefined
       ? {}
@@ -381,7 +409,10 @@ export function projectDiscoveryCoverage(
           openQuestions: (
             coverage.openQuestions as (string | Record<string, unknown>)[]
           ).map((question) =>
-            project(typeof question === "string" ? { question } : question),
+            project(
+              "openQuestions",
+              typeof question === "string" ? { question } : question,
+            ),
           ),
         }),
   };

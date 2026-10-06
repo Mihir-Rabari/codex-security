@@ -10,6 +10,7 @@ import type {
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
+  readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import {
@@ -107,15 +108,30 @@ export async function readDeepReductionSources(
           },
         }));
         const { coverage, ...reduction } = result;
+        // Accepted direct-file results may follow an unreadable failed checkpoint.
+        const archived = await readArchivedWorkerCheckpoints(
+          {
+            ...context,
+            root: dirname(worker.resultPath),
+            layout: "worker",
+            scanId: result.scanId,
+          },
+          true,
+        ).catch(() => []);
         return {
           workerId: worker.id,
-          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
             relative(bound.artifacts.scanDir, dirname(worker.resultPath))
               .split(sep)
               .join("/"),
+            archived.flatMap(({ input, attempt }) => {
+              const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+              return number === undefined
+                ? []
+                : [{ attempt: Number(number), coverage: input.coverage }];
+            }),
           ),
           result: reduction,
         };

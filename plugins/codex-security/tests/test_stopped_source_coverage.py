@@ -67,6 +67,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
             "surfaces": [surface],
             "explicitExclusions": [],
             "deferred": [deferred] if disposition == "needs_follow_up" else [],
+            "reviews": [{"workerId": "other-worker", "attempt": 99, "completeness": "complete"}],
         }
         result.write_text(
             json.dumps(
@@ -158,6 +159,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     assert len(coverage["deferred"]) == 2
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
     assert len(coverage["surfaces"]) == 2
+    assert all(review["workerId"] != "other-worker" for review in coverage.get("reviews", []))
     if host_coverage or parent_draft == "projected":
         for field in ("reviews", "surfaces", "deferred"):
             assert (
@@ -359,8 +361,9 @@ def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenan
 
 
 @pytest.mark.parametrize("retry_publication", [False, True])
+@pytest.mark.parametrize("archived", [False, True])
 def test_partial_parent_projection_keeps_only_missing_worker_records(
-    workbench_api, workbench_db, publication_scan, monkeypatch, retry_publication
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry_publication, archived
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -401,6 +404,26 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
             }
         )
     )
+    if archived:
+        prior = output.parent / "attempts" / "attempt-01" / "result.json"
+        prior.parent.mkdir(parents=True)
+        prior.write_bytes(result.read_bytes())
+        archived_receipt = prior.parent / "artifacts" / "evidence.txt"
+        archived_receipt.parent.mkdir()
+        archived_receipt.write_bytes(receipt.read_bytes())
+        receipt = archived_receipt
+        current = json.loads(result.read_text())
+        current["coverage"]["surfaces"][0]["receiptRefs"] = [
+            receipt.relative_to(scan.scan_dir).as_posix()
+        ]
+        result.write_text(json.dumps(current))
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,)
+            )
+    reviews = [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}]
+    if archived:
+        reviews.append({"workerId": worker_id, "attempt": 2, "completeness": "partial"})
     projected = {
         **pending[0],
         "id": f"{worker_id}-attempt-1-deferred-1",
@@ -412,7 +435,7 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
                 **scan.coverage,
                 "completeness": "partial",
                 "deferred": [projected],
-                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+                "reviews": reviews,
             }
         )
     )
@@ -441,6 +464,11 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
     assert sorted(
         item["reason"] for item in coverage["deferred"] if item["id"] != "scan-stopped"
     ) == sorted(item["reason"] for item in pending)
+    assert all(
+        item["provenance"]["attempt"] == 1
+        for item in coverage["deferred"]
+        if item["id"] != "scan-stopped"
+    )
     assert result.read_bytes() == original
     retained_surface = next(
         item for item in coverage["surfaces"] if item["label"] == surface["label"]

@@ -104,10 +104,19 @@ try {
       coverage: {
         ...coverage,
         completeness: "partial",
-        deferred: [{ id: "remaining-review", reason: "Another surface remains.", provenance }],
+        deferred: [
+          {
+            id: "remaining-review",
+            reason: "Another surface remains.",
+            provenance,
+          },
+        ],
       },
     };
-    assert.deepEqual(parseScanDraft(draft).coverage.deferred, draft.coverage.deferred);
+    assert.deepEqual(
+      parseScanDraft(draft).coverage.deferred,
+      draft.coverage.deferred,
+    );
   }
 
   const findingInput = (changes: Record<string, unknown>) => ({

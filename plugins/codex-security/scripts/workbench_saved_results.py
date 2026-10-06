@@ -1216,10 +1216,12 @@ def merge_saved_results(
                 if not isinstance(record, dict):
                     continue
                 provenance = record.get("provenance")
-                if not isinstance(provenance, dict) or (
-                    provenance.get("workerId"),
-                    provenance.get("attempt"),
-                ) != (worker["id"], worker["attempt"]):
+                if (
+                    not isinstance(provenance, dict)
+                    or provenance.get("workerId") != worker["id"]
+                    or not isinstance(provenance.get("attempt"), int)
+                    or (worker["id"], provenance["attempt"]) not in reviewed_attempts
+                ):
                     continue
                 original = {
                     key: value for key, value in record.items() if key not in {"id", "provenance"}
@@ -1245,18 +1247,55 @@ def merge_saved_results(
                     return True
         return False
 
+    def coverage_source_attempt(relative: str, worker: Any) -> int:
+        directory = Path(relative).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        return worker_attempts.get(directory.as_posix(), (worker["id"], worker["attempt"]))[1]
+
+    def coverage_attempt(field: str, item: dict[str, Any], worker: Any, relative: str) -> int:
+        attempt = coverage_source_attempt(relative, worker)
+        value = dict(item)
+        if field == "surfaces":
+            value["receiptRefs"] = coverage_receipts(item, worker, relative)
+        for path, draft, owner in sources:
+            prior_attempt = coverage_source_attempt(path, worker)
+            if owner != worker["id"] or not 0 < prior_attempt < attempt:
+                continue
+            records = (
+                deferred_rows[path] if field == "deferred" else draft["coverage"].get(field, [])
+            )
+            for record in records if isinstance(records, list) else []:
+                if field == "openQuestions" and isinstance(record, str):
+                    record = {"question": record.strip()}
+                if not isinstance(record, dict):
+                    continue
+                prior = dict(record)
+                if field == "surfaces":
+                    prior["receiptRefs"] = coverage_receipts(record, worker, path)
+                if prior == value:
+                    attempt = prior_attempt
+                    break
+        return attempt
+
     def project_missing_record(
-        field: str, item: dict[str, Any], index: int, worker: Any, source: dict[str, Any]
+        field: str,
+        item: dict[str, Any],
+        index: int,
+        worker: Any,
+        source: dict[str, Any],
+        relative: str,
     ) -> dict[str, Any]:
         # Match projectDiscoveryCoverage so recovered holes retain source ownership.
-        prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+        attempt = coverage_attempt(field, item, worker, relative)
+        prefix = f"{worker['id']}-attempt-{attempt}"
         result = copy.deepcopy(item)
         provenance = result.get("provenance")
         if not isinstance(provenance, dict):
             provenance = {}
         for key in ("workerId", "attempt", "sourceId", "candidateId"):
             provenance.pop(key, None)
-        provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+        provenance.update(workerId=worker["id"], attempt=attempt)
         result["provenance"] = provenance
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key in item:
@@ -1270,7 +1309,10 @@ def merge_saved_results(
             if isinstance(item.get("surfaceIds"), list):
                 surfaces = source.get("surfaces", [])
                 surface_ids = {
-                    surface["id"]: f"{prefix}-surface-{offset}"
+                    surface["id"]: (
+                        f"{worker['id']}-attempt-{coverage_attempt('surfaces', surface, worker, relative)}"
+                        f"-surface-{offset}"
+                    )
                     for offset, surface in enumerate(
                         surfaces if isinstance(surfaces, list) else [], 1
                     )
@@ -1285,7 +1327,8 @@ def merge_saved_results(
                         if (
                             isinstance(provenance, dict)
                             and provenance.get("workerId") == worker["id"]
-                            and provenance.get("attempt") == worker["attempt"]
+                            and isinstance(provenance.get("attempt"), int)
+                            and (worker["id"], provenance["attempt"]) in reviewed_attempts
                             and isinstance(provenance.get("sourceId"), str)
                         ):
                             surface_ids[provenance["sourceId"]] = surface["id"]
@@ -1668,7 +1711,11 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                     and (candidate := coverage_candidate(owner, item)) is not None
-                    and (item["disposition"] != "reported" or candidate[1] in reported_candidates)
+                    and (
+                        candidate[0] is None
+                        or item["disposition"] != "reported"
+                        or candidate[1] in reported_candidates
+                    )
                 ):
                     outcomes.append((relative, candidate[0], candidate[1], item["disposition"]))
     ordered_candidates.update(
@@ -2091,6 +2138,8 @@ def merge_saved_results(
         ):
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
+            if field == "reviews" and worker is not None:
+                continue
             if (
                 superseded
                 and relative != accepted_reducer
@@ -2191,7 +2240,9 @@ def merge_saved_results(
                 if field == "surfaces" and isinstance(item, dict):
                     item = {**item, "receiptRefs": item.get("receiptRefs", [])}
                 if reviewed and isinstance(item, dict) and field != "reviews":
-                    item = project_missing_record(field, item, index, worker, draft["coverage"])
+                    item = project_missing_record(
+                        field, item, index, worker, draft["coverage"], relative
+                    )
                 if field == "surfaces" and worker is not None and isinstance(item, dict):
                     item = copy.deepcopy(item)
                     item["receiptRefs"] = coverage_receipts(item, worker, relative)

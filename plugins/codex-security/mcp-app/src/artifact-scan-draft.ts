@@ -1121,6 +1121,7 @@ async function readSavedCheckpoints(
   context: ArtifactContext,
   kind: "current" | "archived",
   excludedCheckpoint?: string,
+  skipInvalid = false,
 ): Promise<Array<SavedScanDraft & { name: string }>> {
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
@@ -1167,16 +1168,24 @@ async function readSavedCheckpoints(
       );
     }
     const label = `${kind} scan checkpoint`;
-    const draft = parseJsonObject(
-      await readArtifactText(context, ["checkpoints", entry.name], label),
+    const contents = await readArtifactText(
+      context,
+      ["checkpoints", entry.name],
       label,
     );
-    const input =
-      kind === "current"
-        ? parsePersistedCheckpoint(draft)
-        : parsePersistedScanDraft(draft);
-    if (kind === "archived") requireMatchingScan(context, input);
-    else if (input.scanId !== context.scanId) {
+    let input: ScanDraftInput;
+    try {
+      const draft = parseJsonObject(contents, label);
+      input =
+        kind === "current"
+          ? parsePersistedCheckpoint(draft)
+          : parsePersistedScanDraft(draft);
+      if (kind === "archived") requireMatchingScan(context, input);
+    } catch (error) {
+      if (skipInvalid) continue;
+      throw error;
+    }
+    if (kind === "current" && input.scanId !== context.scanId) {
       throw new Error(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
@@ -1315,8 +1324,9 @@ async function preserveDeepThreatModel(
   };
 }
 
-async function readArchivedWorkerCheckpoints(
+export async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
+  skipInvalid = false,
 ): Promise<SavedScanDraft[]> {
   const workerRoot = dirname(context.root);
   const attemptsRoot = join(workerRoot, "attempts");
@@ -1408,7 +1418,12 @@ async function readArchivedWorkerCheckpoints(
     }
     drafts.push(
       ...(
-        await readSavedCheckpoints(attemptContext, "archived", head?.checkpoint)
+        await readSavedCheckpoints(
+          attemptContext,
+          "archived",
+          head?.checkpoint,
+          skipInvalid,
+        )
       ).map((draft) => ({ ...draft, result: false })),
     );
     if (checkpointHead !== undefined) {
