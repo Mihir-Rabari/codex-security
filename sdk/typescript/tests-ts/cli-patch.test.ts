@@ -3,7 +3,7 @@ import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import {
   mkdir,
@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Writable } from "node:stream";
-import { stripVTControlCharacters } from "node:util";
+import { promisify, stripVTControlCharacters } from "node:util";
 import { pathToFileURL } from "node:url";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
@@ -2379,6 +2379,129 @@ describe("scan and patch workflow", () => {
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories(true);
   test.each(
+    ["root", "package"].flatMap((scope) =>
+      ["absolute", "relative"].flatMap((spelling) =>
+        [false, true].map((assess) => ({ scope, spelling, assess })),
+      ),
+    ),
+  )(
+    "preserves separately configured worktree metadata from $scope with $spelling path and assessment=$assess",
+    async ({ scope, spelling, assess }) => {
+      const root = await fixtures.create("patch-separate-worktree-");
+      const metadata = join(root, "metadata");
+      const tree = join(root, "selected-tree");
+      const directory = scope === "root" ? metadata : join(metadata, "package");
+      const nested = join(tree, "nested");
+      await mkdir(directory, { recursive: true });
+      await mkdir(nested, { recursive: true });
+      for (const repository of [metadata, nested]) {
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "nested before\n");
+      const nestedGit = repositoryGit(nested);
+      nestedGit("add", ".");
+      nestedGit("commit", "-m", "Synthetic nested baseline");
+      await writeFile(join(tree, "app.ts"), "before\n");
+      await writeFile(join(tree, "unrelated.txt"), "original\n");
+      const environment = {
+        GIT_WORK_TREE:
+          spelling === "absolute" ? tree : relative(directory, tree),
+      };
+      const beforeEnvironment = { ...environment };
+      const git = (...args: string[]) =>
+        runGitRepositoryCommand("git", args, directory, { environment });
+      await git("add", ".");
+      await git("commit", "-m", "Synthetic baseline");
+      await writeFile(join(tree, "unrelated.txt"), "staged user change\n");
+      await git("add", "--", join(tree, "unrelated.txt"));
+      const head = await git("rev-parse", "HEAD");
+      const staged = await git("diff", "--cached", "--binary");
+      const indexes = [metadata, nested].map((path) =>
+        join(path, ".git", "index"),
+      );
+      const beforeIndexes = await Promise.all(
+        indexes.map((path) => readFile(path)),
+      );
+      let modelCalls = 0;
+      let assessments = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--json",
+          ...(assess ? ["--assess-patch-risk"] : []),
+        ],
+        {
+          currentDirectory: directory,
+          environment,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            modelCalls++;
+            await writeFile(join(tree, "app.ts"), "fixed\n");
+            if (!assess)
+              await writeFile(join(nested, "app.ts"), "nested fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+        {
+          configure: (current) => {
+            current.assessPatchRisk = async (request) => {
+              assessments++;
+              expect(request.repository).toBe(tree);
+              expect(request.files).toEqual(["app.ts"]);
+              expect(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["rev-parse", "HEAD"],
+                  tree,
+                  {
+                    environment: request.environment,
+                  },
+                ),
+              ).toBe(head);
+              expect(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["diff", "--name-only"],
+                  tree,
+                  {
+                    environment: request.environment,
+                  },
+                ),
+              ).toBe("app.ts");
+              return patchRiskAssessment();
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(assessments).toBe(assess ? 1 : 0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: assess ? ["app.ts"] : ["app.ts", "nested/app.ts"],
+      });
+      expect(await git("rev-parse", "HEAD")).toBe(head);
+      expect(await git("diff", "--cached", "--binary")).toBe(staged);
+      expect(await Promise.all(indexes.map((path) => readFile(path)))).toEqual(
+        beforeIndexes,
+      );
+      expect(await readFile(join(tree, "unrelated.txt"), "utf8")).toBe(
+        "staged user change\n",
+      );
+      expect(environment).toEqual(beforeEnvironment);
+    },
+  );
+
+  test.each(
     ["ordinary", "absolute", "relative", "empty"].flatMap((settings) =>
       [
         { command: "patch", flag: undefined },
@@ -3346,6 +3469,89 @@ describe("patch change tracking", () => {
     },
   );
 
+  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
+    const { directory, git } = await publicationRepository();
+    const sshDirectory = await fixtures.create("patch-git-ssh-");
+    await writeFile(
+      join(sshDirectory, "ssh"),
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
+      { mode: 0o755 },
+    );
+    const emptyPath = await fixtures.create("patch-no-ssh-");
+    const gitExecutable = Bun.which("git")!;
+    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
+    const environment = {
+      PATH: emptyPath,
+      GIT_EXEC_PATH: sshDirectory,
+      GIT_SSH: undefined,
+      GIT_SSH_COMMAND: undefined,
+    };
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/example/repository.git",
+    );
+    git(
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@GitHub-Work:example/repository.git",
+    );
+    const branch = "codex-security/saved-patch";
+    const commit = git("rev-parse", "HEAD");
+    git("branch", branch);
+    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+    const url = "https://github.com/example/repository/pull/1";
+    let repositoryLookups = 0;
+    const outcome = await runWorkflow(
+      ["patch", "--resume-pr", branch, "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "gh") {
+            if (args[0] === "pr" && args[1] === "list")
+              return JSON.stringify([
+                {
+                  url,
+                  head: commit,
+                  repository: "synthetic-id",
+                  crossRepository: true,
+                },
+              ]);
+            expect(args).toEqual([
+              "repo",
+              "view",
+              "ssh://git@github.com/example/repository.git",
+              "--json",
+              "id",
+              "--jq",
+              ".id",
+            ]);
+            repositoryLookups++;
+            return "synthetic-id";
+          }
+          const { stdout } = await promisify(execFile)(
+            command === "git" ? gitExecutable : command,
+            args,
+            {
+              cwd,
+              env: { ...process.env, ...environment, ...options?.environment },
+              encoding: "utf8",
+            },
+          );
+          return options?.trim === false ? stdout : stdout.trim();
+        },
+        onCodex: throwing("must reuse the saved patch"),
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
+    expect(repositoryLookups).toBe(1);
+  });
+
   test.each(
     [
       "local",
@@ -3423,7 +3629,7 @@ describe("patch change tracking", () => {
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] ??
         coreCommand ??
-        (environment["GIT_SSH"] === undefined ? undefined : '"$GIT_SSH"');
+        (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
       const alias = transport.endsWith("-mixed")
         ? "GitHub-Work"
         : "github-work";
@@ -3493,7 +3699,7 @@ describe("patch change tracking", () => {
               ? undefined
               : localOnly ||
                   (mirror && transport.endsWith("only")) ||
-                  ["ssh-failed", "ssh-empty"].includes(transport)
+                  ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport)
                 ? fetchRemote
                 : pushRemote.startsWith("https://")
                   ? pushRemote
@@ -3578,15 +3784,30 @@ describe("patch change tracking", () => {
                 });
               }
               if (args[0] === "-c") {
-                expect(effectiveCommand).toBeDefined();
-                expect(args).toEqual([
+                sshLookups++;
+                expect(args.slice(0, 3)).toEqual([
                   "-c",
                   `alias.codex-security-ssh-config=!${effectiveCommand} -G`,
                   "codex-security-ssh-config",
-                  ...sshArguments,
                 ]);
-                sshLookups++;
-                return "hostname github.com";
+                if (
+                  mirror?.startsWith("ssh:") &&
+                  args.at(-1) === "git@mirror.example.test"
+                ) {
+                  expect(args.slice(3)).toEqual(["git@mirror.example.test"]);
+                  return "hostname mirror.example.test";
+                }
+                expect(args.slice(3)).toEqual(sshArguments);
+                if (transport === "ssh-missing" || transport === "ssh-failed")
+                  throw Object.assign(
+                    new Error("Synthetic SSH lookup failure"),
+                    {
+                      code: transport === "ssh-missing" ? 127 : 1,
+                    },
+                  );
+                return transport === "ssh-empty"
+                  ? ""
+                  : `hostname ${transport === "ssh-host" ? "ssh.github.com" : "github.com"}`;
               }
               if (args[0] === "push") {
                 pushes++;
@@ -3611,25 +3832,6 @@ describe("patch change tracking", () => {
                 );
               }
               return runGitRepositoryCommand(command, args, cwd, options);
-            }
-            if (command === "ssh") {
-              expect(effectiveCommand).toBeUndefined();
-              sshLookups++;
-              if (
-                mirror?.startsWith("ssh:") &&
-                args.at(-1) === "git@mirror.example.test"
-              ) {
-                expect(args).toEqual(["-G", "git@mirror.example.test"]);
-                return "hostname mirror.example.test";
-              }
-              expect(args).toEqual(["-G", ...sshArguments]);
-              if (transport === "ssh-missing" || transport === "ssh-failed")
-                throw Object.assign(new Error("Synthetic SSH lookup failure"), {
-                  code: transport === "ssh-missing" ? "ENOENT" : 1,
-                });
-              return transport === "ssh-empty"
-                ? ""
-                : `hostname ${transport === "ssh-host" ? "ssh.github.com" : "github.com"}`;
             }
             if (args[0] === "repo") {
               repositoryLookups++;
@@ -3697,13 +3899,12 @@ describe("patch change tracking", () => {
           },
         },
       );
-      const failedLookup = transport === "ssh-missing";
       expect(outcome.exitCode, outcome.stderr).toBe(
-        failedLookup || (!resume && ownIncluded) ? 2 : 0,
+        !resume && ownIncluded ? 2 : 0,
       );
-      const attempts = !failedLookup && !resume && !ownIncluded ? 2 : 1;
+      const attempts = !resume && !ownIncluded ? 2 : 1;
       expect(repositoryLookups).toBe(
-        (failedLookup || !lookupRemote || transport === "no-candidates"
+        (!lookupRemote || transport === "no-candidates"
           ? 0
           : transport === "multiple-hosted"
             ? 2
@@ -3712,11 +3913,9 @@ describe("patch change tracking", () => {
       expect(sshLookups).toBe(
         (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) * attempts,
       );
-      expect(modelCalls).toBe(failedLookup || resume || ownIncluded ? 0 : 1);
-      expect(pushes).toBe(failedLookup || ownIncluded ? 0 : 1);
-      if (failedLookup)
-        expect(outcome.stderr).toContain("Synthetic SSH lookup failure");
-      if (!failedLookup && (resume || !ownIncluded))
+      expect(modelCalls).toBe(resume || ownIncluded ? 0 : 1);
+      expect(pushes).toBe(ownIncluded ? 0 : 1);
+      if (resume || !ownIncluded)
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
           ownIncluded ? ownUrl : createdUrl,
         );
@@ -3814,6 +4013,185 @@ describe("patch change tracking", () => {
       expect(await readFile(join(external, "app.ts"), "utf8")).toBe(
         "outside uncommitted content\n",
       );
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((recursive) =>
+      ["root", "package"].flatMap((scope) =>
+        [
+          "init",
+          "init-edit",
+          "init-new",
+          "init-delete",
+          "deinit",
+          "deinit-dirty",
+        ].map((operation) => ({ recursive, scope, operation })),
+      ),
+    ),
+  )(
+    "reports submodule content changes for $operation from $scope: recursive=$recursive",
+    async ({ recursive, scope, operation }) => {
+      const root = await fixtures.create("synthetic-submodule-state-");
+      const origin = await fixtures.create("synthetic-submodule-origin-");
+      const leaf = recursive
+        ? await fixtures.create("synthetic-submodule-leaf-")
+        : undefined;
+      for (const directory of [root, origin, ...(leaf ? [leaf] : [])]) {
+        const git = repositoryGit(directory);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(directory, "app.ts"), "baseline\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+      }
+      if (leaf) {
+        const upstream = repositoryGit(origin);
+        upstream(
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          leaf,
+          "inner",
+        );
+        upstream("commit", "-am", "Synthetic nested dependency");
+      }
+      const git = repositoryGit(root);
+      await mkdir(join(root, "package"));
+      await writeFile(join(root, "package/app.ts"), "outer baseline\n");
+      git(
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        origin,
+        "vendor",
+      );
+      git("add", ".");
+      git("commit", "-m", "Synthetic dependency");
+      const initialize = () =>
+        git(
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "update",
+          "--init",
+          "--recursive",
+        );
+      initialize();
+      const prefix = recursive ? "vendor/inner" : "vendor";
+      const nested = join(root, prefix);
+      if (operation.startsWith("init"))
+        git("submodule", "deinit", "-f", "--all");
+      if (operation === "deinit-dirty") {
+        await writeFile(join(nested, "app.ts"), "local dirty content\n");
+        await writeFile(join(nested, "new.ts"), "local new content\n");
+      }
+      await writeFile(join(root, "unrelated.txt"), "staged local content\n");
+      git("add", "unrelated.txt");
+      const index = await readFile(join(root, ".git/index"));
+      const staged = git("diff", "--cached");
+      const head = git("rev-parse", "HEAD");
+      const onCodex = mock(
+        async (
+          _args: readonly string[],
+          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+        ) => {
+          if (operation.startsWith("init")) initialize();
+          if (operation === "init-edit")
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+          if (operation === "init-new")
+            await writeFile(join(nested, "new.ts"), "new fix\n");
+          if (operation === "init-delete") await rm(join(nested, "app.ts"));
+          if (operation.startsWith("deinit"))
+            git("submodule", "deinit", "-f", "--all");
+          output?.stdout.write("Prepared dependencies and checked the result.");
+          return 0;
+        },
+      );
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: scope === "root" ? root : join(root, "package"),
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex,
+        },
+      );
+      const clean = operation === "init" || operation === "deinit";
+      expect(outcome.exitCode, outcome.stderr).toBe(clean ? 2 : 0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: !clean,
+        files: clean
+          ? []
+          : operation === "init-new"
+            ? [`${prefix}/new.ts`]
+            : operation === "deinit-dirty"
+              ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
+              : [`${prefix}/app.ts`],
+      });
+      expect(onCodex).toHaveBeenCalledTimes(1);
+      expect(await readFile(join(root, ".git/index"))).toEqual(index);
+      expect(git("diff", "--cached")).toBe(staged);
+      expect(git("rev-parse", "HEAD")).toBe(head);
+    },
+  );
+
+  test.each(["root", "package"])(
+    "reports sparse nested changes from %s when the recorded commit is unavailable",
+    async (scope) => {
+      const root = await fixtures.create("synthetic-sparse-submodule-");
+      const nested = join(root, "vendor");
+      await mkdir(nested);
+      const git = repositoryGit(root);
+      const inner = repositoryGit(nested);
+      for (const repository of [git, inner]) {
+        repository("init", "--initial-branch=main");
+        repository("config", "user.name", "Synthetic User");
+        repository("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "old dependency\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic dependency baseline");
+      const recorded = inner("rev-parse", "HEAD");
+      await mkdir(join(root, "package"));
+      await writeFile(join(root, "app.ts"), "outer baseline\n");
+      await writeFile(join(root, "package/app.ts"), "package baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic outer baseline");
+      git("sparse-checkout", "set", "--no-cone", "/app.ts", "/package/app.ts");
+      await rm(nested, { recursive: true });
+      await mkdir(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "different history\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic replacement baseline");
+      expect(inner("rev-parse", "--revs-only", `${recorded}^{tree}`)).toBe("");
+      const index = await readFile(join(root, ".git/index"));
+      const nestedIndex = await readFile(join(nested, ".git/index"));
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: scope === "root" ? root : join(root, "package"),
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(join(root, "app.ts"), "fixed outer\n");
+            await writeFile(join(nested, "app.ts"), "fixed nested\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout).files).toEqual([
+        "app.ts",
+        "vendor/app.ts",
+      ]);
+      expect(await readFile(join(root, ".git/index"))).toEqual(index);
+      expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
     },
   );
 

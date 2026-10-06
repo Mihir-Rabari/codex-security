@@ -1763,9 +1763,9 @@ export async function main(
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   dependencies = {
     ...parentDependencies,
-    runRepositoryCommand(command, args, repository, options) {
-      if (command === "git") {
-        gitEnvironment ??= Object.fromEntries(
+    async runRepositoryCommand(command, args, repository, options) {
+      if (command === "git" && gitEnvironment === undefined) {
+        gitEnvironment = Object.fromEntries(
           ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
             const value = parentDependencies.environment[name];
             return value && !isAbsolute(value)
@@ -1773,6 +1773,23 @@ export async function main(
               : [];
           }),
         );
+        if (
+          parentDependencies.environment["GIT_WORK_TREE"] &&
+          parentDependencies.environment["GIT_DIR"] === undefined
+        ) {
+          gitEnvironment["GIT_DIR"] = (
+            await parentDependencies.runRepositoryCommand(
+              "git",
+              ["rev-parse", "--absolute-git-dir"],
+              repository,
+              {
+                ...options,
+                trim: false,
+                environment: { ...gitEnvironment, ...options?.environment },
+              },
+            )
+          ).replace(/\n$/u, "");
+        }
       }
       options = {
         ...options,
@@ -6745,7 +6762,7 @@ async function patchPublicationDestination(
   branch: string,
   dependencies: CliDependencies,
 ) {
-  const run = (command: "git" | "gh" | "glab" | "ssh", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   const pushRemotes = (
     await run("git", ["remote", "get-url", "--push", "--all", "origin"])
@@ -6841,17 +6858,12 @@ async function patchPublicationDestination(
               throw error;
             },
           ));
-        const settings = await (
-          sshCommand !== undefined ||
-          dependencies.environment["GIT_SSH"] !== undefined
-            ? run("git", [
-                "-c",
-                `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
-                "codex-security-ssh-config",
-                ...sshArguments,
-              ])
-            : run("ssh", ["-G", ...sshArguments])
-        ).catch((error: unknown) => {
+        const settings = await run("git", [
+          "-c",
+          `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
+          "codex-security-ssh-config",
+          ...sshArguments,
+        ]).catch((error: unknown) => {
           if (isJsonObject(error) && typeof error["code"] === "number")
             return "";
           throw error;
@@ -7249,6 +7261,14 @@ interface GitPatchState {
   root: string;
   tree: string;
   files: Map<string, string>;
+  gitlinks: Map<
+    string,
+    {
+      commit: string;
+      initialized: boolean;
+      committed: Map<string, string> | null;
+    }
+  >;
 }
 
 async function changedPatchFiles(
@@ -7282,8 +7302,33 @@ async function changedPatchFiles(
   );
   const files = new Set(output.split("\0").filter(Boolean));
   if (typeof base !== "string" && typeof head !== "string") {
-    for (const path of new Set([...base.files.keys(), ...head.files.keys()])) {
-      if (base.files.get(path) !== head.files.get(path)) files.add(path);
+    const before = new Map(base.files);
+    const after = new Map(head.files);
+    const hydrate = (
+      state: GitPatchState,
+      directory: string,
+      commit: string,
+      entries: Map<string, string>,
+    ): void => {
+      const gitlink = state.gitlinks.get(directory);
+      if (gitlink?.commit !== commit || gitlink.committed === null) return;
+      for (const [path, entry] of gitlink.committed) {
+        const nestedPath = `${directory}/${path}`;
+        entries.set(nestedPath, entry);
+        if (entry.startsWith("160000 "))
+          hydrate(state, nestedPath, entry.split(" ")[2]!, entries);
+      }
+    };
+    for (const [directory, previous] of base.gitlinks) {
+      const current = head.gitlinks.get(directory);
+      if (current === undefined || previous.commit !== current.commit) continue;
+      if (!previous.initialized && current.initialized)
+        hydrate(head, directory, current.commit, before);
+      if (!current.initialized && previous.initialized)
+        hydrate(base, directory, previous.commit, after);
+    }
+    for (const path of new Set([...before.keys(), ...after.keys()])) {
+      if (before.get(path) !== after.get(path)) files.add(path);
     }
   }
   return [...files].sort();
@@ -7313,12 +7358,41 @@ async function snapshotPatchState(
   return snapshotGitPatchState(resolve(root.replace(/\n$/u, "")), dependencies);
 }
 
+async function patchTreeEntries(
+  repository: string,
+  checkout: string,
+  tree: string,
+  dependencies: CliDependencies,
+): Promise<Map<string, string>> {
+  const entries = await dependencies.runRepositoryCommand(
+    "git",
+    ["-C", checkout, "ls-tree", "-r", "-z", tree],
+    repository,
+    {
+      trim: false,
+      maxBuffer: Infinity,
+      environment:
+        checkout !== repository ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
+    },
+  );
+  return new Map(
+    entries
+      .split("\0")
+      .filter(Boolean)
+      .map((entry) => {
+        const separator = entry.indexOf("\t");
+        return [entry.slice(separator + 1), entry.slice(0, separator)];
+      }),
+  );
+}
+
 async function snapshotGitPatchState(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<GitPatchState> {
   const tree = await snapshotPatchTree(repository, dependencies);
   const files = new Map<string, string>();
+  const gitlinks: GitPatchState["gitlinks"] = new Map();
   const repositoryRoot = await realpath(repository);
   const visit = async (
     directory: string,
@@ -7326,26 +7400,24 @@ async function snapshotGitPatchState(
     ancestors: string[],
   ): Promise<void> => {
     const checkout = join(repository, directory);
-    const entries = await dependencies.runRepositoryCommand(
-      "git",
-      ["-C", checkout, "ls-tree", "-r", "-z", snapshot],
+    const entries = await patchTreeEntries(
       repository,
-      {
-        trim: false,
-        maxBuffer: Infinity,
-        environment: directory ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
-      },
+      checkout,
+      snapshot,
+      dependencies,
     );
-    for (const entry of entries.split("\0").filter(Boolean)) {
-      const separator = entry.indexOf("\t");
-      const path = entry.slice(separator + 1);
+    for (const [path, entry] of entries) {
       const nestedPath = directory ? `${directory}/${path}` : path;
-      if (directory) files.set(nestedPath, entry.slice(0, separator));
-      if (
-        entry.startsWith("160000 ") &&
-        existsSync(join(checkout, path, ".git"))
-      ) {
+      if (directory) files.set(nestedPath, entry);
+      if (entry.startsWith("160000 ")) {
         const nested = join(checkout, path);
+        const gitlink = {
+          commit: entry.split(" ")[2]!,
+          initialized: false,
+          committed: null as Map<string, string> | null,
+        };
+        gitlinks.set(nestedPath, gitlink);
+        if (!existsSync(join(nested, ".git"))) continue;
         const worktree = await enclosingGitWorktreeRoot(nested, undefined, {
           requireIfPresent: true,
         });
@@ -7359,6 +7431,26 @@ async function snapshotGitPatchState(
               "Nested Git checkout resolves to an ancestor worktree.",
             );
         }
+        gitlink.initialized = true;
+        const committedTree = await dependencies.runRepositoryCommand(
+          "git",
+          [
+            "-C",
+            nested,
+            "rev-parse",
+            "--revs-only",
+            `${gitlink.commit}^{tree}`,
+          ],
+          repository,
+          { environment: NESTED_PATCH_GIT_ENVIRONMENT },
+        );
+        if (committedTree)
+          gitlink.committed = await patchTreeEntries(
+            repository,
+            nested,
+            committedTree,
+            dependencies,
+          );
         await visit(
           nestedPath,
           await snapshotPatchTree(nested, dependencies, repository),
@@ -7368,7 +7460,7 @@ async function snapshotGitPatchState(
     }
   };
   await visit("", tree, [repositoryRoot]);
-  return { root: repository, tree, files };
+  return { root: repository, tree, files, gitlinks };
 }
 
 // Literal patch inputs also work in directories without Git metadata.
