@@ -2042,14 +2042,17 @@ def merge_saved_results(
                 continue
             key = _finding_key(finding)
             represented_by_parent = False
+            mapped_candidate = None
             if relative != "parent":
                 if key in represented:
                     mapped_key = represented[key]
+                    mapped_candidate = mapped_key
                     historical_contents = represented_history.get(key, set())
                 elif (
                     identity_key := explicit_finding_key(value, worker_id)
                 ) in represented_explicit and len(source_explicit_positions[identity_key]) == 1:
                     mapped_key = represented_explicit[identity_key]
+                    mapped_candidate = mapped_key
                     historical_contents = set()
                     represented_by_parent = (
                         mapped_key is not None
@@ -2074,17 +2077,20 @@ def merge_saved_results(
                 if worker_id and candidate_id
                 else None
             )
-            mapped_candidate = (
-                represented_candidates[canonical_candidate]
-                if canonical_candidate in canonical_candidates
-                else None
-            )
-            if mapped_candidate is not None:
-                key = mapped_candidate
-                represented_by_parent = represented_by_parent or (
-                    _digest(_finding_content(value))
-                    in represented_candidate_history.get(canonical_candidate, set())
+            # A location-aware parent match takes precedence over a reused
+            # worker candidate alias, which can refer to a different location.
+            if mapped_candidate is None:
+                mapped_candidate = (
+                    represented_candidates[canonical_candidate]
+                    if canonical_candidate in canonical_candidates
+                    else None
                 )
+                if mapped_candidate is not None:
+                    key = mapped_candidate
+                    represented_by_parent = represented_by_parent or (
+                        _digest(_finding_content(value))
+                        in represented_candidate_history.get(canonical_candidate, set())
+                    )
             if not represented_by_parent and mapped_candidate is None:
                 key = candidate_position_key(finding, key)
             if relative == "parent":
