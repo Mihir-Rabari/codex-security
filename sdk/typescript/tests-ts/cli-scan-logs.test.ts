@@ -408,16 +408,35 @@ test("saved logs remain readable for a future workflow without admitting executi
       "--scan-root",
       join(f.state, "scans"),
     ]);
-    const scanId = String((begun["deepScan"] as { scanId: string }).scanId);
+    const deepScan = begun["deepScan"] as { scanId: string; createdAt: string };
+    const scanId = deepScan.scanId;
+    await runWorkbench(options, [
+      "set-scan-thread",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "thread-1",
+    ]);
+    f.deps.environment = environment;
     await promisify(execFile)(
       python,
       [
         "-I",
         "-B",
         "-c",
-        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); connection.execute(\"UPDATE deep_scan_runs SET workflow_version = 'future/v99' WHERE scan_id = ?\", (sys.argv[2],)); connection.commit(); connection.close()",
+        "import sqlite3, sys; connection = sqlite3.connect(sys.argv[1]); connection.execute(\"UPDATE deep_scan_runs SET workflow_version = 'future/v99', usage_owner_json = ?, execution_settings_json = ? WHERE scan_id = ?\", (sys.argv[3], sys.argv[4], sys.argv[2])); connection.commit(); connection.close()",
         join(f.state, "workbench.sqlite3"),
         scanId,
+        JSON.stringify({
+          threadId: "thread-1",
+          turnId: "original",
+          startedAt: deepScan.createdAt,
+          dedicated: false,
+        }),
+        JSON.stringify({
+          version: 1,
+          settings: { codexHome: environment.CODEX_HOME, codexPath: python },
+        }),
       ],
       { env: environment },
     );
@@ -437,7 +456,9 @@ test("saved logs remain readable for a future workflow without admitting executi
       );
     };
     const { stdout, stderr, runCli } = createCliTest(main);
-    expect(await runCli(["scans", "logs", scanId, "--json"], f.deps)).toBe(0);
+    const code = await runCli(["scans", "logs", scanId, "--json"], f.deps);
+    expect(stderr.text()).toBe("");
+    expect(code).toBe(0);
     expect(privateSettingsRequested).toBe(true);
     const logs = JSON.parse(stdout.text());
     expect(logs.scanId).toBe(scanId);
