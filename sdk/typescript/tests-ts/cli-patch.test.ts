@@ -957,7 +957,10 @@ describe("scan and patch workflow", () => {
             workingDirectory,
             commandOptions,
           ) => {
-            if (args.includes("--show-toplevel"))
+            if (
+              args.includes("--show-toplevel") ||
+              args.includes("--absolute-git-dir")
+            )
               expect([repository, join(repository, "src")]).toContain(
                 workingDirectory,
               );
@@ -2379,14 +2382,21 @@ describe("scan and patch workflow", () => {
 describe("patch publication integrity", () => {
   const fixtures = createTemporaryDirectories(true);
   test.each(
-    ["root", "package"].flatMap((scope) =>
-      ["absolute", "relative"].flatMap((spelling) =>
-        [false, true].map((assess) => ({ scope, spelling, assess })),
+    ["environment", "config"].flatMap((selection) =>
+      ["root", "package"].flatMap((scope) =>
+        ["absolute", "relative"].flatMap((spelling) =>
+          [false, true].map((assess) => ({
+            selection,
+            scope,
+            spelling,
+            assess,
+          })),
+        ),
       ),
     ),
   )(
-    "preserves separately configured worktree metadata from $scope with $spelling path and assessment=$assess",
-    async ({ scope, spelling, assess }) => {
+    "preserves separately configured worktree metadata from $scope with $spelling $selection path and assessment=$assess",
+    async ({ selection, scope, spelling, assess }) => {
       const root = await fixtures.create("patch-separate-worktree-");
       const metadata = join(root, "metadata");
       const tree = join(root, "selected-tree");
@@ -2406,10 +2416,21 @@ describe("patch publication integrity", () => {
       nestedGit("commit", "-m", "Synthetic nested baseline");
       await writeFile(join(tree, "app.ts"), "before\n");
       await writeFile(join(tree, "unrelated.txt"), "original\n");
-      const environment = {
-        GIT_WORK_TREE:
-          spelling === "absolute" ? tree : relative(directory, tree),
-      };
+      if (selection === "config")
+        repositoryGit(metadata)(
+          "config",
+          "core.worktree",
+          spelling === "absolute"
+            ? tree
+            : relative(join(metadata, ".git"), tree),
+        );
+      const environment =
+        selection === "environment"
+          ? {
+              GIT_WORK_TREE:
+                spelling === "absolute" ? tree : relative(directory, tree),
+            }
+          : {};
       const beforeEnvironment = { ...environment };
       const git = (...args: string[]) =>
         runGitRepositoryCommand("git", args, directory, { environment });
@@ -3524,7 +3545,7 @@ describe("patch change tracking", () => {
             expect(args).toEqual([
               "repo",
               "view",
-              "ssh://git@github.com/example/repository.git",
+              "github.com/example/repository",
               "--json",
               "id",
               "--jq",
@@ -3574,6 +3595,12 @@ describe("patch change tracking", () => {
       "local-push-only",
       "network-push-only",
       "ssh-api",
+      "ssh-api-port",
+      "https-api-port",
+      "scp-absolute-api-port",
+      "ssh-uri-api-port",
+      "ssh-uri-git+ssh-api-port",
+      "ssh-uri-ssh+git-api-port",
       "ssh-enterprise",
       "scp",
       "scp-userless",
@@ -3640,11 +3667,14 @@ describe("patch change tracking", () => {
       ].includes(transport);
       const localOnly =
         transport.startsWith("local-fetch") || transport === "local-push-only";
+      const apiPort = transport.endsWith("-api-port") ? ":8443" : "";
       const hostingHost =
-        transport === "ssh-enterprise"
+        transport === "ssh-enterprise" || apiPort
           ? "enterprise.example.test"
           : "github.com";
-      const hostingUrl = `https://${hostingHost}`;
+      const hostingUrl = `https://${hostingHost}${apiPort}`;
+      if (apiPort)
+        environment["GH_REPO"] = `${hostingHost}${apiPort}/upstream/repository`;
       const fetchRemote = `${hostingUrl}/fetch-owner/repository.git`;
       const mirror = transport.includes("mirror")
         ? `${transport.startsWith("ssh") ? "ssh://git@" : "https://"}mirror.example.test/srv/git/repository.git`
@@ -3655,61 +3685,72 @@ describe("patch change tracking", () => {
           ? "ssh+git"
           : "ssh";
       const pushRemote =
-        transport === "www-scp"
-          ? "git@www.github.com:push-owner/repository.git"
-          : transport === "www" || transport === "www-mixed"
-            ? `https://${transport === "www-mixed" ? "www.GitHub.COM" : "www.github.com"}/push-owner/repository.git`
-            : mirror && transport.endsWith("only")
-              ? mirror
-              : transport === "renamed"
-                ? `${hostingUrl}/push-owner/old-name.git`
-                : transport === "transferred"
-                  ? `${hostingUrl}/old-owner/repository.git`
-                  : localFirst ||
-                      mirror ||
-                      [
-                        "network-push-only",
-                        "multiple-hosted",
-                        "no-candidates",
-                      ].includes(transport)
-                    ? `${hostingUrl}/push-owner/repository.git`
-                    : transport === "local" || localOnly
-                      ? remote
-                      : transport === "scp-userless"
-                        ? "github.com:example/repository.git"
-                        : transport === "ssh-api"
-                          ? "git@github.com:push-owner/repository.git"
-                          : transport === "ssh-enterprise"
-                            ? "git@enterprise.example.test:push-owner/other-repository.git"
-                            : transport.startsWith("scp")
-                              ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
-                              : transport.startsWith("ssh-uri")
-                                ? `${sshScheme}://git@${alias}:2222/example/repository.git`
-                                : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
+        transport === "https-api-port"
+          ? `${hostingUrl}/push-owner/repository.git`
+          : transport === "www-scp"
+            ? "git@www.github.com:push-owner/repository.git"
+            : transport === "www" || transport === "www-mixed"
+              ? `https://${transport === "www-mixed" ? "www.GitHub.COM" : "www.github.com"}/push-owner/repository.git`
+              : mirror && transport.endsWith("only")
+                ? mirror
+                : transport === "renamed"
+                  ? `${hostingUrl}/push-owner/old-name.git`
+                  : transport === "transferred"
+                    ? `${hostingUrl}/old-owner/repository.git`
+                    : localFirst ||
+                        mirror ||
+                        [
+                          "network-push-only",
+                          "multiple-hosted",
+                          "no-candidates",
+                        ].includes(transport)
+                      ? `${hostingUrl}/push-owner/repository.git`
+                      : transport === "local" || localOnly
+                        ? remote
+                        : transport === "scp-userless"
+                          ? "github.com:example/repository.git"
+                          : transport === "ssh-api" ||
+                              transport === "ssh-api-port"
+                            ? `git@${hostingHost}:push-owner/repository.git`
+                            : transport === "ssh-enterprise"
+                              ? "git@enterprise.example.test:push-owner/other-repository.git"
+                              : transport.startsWith("scp")
+                                ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
+                                : transport.startsWith("ssh-uri")
+                                  ? `${sshScheme}://git@${alias}:2222/example/repository.git`
+                                  : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
       const aliasLookup =
         (transport.startsWith("scp") && transport !== "scp-userless") ||
         transport.startsWith("ssh-uri") ||
         ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport);
       const lookupRemote =
-        transport === "www-scp"
-          ? "ssh://git@www.github.com/push-owner/repository.git"
-          : transport === "www-mixed"
-            ? "https://www.github.com/push-owner/repository.git"
-            : transport === "local" || transport === "local-push-only"
-              ? undefined
-              : localOnly ||
-                  (mirror && transport.endsWith("only")) ||
-                  ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport)
-                ? fetchRemote
-                : pushRemote.startsWith("https://")
-                  ? pushRemote
-                  : transport === "ssh-api"
-                    ? "ssh://git@github.com/push-owner/repository.git"
-                    : transport === "ssh-enterprise"
-                      ? "ssh://git@enterprise.example.test/push-owner/other-repository.git"
-                      : transport === "scp-userless"
-                        ? "ssh://github.com/example/repository.git"
-                        : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
+        transport === "local" || transport === "local-push-only"
+          ? undefined
+          : localOnly ||
+              (mirror && transport.endsWith("only")) ||
+              ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport)
+            ? `${hostingHost}${apiPort}/fetch-owner/repository`
+            : transport === "renamed"
+              ? `${hostingHost}/push-owner/old-name`
+              : transport === "transferred"
+                ? `${hostingHost}/old-owner/repository`
+                : transport === "ssh-enterprise"
+                  ? `${hostingHost}/push-owner/other-repository`
+                  : localFirst ||
+                      mirror ||
+                      [
+                        "www",
+                        "www-mixed",
+                        "www-scp",
+                        "network-push-only",
+                        "multiple-hosted",
+                        "no-candidates",
+                        "ssh-api",
+                        "ssh-api-port",
+                        "https-api-port",
+                      ].includes(transport)
+                    ? `${hostingHost}${apiPort}/push-owner/repository`
+                    : `${hostingHost}${apiPort}/example/repository`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
         transport === "scp-userless"
@@ -3807,7 +3848,7 @@ describe("patch change tracking", () => {
                   );
                 return transport === "ssh-empty"
                   ? ""
-                  : `hostname ${transport === "ssh-host" ? "ssh.github.com" : "github.com"}`;
+                  : `hostname ${transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
               }
               if (args[0] === "push") {
                 pushes++;
@@ -3839,7 +3880,7 @@ describe("patch change tracking", () => {
                 "repo",
                 "view",
                 transport === "multiple-hosted" && repositoryLookups % 2 === 1
-                  ? `${hostingUrl}/first-owner/repository.git`
+                  ? `${hostingHost}${apiPort}/first-owner/repository`
                   : lookupRemote!,
                 "--json",
                 "id",
@@ -4316,12 +4357,16 @@ describe("patch change tracking", () => {
                 gitEnvironment.GIT_COMMON_DIR,
               );
               expect(environment["GIT_DIR"]).toBe(
-                settings === "relative"
+                settings === "relative" || (target !== root && cwd === root)
                   ? join(root, ".git")
                   : gitEnvironment.GIT_DIR,
               );
               expect(environment["GIT_WORK_TREE"]).toBe(
-                settings === "relative" ? root : gitEnvironment.GIT_WORK_TREE,
+                settings === "relative" ||
+                  (target !== root &&
+                    (cwd === root || args.includes("--absolute-git-dir")))
+                  ? root
+                  : gitEnvironment.GIT_WORK_TREE,
               );
             }
             expect(environment["GIT_CONFIG_COUNT"]).toBe("1");

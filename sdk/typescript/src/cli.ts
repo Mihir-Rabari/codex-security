@@ -1761,11 +1761,13 @@ export async function main(
 ): Promise<number> {
   const parentDependencies = dependencies;
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
+  let gitRepository: string | undefined;
   dependencies = {
     ...parentDependencies,
     async runRepositoryCommand(command, args, repository, options) {
-      if (command === "git" && gitEnvironment === undefined) {
-        gitEnvironment = Object.fromEntries(
+      if (command === "git") {
+        gitRepository ??= repository;
+        gitEnvironment ??= Object.fromEntries(
           ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
             const value = parentDependencies.environment[name];
             return value && !isAbsolute(value)
@@ -1774,18 +1776,31 @@ export async function main(
           }),
         );
         if (
-          parentDependencies.environment["GIT_WORK_TREE"] &&
-          parentDependencies.environment["GIT_DIR"] === undefined
+          repository !== gitRepository &&
+          parentDependencies.environment["GIT_DIR"] === undefined &&
+          gitEnvironment["GIT_DIR"] === undefined
         ) {
+          if (parentDependencies.environment["GIT_WORK_TREE"] === undefined) {
+            gitEnvironment["GIT_WORK_TREE"] = (
+              await parentDependencies.runRepositoryCommand(
+                "git",
+                ["rev-parse", "--show-toplevel"],
+                gitRepository,
+                {
+                  trim: false,
+                  environment: gitEnvironment,
+                },
+              )
+            ).replace(/\n$/u, "");
+          }
           gitEnvironment["GIT_DIR"] = (
             await parentDependencies.runRepositoryCommand(
               "git",
               ["rev-parse", "--absolute-git-dir"],
-              repository,
+              gitRepository,
               {
-                ...options,
                 trim: false,
-                environment: { ...gitEnvironment, ...options?.environment },
+                environment: gitEnvironment,
               },
             )
           ).replace(/\n$/u, "");
@@ -6827,7 +6842,7 @@ async function patchPublicationDestination(
   }[];
   if (gitlab || !candidates.length)
     return { remote, gitlab, command, existing: candidates[0] };
-  const apiHost = new URL(candidates[0]!.url).hostname;
+  const { hostname: apiHost, host: apiEndpoint } = new URL(candidates[0]!.url);
   let existing = candidates.find(
     (candidate) => candidate.repository && !candidate.crossRepository,
   );
@@ -6875,14 +6890,12 @@ async function patchPublicationDestination(
       }
       if (url.hostname.toLowerCase().replace(/^www\./u, "") === apiHost) {
         hosted = true;
-        if (ssh) {
-          url.protocol = "ssh:";
-          url.port = "";
-        }
         const id = await run("gh", [
           "repo",
           "view",
-          url.href,
+          `${apiEndpoint}/${decodeURIComponent(url.pathname)
+            .replace(/^\/+|\/+$/gu, "")
+            .replace(/\.git$/u, "")}`,
           "--json",
           "id",
           "--jq",
