@@ -15,7 +15,14 @@ const {
   new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
 );
 
-const savedOwners = [null, ["legacy-worker"], { worker: "legacy-worker" }, "", " ", "legacy-worker"];
+const savedOwners = [
+  null,
+  ["legacy-worker"],
+  { worker: "legacy-worker" },
+  "",
+  " ",
+  "legacy-worker",
+];
 
 for (const mode of ["standard", "diff", "worker"] as const) {
   for (const source of ["published", "checkpoint"] as const) {
@@ -23,28 +30,72 @@ for (const mode of ["standard", "diff", "worker"] as const) {
       for (const [index, owner] of savedOwners.entries()) {
         test(`updates saved ${mode}/${source}/${field} owner metadata ${index}`, async (t) => {
           const f = await fixture(t, mode);
-          const row = field === "surfaces"
-            ? { id: "legacy-surface", label: "Saved review", disposition: "needs_follow_up" }
-            : { id: "legacy-gap", reason: "Retain the saved proof gap." };
-          const legacyCoverage = { [field]: [{ ...row, sourceWorkerId: owner }] };
-          await f.write(f.draft({ [field]: [{ ...row, sourceWorkerId: "legacy-worker" }] }));
+          const row =
+            field === "surfaces"
+              ? {
+                  id: "legacy-surface",
+                  label: "Saved review",
+                  disposition: "needs_follow_up",
+                }
+              : { id: "legacy-gap", reason: "Retain the saved proof gap." };
+          const legacyCoverage = {
+            [field]: [{ ...row, sourceWorkerId: owner }],
+          };
+          await f.write(
+            f.draft({ [field]: [{ ...row, sourceWorkerId: "legacy-worker" }] }),
+          );
           if (source === "checkpoint") {
-            await draftApi.saveScanDraftCheckpoint(f.context, f.draft(legacyCoverage));
+            await draftApi.saveScanDraftCheckpoint(
+              f.context,
+              f.draft(legacyCoverage),
+            );
           } else {
-            const file = path.join(f.root, mode === "worker" ? "result.json" : "coverage.json");
+            const file = path.join(
+              f.root,
+              mode === "worker" ? "result.json" : "coverage.json",
+            );
             const saved = JSON.parse(await readFile(file, "utf8"));
             const coverage = mode === "worker" ? saved.coverage : saved;
             coverage[field][0].sourceWorkerId = owner;
             await writeFile(file, JSON.stringify(saved, null, 2) + "\n");
           }
           const checkpointRoot = path.join(f.root, "checkpoints");
-          const checkpoints = await Promise.all((await readdir(checkpointRoot)).map(async (name) => [name, await readFile(path.join(checkpointRoot, name), "utf8")] as const));
-          await f.write(f.draft({ deferred: [{ id: "independent-gap", reason: "Independent unfinished work." }] }));
-          for (const [name, contents] of checkpoints) assert.equal(await readFile(path.join(checkpointRoot, name), "utf8"), contents);
+          const checkpoints = await Promise.all(
+            (await readdir(checkpointRoot)).map(
+              async (name) =>
+                [
+                  name,
+                  await readFile(path.join(checkpointRoot, name), "utf8"),
+                ] as const,
+            ),
+          );
+          await f.write(
+            f.draft({
+              deferred: [
+                {
+                  id: "independent-gap",
+                  reason: "Independent unfinished work.",
+                },
+              ],
+            }),
+          );
+          for (const [name, contents] of checkpoints)
+            assert.equal(
+              await readFile(path.join(checkpointRoot, name), "utf8"),
+              contents,
+            );
           const restored = await f.read();
-          assert.ok(restored[field].some((saved: { sourceWorkerId?: unknown }) =>
-            JSON.stringify(saved.sourceWorkerId) === JSON.stringify(owner)));
-          assert.ok(restored.deferred.some((saved: { id: string }) => saved.id === "independent-gap"));
+          assert.ok(
+            restored[field].some(
+              (saved: { sourceWorkerId?: unknown }) =>
+                JSON.stringify(saved.sourceWorkerId) === JSON.stringify(owner),
+            ),
+          );
+          assert.ok(
+            restored.deferred.some(
+              (saved: { id: string }) => saved.id === "independent-gap",
+            ),
+          );
         });
       }
     }
@@ -56,10 +107,27 @@ for (const field of ["surfaces", "deferred"] as const) {
     test(`recovers persisted Deep worker ${field} owner metadata ${index}`, async (t) => {
       const f = await fixture(t, "worker");
       await f.write({
-        ...f.draft({
-          surfaces: [{ id: "legacy-surface", label: "Saved review", disposition: "needs_follow_up", sourceWorkerId: "legacy-worker" }],
-          deferred: [{ id: "legacy-gap", candidateId: "legacy-gap", reason: "Retain the saved proof gap.", sourceWorkerId: "legacy-worker" }],
-        }, true),
+        ...f.draft(
+          {
+            surfaces: [
+              {
+                id: "legacy-surface",
+                label: "Saved review",
+                disposition: "needs_follow_up",
+                sourceWorkerId: "legacy-worker",
+              },
+            ],
+            deferred: [
+              {
+                id: "legacy-gap",
+                candidateId: "legacy-gap",
+                reason: "Retain the saved proof gap.",
+                sourceWorkerId: "legacy-worker",
+              },
+            ],
+          },
+          true,
+        ),
         complete: true,
       });
       const resultPath = path.join(f.root, "result.json");
@@ -67,12 +135,20 @@ for (const field of ["surfaces", "deferred"] as const) {
       saved.coverage[field][0].sourceWorkerId = owner;
       const contents = JSON.stringify(saved, null, 2) + "\n";
       await writeFile(resultPath, contents);
-      const restored = await validateDiscoveryArtifacts({
-        scanDir: path.dirname(f.root), workersRoot: path.dirname(f.root), dedupRoot: path.join(path.dirname(f.root), "dedup"),
-      }, resultPath, f.context.scanId);
+      const restored = await validateDiscoveryArtifacts(
+        {
+          scanDir: path.dirname(f.root),
+          workersRoot: path.dirname(f.root),
+          dedupRoot: path.join(path.dirname(f.root), "dedup"),
+        },
+        resultPath,
+        f.context.scanId,
+      );
       assert.deepEqual(restored.coverage[field][0].sourceWorkerId, owner);
-      assert.deepEqual(discoveryReductionInput(restored, "actual-worker").unresolvedCandidates,
-        [{ ...saved.coverage.deferred[0], sourceWorkerId: "actual-worker" }]);
+      assert.deepEqual(
+        discoveryReductionInput(restored, "actual-worker").unresolvedCandidates,
+        [{ ...saved.coverage.deferred[0], sourceWorkerId: "actual-worker" }],
+      );
       assert.equal(await readFile(resultPath, "utf8"), contents);
     });
   }
