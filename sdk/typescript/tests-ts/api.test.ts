@@ -2625,6 +2625,50 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("an active execution lock preserves completed output before archiving", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const output = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(output, { mode: 0o700 });
+    await writeFile(join(output, "previous.txt"), "previous scan\n");
+    const acquire = mock(async () => {
+      throw new Error("SYNTHETIC_EXECUTION_STILL_HELD");
+    });
+    const register = mock(async () => {
+      throw new Error("registration should not start");
+    });
+    const client = new TestClient(
+      {},
+      {
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        acquireScanExecution: acquire,
+        runWorkbench: async (_options: unknown, args: readonly string[]) =>
+          args[0] === "list-scans" ? { scans: [] } : register(),
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { outputDir: output, archiveExisting: true }),
+      ).rejects.toThrow("SYNTHETIC_EXECUTION_STILL_HELD");
+      expect(await readFile(join(output, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      expect(
+        (await readdir(root)).filter((name) =>
+          name.startsWith("scan.previous-"),
+        ),
+      ).toEqual([]);
+      expect(register).not.toHaveBeenCalled();
+      expect(acquire).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.close();
+    }
+  });
+
   test.each([false, true])(
     "checks child state before archiving output (running child: %p)",
     async (runningChild) => {

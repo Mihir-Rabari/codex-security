@@ -1662,6 +1662,9 @@ export class CodexSecurity {
           (args) => workbench(workbenchOptions, args),
           requestedOutput,
         );
+        releaseExecution ??= await (
+          this.#dependencies.acquireScanExecution ?? acquireScanExecution
+        )(stateDirectory, requestedOutput, await bundledPluginRoot());
       }
       const scanOutputRoot =
         requestedOutput === null &&

@@ -43,9 +43,10 @@ def select_checkpoint(directory: Path, checkpoint: Path) -> None:
     committed.write_text(json.dumps(document))
 
 
+@pytest.mark.parametrize("field", ["id", "candidateId"])
 @pytest.mark.parametrize("invalid_id", [["review"], {"task": "review"}], ids=["list", "object"])
 def test_stopped_scan_recovers_checkpoint_with_non_string_coverage_id(
-    tmp_path: Path, invalid_id: object
+    tmp_path: Path, invalid_id: object, field: str
 ) -> None:
     from workbench_test_support import saved_draft, write_checkpoint
 
@@ -58,7 +59,7 @@ def test_stopped_scan_recovers_checkpoint_with_non_string_coverage_id(
     write_completed_contract(contract_dir, scan["scanId"], target, relative_path="app.py")
     findings = json.loads((contract_dir / "findings.json").read_text())["findings"]
     valid_work = {"id": "valid-review", "reason": "Other review remains."}
-    malformed_work = {"id": invalid_id, "reason": "Review remains."}
+    malformed_work = {"id": "malformed-review", "reason": "Review remains.", field: invalid_id}
     checkpoint = write_checkpoint(
         scan_dir / "checkpoints",
         saved_draft(scan["scanId"], findings=findings, deferred=[valid_work, malformed_work]),
@@ -72,12 +73,16 @@ def test_stopped_scan_recovers_checkpoint_with_non_string_coverage_id(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 1
     assert stopped["resultsRecoveryNeeded"] is False
-    assert any(
-        "Skipped malformed deferred coverage item" in warning for warning in stopped["warnings"]
-    )
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert valid_work in coverage["deferred"]
-    assert malformed_work not in coverage["deferred"]
+    if field == "id":
+        assert any(
+            "Skipped malformed deferred coverage item" in warning for warning in stopped["warnings"]
+        )
+        assert malformed_work not in coverage["deferred"]
+    else:
+        # A string task ID still identifies generic work without a usable candidate ID.
+        assert malformed_work in coverage["deferred"]
     assert checkpoint.read_bytes() == checkpoint_bytes
     assert (scan_dir / "report.md").is_file()
 

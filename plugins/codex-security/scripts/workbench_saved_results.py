@@ -1381,7 +1381,8 @@ def merge_saved_results(
         )
         if (
             isinstance(item, dict)
-            and item.get("candidateId") in resolved
+            and isinstance(item.get("candidateId"), str)
+            and item["candidateId"] in resolved
             and (
                 field == "deferred"
                 or item.get("disposition") == "needs_follow_up"

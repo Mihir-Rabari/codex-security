@@ -1518,3 +1518,49 @@ test("terminal Deep publication retains an omitted model and forwards projection
   );
   assert.deepEqual(result.warnings, ["Synthetic optional projection warning."]);
 });
+
+for (const scenario of ["retry", "explicit", "different owner", "ambiguous"])
+  test(`implicit finding identities preserve independent findings (${scenario})`, async (t) => {
+    const f = await fixture(t);
+    const implicit = (sourceScanId = "owner-a") =>
+      finding("candidate-a", {
+        identity: undefined,
+        provenance: {
+          source: "local_plugin",
+          candidateId: "candidate-a",
+          sourceScanId,
+        },
+      });
+    await f.save(
+      draft({
+        complete: false,
+        findings:
+          scenario === "ambiguous" ? [implicit(), implicit()] : [implicit()],
+      }),
+    );
+    const firstAnchor = f.documents.findings.findings[0].identity.anchor;
+    await f.save(
+      draft({
+        findings: [
+          scenario === "explicit"
+            ? finding("explicit-second", {
+                provenance: {
+                  source: "local_plugin",
+                  candidateId: "candidate-a",
+                  sourceScanId: "owner-a",
+                },
+              })
+            : implicit(scenario === "different owner" ? "owner-b" : "owner-a"),
+        ],
+      }),
+    );
+    assert.equal(
+      f.documents.findings.findings.length,
+      scenario === "retry" ? 1 : scenario === "ambiguous" ? 3 : 2,
+    );
+    if (scenario === "retry")
+      assert.equal(
+        f.documents.findings.findings[0].identity.anchor,
+        firstAnchor,
+      );
+  });
