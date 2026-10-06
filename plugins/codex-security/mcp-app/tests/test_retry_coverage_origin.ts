@@ -13,6 +13,11 @@ const { readDeepReductionSources } = await importSource(
 const { recordCodexSecurityWorkerScanDraft } = await importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
+const { validateDiscoveryArtifacts } = await importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
+);
 const { archiveDirectory } = await importSource(
   fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
 );
@@ -56,6 +61,7 @@ for (const malformed of [
   "schema",
   "head-json",
   "head-checkpoint",
+  "head-missing",
 ]) {
   test(`accepted current coverage survives archived ${malformed}`, async () => {
     const f = await fixture();
@@ -71,8 +77,13 @@ for (const malformed of [
                 ? {}
                 : workerDraft([]),
             );
-      await writeFile(path.join(archive, "checkpoints", name), contents);
-      if (malformed === "head-json" || malformed === "head-checkpoint")
+      if (malformed !== "head-missing")
+        await writeFile(path.join(archive, "checkpoints", name), contents);
+      if (
+        malformed === "head-json" ||
+        malformed === "head-checkpoint" ||
+        malformed === "head-missing"
+      )
         await writeFile(
           path.join(archive, "checkpoint-head.json"),
           malformed === "head-json"
@@ -82,6 +93,11 @@ for (const malformed of [
       await writeFile(
         f.resultPath,
         JSON.stringify(workerDraft([], { complete: true })),
+      );
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
       );
       const before = await readFile(f.resultPath);
       const sources = await readDeepReductionSources(f.context);

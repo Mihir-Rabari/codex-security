@@ -960,6 +960,12 @@ def test_reopened_pending_rows_use_the_existing_host_projection(
     assert result.read_bytes() == original
 
 
+@pytest.mark.skipif(
+    not (
+        Path(__file__).resolve().parents[1] / "mcp-app/node_modules/esbuild/package.json"
+    ).is_file(),
+    reason="Requires installed MCP JavaScript integration dependencies.",
+)
 @pytest.mark.parametrize("interrupted_reducer", [False, True], ids=["accepted", "interrupted"])
 @pytest.mark.parametrize("retry_publication", [False, True], ids=["direct", "failed-retry"])
 def test_recovery_excludes_unaccepted_reducer_review_summaries(
@@ -1071,3 +1077,177 @@ def test_recovery_excludes_unaccepted_reducer_review_summaries(
     assert imported_review["workerId"] not in (scan.scan_dir / "report.md").read_text()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
+
+
+@pytest.mark.parametrize("complete_markers", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_tied_parent_observations_retain_both_worker_review_markers(
+    workbench_api, workbench_db, publication_scan, monkeypatch, complete_markers, retry
+):
+    scan = publication_scan()
+    results = [add_worker(workbench_db, scan), add_worker(workbench_db, scan)]
+    workers = [result.parent.name for result in results]
+    projections = []
+    for index, (result, owner) in enumerate(zip(results, workers), 1):
+        surface = {
+            "id": "source-surface",
+            "label": f"Independent surface {index}",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+        task = {
+            "id": "source-task",
+            "reason": f"Review {surface['label']}.",
+            "surfaceIds": [surface["id"]],
+        }
+        result.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "coverage": {
+                        **scan.coverage,
+                        "completeness": "partial",
+                        "surfaces": [surface],
+                        "deferred": [task],
+                    },
+                }
+            )
+        )
+        prefix = f"{owner}-attempt-1"
+        projected_surface = {
+            **surface,
+            "id": f"{prefix}-surface-1",
+            "provenance": {"workerId": owner, "attempt": 1, "sourceId": surface["id"]},
+        }
+        projected_task = {
+            **task,
+            "id": f"{prefix}-deferred-1",
+            "surfaceIds": [projected_surface["id"]],
+            "provenance": {"workerId": owner, "attempt": 1, "sourceId": task["id"]},
+        }
+        projections.append(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "surfaces": [projected_surface],
+                "deferred": [projected_task],
+                "reviews": [
+                    {"workerId": worker, "attempt": 1, "completeness": "partial"}
+                    for worker in (workers if complete_markers else [owner])
+                ],
+            }
+        )
+    publish_review_projection(workbench_api, workbench_db, scan, projections[0])
+    saved = workbench_api["saved_results"]
+    original_write = saved.write_scan_local_bytes
+
+    def fail_coverage(root, relative, contents):
+        if relative == "coverage.json":
+            raise OSError("Synthetic tied parent publication failure.")
+        original_write(root, relative, contents)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(saved, "write_scan_local_bytes", fail_coverage)
+        with pytest.raises(OSError, match="Synthetic tied parent publication failure"):
+            publish_review_projection(workbench_api, workbench_db, scan, projections[1])
+    tied = 2_000_000_000
+    for path in [
+        scan.scan_dir / name
+        for name in ["coverage.json", "findings.json", "scan-manifest.json", "checkpoint-head.json"]
+    ]:
+        os.utime(path, ns=(tied, tied))
+    for path in (scan.scan_dir / "checkpoints").glob("*.json"):
+        os.utime(path, ns=(tied, tied))
+    originals = {path: path.read_bytes() for path in results}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert len(coverage["surfaces"]) == 2
+    tasks = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    assert len(tasks) == 2
+    assert {row["provenance"]["workerId"] for row in coverage["surfaces"]} == set(workers)
+    assert {row["workerId"] for row in coverage["reviews"]} == set(workers)
+    surfaces = {row["id"]: row["label"] for row in coverage["surfaces"]}
+    for task in tasks:
+        assert surfaces[task["surfaceIds"][0]] in task["reason"]
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("inserted", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_new_selected_worker_surface_links_keep_retained_surface_identity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, inserted, retry
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker = result.parent.name
+    first = {
+        "id": "first",
+        "label": "First retained surface",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    second = {
+        "id": "second",
+        "label": "Second newly selected surface",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [first],
+            "deferred": [],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    projected = {
+        **first,
+        "id": f"{worker}-attempt-1-surface-1",
+        "provenance": {"workerId": worker, "attempt": 1, "sourceId": "first"},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [projected],
+            "deferred": [],
+            "reviews": [{"workerId": worker, "attempt": 1, "completeness": "partial"}],
+        },
+    )
+    task = {
+        "id": "follow-up",
+        "reason": "Review second newly selected surface."
+        if inserted
+        else "Review first retained surface.",
+        "surfaceIds": ["second" if inserted else "first"],
+    }
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            **draft,
+            "coverage": {
+                **draft["coverage"],
+                "surfaces": [second, first] if inserted else [first],
+                "deferred": [task],
+            },
+        },
+    )
+    head = result.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    originals = {path: path.read_bytes() for path in [result, checkpoint, head]}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    surfaces = {row["label"]: row for row in coverage["surfaces"]}
+    assert surfaces[first["label"]]["id"] == projected["id"]
+    expected = second if inserted else first
+    pending = next(row for row in coverage["deferred"] if row.get("reason") == task["reason"])
+    assert pending["surfaceIds"] == [surfaces[expected["label"]]["id"]]
+    assert len(surfaces) == (2 if inserted else 1)
+    assert all(path.read_bytes() == value for path, value in originals.items())

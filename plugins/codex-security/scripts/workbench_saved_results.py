@@ -688,7 +688,7 @@ def _merge_tied_parent_observations(
         if finding not in merged["findings"]:
             merged["findings"].append(copy.deepcopy(finding))
     coverage = merged["coverage"]
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
         rows = previous["coverage"].get(field, [])
         output = coverage.setdefault(field, [])
         if isinstance(rows, list) and isinstance(output, list):
@@ -1269,25 +1269,25 @@ def merge_saved_results(
                     return attempt
         return worker["attempt"]
 
+    def source_record(record: dict[str, Any]) -> dict[str, Any]:
+        result = dict(record)
+        if isinstance(provenance := result.get("provenance"), dict):
+            descriptive = {
+                key: value
+                for key, value in provenance.items()
+                if key not in {"workerId", "attempt", "sourceId", "candidateId"}
+            }
+            if descriptive:
+                result["provenance"] = descriptive
+            else:
+                result.pop("provenance", None)
+        return result
+
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
     ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
-
-        def source_record(record: dict[str, Any]) -> dict[str, Any]:
-            result = dict(record)
-            if isinstance(provenance := result.get("provenance"), dict):
-                descriptive = {
-                    key: value
-                    for key, value in provenance.items()
-                    if key not in {"workerId", "attempt", "sourceId", "candidateId"}
-                }
-                if descriptive:
-                    result["provenance"] = descriptive
-                else:
-                    result.pop("provenance", None)
-            return result
 
         source = source_record(item)
         if field == "surfaces":
@@ -1341,6 +1341,18 @@ def merge_saved_results(
                     return record
         return None
 
+    reserved_projection_ids = {
+        field: {
+            row["id"]
+            for projection in projected_coverages
+            if isinstance(rows := projection.get(field), list)
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        for field in ("surfaces", "deferred")
+    }
+    missing_projections: dict[tuple[str, str, int, bytes], dict[str, Any]] = {}
+
     def project_missing_record(
         field: str,
         item: dict[str, Any],
@@ -1363,10 +1375,13 @@ def merge_saved_results(
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key in item:
                 result["provenance"][name] = item[key]
-        if field == "surfaces":
-            result["id"] = f"{prefix}-surface-{index}"
-        elif field == "deferred":
-            result["id"] = f"{prefix}-deferred-{index}"
+        if field in reserved_projection_ids:
+            kind = "surface" if field == "surfaces" else "deferred"
+            while f"{prefix}-{kind}-{index}" in reserved_projection_ids[field]:
+                index += 1
+            result["id"] = f"{prefix}-{kind}-{index}"
+            reserved_projection_ids[field].add(result["id"])
+        if field == "deferred":
             if "candidateId" in item:
                 result["candidateId"] = f"{prefix}-candidate-{index}"
             if isinstance(item.get("surfaceIds"), list):
@@ -1375,11 +1390,11 @@ def merge_saved_results(
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
                         continue
-                    retained = retained_coverage_record("surfaces", surface, worker, relative)
+                    projected = project_record("surfaces", surface, offset, relative)
                     surface_ids.setdefault(
                         surface["id"],
-                        retained["id"]
-                        if retained is not None and isinstance(retained.get("id"), str)
+                        projected["id"]
+                        if isinstance(projected.get("id"), str)
                         else f"{worker['id']}-attempt-{coverage_origin('surfaces', surface, worker, relative)}-surface-{offset}",
                     )
                 result["surfaceIds"] = [
@@ -1412,16 +1427,30 @@ def merge_saved_results(
             and worker["merge_state"] == "merged"
             and (worker["id"], worker["attempt"]) in reviewed_attempts
         )
+        projection_key = None
         if reviewed and field != "reviews":
             retained = retained_coverage_record(field, item, worker, relative)
             if retained is not None:
                 return retained
+            source = source_record(item)
+            if field == "surfaces":
+                source["receiptRefs"] = coverage_receipts(item, worker, relative)
+            projection_key = (
+                field,
+                worker["id"],
+                coverage_origin(field, item, worker, relative),
+                _encoded(source),
+            )
+            if projection_key in missing_projections:
+                return missing_projections[projection_key]
             item = project_missing_record(
                 field, item, index, worker, drafts_by_path[relative]["coverage"], relative
             )
         if field == "surfaces" and worker is not None:
             item = copy.deepcopy(item)
             item["receiptRefs"] = coverage_receipts(item, worker, relative)
+        if projection_key is not None:
+            missing_projections[projection_key] = item
         return item
 
     def project_surface(relative: str, item: dict[str, Any]) -> dict[str, Any]:

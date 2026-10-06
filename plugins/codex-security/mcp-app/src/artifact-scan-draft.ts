@@ -1380,17 +1380,19 @@ export async function readArchivedWorkerCheckpoints(
     const head = await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
-      const contents = await readArtifactText(
+      const saved = await readOptionalArtifactTextWithMetadata(
         attemptContext,
         ["checkpoints", head.checkpoint],
         "archived scan checkpoint head",
       );
-      try {
-        checkpointHead = parsePersistedScanDraft(
-          parseJsonObject(contents, "archived scan checkpoint head"),
-        );
-      } catch {
-        // Failed attempts can retain malformed checkpoints beside valid current output.
+      if (saved !== undefined) {
+        try {
+          checkpointHead = parsePersistedScanDraft(
+            parseJsonObject(saved.contents, "archived scan checkpoint head"),
+          );
+        } catch {
+          // Failed attempts can retain malformed checkpoints beside valid current output.
+        }
       }
       if (checkpointHead !== undefined)
         requireMatchingScan(context, checkpointHead);
@@ -1477,18 +1479,14 @@ async function lstatIfExists(
 async function readOptionalArtifactTextWithMetadata(
   context: ArtifactContext,
   components: readonly string[],
+  label = "previous scan draft",
 ): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactTextWithMetadata(
-      context,
-      components,
-      "previous scan draft",
-    );
+    return await readArtifactTextWithMetadata(context, components, label);
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message ===
-        "previous scan draft: the requested artifact is unavailable."
+      error.message === `${label}: the requested artifact is unavailable.`
     ) {
       return undefined;
     }
