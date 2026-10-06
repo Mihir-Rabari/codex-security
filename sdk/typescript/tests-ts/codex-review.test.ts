@@ -502,6 +502,7 @@ test.each([
   "Request refusal due to the safety policy.",
   "This request was refused because of the safety policy.",
   "The content policy requires refusal of this request.",
+  "Under the safety policy, this request is refused.",
   "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",

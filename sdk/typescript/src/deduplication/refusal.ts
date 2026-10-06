@@ -15,6 +15,7 @@ export function isReviewRefusal(
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
     /\b(?:refusal|refused|blocked)\s+(?:under|by|due to|because of|for violating)\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\s+requires\s+(?:a\s+)?refusal\b/iu,
+    /\bunder\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy[, :]\s*(?:this|the|your) request (?:is|was|has been) (?:refused|blocked)\b/iu,
     /^(?:I(?:['’]m| am) sorry[,.:]?\s*(?:but\s+)?|Sorry[,.:]?\s*)?I(?:\s+(?:cannot|can['’]t|won['’]t|am (?:unable|not able) to)|['’]m (?:unable|not able) to)\s+(?:help|assist|comply)\b/iu,
   ].some((pattern) => pattern.test(message.trim()));
 }

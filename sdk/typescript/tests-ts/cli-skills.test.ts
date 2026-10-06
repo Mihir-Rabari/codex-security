@@ -1284,6 +1284,14 @@ process.stdout.write(JSON.stringify({
         "403 model access denied /private/repository",
         "selected model is unavailable",
       ],
+      [
+        "You do not have permission to use this model",
+        "selected model is unavailable",
+      ],
+      [
+        "You do not have permissions to use the model",
+        "selected model is unavailable",
+      ],
       ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
       [
         "tokens per minute limit exceeded sk-proj-SYNTHETIC_SECRET",
