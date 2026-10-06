@@ -3719,6 +3719,72 @@ describe("patch change tracking", () => {
     },
   );
 
+  test.each(["gitfile", "configured-worktree"])(
+    "does not snapshot another worktree through nested %s metadata",
+    async (kind) => {
+      const parent = await fixtures.create("synthetic-nested-binding-");
+      const root = join(parent, "outer");
+      const nested = join(root, "nested");
+      const external = join(parent, "external");
+      for (const checkout of [root, nested, external]) {
+        await mkdir(checkout, { recursive: true });
+        const git = repositoryGit(checkout);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(checkout, "app.ts"), "original\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+      }
+      const git = repositoryGit(root);
+      const outside = repositoryGit(external);
+      const metadata = repositoryGit(kind === "gitfile" ? external : nested);
+      if (kind === "gitfile") {
+        await rm(join(nested, ".git"), { recursive: true });
+        await writeFile(
+          join(nested, ".git"),
+          `gitdir: ${join(external, ".git")}\n`,
+        );
+      }
+      metadata("config", "core.worktree", external);
+      git("add", "nested");
+      git("commit", "-m", "Synthetic nested dependency");
+      await writeFile(
+        join(external, "app.ts"),
+        "outside uncommitted content\n",
+      );
+      const blob = outside("hash-object", "app.ts");
+      expect(() => metadata("cat-file", "-e", blob)).toThrow();
+      const rootIndex = await readFile(join(root, ".git", "index"));
+      const externalIndex = await readFile(join(external, ".git", "index"));
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            modelCalls += 1;
+            await writeFile(join(root, "app.ts"), "fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("worktree root does not match");
+      expect(modelCalls).toBe(0);
+      expect(() => metadata("cat-file", "-e", blob)).toThrow();
+      expect(await readFile(join(root, ".git", "index"))).toEqual(rootIndex);
+      expect(await readFile(join(external, ".git", "index"))).toEqual(
+        externalIndex,
+      );
+      expect(await readFile(join(external, "app.ts"), "utf8")).toBe(
+        "outside uncommitted content\n",
+      );
+    },
+  );
+
   test.each(
     [
       "root",

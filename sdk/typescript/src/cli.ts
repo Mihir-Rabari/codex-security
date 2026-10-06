@@ -239,6 +239,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
@@ -7533,6 +7534,10 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
   commandRoot = repository,
 ): Promise<string> {
+  if (commandRoot !== repository)
+    await enclosingGitWorktreeRoot(repository, undefined, {
+      requireIfPresent: true,
+    });
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const environment = {
     GIT_INDEX_FILE: join(root, "index"),
