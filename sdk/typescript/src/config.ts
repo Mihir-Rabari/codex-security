@@ -276,10 +276,21 @@ export async function readCodexFileProfile(
     for (const key of [
       "model_instructions_file",
       "experimental_compact_prompt_file",
+      "model_catalog_json",
     ]) {
       const path = nativeProfile[key];
       if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
         nativeProfile[key] = resolve(profileHome, path);
+      }
+    }
+    const agents = nativeProfile["agents"];
+    if (isObject(agents)) {
+      for (const agent of Object.values(agents)) {
+        if (!isObject(agent)) continue;
+        const path = agent["config_file"];
+        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+          agent["config_file"] = resolve(profileHome, path);
+        }
       }
     }
     normalizeLegacyWindowsSandboxOverride(nativeProfile);

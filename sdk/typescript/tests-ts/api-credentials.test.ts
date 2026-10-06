@@ -28,11 +28,24 @@ const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["direct", "profile", "profile-partial", "native-profile"])(
+  test.each([
+    "direct",
+    "profile",
+    "profile-partial",
+    "native-profile",
+    "native-openrouter",
+    "native-fireworks",
+  ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
       const profile = selection !== "direct";
-      const nativeProfile = selection === "native-profile";
+      const nativeProfile = selection.startsWith("native-");
+      const providerName =
+        selection === "native-openrouter"
+          ? "openrouter"
+          : selection === "native-fireworks"
+            ? "fireworks"
+            : "synthetic.provider";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -68,9 +81,16 @@ describe("CodexSecurity orchestration", () => {
             model_reasoning_effort: "high",
             model_reasoning_summary: "concise",
             experimental_compact_prompt_file: "compact.md",
-            model_provider: "synthetic.provider",
+            model_catalog_json: "models.json",
+            agents: {
+              reviewer: {
+                config_file: "agents/reviewer.toml",
+                description: "Synthetic reviewer",
+              },
+            },
+            model_provider: providerName,
             features: { shell_tool: false, unified_exec: false },
-            model_providers: { "synthetic.provider": providerConfig },
+            model_providers: { [providerName]: providerConfig },
           }),
         );
       }
@@ -82,12 +102,12 @@ describe("CodexSecurity orchestration", () => {
                 profile: "review",
                 profiles: {
                   review: {
-                    model_provider: "synthetic.provider",
+                    model_provider: providerName,
                     features: { shell_tool: false, unified_exec: false },
                     ...(selection === "profile-partial"
                       ? {
                           model_providers: {
-                            "synthetic.provider": {
+                            [providerName]: {
                               auth: { refresh_interval_ms: 2000 },
                             },
                           },
@@ -96,10 +116,10 @@ describe("CodexSecurity orchestration", () => {
                   },
                 },
               }
-            : { model_provider: "synthetic.provider" }),
+            : { model_provider: providerName }),
         ...(nativeProfile
           ? {}
-          : { model_providers: { "synthetic.provider": providerConfig } }),
+          : { model_providers: { [providerName]: providerConfig } }),
       };
       let captured: CodexOptions | undefined;
       let savedRecipe: JsonObject | undefined;
@@ -156,7 +176,7 @@ describe("CodexSecurity orchestration", () => {
           expect(preflight).toMatchObject({
             model: "native-model",
             reasoningEffort: "high",
-            modelProvider: "synthetic.provider",
+            modelProvider: providerName,
           });
         }
         await expect(client.run(repository)).rejects.toThrow(
@@ -171,7 +191,7 @@ describe("CodexSecurity orchestration", () => {
             await mergedCodexConfig({ codexOverrides: savedConfig }, home),
           );
           expect(replay["model_providers"]).toEqual({
-            "synthetic.provider": providerConfig,
+            [providerName]: providerConfig,
           });
         }
         if (profile) {
@@ -205,17 +225,24 @@ describe("CodexSecurity orchestration", () => {
           },
         };
         expect(parseToml(captured!.configOverrides![0]!)).toEqual({
-          model_providers: { "synthetic.provider": provider },
+          model_providers: { [providerName]: provider },
         });
         expect(captured?.config).not.toHaveProperty("profile");
         expect(captured?.config).not.toHaveProperty("profiles");
-        expect(captured?.config?.["model_provider"]).toBe("synthetic.provider");
+        expect(captured?.config?.["model_provider"]).toBe(providerName);
         if (nativeProfile) {
           expect(captured?.config).toMatchObject({
             model: "native-model",
             model_reasoning_effort: "high",
             model_reasoning_summary: "concise",
             experimental_compact_prompt_file: join(home, "compact.md"),
+            model_catalog_json: join(home, "models.json"),
+            agents: {
+              reviewer: {
+                config_file: join(home, "agents/reviewer.toml"),
+                description: "Synthetic reviewer",
+              },
+            },
           });
         }
         if (!profile || nativeProfile) {
@@ -225,7 +252,7 @@ describe("CodexSecurity orchestration", () => {
           expect(saved).not.toHaveProperty("profile");
           expect(saved).not.toHaveProperty("profiles");
           expect(saved["model_providers"]).toEqual({
-            "synthetic.provider": provider,
+            [providerName]: provider,
           });
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);

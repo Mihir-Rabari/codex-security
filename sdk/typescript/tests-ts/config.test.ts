@@ -196,9 +196,12 @@ describe("Codex configuration", () => {
   });
 
   test.each(
-    ["model_instructions_file", "experimental_compact_prompt_file"].flatMap(
-      (key) =>
-        [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+    [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+      "model_catalog_json",
+    ].flatMap((key) =>
+      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
     ),
   )(
     "resolves file-profile paths before explicit overrides: %j",
@@ -220,6 +223,39 @@ describe("Codex configuration", () => {
       expect(overrides).toEqual({
         profile: "review",
         ...(explicit === undefined ? {} : { [key]: explicit }),
+      });
+    },
+  );
+
+  test.each([undefined, "explicit.toml"])(
+    "resolves file-profile agent paths before explicit overrides: %j",
+    async (explicit) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        '[agents.reviewer]\ndescription = "Synthetic reviewer"\nconfig_file = "agents/reviewer.toml"\n',
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["agents"]).toMatchObject({
+        reviewer: {
+          description: "Synthetic reviewer",
+          config_file: explicit ?? join(home, "agents/reviewer.toml"),
+        },
+      });
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { agents: { reviewer: { config_file: explicit } } }),
       });
     },
   );

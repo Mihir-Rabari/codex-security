@@ -1571,20 +1571,27 @@ export class CodexSecurity {
       // Saved launches reload the native file; preflight uses resolved values.
       const profileName = effectiveConfig["profile"];
       const inlineProfiles = effectiveConfig["profiles"];
+      const recipeConfig: JsonObject = {
+        ...preflightConfig,
+        approval_policy: approvalPolicy,
+      };
+      if (
+        typeof profileName === "string" &&
+        !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
+      ) {
+        recipeConfig["profile"] = profileName;
+        // Reload the file's provider instead of overlaying generated defaults.
+        if (isExternalModelProvider(scanModelProvider(preflightConfig))) {
+          delete recipeConfig["model_providers"];
+        }
+      }
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: {
-          ...preflightConfig,
-          ...(typeof profileName === "string" &&
-          !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
-            ? { profile: profileName }
-            : {}),
-          approval_policy: approvalPolicy,
-        },
+        config: recipeConfig,
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
         maxCostUsd: options.maxCostUsd,
