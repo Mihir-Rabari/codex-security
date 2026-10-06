@@ -37,6 +37,7 @@ for (const ordering of [
   "lost cancellation response",
   "cancellation before admission",
   "cancellation before admission with active worker",
+  "failure before admission with active worker",
   "cancellation before failure",
   "lost cancellation before failure",
   "cancellation before failure during publication",
@@ -46,6 +47,8 @@ for (const ordering of [
     const canceledBeforeAdmission = ordering.startsWith(
       "cancellation before admission",
     );
+    const failedBeforeAdmission =
+      ordering === "failure before admission with active worker";
     const activeBeforeAdmission = ordering.endsWith("active worker");
     const canceledBeforeFailure = ordering.includes(
       "cancellation before failure",
@@ -229,12 +232,20 @@ for (const ordering of [
       });
       terminal = coordinator.settled();
       void terminal!.catch(() => {});
-      if (canceledBeforeAdmission) {
+      if (canceledBeforeAdmission || failedBeforeAdmission) {
         if (activeBeforeAdmission) await executor.discoveryStarted.promise;
         else await finishCommitted.promise;
-        await runWorkbench(["cancel-scan", "--scan-id", run.scanId]);
+        await runWorkbench([
+          failedBeforeAdmission ? "fail-scan" : "cancel-scan",
+          "--scan-id",
+          run.scanId,
+          ...(failedBeforeAdmission
+            ? ["--message", "synthetic externally persisted failure"]
+            : []),
+        ]);
         cancelRelease.resolve();
-        cancellation = cancel({ scanId: run.scanId });
+        const cancellationResult = cancel({ scanId: run.scanId });
+        cancellation = cancellationResult;
         void cancellation!.catch(() => {});
         await Promise.race([admissionRead.promise, cancellation]);
         if (activeBeforeAdmission) {
@@ -247,9 +258,23 @@ for (const ordering of [
         }
         finishResponse.resolve();
         const result = await terminal!;
-        assert.equal(result.status, "canceled");
+        assert.equal(
+          result.status,
+          failedBeforeAdmission ? "failed" : "canceled",
+        );
         if (!activeBeforeAdmission) assert.equal(result.error, undefined);
-        await cancellation;
+        const canceled = await cancellationResult;
+        if (failedBeforeAdmission) {
+          assert.equal(result.error, "synthetic externally persisted failure");
+          assert.equal(
+            canceled.structuredContent.workspace.results.failureMessage,
+            "synthetic externally persisted failure",
+          );
+          assert.equal(
+            canceled.structuredContent.workspace.results.progress.status,
+            "failed",
+          );
+        }
         return;
       }
       if (canceledBeforeFailure) {

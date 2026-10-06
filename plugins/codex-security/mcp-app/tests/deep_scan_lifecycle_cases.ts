@@ -34,6 +34,7 @@ export async function testDeepScanLifecycle({
   const errors = [];
   for (const test of [
     lateCancellationWaitsForPersistence,
+    failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
     delayedReducerDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -52,6 +53,70 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
+
+  async function failedParentCancellationStopsActiveWorker() {
+    for (const terminalReadFails of [false, true]) {
+      const fixture = await fixtureRun(config);
+      fixture.run.coordinatorGeneration = 1;
+      const store = new FakeStore(fixture.run);
+      const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+      const registry = new DeepScanCoordinatorRegistry();
+      const savedError = "synthetic externally persisted failure";
+      let publications = 0;
+      let cancellationWrites = 0;
+      const coordinator = registry.start({
+        ...fixture,
+        store,
+        executor,
+        threadId: "fixture-owner",
+        heartbeatIntervalMs: 60_000,
+        onStopped: async (stopped: DeepScanRunState) => {
+          publications += 1;
+          assert.equal(stopped.status, "failed");
+          assert.equal(stopped.error, savedError);
+        },
+      });
+      const terminal = coordinator.settled();
+      void terminal.catch(() => {});
+      let cancellation: Promise<boolean> | undefined;
+      try {
+        await executor.discoveryStarted.promise;
+        assert.equal(executor.runningDiscovery, 1);
+        store.run.status = "failed";
+        store.run.error = savedError;
+        store.failNextTerminalGet = terminalReadFails;
+        cancellation = registry.cancelAndWait(
+          fixture.run.scanId,
+          "user_canceled_scan",
+          async () => {
+            cancellationWrites += 1;
+            throw new Error(
+              "saved failure must not be replaced by cancellation",
+            );
+          },
+          async () => ({ status: "failed", failureMessage: savedError }),
+        );
+        void cancellation!.catch(() => {});
+        await new Promise(setImmediate);
+        assert.equal(
+          executor.runningDiscovery,
+          0,
+          "saved parent failure stops the worker before the next heartbeat",
+        );
+        assert.equal(await cancellation, true);
+        const stopped = await terminal;
+        assert.equal(stopped.status, "failed");
+        assert.equal(stopped.error, savedError);
+        assert.equal(store.run.status, "failed");
+        assert.equal(store.run.error, savedError);
+        assert.equal(cancellationWrites, 0);
+        assert.equal(publications, terminalReadFails ? 0 : 1);
+      } finally {
+        registry.shutdown("fixture cleanup");
+        await Promise.allSettled([terminal, cancellation]);
+      }
+    }
+  }
 
   async function lateCancellationWaitsForPersistence() {
     const completedParentStatus: string = JSON.parse(
@@ -92,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       readParent?: () => Promise<{ workspace: typeof current.workspace }>;
       workspace: {
         setup: { submitted: boolean };
-        results: { progress: { status: string } };
+        results: { progress: { status: string }; failureMessage?: string };
       };
     };
     Object.assign(globalThis, {
@@ -256,6 +321,8 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           let admissionPaused = false;
           current.readParent = async () => {
             const workspace = structuredClone(current.workspace);
+            if (workspace.results.progress.status === "failed")
+              workspace.results.failureMessage = current.store.run.error;
             if (pendingFailureRead && !admissionPaused) {
               admissionPaused = true;
               admissionEntered.resolve();
@@ -865,7 +932,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
           store.run.status = "canceled";
           throw new Error("fixture cancellation response lost");
         },
-        async () => "running",
+        async () => ({ status: "running" }),
       ),
       /response lost/,
     );
@@ -902,7 +969,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
       async () => {
         cancellations += 1;
       },
-      async () => "running",
+      async () => ({ status: "running" }),
     );
     release.resolve();
     const result = await cancellation;
@@ -952,7 +1019,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
             persisted = true;
             store.run.status = "canceled";
           },
-          async () => "running",
+          async () => ({ status: "running" }),
         )
         .then((handled: boolean) => {
           resolved = true;

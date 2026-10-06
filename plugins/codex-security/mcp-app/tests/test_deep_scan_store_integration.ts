@@ -89,9 +89,15 @@ async function testReplacementFailureDuringCancellation() {
           await releaseCancellation.promise;
           await runWorkbench(["cancel-scan", "--scan-id", run.scanId]);
         },
-        async () =>
-          (await runWorkbench(["get-scan", "--scan-id", run.scanId])).workspace
-            .results.progress.status,
+        async () => {
+          const parent = (
+            await runWorkbench(["get-scan", "--scan-id", run.scanId])
+          ).workspace.results;
+          return {
+            status: parent.progress.status,
+            failureMessage: parent.failureMessage,
+          };
+        },
       ),
       /Only a running scan can be canceled/,
     );

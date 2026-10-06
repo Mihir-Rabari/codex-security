@@ -1248,9 +1248,16 @@ export function createCodexSecurityServer(): McpServer {
         ] as JsonObject;
         const scan = current["results"];
         const progress = isJsonObject(scan) ? scan["progress"] : undefined;
-        return isJsonObject(progress) && typeof progress["status"] === "string"
-          ? progress["status"]
-          : undefined;
+        return {
+          status:
+            isJsonObject(progress) && typeof progress["status"] === "string"
+              ? progress["status"]
+              : undefined,
+          failureMessage:
+            isJsonObject(scan) && typeof scan["failureMessage"] === "string"
+              ? scan["failureMessage"]
+              : undefined,
+        };
       },
     );
     if (workspace === undefined && canceledLocally) {

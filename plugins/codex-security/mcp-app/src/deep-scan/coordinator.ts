@@ -58,6 +58,11 @@ interface SchedulerResult {
   result?: DeepReductionInput;
 }
 
+export interface ParentScanState {
+  status: string | undefined;
+  failureMessage?: string;
+}
+
 export interface CoordinatorOptions {
   run: DeepScanRunState;
   store: DeepScanStore;
@@ -243,7 +248,7 @@ export class DeepScanCoordinator {
   async cancelAfterPersistence(
     reason: string,
     persistCancellation: () => Promise<void>,
-    readParentStatus: () => Promise<string | undefined>,
+    readParentState: () => Promise<ParentScanState>,
   ): Promise<DeepScanRunState> {
     const existing = this.cancellationPersistence;
     if (existing) {
@@ -273,7 +278,10 @@ export class DeepScanCoordinator {
     };
     this.cancellationPersistence = persistence;
     try {
-      const parentStatus = await readParentStatus();
+      const parent = await readParentState();
+      const parentStatus = parent.status;
+      if (parentStatus === "failed")
+        this.failExternallyPersisted(parent.failureMessage);
       if (parentStatus === "canceled") this.cancel(reason);
       if (
         parentStatus === "running" &&
@@ -293,7 +301,7 @@ export class DeepScanCoordinator {
             if (this.state.status === "succeeded") {
               try {
                 parentStopped = ["complete", "failed"].includes(
-                  (await readParentStatus()) ?? "",
+                  (await readParentState()).status ?? "",
                 );
               } catch {
                 // Preserve the cancellation diagnostic if reconciliation fails.
@@ -316,7 +324,7 @@ export class DeepScanCoordinator {
     return await this.settled();
   }
 
-  failExternallyPersisted(reason: string): void {
+  failExternallyPersisted(reason: string | undefined): void {
     if (this.externallyFailed || this.terminal) return;
     this.externallyFailed = true;
     this.failurePersisted = true;
