@@ -2494,21 +2494,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (gitlab && args[0] === "remote") {
-                expect([
-                  ["remote", "get-url", "--push", "--all", "origin"],
-                  ["remote", "get-url", "origin"],
-                ]).toContainEqual([...args]);
+              if (gitlab && args.join(" ") === "remote get-url origin")
                 return origin;
-              }
-              if (gitlab && args[0] === "ls-remote") {
-                expect(args[3]).toBe(origin);
-                return git(
-                  ...args.map((value) => (value === origin ? remote : value)),
-                );
-              }
               if (args[0] === "push") {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
@@ -2516,7 +2505,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   throw new Error("Synthetic push failure");
                 }
               }
-              return git(...args);
+              return runGitRepositoryCommand(command, args, cwd, options);
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (!gitlab && args[0] === "repo")
