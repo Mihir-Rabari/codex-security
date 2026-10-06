@@ -6893,7 +6893,9 @@ async function patchCommandContext(
   const environment: NodeJS.ProcessEnv = {
     GIT_DIR: isAbsolute(gitDirectory)
       ? gitDirectory
-      : `${directory.replaceAll(sep, "/")}/${gitDirectory}`,
+      : process.platform === "win32" && /^[a-z]:/iu.test(gitDirectory)
+        ? resolve(directory, gitDirectory)
+        : `${directory.replaceAll(sep, "/")}/${gitDirectory}`,
     ...(dependencies.environment["GIT_DIR"] !== undefined &&
     dependencies.environment["GIT_WORK_TREE"] === undefined
       ? {}

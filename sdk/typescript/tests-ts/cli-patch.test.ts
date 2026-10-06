@@ -4062,3 +4062,63 @@ const runGitRepositoryCommand: NonNullable<
   });
   return options?.trim === false ? result : result.trim();
 };
+
+test.skipIf(process.platform !== "win32")(
+  "assesses direct patches with drive-relative Git metadata",
+  async () => {
+    const repository = await temporaryDirectory("patch-drive-relative-");
+    try {
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic drive-relative baseline");
+      const drive = repository.slice(0, 2);
+      expect(drive).toMatch(/^[a-z]:$/iu);
+      const gitEnvironment = { GIT_DIR: `${drive}.git` };
+      expect(
+        gitText(["rev-parse", "--git-dir"], {
+          cwd: repository,
+          env: { ...process.env, ...gitEnvironment },
+        }).trim(),
+      ).toBe(gitEnvironment.GIT_DIR);
+      let calls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: repository,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              output?.stdout.write("Fixed and checked.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: ["app.ts"],
+      });
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+    }
+  },
+);
