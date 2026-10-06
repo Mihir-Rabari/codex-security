@@ -7179,6 +7179,14 @@ async function bindPatchCommandContext(
     throw new CodexSecurityError(
       "The patch repository is no longer available at its original path.",
     );
+  if (
+    currentDirectory !== undefined &&
+    currentDirectory !== context.directory &&
+    isOutsidePath(relative(context.root, currentDirectory))
+  )
+    throw new CodexSecurityError(
+      "Patch directory now resolves outside the selected repository. Local edits and patches were kept.",
+    );
   if (currentDirectory !== context.directory) directory = repository;
   return {
     directory,
