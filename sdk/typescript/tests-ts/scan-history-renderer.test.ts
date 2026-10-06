@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
@@ -640,10 +641,11 @@ describe("scan history renderer", () => {
   });
 });
 
-test.each([
+const validationEvidenceCases: JsonObject[] = [
   { evidence: "Synthetic validation proof" },
   { evidence: ["Synthetic validation proof"] },
-])(
+];
+test.each(validationEvidenceCases)(
   "renders accepted scalar and array validation evidence: %j",
   (validation) => {
     const text = renderScanHistory(
