@@ -6849,7 +6849,10 @@ async function patchPublicationDestination(
       "git",
       ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
       { trim: false },
-    )
+    ).catch((error: unknown) => {
+      if (isJsonObject(error) && error["code"] === 1) return "";
+      throw error;
+    })
   )
     .split("\0")
     .filter(Boolean);
@@ -6862,7 +6865,9 @@ async function patchPublicationDestination(
   const push = urls.filter((entry) =>
     entry.startsWith("remote.origin.pushurl\n"),
   );
-  const remotes: string[] = [];
+  const remotes: string[] = urls.length
+    ? []
+    : output.replace(/\n$/u, "").split("\n");
   // Appending an existing value lets Git delimit its expansion without splitting URL newlines.
   for (const entry of push.length ? push : urls) {
     const appended = (
@@ -7539,7 +7544,7 @@ async function createPatchPullRequest(
           "git",
           [
             "diff",
-            "--name-only",
+            "--raw",
             "--relative=",
             "--no-renames",
             "--diff-filter=D",
@@ -7557,10 +7562,17 @@ async function createPatchPullRequest(
       ...files,
       ...deleted
         .split("\0")
-        .filter(Boolean)
-        .filter((file) => {
+        .filter((file, index, entries) => {
+          if (index % 2 === 0) return false;
           try {
-            return !lstatSync(resolve(root, file), { throwIfNoEntry: false });
+            const metadata = lstatSync(resolve(root, file), {
+              throwIfNoEntry: false,
+            });
+            return (
+              !metadata ||
+              (metadata.isDirectory() &&
+                !entries[index - 1]!.startsWith(":160000 "))
+            );
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code === "ENOTDIR")
               return true;
@@ -8246,6 +8258,7 @@ async function runFindingPatches(
     `\nPatching ${selected.findings.length} confirmed finding${selected.findings.length === 1 ? "" : "s"}...\n`,
   );
   const patches: FindingPatch[] = [];
+  let gitBase: GitPatchState | undefined;
   for (const finding of selected.findings) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
@@ -8266,7 +8279,23 @@ async function runFindingPatches(
     let status: number;
     let changedFiles: string[];
     try {
-      const base = await snapshotPatchState(selected.repository, dependencies);
+      let base: GitPatchState | Map<string, string>;
+      if (gitBase) {
+        const bound = await bindPatchCommandContext(
+          selected.repository,
+          gitBase.root,
+          gitBase.context,
+          dependencies,
+        );
+        base = await snapshotGitPatchState(
+          gitBase.root,
+          bound.dependencies,
+          bound.directory,
+        );
+      } else {
+        base = await snapshotPatchState(selected.repository, dependencies);
+        if (!(base instanceof Map)) gitBase = base;
+      }
       status = await runSkill(
         "fix-finding",
         [],

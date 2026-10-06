@@ -5714,13 +5714,17 @@ describe("inherited patch publication context", () => {
     },
   );
 
-  test.each([
-    "staged",
-    "unstaged",
-    "assume-unchanged",
-    "clean",
-    "deleted-before",
-  ])("handles a renamed file with %s pre-patch state", async (dirty) => {
+  test.each(
+    [
+      "staged",
+      "unstaged",
+      "assume-unchanged",
+      "clean",
+      "deleted-before",
+    ].flatMap((dirty) =>
+      ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
+    ),
+  )("handles a renamed %s file at %s", async (dirty, file) => {
     const directory = await fixtures.create("patch-renamed-local-edits-");
     const git = repositoryGit(directory);
     git("init", "--initial-branch=main");
@@ -5757,14 +5761,15 @@ describe("inherited patch publication context", () => {
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
           await rm(join(directory, "old.ts"), { force: true });
-          await writeFile(join(directory, "new.ts"), `fixed\n${content}\n`);
+          await mkdir(dirname(join(directory, file)), { recursive: true });
+          await writeFile(join(directory, file), `fixed\n${content}\n`);
           output?.stdout.write(
             JSON.stringify({
               patches: [
                 {
                   occurrenceId: "occ_1",
                   status: "verified",
-                  files: ["new.ts"],
+                  files: [file],
                   verification: "Synthetic regression passed.",
                 },
               ],
@@ -5781,10 +5786,10 @@ describe("inherited patch publication context", () => {
       expect(git("write-tree")).toBe(index);
       expect(git("ls-remote", "origin")).toBe("");
     } else {
-      expect(git("show", "HEAD:new.ts")).toBe(`fixed\n${content}`);
+      expect(git("show", `HEAD:${file}`)).toBe(`fixed\n${content}`);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
     }
-    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+    expect(await readFile(join(directory, file), "utf8")).toBe(
       `fixed\n${content}\n`,
     );
   });
@@ -5986,10 +5991,23 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["free", "occupied", "race", "option", "uploadpack"] as const)(
+  test.each([
+    "free",
+    "occupied",
+    "race",
+    "option",
+    "uploadpack",
+    "legacy-free",
+    "legacy-occupied",
+    "legacy-settings",
+  ] as const)(
     "preserves all push destinations: second destination=%s",
     async (destination) => {
-      const occupied = destination === "occupied" || destination === "race";
+      const occupied =
+        destination === "occupied" ||
+        destination === "race" ||
+        destination === "legacy-occupied" ||
+        destination === "legacy-settings";
       const option = destination === "option";
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
@@ -6004,7 +6022,7 @@ describe("patch change tracking", () => {
           `refs/heads/${branch}`,
           original,
         );
-      if (destination === "occupied") occupy();
+      if (occupied && destination !== "race") occupy();
       git("remote", "set-url", "--add", "--push", "origin", remote);
       const marker = join(directory, "upload-pack-marker");
       const script = join(directory, "upload-pack.cjs");
@@ -6049,6 +6067,16 @@ process.exit(result.status ?? 1);
         git("ls-remote", "origin");
         await writeFile(uploadTrace, "");
       }
+      if (destination.startsWith("legacy-")) {
+        git("config", "--remove-section", "remote.origin");
+        await mkdir(join(directory, ".git", "remotes"));
+        await writeFile(
+          join(directory, ".git", "remotes", "origin"),
+          `URL: ${remote}\nURL: ${secondary}\nPull: refs/heads/main:refs/remotes/origin/main\n`,
+        );
+        if (destination === "legacy-settings")
+          git("config", "remote.origin.skipDefaultUpdate", "true");
+      }
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
@@ -6068,14 +6096,21 @@ process.exit(result.status ?? 1);
           currentDirectory: directory,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[0] === "repo"
-                ? "synthetic-origin-id"
-                : args[1] === "list"
-                  ? "[]"
-                  : "https://github.example.test/example/repository/pull/1",
+          onRepositoryCommand: async (command, args, cwd, options) => {
+            if (command === "git") {
+              const { stdout } = await promisify(execFile)("git", [...args], {
+                cwd: options?.directory ?? cwd,
+                env: { ...process.env, ...options?.environment },
+                maxBuffer: options?.maxBuffer,
+              });
+              return options?.trim === false ? stdout : stdout.trim();
+            }
+            return args[0] === "repo"
+              ? "synthetic-origin-id"
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1";
+          },
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
@@ -6084,10 +6119,12 @@ process.exit(result.status ?? 1);
           (await readFile(uploadTrace, "utf8")).trim().split("\n"),
         ).toEqual([`${remote}.logical`, `${secondary}.logical`]);
       expect(onCodex).toHaveBeenCalledTimes(
-        destination === "occupied" || option ? 0 : 1,
+        (occupied && destination !== "race") || option ? 0 : 1,
       );
       await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-      if (destination === "occupied" || option) {
+      if ((occupied && destination !== "race") || option) {
+        if (destination.startsWith("legacy-"))
+          expect(outcome.stderr).toContain("already exists");
         expect(git("rev-parse", "HEAD")).toBe(original);
         expect(git("ls-remote", remote, `refs/heads/${branch}`)).toBe("");
         expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
@@ -7448,6 +7485,7 @@ process.exit(result.status ?? 1);
   }
   test.each([
     "regular",
+    "gitlink",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),
   ])(
     "preserves a newly ignored %s while publishing the ignore rule",
@@ -7460,8 +7498,11 @@ process.exit(result.status ?? 1);
       await writeFile(join(root, ".gitignore"), "# baseline\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
+      const head = git("rev-parse", "HEAD");
       if (kind === "regular")
         await writeFile(join(root, "local.env"), "synthetic local file\n");
+      else if (kind === "gitlink")
+        git("clone", "--local", root, join(root, "local.env"));
       else await symlink("absent-synthetic-target", join(root, "local.env"));
       const remote = await fixtures.create("synthetic-ignore-remote-");
       git("init", "--bare", remote);
@@ -7492,7 +7533,14 @@ process.exit(result.status ?? 1);
         expect(await readFile(join(root, "local.env"), "utf8")).toBe(
           "synthetic local file\n",
         );
-      else
+      else if (kind === "gitlink") {
+        expect(
+          repositoryGit(join(root, "local.env"))("rev-parse", "HEAD"),
+        ).toBe(head);
+        expect(await readFile(join(root, "local.env/.gitignore"), "utf8")).toBe(
+          "# baseline\n",
+        );
+      } else
         expect(await readlink(join(root, "local.env"))).toBe(
           "absent-synthetic-target",
         );
@@ -7578,7 +7626,13 @@ describe("ordinary patch snapshot context", () => {
   afterEach(fixtures.cleanup);
   test.each(
     ["ordinary", "saved", "inline"].flatMap((route) =>
-      ["stable", "remove", "replace", "relative-filter"].flatMap((operation) =>
+      [
+        "stable",
+        "remove",
+        "replace",
+        "relative-filter",
+        ...(route === "ordinary" ? [] : ["gitfile"]),
+      ].flatMap((operation) =>
         (route === "inline"
           ? [undefined, "--create-pr"]
           : route === "saved"
@@ -7629,6 +7683,8 @@ describe("ordinary patch snapshot context", () => {
       foreignGit("init", "--initial-branch=main");
       foreignGit("config", "user.name", "Synthetic User");
       foreignGit("config", "user.email", "synthetic@example.test");
+      if (operation === "gitfile")
+        foreignGit("config", "core.worktree", foreign);
       await writeFile(join(foreign, "keep.ts"), "unrelated baseline\n");
       foreignGit("add", ".");
       foreignGit("commit", "-m", "Synthetic unrelated baseline");
@@ -7652,8 +7708,11 @@ describe("ordinary patch snapshot context", () => {
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
       };
-      const scan = resultWithFindings(["high"]);
-      scan.findings.findings[0]!.locations[0]!.path = "keep.ts";
+      const scan = resultWithFindings(
+        operation === "gitfile" ? ["high", "high"] : ["high"],
+      );
+      for (const finding of scan.findings.findings)
+        finding.locations[0]!.path = "keep.ts";
       const argv =
         route === "ordinary"
           ? ["patch", "Synthetic issue"]
@@ -7713,7 +7772,17 @@ describe("ordinary patch snapshot context", () => {
               operation !== "remove" &&
               operation !== "replace"
             )
-              await writeFile(join(directory, "keep.ts"), "fixed component\n");
+              await writeFile(
+                join(directory, "keep.ts"),
+                operation === "gitfile"
+                  ? `fixed component ${modelCalls}\n`
+                  : "fixed component\n",
+              );
+            if (operation === "gitfile" && modelCalls === 1)
+              await writeFile(
+                join(directory, ".git"),
+                `gitdir: ${join(foreign, ".git")}\n`,
+              );
             if (operation === "remove" || operation === "replace")
               await rm(directory, { recursive: true });
             if (operation === "replace")
@@ -7740,7 +7809,7 @@ describe("ordinary patch snapshot context", () => {
           },
         },
       );
-      expect(modelCalls).toBe(1);
+      expect(modelCalls).toBe(operation === "gitfile" ? 2 : 1);
       expect(assessmentCalls).toBe(flag === "--assess-patch-risk" ? 1 : 0);
       expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
       expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
@@ -7759,9 +7828,12 @@ describe("ordinary patch snapshot context", () => {
       );
       const result = JSON.parse(outcome.stdout);
       if (route === "inline") {
-        expect(result.patches).toMatchObject([
-          { status: "verified", files: ["keep.ts"] },
-        ]);
+        expect(result.patches).toMatchObject(
+          scan.findings.findings.map(() => ({
+            status: "verified",
+            files: ["keep.ts"],
+          })),
+        );
       } else {
         expect(result.applied).toBe(true);
         expect(result.files).toContain(
