@@ -2396,7 +2396,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   for (const [index, finding] of findings.entries()) {
     const key = candidateContentKeys[index];
     const owner = (finding.provenance as JsonObject).workerId;
-    if (key && typeof owner === "string") {
+    if (key && typeof owner === "string" && owner.length > 0) {
       const owners = candidateOwners.get(key) ?? new Set<string>();
       owners.add(owner);
       candidateOwners.set(key, owners);
@@ -2409,7 +2409,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     // Missing ownership can match a known worker only when it is unambiguous.
     return JSON.stringify([
       key,
-      (typeof owner === "string" ? owner : undefined) ??
+      (typeof owner === "string" && owner.length > 0 ? owner : undefined) ??
         (owners?.size === 1 ? [...owners][0] : undefined),
     ]);
   });

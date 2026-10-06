@@ -2131,7 +2131,9 @@ def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
     first = document["findings"][0]
     first["identity"] = {"anchor": "synthetic-observation", "note": "Initial metadata."}
     first["provenance"]["candidateId"] = "same-candidate"
+    first["severity"]["level"] = "low"
     second = copy.deepcopy(first)
+    second["severity"]["level"] = "high"
     if changed_note:
         second["identity"]["note"] = "Later metadata."
     document["findings"] = [first, second]
@@ -2142,6 +2144,8 @@ def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
     assert saved["findingCount"] == 1
     assert {row["provenance"]["candidateId"] for row in saved["findings"]} == {"same-candidate"}
     assert "instance" not in saved["findings"][0]["identity"]
+    assert saved["findings"][0]["severity"]["level"] == "high"
+    assert saved["findings"][0]["identity"] == second["identity"]
 
 
 @pytest.mark.parametrize("retry", [False, True])

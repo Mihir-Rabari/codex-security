@@ -2345,7 +2345,10 @@ def merge_saved_results(
             None,
         )
         if matching is not None:
-            allocated_identities.append((finding, matching))
+            identity.update(
+                {field: matching[field] for field in ("anchor", "instance") if field in matching}
+            )
+            allocated_identities.append((finding, identity))
             continue
         if assigned:
             previous_variant = assigned[0][0]

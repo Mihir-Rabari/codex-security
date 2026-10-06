@@ -2318,6 +2318,9 @@ for (const layout of ["standard", "diff"] as const) {
     [undefined, "worker-a"],
     ["worker-a", undefined],
     ["worker-a", "worker-b"],
+    ["", "worker-a"],
+    ["worker-a", ""],
+    ["", ""],
     [undefined, { note: "synthetic metadata" }],
     [{ note: "synthetic metadata" }, undefined],
     [undefined, ["synthetic metadata"]],
@@ -2346,7 +2349,9 @@ for (const layout of ["standard", "diff"] as const) {
         }
         for (const stopped of [false, "first", true] as const) {
           const findings = await recoverPublishedFindings(f, stopped);
-          const distinct = owners.every((owner) => typeof owner === "string");
+          const distinct = owners.every(
+            (owner) => typeof owner === "string" && owner.length > 0,
+          );
           assert.equal(findings.length, distinct ? 2 : 1);
           assert.equal(
             findings.filter((finding) => finding.severity.level === "high")
@@ -2440,7 +2445,10 @@ for (const layout of ["standard", "diff"] as const) {
         const findings = await recoverPublishedFindings(f, stopped);
         assert.equal(findings.length, 1);
         assert.equal(findings[0]!.severity.level, "high");
-        assert.deepEqual(Reflect.get(findings[0]!.provenance, "workerId"), workerId);
+        assert.deepEqual(
+          Reflect.get(findings[0]!.provenance, "workerId"),
+          workerId,
+        );
       }
     });
   }
