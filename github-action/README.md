@@ -249,6 +249,8 @@ audits the Action and CLI dependency locks. The `@openai/codex-security` depende
 pin and regenerate `runtime/package-lock.json`, rebuild the bundles, and run
 validation. Verify report compatibility when adopting a new release.
 
+<!-- prettier-ignore-start -->
+
 <!-- action-reference:start -->
 
 ## Inputs
@@ -301,3 +303,5 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                                                         |
 
 <!-- action-reference:end -->
+
+<!-- prettier-ignore-end -->
