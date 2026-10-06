@@ -3345,6 +3345,9 @@ describe("patch change tracking", () => {
   test.each(
     [
       "local",
+      "www",
+      "www-mixed",
+      "www-scp",
       "ssh-mirror",
       "https-mirror",
       "ssh-mirror-only",
@@ -3442,53 +3445,61 @@ describe("patch change tracking", () => {
           ? "ssh+git"
           : "ssh";
       const pushRemote =
-        mirror && transport.endsWith("only")
-          ? mirror
-          : transport === "renamed"
-            ? `${hostingUrl}/push-owner/old-name.git`
-            : transport === "transferred"
-              ? `${hostingUrl}/old-owner/repository.git`
-              : localFirst ||
-                  mirror ||
-                  [
-                    "network-push-only",
-                    "multiple-hosted",
-                    "no-candidates",
-                  ].includes(transport)
-                ? `${hostingUrl}/push-owner/repository.git`
-                : transport === "local" || localOnly
-                  ? remote
-                  : transport === "scp-userless"
-                    ? "github.com:example/repository.git"
-                    : transport === "ssh-api"
-                      ? "git@github.com:push-owner/repository.git"
-                      : transport === "ssh-enterprise"
-                        ? "git@enterprise.example.test:push-owner/other-repository.git"
-                        : transport.startsWith("scp")
-                          ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
-                          : transport.startsWith("ssh-uri")
-                            ? `${sshScheme}://git@${alias}:2222/example/repository.git`
-                            : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
+        transport === "www-scp"
+          ? "git@www.github.com:push-owner/repository.git"
+          : transport === "www" || transport === "www-mixed"
+            ? `https://${transport === "www-mixed" ? "www.GitHub.COM" : "www.github.com"}/push-owner/repository.git`
+            : mirror && transport.endsWith("only")
+              ? mirror
+              : transport === "renamed"
+                ? `${hostingUrl}/push-owner/old-name.git`
+                : transport === "transferred"
+                  ? `${hostingUrl}/old-owner/repository.git`
+                  : localFirst ||
+                      mirror ||
+                      [
+                        "network-push-only",
+                        "multiple-hosted",
+                        "no-candidates",
+                      ].includes(transport)
+                    ? `${hostingUrl}/push-owner/repository.git`
+                    : transport === "local" || localOnly
+                      ? remote
+                      : transport === "scp-userless"
+                        ? "github.com:example/repository.git"
+                        : transport === "ssh-api"
+                          ? "git@github.com:push-owner/repository.git"
+                          : transport === "ssh-enterprise"
+                            ? "git@enterprise.example.test:push-owner/other-repository.git"
+                            : transport.startsWith("scp")
+                              ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
+                              : transport.startsWith("ssh-uri")
+                                ? `${sshScheme}://git@${alias}:2222/example/repository.git`
+                                : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
       const aliasLookup =
         (transport.startsWith("scp") && transport !== "scp-userless") ||
         transport.startsWith("ssh-uri") ||
         ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport);
       const lookupRemote =
-        transport === "local" || transport === "local-push-only"
-          ? undefined
-          : localOnly ||
-              (mirror && transport.endsWith("only")) ||
-              ["ssh-failed", "ssh-empty"].includes(transport)
-            ? fetchRemote
-            : pushRemote.startsWith("https://")
-              ? pushRemote
-              : transport === "ssh-api"
-                ? "ssh://git@github.com/push-owner/repository.git"
-                : transport === "ssh-enterprise"
-                  ? "ssh://git@enterprise.example.test/push-owner/other-repository.git"
-                  : transport === "scp-userless"
-                    ? "ssh://github.com/example/repository.git"
-                    : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
+        transport === "www-scp"
+          ? "ssh://git@www.github.com/push-owner/repository.git"
+          : transport === "www-mixed"
+            ? "https://www.github.com/push-owner/repository.git"
+            : transport === "local" || transport === "local-push-only"
+              ? undefined
+              : localOnly ||
+                  (mirror && transport.endsWith("only")) ||
+                  ["ssh-failed", "ssh-empty"].includes(transport)
+                ? fetchRemote
+                : pushRemote.startsWith("https://")
+                  ? pushRemote
+                  : transport === "ssh-api"
+                    ? "ssh://git@github.com/push-owner/repository.git"
+                    : transport === "ssh-enterprise"
+                      ? "ssh://git@enterprise.example.test/push-owner/other-repository.git"
+                      : transport === "scp-userless"
+                        ? "ssh://github.com/example/repository.git"
+                        : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
         transport === "scp-userless"

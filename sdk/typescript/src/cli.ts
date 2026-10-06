@@ -6820,7 +6820,10 @@ async function patchPublicationDestination(
       const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
       if (url.hostname.toLowerCase() === "ssh.github.com")
         url.hostname = "github.com";
-      if (url.hostname.toLowerCase() !== apiHost && ssh) {
+      if (
+        url.hostname.toLowerCase().replace(/^www\./u, "") !== apiHost &&
+        ssh
+      ) {
         const sshArguments = [
           ...(url.port ? ["-p", url.port] : []),
           url.username
@@ -6855,7 +6858,7 @@ async function patchPublicationDestination(
         url.hostname =
           hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
       }
-      if (url.hostname.toLowerCase() === apiHost) {
+      if (url.hostname.toLowerCase().replace(/^www\./u, "") === apiHost) {
         hosted = true;
         if (ssh) {
           url.protocol = "ssh:";
