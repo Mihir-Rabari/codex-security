@@ -4612,6 +4612,8 @@ export function scanPreflightCodexConfig(
       ) &&
         provider["auth"] === undefined &&
         provider["experimental_bearer_token"] === undefined &&
+        provider["http_headers"] === undefined &&
+        provider["env_http_headers"] === undefined &&
         provider["requires_openai_auth"] !== true)
     ) {
       result["model_providers"] = { [modelProvider]: { ...defaults } };

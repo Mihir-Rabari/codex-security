@@ -935,14 +935,19 @@ describe("CodexSecurity preflight configuration", () => {
         { experimental_bearer_token: "synthetic-provider-token" },
         { auth: { command: "synthetic-auth", args: ["synthetic-account"] } },
         { requires_openai_auth: true },
+        { http_headers: { Authorization: "Bearer synthetic-provider-header" } },
+        { env_http_headers: { Authorization: "SYNTHETIC_PROVIDER_HEADER" } },
       ];
       for (const settings of cases) {
+        const nativeProvider: JsonObject = { ...providerConfig, ...settings };
+        if ("http_headers" in settings || "env_http_headers" in settings)
+          delete nativeProvider["env_key"];
         const projected = scanPreflightCodexConfig(
           {
             profile: "selected",
             profiles: { selected: { model, model_provider: provider } },
             model_providers: {
-              [provider]: { ...providerConfig, ...settings },
+              [provider]: nativeProvider,
             },
           },
           true,

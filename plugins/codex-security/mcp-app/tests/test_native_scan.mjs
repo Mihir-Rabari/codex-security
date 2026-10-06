@@ -122,6 +122,7 @@ function syntheticPermissionAppServer() {
   const selectedProvider = config.model_providers?.[config.model_provider];
   capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
     providerToken: selectedProvider && process.env[selectedProvider.env_key],
+    providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
@@ -165,6 +166,10 @@ for (const scenario of [
   "fireworks-bearer",
   "openrouter-command",
   "fireworks-command",
+  "openrouter-http-headers",
+  "fireworks-http-headers",
+  "openrouter-env-http-headers",
+  "fireworks-env-http-headers",
 ]) {
   test(
     `native ${scenario} settings survive projected recipes at fresh and resumed worker boundaries`,
@@ -192,6 +197,8 @@ for (const scenario of [
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
         "CODEX_API_KEY",
         "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
         "NATIVE_PROFILE_CAPTURE",
       ]);
       try {
@@ -202,7 +209,11 @@ for (const scenario of [
                 ? 'base_url = "https://example.invalid/custom"\nenv_key = "OPENAI_API_KEY"\n'
                 : scenario.endsWith("-bearer")
                   ? 'experimental_bearer_token = "synthetic-provider-token"\n'
-                  : 'auth = { command = "synthetic-auth", args = ["synthetic-account"] }\n')
+                  : scenario.endsWith("-env-http-headers")
+                    ? 'env_http_headers = { Authorization = "OPENAI_API_KEY" }\n'
+                    : scenario.endsWith("-http-headers")
+                      ? 'http_headers = { Authorization = "synthetic-provider-header" }\n'
+                      : 'auth = { command = "synthetic-auth", args = ["synthetic-account"] }\n')
             : scenario === "provider"
               ? 'model_provider = "synthetic_provider"\n[model_providers.synthetic_provider]\nenv_key = "OPENAI_API_KEY"\n'
               : scenario === "credential-store"
@@ -228,6 +239,7 @@ else {
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
     kind: process.argv.includes("login") ? "login" : "exec", argv,
     providerToken: selectedProvider && process.env[selectedProvider.env_key],
+    providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
   }) + "\\n");
   if (process.argv.includes("login")) { console.error("Logged in using ChatGPT"); process.exit(0); }
@@ -243,6 +255,8 @@ else {
           NATIVE_PROFILE_CAPTURE: capture,
           OPENAI_API_KEY: "synthetic-openai-selected",
         });
+        delete process.env.OPENROUTER_API_KEY;
+        delete process.env.FIREWORKS_API_KEY;
         if (scenario === "credential-store") delete process.env.CODEX_API_KEY;
         else process.env.CODEX_API_KEY = "synthetic-codex-competing";
         delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
@@ -388,6 +402,20 @@ else {
                 assert.equal(
                   row.argv.some((argument) =>
                     argument.includes("synthetic-provider-token"),
+                  ),
+                  false,
+                );
+              } else if (scenario.endsWith("-http-headers")) {
+                assert.equal(provider.env_key, undefined);
+                assert.equal(
+                  row.providerHeaders.Authorization,
+                  scenario.endsWith("-env-http-headers")
+                    ? "synthetic-openai-selected"
+                    : "synthetic-provider-header",
+                );
+                assert.equal(
+                  row.argv.some((argument) =>
+                    argument.includes("synthetic-provider-header"),
                   ),
                   false,
                 );
