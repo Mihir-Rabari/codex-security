@@ -14,11 +14,10 @@ export async function findingsCommand(
 ): Promise<unknown> {
   const request = parseJson(input) as {
     stateDirectory: string;
-    args?: string[];
     payload: { entries: EmbeddedFinding[]; repositoryId?: string };
   };
   const { values } = parseArgs({
-    args: request.args ?? args,
+    args,
     options:
       command === "list-stored-findings"
         ? { limit: { type: "string" }, offset: { type: "string" } }

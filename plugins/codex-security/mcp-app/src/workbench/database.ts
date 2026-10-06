@@ -14,6 +14,13 @@ import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
 import { windowsBinding } from "../native";
 import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
 
+export function requireSqliteText(
+  values: readonly (string | null | undefined)[],
+): void {
+  if (values.some((value) => value != null && !value.isWellFormed()))
+    throw new TypeError("SQLite text keys must contain valid Unicode.");
+}
+
 function createStateDirectory(path: string): void {
   if (process.platform !== "win32") path = path.replace(/\/+$/u, "") || "/";
   const nativePath =

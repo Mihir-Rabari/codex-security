@@ -173,17 +173,31 @@ with sqlite3.connect(sys.argv[2]) as db:
   }
 });
 
-test("overflowing JSON numbers reject the entire import batch", (t) => {
+test("imports reject lossy SQLite keys and non-finite JSON atomically", (t) => {
   const database = open(t);
   const original = entry("existing");
-  original.finding.extensions = { opaqueId: 9007199254740993n };
-  storeFindings(database, [original], "initial", "original-repository");
+  original.finding.identity = { anchor: "identity�", instance: "identity�" };
+  original.finding.extensions = {
+    opaqueId: 9007199254740993n,
+    opaqueText: "preserve\ud800",
+  };
+  storeFindings(database, [original], "initial", "scope�");
+  assert.deepEqual(
+    listStoredFindings(database, { limit: 10, offset: 0 }).findings,
+    [original.finding],
+  );
   const snapshot = () =>
     ["findings", "finding_embeddings", "finding_repositories"].map((table) =>
       database.prepare(`SELECT * FROM ${table}`).all(),
     );
   const before = snapshot();
-  for (const location of ["extension", "vector"]) {
+  for (const location of [
+    "extension",
+    "vector",
+    "repository",
+    "anchor",
+    "instance",
+  ] as const) {
     const updated = structuredClone(original);
     updated.finding.title = "Updated title";
     updated.embedding.vector = [0, 1];
@@ -191,16 +205,20 @@ test("overflowing JSON numbers reject the entire import batch", (t) => {
     const overflow = parseJson("1e400") as number;
     if (location === "extension")
       invalid.finding.extensions = { evidence: [overflow] };
-    else invalid.embedding.vector = [overflow, 0];
+    else if (location === "vector") invalid.embedding.vector = [overflow, 0];
+    else if (location !== "repository") {
+      invalid.finding = structuredClone(original.finding);
+      invalid.finding.identity[location] = "identity\ud800";
+    }
     assert.throws(
       () =>
         storeFindings(
           database,
           [updated, entry("new"), invalid],
           "later",
-          "new-repository",
+          location === "repository" ? "scope\ud800" : "new-repository",
         ),
-      /non-finite/u,
+      /non-finite|Unicode/u,
     );
     assert.deepEqual(snapshot(), before);
   }

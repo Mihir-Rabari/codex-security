@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { parseJson, stringifyJson } from "../helpers/json";
+import { requireSqliteText } from "./database";
 
 export interface Finding {
   findingId: string;
@@ -54,6 +55,7 @@ export function storeFindings(
 ): { findingIds: string[] } | { error: "finding_conflict" } {
   try {
     return transaction(database, "BEGIN IMMEDIATE", () => {
+      requireSqliteText([timestamp, repositoryId]);
       const existing = database.prepare(
         `SELECT details_json, fingerprint = ? AND rule_id = ? AND identity_anchor = ?
           AND identity_instance IS ? AS same_identity
@@ -76,6 +78,14 @@ export function storeFindings(
       );
       for (const entry of entries) {
         const finding = entry.finding;
+        requireSqliteText([
+          finding.findingId,
+          finding.fingerprints.primary,
+          finding.ruleId,
+          finding.identity.anchor,
+          finding.identity.instance,
+          entry.embedding.model,
+        ]);
         const current = existing.get(
           finding.fingerprints.primary,
           finding.ruleId,
