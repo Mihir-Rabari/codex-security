@@ -12,6 +12,109 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.mark.parametrize("attempt", [1, 2])
+@pytest.mark.parametrize("has_head", [False, True])
+@pytest.mark.parametrize("newer_parent", [False, True])
+@pytest.mark.parametrize("retry_publication", [False, True])
+def test_parent_candidate_outcome_compares_headless_worker_chronology(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    attempt,
+    has_head,
+    newer_parent,
+    retry_publication,
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
+        )
+    candidate = "pending-candidate"
+    surface = {
+        "id": "worker-surface",
+        "candidateId": candidate,
+        "label": "Worker follow-up",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    task = {"id": "worker-task", "candidateId": candidate, "reason": "Validate worker evidence."}
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [task],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(300, 300))
+    originals = {result: result.read_bytes()}
+    if has_head:
+        checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+        os.utime(checkpoint, ns=(300, 300))
+        head = result.parent / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(300, 300))
+        originals.update({path: path.read_bytes() for path in (checkpoint, head)})
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    parent = scan.scan_dir / "coverage.json"
+    parent.write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [
+                    {
+                        **surface,
+                        "id": "parent-rejection",
+                        "label": "Parent reviewed candidate",
+                        "disposition": "rejected",
+                        "provenance": {
+                            "workerId": worker_id,
+                            "attempt": attempt,
+                            "candidateId": candidate,
+                            "sourceId": surface["id"],
+                        },
+                    }
+                ],
+                "reviews": [{"workerId": worker_id, "attempt": attempt, "completeness": "partial"}],
+            }
+        )
+    )
+    modified = 400 if newer_parent else 200
+    os.utime(parent, ns=(modified, modified))
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(
+                workbench_api["saved_results"],
+                "_write_prepared_scan_finalization",
+                fail_publication,
+            )
+        workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads(parent.read_text())
+    pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
+    assert len(pending) == int(not newer_parent)
+    assert any(
+        row.get("label") == surface["label"] and row.get("disposition") == "needs_follow_up"
+        for row in coverage["surfaces"]
+    ) is (not newer_parent)
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize(
     "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent"]
 )

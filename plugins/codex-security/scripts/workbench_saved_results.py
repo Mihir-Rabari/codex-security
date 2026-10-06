@@ -1735,7 +1735,8 @@ def merge_saved_results(
                     key = projection_key(field, item)
                     if (source := projected_sources.get(key)) and source[0] == owner:
                         return source[2]
-            return int(workers_by_id[owner]["attempt"] or 0), order[1]
+            attempt = int(workers_by_id[owner]["attempt"] or 0) if owner in headed_workers else 0
+            return attempt, order[1]
         return order
 
     deferred_rows = {
