@@ -1,4 +1,7 @@
-import { assertPublicText } from "./package-public-content.mjs";
+import {
+  assertPublicPackageContents,
+  assertPublicText,
+} from "./package-public-content.mjs";
 
 const blockSize = 512;
 function invalidTarEntry() {
@@ -36,6 +39,8 @@ function paxAttributes(contents) {
 
 export function plainTarEntries(archiveBytes) {
   const entries = [];
+  const archiveFiles = new Map();
+  const archiveMetadata = [];
   let offset = 0;
   const globalAttributes = new Map();
   const nextAttributes = new Map();
@@ -43,11 +48,11 @@ export function plainTarEntries(archiveBytes) {
   while (offset + blockSize <= archiveBytes.byteLength) {
     const header = archiveBytes.subarray(offset, offset + blockSize);
     if (header.every((byte) => byte === 0)) {
+      archiveMetadata.push(header);
       offset += blockSize;
       continue;
     }
 
-    assertPublicText(header.toString("utf8"));
     const signature = header.subarray(257, 265).toString("latin1");
     const directory = header[156] === 0x35;
     const extended = header[156] === 0x78 || header[156] === 0x67;
@@ -88,13 +93,10 @@ export function plainTarEntries(archiveBytes) {
     if (nextOffset > archiveBytes.byteLength || (directory && size !== 0)) {
       invalidTarEntry();
     }
-    assertPublicText(
-      archiveBytes.subarray(contentsEnd, nextOffset).toString("utf8"),
-    );
 
     if (extended) {
       const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
-      assertPublicText(contents.toString("utf8"));
+      archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
       const destination =
         header[156] === 0x67 ? globalAttributes : nextAttributes;
       for (const [key, value] of paxAttributes(contents)) {
@@ -103,25 +105,16 @@ export function plainTarEntries(archiveBytes) {
         else destination.set(key, value);
       }
     } else {
-      if (
-        [
-          "GNU.sparse.major",
-          "GNU.sparse.minor",
-          "GNU.sparse.name",
-          "GNU.sparse.map",
-          "GNU.sparse.numblocks",
-          "GNU.sparse.size",
-          "GNU.sparse.realsize",
-          "GNU.sparse.offset",
-          "GNU.sparse.numbytes",
-          "SUN.holesdata",
-        ].some((key) => attribute(key) !== undefined)
-      ) {
-        // Native sparse extraction may discard map, hole or trailing bytes.
-        assertPublicText(
-          archiveBytes
-            .subarray(offset + blockSize, contentsEnd)
-            .toString("utf8"),
+      if (directory)
+        archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
+      else {
+        archiveFiles.set(
+          path,
+          archiveBytes.subarray(offset + blockSize, contentsEnd),
+        );
+        archiveMetadata.push(
+          header,
+          archiveBytes.subarray(contentsEnd, nextOffset),
         );
       }
       entries.push({ path, size });
@@ -132,5 +125,6 @@ export function plainTarEntries(archiveBytes) {
 
   if (archiveBytes.subarray(offset).some((byte) => byte !== 0))
     invalidTarEntry();
+  assertPublicPackageContents(archiveFiles, Buffer.concat(archiveMetadata));
   return entries;
 }

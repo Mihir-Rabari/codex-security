@@ -202,6 +202,7 @@ function extractedArchiveFiles() {
     chmodSync(extractionRoot, 0o700);
     try {
       tar([
+        "-m",
         "--keep-old-files",
         "--no-same-owner",
         "--no-same-permissions",

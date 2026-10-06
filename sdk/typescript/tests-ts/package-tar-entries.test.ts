@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   archive,
   blockSize,
+  cleanCompressedPayload,
   octal,
   paxRecords,
   tarRecord,
@@ -230,6 +231,73 @@ describe("plain npm tar entries", () => {
       },
     );
   }
+
+  test("checks stored old GNU sparse bodies", () => {
+    const contents = Buffer.alloc(1024);
+    contents.write("go/example");
+    const record = tarRecord(contents, {
+      name: "package/README.md",
+      magic: "ustar ",
+      version: " \0",
+    });
+    for (const offset of [386, 410]) {
+      octal(0, 12).copy(record, offset);
+      octal(512, 12).copy(record, offset + 12);
+    }
+    octal(1024, 12).copy(record, 483);
+    expect(() => plainTarEntries(archive(record))).toThrow(
+      internalReferenceError,
+    );
+  });
+
+  test("checks stored bytes after an empty repeated sparse attribute", () => {
+    const contents = Buffer.alloc(1024);
+    contents.write("go/example", 512);
+    const attributes = Buffer.concat([
+      paxRecords({ "GNU.sparse.map": "512,512" }),
+      paxRecords({ "GNU.sparse.map": "" }),
+    ]);
+    expect(() =>
+      plainTarEntries(
+        archive(
+          tarRecord(attributes, { name: "PaxHeaders/readme", type: 0x78 }),
+          tarRecord(contents, { name: "package/README.md" }),
+        ),
+      ),
+    ).toThrow(internalReferenceError);
+  });
+
+  test("checks markers across concatenated archive metadata", () => {
+    const record = tarRecord(Buffer.from("Public contents."), {
+      name: "package/README.md",
+    });
+    record.write("go/", record.length - 3);
+    expect(() =>
+      plainTarEntries(
+        archive(
+          record,
+          tarRecord(paxRecords({ uid: "0" }), { name: "example", type: 0x78 }),
+        ),
+      ),
+    ).toThrow(internalReferenceError);
+  });
+
+  test("keeps public Brotli content semantics for a retained sparse extent", () => {
+    const path = "package/runtime.mjs.br";
+    const size = cleanCompressedPayload.length;
+    const bytes = archive(
+      tarRecord(
+        paxRecords({
+          "GNU.sparse.size": String(size),
+          "GNU.sparse.numblocks": "1",
+          "GNU.sparse.map": `0,${size}`,
+        }),
+        { name: "PaxHeaders/runtime", type: 0x78 },
+      ),
+      tarRecord(cleanCompressedPayload, { name: path }),
+    );
+    expect(plainTarEntries(bytes)).toEqual([{ path, size }]);
+  });
 
   test("accepts an empty size field for an empty file", () => {
     expect(

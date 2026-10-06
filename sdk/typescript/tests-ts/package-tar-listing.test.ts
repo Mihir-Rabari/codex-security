@@ -41,6 +41,7 @@ function packageTar({
   compatibleLayout = false,
   rootDirectoryMode = 0o755,
   readmeMode = 0o644,
+  mtime = 0,
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
@@ -48,6 +49,7 @@ function packageTar({
   compatibleLayout?: boolean;
   rootDirectoryMode?: number;
   readmeMode?: number;
+  mtime?: number;
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -80,6 +82,7 @@ function packageTar({
     const record = tarRecord(contents, {
       name: path,
       type,
+      mtime,
       mode: executablePaths.includes(path)
         ? 0o755
         : path === "package/README.md"
@@ -157,6 +160,12 @@ describe("npm package tar listings", () => {
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
         ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
+        [
+          "future-timestamps",
+          gzipSync(
+            packageTar({ mtime: Math.floor(Date.now() / 1000) + 365 * 86400 }),
+          ),
+        ],
         ["unreadable-readme", gzipSync(packageTar({ readmeMode: 0 }))],
         ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
         [
@@ -398,8 +407,9 @@ process.exit(result.status ?? 1);
       }
       expect(calls[0]?.args).toEqual(["--ignore-zeros", "-tzf", "-"]);
       expect(calls[1]?.args).toEqual(["--ignore-zeros", "-tvzf", "-"]);
-      expect(calls[2]?.args.slice(0, 9)).toEqual([
+      expect(calls[2]?.args.slice(0, 10)).toEqual([
         "--ignore-zeros",
+        "-m",
         "--keep-old-files",
         "--no-same-owner",
         "--no-same-permissions",
