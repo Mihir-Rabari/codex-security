@@ -828,80 +828,94 @@ test("shared matching reads evidence through the prepared parent session", async
   expect(result.cost).not.toBeNull();
 });
 
-test("custom provider recipes preserve fresh and resumed discovery and reducer settings", async () => {
-  const h = await fixture();
-  const provider = {
-    name: "Synthetic custom provider",
-    base_url: "https://provider.example.test/v1",
-    wire_api: "responses",
-    env_http_headers: { "X-Synthetic": "SYNTHETIC_SETTING" },
-    request_max_retries: 7,
-    auth: {
-      command: "synthetic-auth",
-      args: ["session"],
-      refresh_interval_ms: 1000,
-    },
-  };
-  h.stopBeforeSealing();
-  await using first = h.makeClient({
-    profile: "selected",
-    profiles: { selected: { model_provider: "synthetic" } },
-    model_providers: {
-      synthetic: {
-        ...provider,
-        experimental_bearer_token: "synthetic-private-bearer",
-        http_headers: { Authorization: "Bearer synthetic-private-header" },
+test.each([
+  { global: "flex", selected: undefined, expected: "flex" },
+  { global: "flex", selected: "priority", expected: "priority" },
+])(
+  "custom provider recipes preserve fresh and resumed discovery and reducer settings (tier: $expected)",
+  async ({ global, selected, expected }) => {
+    const h = await fixture();
+    const provider = {
+      name: "Synthetic custom provider",
+      base_url: "https://provider.example.test/v1",
+      wire_api: "responses",
+      env_http_headers: { "X-Synthetic": "SYNTHETIC_SETTING" },
+      request_max_retries: 7,
+      auth: {
+        command: "synthetic-auth",
+        args: ["session"],
+        refresh_interval_ms: 1000,
       },
-    },
-  });
-  const options = {
-    ...h.options,
-    workers: 1,
-    knowledgeBasePaths: undefined,
-  };
-  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
-    ScanTransportClosedError,
-  );
-  const [parentId, parent] = [...h.records].find(
-    ([, record]) => record.mode === "deep",
-  )!;
-  const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
-    "get-scan-recipe",
-    "--scan-id",
-    parentId,
-  ]);
-  const config = (saved["recipe"] as JsonObject)["config"] as JsonObject;
-  const replayProvider = {
-    ...provider,
-    auth: { ...provider.auth, cwd: h.home },
-  };
-  expect(config["model_providers"]).toEqual({ synthetic: replayProvider });
-  expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
-  await using resumed = h.makeClient(config);
-  const result = await resumed.run(h.repository, {
-    ...options,
-    signal: undefined,
-    resumeScanId: parentId,
-  });
-  expect(result.findings.findings).toHaveLength(2);
-  expect(h.launches[0]!.options.env!["CODEX_SECURITY_SCAN_ID"]).toBe(
-    h.launches[1]!.options.env!["CODEX_SECURITY_SCAN_ID"],
-  );
-  expect(
-    h.launches.some(
-      (launch) =>
-        h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode ===
-        "deep",
-    ),
-  ).toBe(true);
-  for (const launch of h.launches) {
-    expect(launch.options.config).toMatchObject({
-      model_provider: "synthetic",
-      model_providers: { synthetic: replayProvider },
+    };
+    h.stopBeforeSealing();
+    await using first = h.makeClient({
+      profile: "selected",
+      service_tier: global,
+      profiles: {
+        selected: {
+          model_provider: "synthetic",
+          ...(selected === undefined ? {} : { service_tier: selected }),
+        },
+      },
+      model_providers: {
+        synthetic: {
+          ...provider,
+          experimental_bearer_token: "synthetic-private-bearer",
+          http_headers: { Authorization: "Bearer synthetic-private-header" },
+        },
+      },
     });
-    expect(launch.preflightConfig).not.toHaveProperty("model_providers");
-  }
-});
+    const options = {
+      ...h.options,
+      workers: 1,
+      knowledgeBasePaths: undefined,
+    };
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId, parent] = [...h.records].find(
+      ([, record]) => record.mode === "deep",
+    )!;
+    const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+      "get-scan-recipe",
+      "--scan-id",
+      parentId,
+    ]);
+    const config = (saved["recipe"] as JsonObject)["config"] as JsonObject;
+    const replayProvider = {
+      ...provider,
+      auth: { ...provider.auth, cwd: h.home },
+    };
+    expect(config["model_providers"]).toEqual({ synthetic: replayProvider });
+    expect(config["service_tier"]).toBe(expected);
+    expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
+    await using resumed = h.makeClient(config);
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+    expect(result.findings.findings).toHaveLength(2);
+    expect(h.launches[0]!.options.env!["CODEX_SECURITY_SCAN_ID"]).toBe(
+      h.launches[1]!.options.env!["CODEX_SECURITY_SCAN_ID"],
+    );
+    expect(
+      h.launches.some(
+        (launch) =>
+          h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!
+            .mode === "deep",
+      ),
+    ).toBe(true);
+    for (const launch of h.launches) {
+      expect(launch.options.config).toMatchObject({
+        model_provider: "synthetic",
+        model_providers: { synthetic: replayProvider },
+        service_tier: expected,
+      });
+      expect(launch.preflightConfig).not.toHaveProperty("model_providers");
+    }
+  },
+);
 
 test("a reused client's sealed read uses its installed plugin after the source is removed", async () => {
   const h = await fixture();

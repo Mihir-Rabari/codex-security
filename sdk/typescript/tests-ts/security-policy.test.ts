@@ -2,7 +2,6 @@ import { nodeCommand, gitText } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
   cp,
-  chmod,
   mkdir,
   readFile,
   readdir,
@@ -12,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import * as artifactExport from "../src/artifact-export.js";
@@ -112,15 +111,16 @@ describe("security policy generation", () => {
     )
       return;
     const f = await fixture();
-    const plugin = join(f.root, "plugin");
-    await cp(PLUGIN_ROOT, plugin, {
+    const pluginRoot = join(f.root, "plugin");
+    await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+    await mkdir(join(pluginRoot, "scripts", "__pycache__"), {
       recursive: true,
-      filter: (source) => basename(source) !== "__pycache__",
+      mode: 0o700,
     });
     const previous = process.umask(0o600);
     try {
       await f.generate({
-        pluginRoot: plugin,
+        pluginRoot,
         run: async (stage) => {
           if (stage !== "architecture")
             expect(
@@ -132,12 +132,9 @@ describe("security policy generation", () => {
     } finally {
       process.umask(previous);
     }
-    const scripts = join(plugin, "scripts");
-    const entries = await readdir(scripts);
-    // A failed assertion must still let the isolated fixture clean up its cache.
-    if (entries.includes("__pycache__"))
-      await chmod(join(scripts, "__pycache__"), 0o700);
-    expect(entries).not.toContain("__pycache__");
+    await cp(PLUGIN_ROOT, join(f.root, "following-plugin-copy"), {
+      recursive: true,
+    });
     for (const name of await readdir(f.outputDir)) {
       const path = join(f.outputDir, name);
       expect((await stat(path)).mode & 0o600).toBe(0o600);

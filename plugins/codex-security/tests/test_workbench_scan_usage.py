@@ -101,7 +101,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         target,
         str(started["scanId"]),
         Path(str(started["scanDir"])),
-        datetime.fromisoformat(row[0]),
+        datetime.fromisoformat(row[0].replace("Z", "+00:00")),
         environment,
         mode,
         diff_target,

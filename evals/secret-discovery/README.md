@@ -44,7 +44,8 @@ creating private homes. It bundles the SDK's permission-checked client and execu
 locally with esbuild and adds no dependencies.
 
 ```sh
-node evals/secret-discovery/run.mjs
+pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types evals/secret-discovery/run.mts
 ```
 
 An optional positional argument selects a model. When omitted, Codex selects
@@ -100,7 +101,8 @@ the model.
 ## Deterministic checks
 
 ```sh
-node --test evals/secret-discovery/test_*.mjs
+pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types --test evals/secret-discovery/test_*.mts
 ```
 
 CI runs these Node-only checks for fixture staging, production-prompt loading,

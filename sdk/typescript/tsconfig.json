@@ -12,7 +12,8 @@
     "scripts/smoke-findings-service.ts",
     "scripts/merge-eval/*.ts",
     "scripts/fixtures/findings-service-sqlite.ts",
-    "scripts/fixtures/prepare-runner-scan.ts"
+    "scripts/fixtures/prepare-runner-scan.ts",
+    "scripts/run-ci-tests.mts"
   ],
   "compilerOptions": {
     "allowJs": false,
@@ -34,6 +35,7 @@
     "strict": true,
     "strictNullChecks": true,
     "target": "ESNext",
-    "types": ["node", "bun"]
+    "types": ["node", "bun"],
+    "rewriteRelativeImportExtensions": true
   }
 }

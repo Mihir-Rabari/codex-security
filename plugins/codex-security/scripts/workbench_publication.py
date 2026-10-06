@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 from finalize_scan_contract import (
     ContractError,
     SealedArtifactError,

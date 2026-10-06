@@ -7,6 +7,7 @@ import os
 import runpy
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -3580,8 +3581,21 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
     ],
     ids=["original", "long-nested"],
 )
+@pytest.mark.parametrize(
+    "non_utf8_artifact",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                os.name == "nt" or sys.platform == "darwin",
+                reason="Windows and macOS filesystems cannot retain arbitrary non-UTF-8 bytes",
+            ),
+        ),
+    ],
+)
 def test_completed_finding_projects_writeup_and_poc_artifact_paths(
-    tmp_path: Path, report_path: str
+    tmp_path: Path, report_path: str, non_utf8_artifact: bool
 ) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -3617,6 +3631,9 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     (poc / "outside-link.txt").symlink_to(outside)
 
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    if non_utf8_artifact:
+        (poc / os.fsdecode(b"caf\xe9.txt")).write_text("Supplemental fixture.\n")
+        completed = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
     assert completed["scan"]["findings"][0]["artifactPaths"] == [
         report_path,
         f"{report_directory}/poc/README.md",

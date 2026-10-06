@@ -13,7 +13,7 @@ import {
   resolveCodexCommand,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import {
   mockWorkbench,
   shellEnvironmentReference,
@@ -27,8 +27,7 @@ import {
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {

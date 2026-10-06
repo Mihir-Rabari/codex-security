@@ -17,8 +17,9 @@ import { ScanInterruptedError } from "../src/errors.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { cleanup, copyCompletedScan, temporaryDirectory } =
-  createApiTestFixtures();
+const { cleanup, temporaryDirectory } = createApiTestFixtures();
+
+import { copyCompletedScan } from "./plugin-root.js";
 afterEach(cleanup);
 
 describe("completed scan follow-up instructions", () => {

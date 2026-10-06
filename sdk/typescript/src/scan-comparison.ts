@@ -146,8 +146,8 @@ export interface ReadOnlyCodexOptions {
   /** @internal Constraints inherited from the scan that owns this helper. */
   inheritedPermissions?: { filesystem: JsonObject; network: JsonObject };
   model?: string;
-  reasoningEffort?:
-    "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  /** Passed through to Codex; support depends on the runtime, model, and provider. */
+  reasoningEffort?: string;
   signal?: AbortSignal;
   workingDirectory?: string;
 }
@@ -722,6 +722,7 @@ async function startReadOnlyCodexThread(
   return codex.startThread({
     threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
+    // Native Codex accepts strings before the pinned SDK widens its effort type.
     modelReasoningEffort: reasoningEffort as ModelReasoningEffort,
     ...(options.codex !== undefined ||
     options.inheritedPermissions === undefined

@@ -1,6 +1,6 @@
 import { gitText } from "../scripts/git.mjs";
-import { assertNoError } from "./assertions.mjs";
-import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
+import { assertNoError } from "./assertions.ts";
+import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";

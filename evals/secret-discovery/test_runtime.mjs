@@ -26,21 +26,21 @@ import {
   preflightEval,
   prepareEval,
   runPreparedEval,
-} from "./harness.mjs";
+} from "./harness.mts";
 import {
   EVAL_PERMISSION_PROFILE_ID,
   createPermissionCheckedCodex,
   createEvalHome,
   withEvalState,
-} from "./runtime.mjs";
+} from "./runtime.mts";
 
 const unixOnly = { skip: process.platform === "win32", timeout: 15000 };
 const tomlUrl = new URL(
   "../../sdk/typescript/node_modules/smol-toml/dist/index.js",
   import.meta.url,
 ).href;
-const harnessUrl = new URL("./harness.mjs", import.meta.url).href;
-const runtimeUrl = new URL("./runtime.mjs", import.meta.url).href;
+const harnessUrl = new URL("./harness.mts", import.meta.url).href;
+const runtimeUrl = new URL("./runtime.mts", import.meta.url).href;
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));

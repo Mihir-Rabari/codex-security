@@ -1910,11 +1910,11 @@ process.exit(0);
       config,
       codex,
       model: "explicit-model",
-      reasoningEffort: "max",
+      reasoningEffort: "future-effort",
     });
     expect(calls.threadOptions).toMatchObject({
       model: "explicit-model",
-      modelReasoningEffort: "max",
+      modelReasoningEffort: "future-effort",
     });
   });
 
