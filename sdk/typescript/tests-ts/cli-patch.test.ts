@@ -3688,7 +3688,7 @@ describe("patch publication integrity", () => {
   );
 
   test.each([130, 143])(
-    "retains completed and partial patch changes after exit %s",
+    "retains completed and partial patch changes after exit %i",
     async (status) => {
       const directory = await fixtures.create("patch-interrupted-");
       const git = repositoryGit(directory);
@@ -3782,7 +3782,7 @@ describe("patch publication integrity", () => {
   );
 
   test.each([false, true])(
-    "resolves pre-existing dirty paths from the Git root for a subdirectory scan: overlap=%s",
+    "resolves pre-existing dirty paths from the Git root for a subdirectory scan: overlap=%j",
     async (overlap) => {
       const directory = await fixtures.create(
         "patch-subdirectory-publication-",
