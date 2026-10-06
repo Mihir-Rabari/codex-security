@@ -77,7 +77,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     current = stage_publication(
         scan, generation=3, result_path=new_result, title="Current accepted aggregate"
     )
-    workbench_api["write_scan_draft"](workbench_db, current)
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, current
+    )
     saved = {
         path: path.read_bytes()
         for path in scan.scan_dir.rglob("*.json")
@@ -92,7 +94,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     )
 
     with pytest.raises(SystemExit, match="coordinator|aggregate"):
-        workbench_api["write_scan_draft"](workbench_db, old)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, old
+        )
 
     assert {
         path: path.read_bytes()
@@ -103,8 +107,11 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
 
 @pytest.mark.parametrize("generation", [None, 3], ids=["legacy-generation-one", "current-lease"])
 def test_current_publication_replays_without_changing_checkpoint_or_worker_state(
-    workbench_api, workbench_db, publication_scan, generation
+    workbench_api, workbench_db, publication_scan, generation, monkeypatch
 ):
+    # Keep replay time fixed while comparing the preserved publication bytes.
+    instant = workbench_api["now"]()
+    monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     with workbench_db:
@@ -122,13 +129,17 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     run_before = dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone())
     worker_before = dict(workbench_db.execute("SELECT * FROM deep_scan_workers").fetchone())
 
-    workbench_api["write_scan_draft"](workbench_db, draft)
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, draft
+    )
     published = {
         path: path.read_bytes()
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     }
-    replay = workbench_api["write_scan_draft"](workbench_db, draft)
+    replay = workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, draft
+    )
 
     assert replay == {"scanId": scan.scan_id, "status": "draft_written"}
     assert {
@@ -136,7 +147,8 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     } == published
-    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 1
+    # Main retains both the submitted checkpoint and its normalized parent snapshot.
+    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 2
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_workers").fetchone()) == worker_before
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
