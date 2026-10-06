@@ -1623,3 +1623,35 @@ def test_stopped_diff_retains_historical_exclusion_extensions(
     assert_retained()
     run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
     assert_retained()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("malformed_receipts", [False, True])
+def test_stopped_diff_recovers_receipts_before_freezing_authored_gap(
+    tmp_path: Path, termination: str, malformed_receipts: bool
+) -> None:
+    state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    pending = next(row for row in coverage["deferred"] if row.get("candidateId"))
+    pending.update(
+        reason="Original authored proof gap and diagnostic text.",
+        candidate={**candidate, "annotation": "Original candidate annotation."},
+        finding={"title": "Original compact finding annotation."},
+    )
+    original_pending = copy.deepcopy(pending)
+    surface = next(row for row in coverage["surfaces"] if row.get("candidateId"))
+    surface.update(disposition="rejected", receiptRefs=None if malformed_receipts else [])
+    coverage_path.write_text(json.dumps(coverage))
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state, termination, "--scan-id", scan_id, *arguments)
+    saved = json.loads(coverage_path.read_text())
+    rows = [row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]]
+    assert bool(rows) is malformed_receipts
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["candidates"][
+        "unresolved"
+    ] == int(malformed_receipts)
+    if rows:
+        assert original_pending in rows
+    assert any(row.get("id") == "other-review" for row in saved["deferred"])

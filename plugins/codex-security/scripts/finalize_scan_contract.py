@@ -1316,6 +1316,13 @@ def _recover_unsealed_coverage(
         coverage[field] = recovered
 
     deferred_ids = {item["id"] for item in coverage["deferred"]}
+    closures = coverage.get("resolvedDeferred")
+    if isinstance(closures, list):
+        deferred_ids.update(
+            item["id"]
+            for item in closures
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
     for surface, reason in recovered_candidates:
         if any(
             item.get("candidateId") == surface["candidateId"]

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { importSource } from "./import-module.ts";
 import type { TestContext } from "node:test";
@@ -2958,4 +2959,81 @@ for (const shared of [false, true]) {
         ),
       );
   });
+}
+
+for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
+  for (const payload of ["candidate", "finding"] as const) {
+    test(`first Diff submission archives ${payload} evidence on ${outcome}`, async (t) => {
+      const reviewed = candidate("first-submission", "reportable");
+      const context = await fixture(t, [reviewed]);
+      const evidence = {
+        title: "Saved submission annotation",
+        evidence: "Original evidence only in this submission.",
+        authoredNote: "Keep original diagnostic text.",
+      };
+      const otherEvidence = {
+        ...evidence,
+        evidence: "Independent second evidence in this submission.",
+      };
+      const pending = {
+        id: "original-proof-gap",
+        candidateId: reviewed.candidate_id,
+        reason: "Original source review.",
+        [payload]: evidence,
+      };
+      const otherPending = {
+        ...pending,
+        id: "independent-proof-gap",
+        reason: "Independent source review.",
+        [payload]: otherEvidence,
+      };
+      const input = draft([pending, otherPending]);
+      input.coverage.completeness = "partial";
+      if (outcome === "finding")
+        input.findings = [finding(reviewed.candidate_id)];
+      else
+        input.coverage.surfaces = [
+          {
+            id: "authored-terminal",
+            candidateId: reviewed.candidate_id,
+            label: "Authored final review",
+            disposition: outcome,
+            receiptRefs: [],
+          },
+        ];
+      await recordCodexSecurityScanDraft(context, input);
+      const canonical =
+        outcome === "finding"
+          ? JSON.parse(
+              await readFile(path.join(context.root, "findings.json"), "utf8"),
+            )
+          : await readCoverage(context);
+      const contains = (value: unknown, expected: unknown): boolean => {
+        if (isDeepStrictEqual(value, expected)) return true;
+        if (Array.isArray(value))
+          return value.some((child) => contains(child, expected));
+        return (
+          value !== null &&
+          typeof value === "object" &&
+          Object.values(value).some((child) => contains(child, expected))
+        );
+      };
+      for (const expected of [evidence, otherEvidence])
+        assert.ok(contains(canonical, expected));
+      const checkpointRoot = path.join(context.root, "checkpoints");
+      for (const name of await readdir(checkpointRoot)) {
+        const saved = JSON.parse(
+          await readFile(path.join(checkpointRoot, name), "utf8"),
+        );
+        for (const expected of [evidence, otherEvidence])
+          assert.ok(contains(saved, expected));
+      }
+      assert.equal(
+        (await readCoverage(context)).deferred.some(
+          (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+        ),
+        false,
+      );
+    });
+  }
 }

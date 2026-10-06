@@ -478,3 +478,51 @@ describe("ScanResult", () => {
     },
   );
 });
+
+for (const historical of [false, true]) {
+  for (const sameOwner of [false, true]) {
+    for (const terminal of [false, true]) {
+      test(`retained finding preserves current proof gap: historical=${historical}, sameOwner=${sameOwner}, terminal=${terminal}`, () => {
+        const result = fakeResult(["high"]);
+        const finding = result.findings.findings[0]!;
+        finding.provenance = {
+          ...finding.provenance,
+          candidateId: "saved-review",
+          sourceWorkerId: "worker-one",
+          ...(historical ? { candidateReopened: true } : {}),
+        };
+        const owner = sameOwner ? "worker-one" : "worker-two";
+        const pending = {
+          id: "newer-worker-gap",
+          candidateId: "saved-review",
+          sourceWorkerId: owner,
+          reason: "The worker still needs independent validation.",
+          candidate: { evidence: "Keep current checkpoint evidence." },
+        };
+        result.coverage.completeness = "partial";
+        result.coverage.deferred = [pending];
+        result.coverage.surfaces = terminal
+          ? [
+              {
+                id: "current-decision",
+                label: "Current accepted decision",
+                candidateId: "saved-review",
+                sourceWorkerId: owner,
+                disposition: "rejected",
+                receiptRefs: [],
+              },
+            ]
+          : [];
+        const original = structuredClone(finding);
+        expect(result.unresolvedCandidates).toEqual(
+          !terminal && (historical || !sameOwner) ? [pending] : [],
+        );
+        expect(result.unresolvedCandidateCount).toBe(
+          Number(!terminal && (historical || !sameOwner)),
+        );
+        expect(finding).toEqual(original);
+        expect(result.findings.findings).toHaveLength(1);
+      });
+    }
+  }
+}

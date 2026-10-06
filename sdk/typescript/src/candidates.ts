@@ -45,6 +45,7 @@ export function unresolvedCandidates(
 ): DeferredCoverage[] {
   const resolved = new Set<string>();
   for (const finding of findings) {
+    if (finding.provenance["candidateReopened"] === true) continue;
     const candidateId = findingCandidateIds(finding)[0];
     if (candidateId !== undefined) {
       resolved.add(

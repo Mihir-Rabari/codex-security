@@ -1179,12 +1179,13 @@ def complete_budget_exhausted_scan(
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        receipt_warnings = budget_exhausted_draft(scan, scan_dir, candidates, warning)
         warnings = json.loads(scan["completion_warnings_json"])
-        if warning not in warnings:
+        additions = [message for message in [warning, *receipt_warnings] if message not in warnings]
+        if additions:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
-                (json.dumps([*warnings, warning]), scan_id),
+                (json.dumps([*warnings, *additions]), scan_id),
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
@@ -1267,7 +1268,7 @@ def budget_exhausted_draft(
     scan_dir: Path,
     candidates: list[dict[str, Any]],
     warning: str,
-) -> None:
+) -> list[str]:
     documents: dict[str, dict[str, Any]] = {}
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         path = artifact_path(scan_dir, name, required=False)
@@ -1325,6 +1326,12 @@ def budget_exhausted_draft(
             scan_dir, scan["id"], {"targetId": scan["target_id"]}, [finding]
         )
     ]
+    receipt_warnings: list[str] = []
+    recovered = saved_results.recover_candidate_receipts(
+        {"coverage": coverage}, scan_dir, receipt_warnings
+    )
+    assert recovered is not None
+    coverage = recovered["coverage"]
     saved_results.preserve_budget_candidates(coverage, valid_findings, candidates)
     if not any(
         isinstance(item, dict)
@@ -1357,6 +1364,8 @@ def budget_exhausted_draft(
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+    return receipt_warnings
 
 
 def complete_scan_locked(

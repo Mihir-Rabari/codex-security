@@ -2635,10 +2635,16 @@ def merge_saved_results(
             or candidate_key(item.get("id"), item.get("sourceWorkerId")) in pending_surface_keys
         ]
 
+    reopened_candidates = {key for _, key in inactive_outcomes if key not in resolved}
     identities: dict[str, str] = {}
     for finding in findings:
         if not valid_finding(finding):
             continue
+        candidate = finding_candidate_key(finding)
+        if candidate in reopened_candidates:
+            finding["provenance"]["candidateReopened"] = True
+        elif resolved.get(candidate) == "reported":
+            finding["provenance"].pop("candidateReopened", None)
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue

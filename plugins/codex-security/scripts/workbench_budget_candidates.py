@@ -25,7 +25,10 @@ def recover_candidate_receipts(
     if not isinstance(surfaces, list) or not any(
         isinstance(row, dict)
         and row.get("disposition") in ("rejected", "not_applicable")
-        and row.get("receiptRefs")
+        and (
+            row.get("receiptRefs")
+            or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
+        )
         for row in surfaces
     ):
         return parent

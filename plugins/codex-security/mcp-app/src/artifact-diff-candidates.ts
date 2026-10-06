@@ -376,6 +376,7 @@ export function preserveUnresolvedDiffCandidates(
   submitted = input,
 ): ScanDraftInput {
   if (candidates === undefined) return input;
+  input = structuredClone(input);
   const resolvedKeys = resolvedCandidateKeys(input);
   const confirmed = new Map(
     input.findings.map((finding) => [findingCandidateKey(finding), finding]),
@@ -386,6 +387,43 @@ export function preserveUnresolvedDiffCandidates(
       .filter(isTerminalCandidateDecision)
       .map((item) => [coverageCandidateKey(item), item]),
   );
+  // Resolved rows still carry submitted evidence; archive it before clearing the gap.
+  for (const pending of submitted.coverage.deferred as JsonObject[]) {
+    const key = coverageCandidateKey(pending);
+    const finding = confirmed.get(key ?? "");
+    if (finding) {
+      const provenance = finding.provenance as JsonObject;
+      if (pending.candidate !== undefined) {
+        const previous = Array.isArray(provenance.originalCandidates)
+          ? provenance.originalCandidates
+          : [];
+        if (
+          !previous.some((item) => isDeepStrictEqual(item, pending.candidate))
+        )
+          provenance.originalCandidates = [
+            ...previous,
+            structuredClone(pending.candidate),
+          ];
+      }
+      if (object(pending.finding))
+        preserveFindingDetails(finding, pending.finding as JsonObject);
+      continue;
+    }
+    const decision = decisions.get(key);
+    if (!decision) continue;
+    for (const [field, archive] of [
+      ["candidate", "originalCandidates"],
+      ["finding", "previousFindings"],
+    ] as const) {
+      if (pending[field] === undefined) continue;
+      const previous = Array.isArray(decision[archive])
+        ? (decision[archive] as unknown[])
+        : [];
+      if (!previous.some((item) => isDeepStrictEqual(item, pending[field])))
+        decision[archive] = [...previous, structuredClone(pending[field])];
+      decision[field] ??= structuredClone(pending[field]);
+    }
+  }
   const replacedDecisions = new Set<JsonObject>();
   const pending = new Map(
     candidates

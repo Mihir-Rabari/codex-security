@@ -3180,6 +3180,46 @@ The extraction root is not enforced.
 
         self.assertEqual(line_hashes.call_count, 1)
 
+    def test_receipt_recovery_preserves_closed_generic_task_identities(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for disposition in ("rejected", "not_applicable"):
+            for valid_receipt in (False, True):
+                with self.subTest(disposition=disposition, valid_receipt=valid_receipt):
+                    self.coverage = copy.deepcopy(original)
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="candidate-review",
+                        disposition=disposition,
+                        candidate={"evidence": "Retain original candidate evidence."},
+                        receiptRefs=["artifacts/review/receipt.txt"],
+                    )
+                    closures = [
+                        {"id": surface["id"], "reason": "Source review completed."},
+                        {"id": "other-closed-review", "reason": "Another review completed."},
+                    ]
+                    self.coverage["resolvedDeferred"] = copy.deepcopy(closures)
+                    self.write_scan()
+                    receipt = self.scan_dir / "artifacts/review/receipt.txt"
+                    receipt.parent.mkdir(parents=True, exist_ok=True)
+                    if valid_receipt:
+                        receipt.write_text("Synthetic verified review receipt.\n")
+                    elif receipt.exists():
+                        receipt.unlink()
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, completion_warnings=[]
+                    )
+                    recovered = prepared[4]
+                    self.assertEqual(recovered.get("resolvedDeferred"), closures)
+                    candidate_rows = [
+                        row
+                        for row in recovered["deferred"]
+                        if row.get("candidateId") == surface["candidateId"]
+                    ]
+                    self.assertEqual(bool(candidate_rows), not valid_receipt)
+                    if candidate_rows:
+                        self.assertNotIn(candidate_rows[0]["id"], {row["id"] for row in closures})
+                        self.assertEqual(candidate_rows[0]["candidate"], surface["candidate"])
+
 
 if __name__ == "__main__":
     unittest.main()

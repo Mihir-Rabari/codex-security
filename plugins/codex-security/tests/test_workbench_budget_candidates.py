@@ -902,3 +902,71 @@ def test_budget_completion_preserves_authored_partial_candidate_snapshot(
         assert surface["label"] == current["summary"]
         assert surface["notes"] == current["evidence"]
         assert pending["paths"] == ["app.py"]
+
+
+@pytest.mark.parametrize("receipt", ["valid", "missing", "unsafe"])
+def test_budget_receipts_are_recovered_before_shared_surface_decisions(
+    tmp_path: Path, receipt: str
+) -> None:
+    state, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "deferred"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    receipt_file = scan_dir / "artifacts/review/receipt.txt"
+    receipt_file.parent.mkdir(parents=True, exist_ok=True)
+    if receipt == "valid":
+        receipt_file.write_text("Synthetic verified review.\n")
+    surface = {
+        "id": "shared-source-review",
+        "candidateId": candidate["candidate_id"],
+        "label": "Authored candidate decision",
+        "disposition": "rejected",
+        "receiptRefs": [
+            "../outside.txt" if receipt == "unsafe" else "artifacts/review/receipt.txt"
+        ],
+    }
+    pending = {
+        "id": "authored-candidate-gap",
+        "candidateId": candidate["candidate_id"],
+        "reason": "Original source evidence still needs validation.",
+        "candidate": {**candidate, "annotation": "Original saved annotation."},
+        "surfaceIds": [surface["id"]],
+    }
+    generic = {
+        "id": "generic-review",
+        "reason": "Independent review remains.",
+        "surfaceIds": [surface["id"]],
+    }
+    coverage.update(surfaces=[surface], deferred=[pending, generic])
+    coverage_path.write_text(json.dumps(coverage))
+    completion = complete_budget_scan(state, scan_id, check=False)
+    if completion["returncode"]:
+        run_workbench(
+            state,
+            "fail-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Synthetic budget recovery failure.",
+        )
+    completed = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    saved = json.loads(coverage_path.read_text())
+    assert generic in saved["deferred"]
+    rows = [row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]]
+    assert bool(rows) is (receipt != "valid")
+    assert completed["progress"]["candidates"]["unresolved"] == int(receipt != "valid")
+    if rows:
+        assert pending in rows
+        assert not any(
+            row.get("candidateId") == candidate["candidate_id"]
+            and row.get("disposition") in {"rejected", "not_applicable"}
+            for row in saved["surfaces"]
+        )
+    else:
+        assert any(row["receiptRefs"] == surface["receiptRefs"] for row in saved["surfaces"])

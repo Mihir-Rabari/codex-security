@@ -141,7 +141,13 @@ def unresolved_candidate_rows(
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
     resolved = {
-        key for finding in objects(findings) if (key := finding_candidate_key(finding)) is not None
+        key
+        for finding in objects(findings)
+        if not (
+            isinstance(provenance := finding.get("provenance"), dict)
+            and provenance.get("candidateReopened") is True
+        )
+        and (key := finding_candidate_key(finding)) is not None
     }
     for field in ("surfaces", "explicitExclusions"):
         resolved.update(

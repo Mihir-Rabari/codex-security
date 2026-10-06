@@ -226,5 +226,38 @@ def test_legacy_owned_parent_respects_pending_only_checkpoint_order(
         assert rows[0]["reason"] == pending["reason"]
     assert len(documents[1]["findings"]) == 1
     assert documents[1]["findings"][0]["summary"] == finding["summary"]
+    from candidate_identity import unresolved_candidates
+    from report_projection import build_report_markdown
+
+    candidates = unresolved_candidates(documents[2], documents[1]["findings"])
+    assert candidates == rows
+    markdown = build_report_markdown(*documents)
+    assert (pending["reason"] in markdown) is expected
+    assert checkpoint.read_bytes() == original_checkpoint
+    assert {name: (scan_dir / name).read_bytes() for name in parent_bytes} == parent_bytes
+
+    # A later accepted finding resolves the reopened candidate without erasing history.
+    accepted_finding = json.loads(json.dumps(documents[1]["findings"][0]))
+    terminal = write_checkpoint(
+        output / "checkpoints", saved_draft(scan_id, findings=[accepted_finding], complete=True)
+    )
+    os.utime(terminal, ns=(400, 400))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": terminal.name}))
+    os.utime(head, ns=(400, 400))
+    accepted = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        [saved_discovery_worker(output, owner)],
+        [],
+        stopped=True,
+        reason="Synthetic interruption.",
+    )
+    assert accepted is not None
+    assert unresolved_candidates(accepted[2], accepted[1]["findings"]) == []
+    assert all(
+        row["provenance"].get("candidateReopened") is not True for row in accepted[1]["findings"]
+    )
     assert checkpoint.read_bytes() == original_checkpoint
     assert {name: (scan_dir / name).read_bytes() for name in parent_bytes} == parent_bytes
