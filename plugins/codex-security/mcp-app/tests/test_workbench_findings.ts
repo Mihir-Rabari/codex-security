@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -40,6 +41,58 @@ function entry(id: string): Findings.EmbeddedFinding {
     embedding: { model: "synthetic-model", vector: [1, 0] },
   };
 }
+
+test(
+  "workbench helper help exits without reading stdin and lists its input contract",
+  { timeout: 30_000 },
+  async (t) => {
+    const helper = fileURLToPath(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+        import.meta.url,
+      ),
+    );
+    for (const [command, expected] of [
+      ["database-info", ["JSON", "absolute state-directory"]],
+      [
+        "store-findings",
+        ["stateDirectory", "payload.entries", "payload.repositoryId"],
+      ],
+      ["list-stored-findings", ["--limit", "--offset", "stateDirectory"]],
+    ] as const) {
+      for (const flag of ["--help", "-h"]) {
+        const child = spawn(process.execPath, [helper, command, flag]);
+        t.after(() => {
+          child.kill();
+        });
+        let output = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk) => {
+          output += chunk;
+        });
+        // Leave stdin open: help must not wait for a JSON request.
+        assert.equal((await once(child, "close"))[0], 0);
+        assert.ok(output.includes(command));
+        for (const field of expected) assert.ok(output.includes(field));
+      }
+    }
+    const usage = spawnSync(process.execPath, [helper], { encoding: "utf8" });
+    assert.equal(usage.status, 2);
+    assert.ok(usage.stderr.includes("store-findings"));
+    assert.ok(usage.stderr.includes("list-stored-findings"));
+    const invalid = spawnSync(process.execPath, [helper, "database-info"], {
+      input: JSON.stringify("relative"),
+      encoding: "utf8",
+    });
+    assert.equal(invalid.status, 1);
+    assert.ok(
+      invalid.stderr
+        .split("\n")
+        .includes(
+          "database-info requires an absolute Unicode state-directory string.",
+        ),
+    );
+  },
+);
 
 test("import batches preserve identity, repository memberships and stable pages", (t) => {
   const database = open(t);

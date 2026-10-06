@@ -83,7 +83,7 @@ export function workbenchDatabasePath(state: string): string {
     !state.isWellFormed()
   ) {
     throw new Error(
-      "Workbench requires an absolute Unicode state-directory string.",
+      "database-info requires an absolute Unicode state-directory string.",
     );
   }
   return `${state}${sep}workbench.sqlite3`;

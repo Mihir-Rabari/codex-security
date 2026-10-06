@@ -36,6 +36,14 @@ if (commandLine[0] === "--helper") {
   }
 }
 const [command, ...args] = commandLine;
+const workbenchUsage: Record<string, string> = {
+  "database-info":
+    "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+  "store-findings":
+    "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
+  "list-stored-findings":
+    "Usage: list-stored-findings --limit N --offset N\nReads a JSON object from stdin with an absolute stateDirectory. Limit must be positive and offset non-negative.",
+};
 if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
 } else if (command === "normalize-candidates") {
@@ -61,10 +69,12 @@ if (command === "resolve-security-md") {
   process.exitCode = rankPoolCommand(command, args, posixHome);
 } else if (command === "bind-repo-scopes") {
   process.exitCode = bindRepoScopesCommand(args, posixHome);
-} else if (
-  ["database-info", "store-findings", "list-stored-findings"].includes(command)
-) {
+} else if (Object.hasOwn(workbenchUsage, command)) {
   void (async () => {
+    if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+      console.log(workbenchUsage[command]);
+      return;
+    }
     let result: unknown;
     if (command === "database-info") {
       const { values } = parseArgs({
@@ -72,9 +82,7 @@ if (command === "resolve-security-md") {
         options: { help: { type: "boolean", short: "h" } },
       });
       if (values.help) {
-        console.log(
-          "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
-        );
+        console.log(workbenchUsage[command]);
         return;
       }
       const { databaseInfo } = await import("./src/workbench/database");
@@ -105,7 +113,7 @@ if (command === "resolve-security-md") {
   });
 } else {
   console.error(
-    "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | database-info> [options]",
+    `Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
   );
   process.exitCode = 2;
 }
