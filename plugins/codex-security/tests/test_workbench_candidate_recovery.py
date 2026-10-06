@@ -516,6 +516,8 @@ def test_absorbed_source_identity_respects_pending_checkpoint_order(
     assert all(path.read_bytes() == data for path, data in source_bytes.items())
 
 
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize("terminal_field", ["surfaces", "explicitExclusions"])
 @pytest.mark.parametrize("pending_time", [200, 300, 400])
 @pytest.mark.parametrize(
     "owner", [None, "worker", "other-worker"], ids=["parent", "same-worker", "other-worker"]
@@ -531,6 +533,8 @@ def test_parent_owned_pending_respects_worker_outcome_order(
     owner: str | None,
     source_layout: str,
     alias: bool,
+    disposition: str,
+    terminal_field: str,
 ) -> None:
     module, pending, terminal, binding = generic_review_recovery
     candidate = pending["coverage"]["deferred"][0]
@@ -541,12 +545,14 @@ def test_parent_owned_pending_respects_worker_outcome_order(
         candidate["sourceWorkerId"] = owner
     write_saved_parent(tmp_path, pending, pending_time)
     terminal["coverage"].pop("resolvedDeferred")
-    terminal["coverage"]["surfaces"] = [
+    terminal["coverage"][terminal_field] = [
         {
             "id": "outcome",
             "candidateId": "review",
             "label": "API",
-            "disposition": "rejected",
+            "pattern": "app.py",
+            "reason": "The worker finished its review.",
+            "disposition": disposition,
             "receiptRefs": [],
         }
     ]
@@ -574,9 +580,99 @@ def test_parent_owned_pending_respects_worker_outcome_order(
     expected_pending = owner != "worker" or pending_time >= 300
     assert first is not None
     assert (candidate in first[2]["deferred"]) is expected_pending
+    assert len(module.unresolved_candidates(first[2], first[1])) == int(expected_pending)
     replay = replay_saved_results(
         module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
     )
     assert replay is not None
     assert (candidate in replay[2]["deferred"]) is expected_pending
+    assert len(module.unresolved_candidates(replay[2], replay[1])) == int(expected_pending)
     assert result_path.read_bytes() == original_worker
+
+
+@pytest.mark.parametrize("candidate", [False, True], ids=["generic", "candidate"])
+@pytest.mark.parametrize("owner", [None, "worker"], ids=["parent", "worker"])
+def test_owned_candidate_survives_newer_parent_generic_alias(
+    tmp_path: Path, generic_review_recovery, candidate: bool, owner: str | None
+) -> None:
+    module, pending, _, binding = generic_review_recovery
+    historical = pending["coverage"]["deferred"][0]
+    historical["reason"] = "The earlier proof gap remains."
+    if candidate:
+        historical.update(candidateId="candidate-review", candidate={"title": "Review the API."})
+    if owner is not None:
+        historical["sourceWorkerId"] = owner
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(checkpoint, ns=(200, 200))
+    original = checkpoint.read_bytes()
+    current = copy.deepcopy(pending)
+    current["complete"] = False
+    current["coverage"]["deferred"] = [{"id": "review", "reason": "A separate new task remains."}]
+    write_saved_parent(tmp_path, current, 300)
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert (
+        any(
+            {key: value for key, value in row.items() if key != "id"}
+            == {key: value for key, value in historical.items() if key != "id"}
+            for row in first[2]["deferred"]
+            if isinstance(row, dict)
+        )
+        is candidate
+    )
+    assert len(module.unresolved_candidates(first[2], first[1])) == int(candidate)
+    assert current["coverage"]["deferred"][0] in first[2]["deferred"]
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding, stopped=True)
+    assert replay is not None
+    assert (
+        any(
+            {key: value for key, value in row.items() if key != "id"}
+            == {key: value for key, value in historical.items() if key != "id"}
+            for row in replay[2]["deferred"]
+            if isinstance(row, dict)
+        )
+        is candidate
+    )
+    assert len(module.unresolved_candidates(replay[2], replay[1])) == int(candidate)
+    assert checkpoint.read_bytes() == original
+    assert checkpoint.stat().st_mtime_ns == 200
+
+
+@pytest.mark.parametrize("pending_time", [100, 200, 300])
+def test_new_worker_pending_keeps_parent_outcome_chronology(
+    tmp_path: Path, generic_review_recovery, pending_time: int
+) -> None:
+    module, pending, terminal, binding = generic_review_recovery
+    pending["coverage"]["deferred"][0].update(candidateId="review", paths=["app.py"])
+    terminal["coverage"].pop("resolvedDeferred")
+    terminal["coverage"]["surfaces"] = [
+        {
+            "id": "outcome",
+            "candidateId": "review",
+            "sourceWorkerId": "worker",
+            "label": "API",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    write_saved_parent(tmp_path, terminal, 200)
+    output = tmp_path / "worker"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_text(json.dumps(pending))
+    os.utime(result, ns=(pending_time, pending_time))
+    original = result.read_bytes()
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert len(module.unresolved_candidates(first[2], first[1])) == int(pending_time >= 200)
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert len(module.unresolved_candidates(replay[2], replay[1])) == int(pending_time >= 200)
+    assert result.read_bytes() == original

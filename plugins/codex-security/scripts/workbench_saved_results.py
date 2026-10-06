@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from candidate_identity import (
     _deferred_candidate_id,
+    _deferred_owner,
     candidate_key,
     candidate_owner,
     coverage_candidate_key,
@@ -52,7 +53,13 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench_budget_candidates import preserve_budget_candidates as preserve_budget_candidates
+from workbench_budget_candidates import (
+    _diff_candidate_phase_snapshot,
+    _diff_candidate_reason,
+)
+from workbench_budget_candidates import (
+    preserve_budget_candidates as preserve_budget_candidates,
+)
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -729,12 +736,6 @@ def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) ->
     return result
 
 
-def _diff_candidate_phase_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
-    return {
-        phase: candidate[phase] for phase in ("validation", "attack_path") if phase in candidate
-    }
-
-
 def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
     validation = candidate.get("validation") or {}
@@ -778,28 +779,6 @@ def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
         return False
     return decision is not None and all(
         item.get(field) == decision[field] for field in ("label", "disposition", "notes")
-    )
-
-
-def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
-    validation = candidate.get("validation")
-    validation = validation if isinstance(validation, dict) else {}
-    attack_path = candidate.get("attack_path")
-    attack_path = attack_path if isinstance(attack_path, dict) else {}
-    if (
-        validation.get("disposition") == "reportable"
-        and attack_path.get("decision") == "reportable"
-    ):
-        return f"A reportable candidate has no saved finding: {candidate.get('summary')}"
-    return next(
-        value
-        for value in (
-            attack_path.get("proof_gap"),
-            validation.get("counterevidence_or_proof_gap"),
-            validation.get("remaining_uncertainty"),
-            f"Candidate review is incomplete: {candidate.get('summary')}",
-        )
-        if isinstance(value, str) and value.strip()
     )
 
 
@@ -1939,9 +1918,8 @@ def merge_saved_results(
         for item in deferred_rows[relative]:
             if not isinstance(item, dict):
                 continue
-            item_owner = owner
+            item_owner = _deferred_owner(item, owner)
             if isinstance(item.get("candidateId"), str) or "candidate" in item or "finding" in item:
-                item_owner = candidate_owner(owner, item.get("sourceWorkerId"))
                 candidate_ids.update(
                     (item_owner, identity)
                     for identity in (item.get("id"), item.get("candidateId"))
@@ -2045,6 +2023,7 @@ def merge_saved_results(
         and (owner, identity) in candidate_ids
     )
     ordered_outcomes = {}
+    inactive_outcomes = set()
 
     outcomes: list[tuple[str, str | None, str, str]] = []
     for relative, draft, owner in current_drafts:
@@ -2087,6 +2066,7 @@ def merge_saved_results(
             )
             for (saved_owner, _), (modified, row, saved_relative) in active_deferred.items()
         ):
+            inactive_outcomes.add((relative, key))
             continue
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
@@ -2141,6 +2121,16 @@ def merge_saved_results(
                                 resolved.setdefault(worker_candidate[:2], "reported")
     pending_resolved = resolved.keys() | diff_resolved
 
+    for field in ("surfaces", "explicitExclusions"):
+        if isinstance(coverage.get(field), list):
+            coverage[field] = [
+                item
+                for item in coverage[field]
+                if not isinstance(item, dict)
+                or item.get("disposition") not in {"rejected", "not_applicable"}
+                or ("parent", coverage_candidate_key(item)) not in inactive_outcomes
+            ]
+
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -2160,7 +2150,7 @@ def merge_saved_results(
             for row in deferred_rows[relative]
             if isinstance(row, dict)
             and isinstance(identity := row.get("id"), str)
-            and (key := (owner, identity)) not in candidate_ids
+            and (key := (_deferred_owner(row, owner), identity)) not in candidate_ids
             and key not in ambiguous_deferred
             and (updated := accepted_deferred_orders.get(key)) is not None
             and updated > source_order[relative]
@@ -2524,6 +2514,13 @@ def merge_saved_results(
                 ):
                     continue
                 if id(item) in replaced_rows.get(field, ()):
+                    continue
+                if (
+                    field in {"surfaces", "explicitExclusions"}
+                    and isinstance(item, dict)
+                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and (relative, coverage_candidate_key(item, worker_id)) in inactive_outcomes
+                ):
                     continue
                 if (
                     field == "deferred"

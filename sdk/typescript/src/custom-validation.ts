@@ -497,6 +497,8 @@ export async function runCustomValidation(options: {
       for (const surface of coverage.surfaces) {
         if (
           surface.disposition !== "needs_follow_up" ||
+          (surface["sourceWorkerId"] != null &&
+            typeof surface["sourceWorkerId"] !== "string") ||
           sharedSurfaceIds.has(surface.id)
         )
           continue;

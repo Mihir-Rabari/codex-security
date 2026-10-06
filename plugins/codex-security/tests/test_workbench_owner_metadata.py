@@ -26,11 +26,20 @@ def saved_parent(tmp_path: Path, scan_id: str) -> tuple[Path, dict, dict, dict]:
     )
 
 
-@pytest.mark.parametrize("source", ["parent", "checkpoint", "worker"])
+@pytest.mark.parametrize(
+    "source, observation",
+    [
+        ("parent", "newer"),
+        ("checkpoint", "newer"),
+        ("worker", "older"),
+        ("worker", "tied"),
+        ("worker", "newer"),
+    ],
+)
 @pytest.mark.parametrize("owner_field", ["sourceWorkerId", "workerId"])
 @pytest.mark.parametrize("metadata", [["worker-one", "worker-two"], {"workers": ["worker-one"]}])
 def test_saved_findings_retain_nonstring_ownership_metadata(
-    tmp_path: Path, workbench_api, source: str, owner_field: str, metadata: object
+    tmp_path: Path, workbench_api, source: str, observation: str, owner_field: str, metadata: object
 ) -> None:
     workbench_saved_results = workbench_api["saved_results"]
 
@@ -69,6 +78,16 @@ def test_saved_findings_retain_nonstring_ownership_metadata(
                 "attempt": 1,
             }
         )
+    if source == "worker":
+        parent_time = 1_700_000_000_000_000_000
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            os.utime(scan_dir / name, ns=(parent_time, parent_time))
+        worker_time = (
+            parent_time + {"older": -1, "tied": 0, "newer": 1}[observation] * 1_000_000_000
+        )
+        os.utime(result_path, ns=(worker_time, worker_time))
+        assert result_path.stat().st_mtime_ns == worker_time
+        assert (scan_dir / "coverage.json").stat().st_mtime_ns == parent_time
     binding = {
         "status": "failed",
         "allowedTargetKinds": ["directory_snapshot"],
@@ -95,11 +114,13 @@ def test_saved_findings_retain_nonstring_ownership_metadata(
         assert retained[0]["provenance"][owner_field] == metadata
     assert retained[0]["summary"] == original["summary"]
     candidates = [row for row in result[2]["deferred"] if row.get("candidateId")]
-    assert len(candidates) == (1 if source == "checkpoint" else 0)
+    assert len(candidates) == (
+        1 if source == "checkpoint" or (source == "worker" and observation != "newer") else 0
+    )
     if candidates:
         assert candidates[0]["candidateId"] == pending["candidateId"]
         assert candidates[0]["reason"] == pending["reason"]
-        assert candidates[0].get("sourceWorkerId") is None
+        assert candidates[0].get("sourceWorkerId") == ("worker-one" if source == "worker" else None)
 
 
 @pytest.mark.parametrize("field", ["surfaces", "explicitExclusions", "deferred"])

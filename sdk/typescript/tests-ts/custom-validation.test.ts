@@ -1814,3 +1814,72 @@ for (const outcomes of [
     });
   }
 }
+
+for (const owner of [
+  undefined,
+  "other-worker",
+  { worker: "historical-worker" },
+  ["historical-worker"],
+]) {
+  for (const mapped of [false, true]) {
+    for (const disposition of [
+      "reportable",
+      "deferred",
+      "suppressed",
+      "not_applicable",
+    ] as const) {
+      test(`historical follow-up owner remains independent: ${JSON.stringify(owner)}/${mapped}/${disposition}`, async () => {
+        const f = await fixture();
+        const finding = f.findings.findings[0]!;
+        finding.provenance["candidateId"] = "validated-candidate";
+        if (mapped)
+          finding.extensions!["customValidationSurfaceIds"] = [
+            "surface-0",
+            "historical-follow-up",
+          ];
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        const historical = {
+          id: "historical-follow-up",
+          candidateId: "validated-candidate",
+          ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+          label: "Historical proof gap",
+          disposition: "needs_follow_up" as const,
+          notes:
+            "This earlier task has no consumed deferred row or current mapping.",
+          receiptRefs: [],
+        };
+        coverage.surfaces.push(historical);
+        coverage.completeness = "partial";
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        const independent = !mapped && owner !== undefined;
+        const retained = saved.coverage.surfaces.find(
+          (row) => row.id === historical.id,
+        )!;
+        if (independent) expect(retained).toEqual(historical);
+        else
+          expect(retained.disposition).toBe(
+            disposition === "reportable"
+              ? "reported"
+              : disposition === "suppressed"
+                ? "rejected"
+                : disposition === "deferred"
+                  ? "needs_follow_up"
+                  : "not_applicable",
+          );
+        expect(retained["sourceWorkerId"]).toEqual(owner);
+        if (disposition === "deferred")
+          expect(
+            saved.coverage.deferred[0]!.surfaceIds!.includes(historical.id),
+          ).toBe(!independent);
+      });
+    }
+  }
+}

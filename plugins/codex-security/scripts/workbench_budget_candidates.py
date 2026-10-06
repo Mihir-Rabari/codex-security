@@ -246,3 +246,31 @@ def preserve_budget_candidates(
                 **_budget_candidate_deferred(candidate, [surface["id"] for surface in surfaces]),
             }
         )
+
+
+def _diff_candidate_phase_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        phase: candidate[phase] for phase in ("validation", "attack_path") if phase in candidate
+    }
+
+
+def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
+    validation = candidate.get("validation")
+    validation = validation if isinstance(validation, dict) else {}
+    attack_path = candidate.get("attack_path")
+    attack_path = attack_path if isinstance(attack_path, dict) else {}
+    if (
+        validation.get("disposition") == "reportable"
+        and attack_path.get("decision") == "reportable"
+    ):
+        return f"A reportable candidate has no saved finding: {candidate.get('summary')}"
+    return next(
+        value
+        for value in (
+            attack_path.get("proof_gap"),
+            validation.get("counterevidence_or_proof_gap"),
+            validation.get("remaining_uncertainty"),
+            f"Candidate review is incomplete: {candidate.get('summary')}",
+        )
+        if isinstance(value, str) and value.strip()
+    )

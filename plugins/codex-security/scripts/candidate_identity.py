@@ -61,6 +61,14 @@ def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> Ca
     return candidate_key(item.get("candidateId"), source_owner)
 
 
+def _deferred_owner(row: dict[str, Any], owner: str | None) -> str | None:
+    return (
+        candidate_owner(owner, row.get("sourceWorkerId"))
+        if any(key in row for key in ("candidateId", "candidate", "finding"))
+        else owner
+    )
+
+
 def _deferred_candidate_id(
     row: dict[str, Any],
     owner: str | None,
