@@ -17,12 +17,12 @@ type WorkerExecutorConstructor = new (settings: {
     subagents: number;
     signal: AbortSignal;
     onThreadStarted?: () => void;
-  }): Promise<{ finalResponse: string; threadId?: string }>;
+  }): Promise<{ threadId?: string }>;
 };
 
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
-  preflight = async () => {},
+  preflight = async () => ({ useOpenAiApiKey: false }),
 ): Promise<WorkerExecutorConstructor> {
   const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
@@ -54,8 +54,9 @@ async function bundledWorkerExecutor(
     "workerPermissionProfile",
     "workerPermissionProfileConfigOverrides",
     "snapshotWorkerEnvironment",
+    "workerRuntimeSettings",
+    "environmentVariable",
     "preflightDeepScanWorkerPermissionProfile",
-    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "deepScanPermissionProfileFallbackError",
     "resolveCodexPath",
     "executablePathForSpawn",
@@ -69,8 +70,9 @@ async function bundledWorkerExecutor(
     () => ({}),
     () => [],
     async () => ({}),
+    async () => ({}),
+    () => undefined,
     preflight,
-    "codex_security_deep_scan_worker",
     () => undefined,
     () => "/fixture/codex",
     (path: string) => path,
@@ -160,7 +162,6 @@ test("drains completed bundled Deep Scan workers during coordinator cancellation
     expect(workerSignal?.aborted).toBe(false);
     releaseDrain.resolve();
     expect(await outcome).toEqual({
-      finalResponse: "worker completed",
       threadId: "fixture-worker-thread",
     });
     expect(iteratorClosed).toBe(true);

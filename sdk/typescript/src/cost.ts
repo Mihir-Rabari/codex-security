@@ -1,5 +1,6 @@
 import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -16,7 +17,7 @@ import {
   sessionStartedAt,
 } from "./scan-sessions.js";
 import {
-  scanProgressUpdatesFromEvent,
+  scanProgressUpdatesFromText,
   type ScanProgress,
 } from "./worker-progress.js";
 
@@ -148,7 +149,7 @@ export class ScanCostTracker {
     unidentifiedSessions: new Set(),
     accountedSessions: new Set(),
   };
-  #lastCost: number | null = null;
+  #lastCost: string | null = null;
   #rootOnlyReadError = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
@@ -447,25 +448,23 @@ export class ScanCostTracker {
         included.add(session.threadId);
       }
     }
-    let changed = true;
-    while (changed) {
-      changed = false;
+    let previousSize: number;
+    do {
+      previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
+          included.has(session.parentThreadId)
         ) {
           if (conflictingParents.has(session.threadId)) {
             ambiguousWorkers.add(session.threadId);
             continue;
           }
           included.add(session.threadId);
-          changed = true;
         }
       }
-    }
+    } while (included.size > previousSize);
     const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
       (threadId) => !included.has(threadId),
     );
@@ -668,10 +667,9 @@ export class ScanCostTracker {
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        [...this.#workerProgress.values()].reduce(
-          (total, reviewed) => total + reviewed,
-          0,
-        ),
+        this.#workerProgress
+          .values()
+          .reduce((total, reviewed) => total + reviewed, 0),
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
@@ -689,8 +687,10 @@ export class ScanCostTracker {
   }
 
   #reportCost(cost: ScanCost | null): void {
-    if (cost === null || cost.estimatedUsd === this.#lastCost) return;
-    this.#lastCost = cost.estimatedUsd;
+    if (cost === null) return;
+    const signature = JSON.stringify(cost);
+    if (signature === this.#lastCost) return;
+    this.#lastCost = signature;
     this.#options.onCost?.(cost, this.#snapshot.usage);
   }
 }
@@ -807,18 +807,6 @@ function readSessionChunk(
   }
 }
 
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
-}
-
 function readSessionEvent(
   line: string,
   session: SessionUsage,
@@ -869,6 +857,7 @@ function readSessionEvent(
       }
     }
     if (payload["type"] === "task_started") {
+      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
       const threadOrder = uuid7Order(session.threadId);
       const turnOrder = uuid7Order(payload["turn_id"]);
       const owned =
@@ -1001,12 +990,7 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(
-        ...scanProgressUpdatesFromEvent({
-          type: "item.completed",
-          item: { type: "agent_message", text: payload["message"] },
-        }),
-      );
+      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -1084,6 +1068,18 @@ function readSessionEvent(
   session.taskCompleted = false;
 }
 
+function uuid7Order(value: unknown): bigint | null {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  return BigInt(`0x${value.replaceAll("-", "")}`);
+}
+
 function readSessionReasoning(
   event: Readonly<Record<string, unknown>>,
   payload: Readonly<Record<string, unknown>>,
@@ -1158,13 +1154,7 @@ function sessionProgressUpdates(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     const content = payload["content"];
     if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromEvent({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: sessionContentText(content, false),
-      },
-    });
+    return scanProgressUpdatesFromText(sessionContentText(content, false));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -1183,10 +1173,7 @@ function sessionProgressUpdates(
   if (payload["status"] === "failed" || output === null) {
     return [];
   }
-  return scanProgressUpdatesFromEvent({
-    type: "item.completed",
-    item: { type: "command_execution", aggregated_output: output },
-  });
+  return scanProgressUpdatesFromText(output);
 }
 
 function sessionContentText(
@@ -1219,6 +1206,15 @@ function higherCostUsage(
     const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
     return previousTotal > nextTotal ? previous : next;
   }
+  // SDK receipts insert zero for omitted cache writes; retain equally counted rollout evidence.
+  if (
+    previous !== null &&
+    next.cache_write_input_tokens === 0 &&
+    previous.input_tokens === next.input_tokens &&
+    previous.output_tokens === next.output_tokens &&
+    previousCost?.estimatedUsd === nextCost?.estimatedUsd
+  )
+    return previous;
   return previousCost !== null &&
     nextCost !== null &&
     previousCost.estimatedUsd > nextCost.estimatedUsd
@@ -1236,13 +1232,34 @@ function accumulateTokenUsage(
     BigInt(previousRaw?.output_tokens ?? 0);
   const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
   const reset = nextTotal < previousTotal;
+  // A cumulative receipt can fill missing cache writes for this epoch, while
+  // unknown usage from earlier reset epochs remains unknown.
+  const cacheWritesUnreported =
+    next.cache_write_input_tokens_reported === false ||
+    (accumulated?.cache_write_input_tokens_reported === false &&
+      (reset ||
+        next.input_tokens < (previousRaw?.input_tokens ?? 0) ||
+        next.output_tokens < (previousRaw?.output_tokens ?? 0) ||
+        accumulated.total_tokens !== previousRaw?.total_tokens)) ||
+    (accumulated === null &&
+      previousRaw?.cache_write_input_tokens_reported === false);
   if (
     next.input_tokens === (previousRaw?.input_tokens ?? 0) &&
     next.output_tokens === (previousRaw?.output_tokens ?? 0)
   ) {
-    return accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 });
+    const { cache_write_input_tokens_reported: _reported, ...usage } =
+      accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 })!;
+    return tokenUsage({
+      ...usage,
+      ...(cacheWritesUnreported
+        ? { cache_write_input_tokens_reported: false }
+        : {}),
+    });
   }
-  type TokenField = Exclude<keyof ScanTokenUsage, "total_tokens">;
+  type TokenField = Exclude<
+    keyof ScanTokenUsage,
+    "total_tokens" | "cache_write_input_tokens_reported"
+  >;
   const fieldDelta = (field: TokenField): bigint => {
     const previous = BigInt(previousRaw?.[field] ?? 0);
     const value = BigInt(next[field]);
@@ -1279,7 +1296,12 @@ function accumulateTokenUsage(
   };
   return Object.values(usage).some((value) => value === null)
     ? null
-    : tokenUsage(usage);
+    : tokenUsage({
+        ...usage,
+        ...(cacheWritesUnreported
+          ? { cache_write_input_tokens_reported: false }
+          : {}),
+      });
 }
 function addTokenUsage(
   previous: ScanTokenUsage | null,
@@ -1292,6 +1314,10 @@ function addTokenUsage(
       previous.cached_input_tokens + next.cached_input_tokens,
     cache_write_input_tokens:
       previous.cache_write_input_tokens + next.cache_write_input_tokens,
+    ...(previous.cache_write_input_tokens_reported === false ||
+    next.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
@@ -1309,14 +1335,14 @@ function subtractTokenUsage(
       usage.cached_input_tokens - inherited.cached_input_tokens,
     cache_write_input_tokens:
       usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: usage.output_tokens - inherited.output_tokens,
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {
