@@ -509,6 +509,8 @@ export class ScanCostTracker {
       accountedSessions: new Set(),
     };
     const accountedThreads = new Set<string | null>();
+    const threadUsages = new Map<string, ScanTokenUsage | null>();
+    const completedThreads = new Set<string>();
     for (const [path, session] of this.#sessions) {
       if (
         this.#options.maxCostUsd !== undefined &&
@@ -537,25 +539,29 @@ export class ScanCostTracker {
           session.accounting?.usage ?? null,
           this.#completedThreadUsage.get(session.threadId) ?? null,
         );
-        if (session.threadId === this.#threadId) {
-          observed.rootCompleted =
-            session.taskCompleted ||
-            this.#completedThreadUsage.has(session.threadId);
-          if (usage !== null) {
-            observed.root = addTokenUsage(observed.root, usage);
-          }
-        } else {
-          if (usage === null) {
-            observed.unverified = true;
-          } else {
-            observed.workers = addTokenUsage(observed.workers, usage);
-          }
-          if (
-            !session.taskCompleted &&
-            !this.#completedThreadUsage.has(session.threadId)
-          )
-            observed.unfinishedWorkers = true;
-        }
+        threadUsages.set(
+          session.threadId,
+          higherCostUsage(
+            this.#options.model,
+            threadUsages.get(session.threadId) ?? null,
+            usage,
+          ),
+        );
+        if (
+          session.taskCompleted ||
+          this.#completedThreadUsage.has(session.threadId)
+        )
+          completedThreads.add(session.threadId);
+      }
+    }
+    for (const [threadId, usage] of threadUsages) {
+      if (threadId === rootThreadId) {
+        observed.root = usage;
+        observed.rootCompleted = completedThreads.has(threadId);
+      } else {
+        if (usage === null) observed.unverified = true;
+        else observed.workers = addTokenUsage(observed.workers, usage);
+        if (!completedThreads.has(threadId)) observed.unfinishedWorkers = true;
       }
     }
     for (const [threadId, usage] of this.#completedThreadUsage) {

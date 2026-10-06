@@ -108,6 +108,7 @@ try {
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
     await testCompletedWorkerFlushesBeforeSettling();
+    await testCancelCompletedWorkerDrain();
     await testAbortPropagation();
     await testUnstructuredConfigurationFailureRemainsRetryable();
     await testUnstructuredThreadStartFailureRemainsRetryable();
@@ -1129,6 +1130,7 @@ async function testWorkerRuntimeSettings() {
     "GIT_CONFIG_GLOBAL",
     "CODEX_CLI_PATH",
     "CODEX_HOME",
+    "CODEX_SQLITE_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "OPENAI_API_KEY",
@@ -1224,6 +1226,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
+      const sqliteHomes = settings.map((_, index) =>
+        path.join(fixture.root, `scan-state-${index}`),
+      );
       const providerKeys = settings.map((_, index) =>
         index < 2 ? `synthetic-gateway-key-${index}` : undefined,
       );
@@ -1247,6 +1252,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_SQLITE_HOME = sqliteHomes[index];
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1301,6 +1307,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               workerLaunch.environment!.CODEX_HOME,
               await realpath(codexHome),
+            );
+            assert.equal(
+              workerLaunch.environment!.CODEX_SQLITE_HOME,
+              sqliteHomes[index],
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -1917,6 +1927,67 @@ async function testAbortPropagation() {
   });
 }
 
+async function testCancelCompletedWorkerDrain() {
+  const fixture = await fakeCodexFixture();
+  const previousPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = fixture.executablePath;
+  const controller = new AbortController();
+  let childPid: number | undefined;
+  let execution: Promise<{ threadId?: string }> | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const promptPath = path.join(fixture.root, "prompt.md"),
+      workingDirectory = path.join(fixture.root, "artifacts");
+    await mkdir(workingDirectory);
+    await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
+    execution = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox,
+    }).run({
+      kind: "discovery",
+      promptPath,
+      workingDirectory,
+      subagents: 0,
+      signal: controller.signal,
+    });
+    while (true) {
+      try {
+        if (
+          (await readFile(fixture.completionMarkerPath, "utf8")) ===
+          "completed\n"
+        )
+          break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    childPid = JSON.parse(await readFile(fixture.markerPath, "utf8")).pid;
+    controller.abort("coordinator canceled completed worker drain");
+    await assert.rejects(
+      Promise.race([
+        execution,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(new Error("completed worker drain ignored cancellation")),
+            1000,
+          );
+        }),
+      ]),
+      /abort|SIGTERM/i,
+    );
+  } finally {
+    clearTimeout(timeout);
+    controller.abort("fixture cleanup");
+    if (childPid)
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {}
+    await execution?.catch(() => {});
+    restoreEnv("CODEX_CLI_PATH", previousPath);
+  }
+}
+
 async function testCompletedWorkerFlushesBeforeSettling() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
@@ -2327,6 +2398,7 @@ if (stdin.includes('ARTIFACT_TOOL_')) {
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 if (stdin.includes('COMPLETE_THEN_FLUSH')) { await new Promise((resolve) => setTimeout(resolve, 100)); writeFileSync(completionMarkerPath, 'flushed\\n'); }
+if (stdin.includes('COMPLETE_THEN_HANG')) { writeFileSync(completionMarkerPath, 'completed\\n'); setInterval(() => {}, 1000); }
 }
 `,
   );

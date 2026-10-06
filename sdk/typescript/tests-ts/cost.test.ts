@@ -5406,6 +5406,50 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["root", "worker"])(
+    "counts copied %s rollouts once per native thread",
+    async (copied) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const workerUsage = { input_tokens: 50, output_tokens: 5 };
+      const root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        workerUsage,
+        "scan-thread",
+        undefined,
+        undefined,
+        true,
+      );
+      await fsPromises.copyFile(
+        copied === "root" ? root : worker,
+        join(home, "sessions", "2026", "07", "26", "restored-copy.jsonl"),
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+      });
+      tracker.start("scan-thread");
+      const snapshot = await tracker.stop(rootUsage);
+      expect(snapshot.cost).toMatchObject({
+        inputTokens: 150,
+        outputTokens: 15,
+        estimatedUsd: 0.0009,
+      });
+    },
+  );
+
   test("does not let an unrelated partial session hide incomplete owned usage", async () => {
     const home = await codexHome();
     const rootUsage = { input_tokens: 100, output_tokens: 10 };

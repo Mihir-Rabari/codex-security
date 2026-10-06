@@ -7380,7 +7380,7 @@ test.each([
         resolvePluginPython: async () => "/managed/python",
         resolveScanSessionPaths: async (
           _options: unknown,
-          scanId: string,
+          scanId: string | null,
           threadId: string,
         ) => {
           ownershipChecks += 1;
@@ -7431,6 +7431,104 @@ test.each([
       expect(commands).toContain("complete-scan");
     }
     await client.close();
+  },
+);
+
+test.each(["absolute", "relative", "default"])(
+  "verifies budget ownership at the effective %s SQLite location",
+  async (location) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository"),
+      codexHome = join(root, "codex-home"),
+      scanDir = join(root, "scan"),
+      stateDirectory = join(root, "state");
+    const sqliteHome =
+      location === "default"
+        ? codexHome
+        : location === "relative"
+          ? join(scanDir, "selected-state")
+          : join(root, "selected-state");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(stateDirectory),
+    ]);
+    if (sqliteHome !== codexHome) await mkdir(sqliteHome, { recursive: true });
+    const python = await runtime.resolvePluginPython({
+      environment: process.env,
+    });
+    let ownershipChecks = 0;
+    const config =
+      location === "default"
+        ? {}
+        : {
+            codexOverrides: {
+              sqlite_home:
+                location === "relative" ? "selected-state" : sqliteHome,
+            },
+          };
+    const client = new TestClient(config, {
+      environment: {
+        PATH: process.env["PATH"]!,
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        ...(location === "default"
+          ? {}
+          : { CODEX_SQLITE_HOME: join(root, "ambient-unselected-state") }),
+      },
+      prepareRuntime: async () => ({
+        ...preparedRuntime(codexHome),
+        environment: {
+          PATH: process.env["PATH"]!,
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          ...(location === "default"
+            ? {}
+            : { CODEX_SQLITE_HOME: join(root, "ambient-unselected-state") }),
+        },
+      }),
+      resolvePluginPython: async () => python,
+      prepareOutputDir: async () => scanDir,
+      repositoryRevision: async () => "deadbeef",
+      resolveScanSessionPaths: async (options, scanId, threadId) => {
+        ownershipChecks += 1;
+        return await runtime.resolveScanSessionPaths(options, scanId, threadId);
+      },
+      createCodex: () => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed() {
+            await copyCompletedScan(root);
+            const rollout = await writeUsageSession(codexHome, "thread-1", {
+              input_tokens: 100,
+              output_tokens: 10,
+            });
+            execFileSync(python, [
+              "-I",
+              "-B",
+              "-c",
+              [
+                "import sqlite3,sys",
+                "w=sqlite3.connect(sys.argv[1]); w.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, mode TEXT NOT NULL)'); w.execute('CREATE TABLE workspaces (id TEXT PRIMARY KEY,thread_id TEXT)'); w.execute(\"INSERT INTO scans VALUES ('scan_example_001','fixture-workspace','standard')\"); w.execute(\"INSERT INTO workspaces VALUES ('fixture-workspace','thread-1')\"); w.commit(); w.close()",
+                "c=sqlite3.connect(sys.argv[2]); c.execute('CREATE TABLE threads (id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)'); c.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)'); c.execute('INSERT INTO threads VALUES (?,?)',('thread-1',sys.argv[3])); c.commit(); c.close()",
+              ].join("\n"),
+              join(stateDirectory, "workbench.sqlite3"),
+              join(sqliteHome, "state_7.sqlite"),
+              rollout,
+            ]);
+            return { events: completedEvents() };
+          },
+        }),
+      }),
+    });
+    try {
+      const result = await client.run(repository, { maxCostUsd: 1 });
+      expect(result).toMatchObject({ threadId: "thread-1" });
+      expect(ownershipChecks).toBe(1);
+    } finally {
+      await client.close();
+    }
   },
 );
 

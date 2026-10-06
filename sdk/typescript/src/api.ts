@@ -1057,6 +1057,35 @@ export class CodexSecurity {
           repository: target.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
+          resolveOwnedSessionPaths:
+            options.maxCostUsd === undefined
+              ? undefined
+              : async (threadId) =>
+                  await (
+                    this.#dependencies.resolveScanSessionPaths ??
+                    resolveScanSessionPaths
+                  )(
+                    {
+                      python: session.python,
+                      pluginRoot: runtime.plugin.pluginRoot,
+                      environment: {
+                        ...session.scanEnvironment,
+                        CODEX_HOME: runtime.codexHome,
+                        ...(typeof session.sessionConfig["sqlite_home"] ===
+                        "string"
+                          ? {
+                              CODEX_SQLITE_HOME: resolve(
+                                outputDir,
+                                session.sessionConfig["sqlite_home"],
+                              ),
+                            }
+                          : {}),
+                      },
+                      signal,
+                    },
+                    null,
+                    threadId,
+                  ),
           onCost:
             options.onCost === undefined && options.maxCostUsd === undefined
               ? undefined
@@ -1614,6 +1643,14 @@ export class CodexSecurity {
         environment: {
           ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
+          ...(typeof session.sessionConfig["sqlite_home"] === "string"
+            ? {
+                CODEX_SQLITE_HOME: resolve(
+                  scanDir,
+                  session.sessionConfig["sqlite_home"],
+                ),
+              }
+            : {}),
         },
         signal,
         failureMessage: "Could not save the Codex Security scan",

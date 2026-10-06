@@ -55,6 +55,7 @@ async function setup(
     secureOutput?: (path: string) => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
+    resolveOwnedSessions?: typeof runtime.resolveScanSessionPaths;
   } = {},
 ) {
   const f = await fixture();
@@ -109,6 +110,8 @@ async function setup(
       },
       runWorkbench: rejecting("Policy generation must not register a scan."),
       createCodex,
+      resolveScanSessionPaths:
+        options.resolveOwnedSessions ?? (async () => new Set<string>()),
     },
     { surface: options.surface ?? "sdk" },
   );
@@ -1551,6 +1554,64 @@ describe("CodexSecurity policy API", () => {
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
   });
+
+  test.each([false, true])(
+    "policy accounting ignores unrelated empty sessions with budget=%s",
+    async (limited) => {
+      const f = await setup({
+        resolveOwnedSessions: runtime.resolveScanSessionPaths,
+        stream: async function* (stage) {
+          const id = `policy-${stage}`;
+          const directory = join(f.runtime.codexHome, "sessions");
+          await mkdir(directory, { recursive: true });
+          const rollout = join(directory, `${id}.jsonl`);
+          await writeFile(
+            rollout,
+            [
+              { type: "session_meta", payload: { id } },
+              {
+                type: "event_msg",
+                payload: {
+                  type: "token_count",
+                  info: {
+                    total_token_usage: { input_tokens: 100, output_tokens: 10 },
+                  },
+                },
+              },
+              { type: "event_msg", payload: { type: "task_complete" } },
+            ]
+              .map((value) => JSON.stringify(value))
+              .join("\n") + "\n",
+          );
+          execFileSync(PYTHON, [
+            "-I",
+            "-B",
+            "-c",
+            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)'); c.execute('CREATE TABLE IF NOT EXISTS thread_spawn_edges (parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)'); c.execute('INSERT INTO threads VALUES (?,?)',(sys.argv[2],sys.argv[3])); c.commit(); c.close()",
+            join(f.runtime.codexHome, "state_7.sqlite"),
+            id,
+            rollout,
+          ]);
+          yield* events(stage);
+        },
+      });
+      await mkdir(join(f.runtime.codexHome, "sessions"), { recursive: true });
+      await writeFile(
+        join(f.runtime.codexHome, "sessions", "unrelated-empty.jsonl"),
+        "",
+      );
+      try {
+        const result = await f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+          ...(limited ? { maxCostUsd: 1 } : {}),
+        });
+        expect(result.content).toBe(POLICY);
+        expect(result.cost?.inputTokens).toBe(300);
+      } finally {
+        await f.security.close();
+      }
+    },
+  );
 
   test("optional observer failures do not stop policy generation", async () => {
     const f = await setup();
