@@ -290,7 +290,9 @@ function matchRetention(supplied, retained) {
       matches.flatMap((match) =>
         match.advisory_ids.map((id) =>
           JSON.stringify([
-            match.component.source.replace(/\\/g, "/"),
+            process.platform === "win32"
+              ? match.component.source.replace(/\\/g, "/")
+              : match.component.source,
             match.component.ecosystem,
             match.component.name,
             match.component.version,

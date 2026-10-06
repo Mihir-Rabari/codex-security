@@ -1215,7 +1215,6 @@ export async function runOsvScan(
       const emptyInput =
         output.exitCode === 128 && output.stderr.includes(emptyInputReceipt);
       if (emptyInput) {
-        reconciledSources.add(input.path);
         emptyOutputPaths.add(invocation.rawOutputPath);
         input.reason = "OSV extracted no packages from this lockfile.";
       }
@@ -1266,6 +1265,8 @@ export async function runOsvScan(
             result.diagnostics.push(`${input.path}: ${input.reason}`);
           }
         }
+      } else if (emptyInput) {
+        consumeOutput({ results: [] }, output.stderr, input);
       } else if (output.exitCode !== 128)
         result.diagnostics.push("OSV returned no JSON output.");
       pending = null;

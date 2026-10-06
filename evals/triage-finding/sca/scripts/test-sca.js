@@ -341,7 +341,7 @@ test("scanner retention tracks source, resolved version and every original alias
         },
       ],
     ).rate,
-    1,
+    process.platform === "win32" ? 1 : 0,
   );
 });
 
@@ -581,3 +581,36 @@ test("does not stage an unrestricted provider when MCP discovery fails", () => {
 });
 
 module.exports = { resultFor };
+
+test(
+  "scanner retention preserves distinct literal POSIX source paths",
+  { skip: process.platform === "win32" },
+  () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-retention-"));
+    try {
+      const sources = ["a\\b/package-lock.json", "a/b/package-lock.json"];
+      for (const source of sources) {
+        fs.mkdirSync(path.dirname(path.join(root, source)), {
+          recursive: true,
+        });
+        fs.writeFileSync(path.join(root, source), "{}");
+      }
+      assert.notEqual(
+        fs.realpathSync(path.join(root, sources[0])),
+        fs.realpathSync(path.join(root, sources[1])),
+      );
+      const first = CORPUS.cases[0].input;
+      const matches = sources.map((source) => ({
+        ...first,
+        component: { ...first.component, source },
+      }));
+      const result = matchRetention(matches, [matches[0]]);
+      assert.equal(result.rate, 0.5);
+      assert.equal(result.missing.length, first.advisory_ids.length);
+      assert.equal(result.missing[0][0], sources[1]);
+      assert.equal(matchRetention(matches, matches).rate, 1);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
