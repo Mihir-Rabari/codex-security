@@ -472,7 +472,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             continue
         root = git_output(submodule, "rev-parse", "--show-toplevel")
         try:
-            is_initialized = root is not None and Path(root).resolve() == submodule.resolve()
+            is_initialized = root is not None and Path(root).samefile(submodule)
         except OSError:
             is_initialized = False
         if not is_initialized:
