@@ -474,6 +474,7 @@ def boundaries(repository: Path) -> dict:
         )
         linked = True
     except OSError:
+        # Some platforms or environments do not support these optional symlinks.
         pass
     revision = commit(repository)
     selected = scan(repository, revision, ["src"])

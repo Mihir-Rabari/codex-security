@@ -74,6 +74,7 @@ def finding_source_excerpt(
                     if object_id is not None:
                         return object_id
         except (OSError, RuntimeError, SystemExit, UnicodeError, ValueError):
+            # An unavailable source object leaves the optional excerpt absent.
             pass
         return None
 
