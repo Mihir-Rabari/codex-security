@@ -2287,3 +2287,38 @@ def test_parent_alias_metadata_preserves_independent_worker(
     findings = scan["findings"]
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("historical_provenance", [None, [], "historical metadata"])
+def test_parent_history_preserves_opaque_provenance_during_worker_recovery(
+    tmp_path, retry, historical_provenance
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    parent = document["findings"][0]
+    parent["provenance"]["candidateId"] = "parent-candidate"
+    worker = copy.deepcopy(parent)
+    worker["provenance"]["candidateId"] = "worker-candidate"
+    historical = copy.deepcopy(worker)
+    historical["extensions"] = {"candidateId": "worker-candidate"}
+    historical["provenance"] = historical_provenance
+    parent["provenance"]["previousFindings"] = [historical]
+    path.write_text(json.dumps(document))
+    _, worker_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    worker_document = json.loads(worker_path.read_text())
+    worker_document["findings"] = [worker]
+    worker_path.write_text(json.dumps(worker_document))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 1
+    assert any(
+        previous.get("provenance") == historical_provenance
+        for previous in scan["findings"][0]["provenance"]["previousFindings"]
+    )
+    findings = scan["findings"]
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings

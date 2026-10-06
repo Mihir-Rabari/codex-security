@@ -1345,16 +1345,20 @@ def merge_saved_results(
     ) -> bool:
         current_candidate = finding_candidate_id(finding)
         previous_candidate = finding_candidate_id(previous)
-        current_owner = finding.get("provenance", {}).get("workerId") or current_owner
-        previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
+        current_provenance = finding.get("provenance")
+        current_provenance = current_provenance if isinstance(current_provenance, dict) else {}
+        previous_provenance = previous.get("provenance")
+        previous_provenance = previous_provenance if isinstance(previous_provenance, dict) else {}
+        current_owner = current_provenance.get("workerId") or current_owner
+        previous_owner = previous_provenance.get("workerId") or previous_owner
         current_owner = current_owner if isinstance(current_owner, str) else None
         previous_owner = previous_owner if isinstance(previous_owner, str) else None
         if (
             (
                 (not current_candidate and not previous_candidate)
                 or (
-                    isinstance(finding.get("provenance", {}).get("preservedIdentity"), dict)
-                    and isinstance(previous.get("provenance", {}).get("preservedIdentity"), dict)
+                    isinstance(current_provenance.get("preservedIdentity"), dict)
+                    and isinstance(previous_provenance.get("preservedIdentity"), dict)
                 )
             )
             and isinstance(finding.get("identity"), dict)
