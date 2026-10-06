@@ -1772,11 +1772,11 @@ export async function main(
               : [];
           }),
         );
-        options = {
-          ...options,
-          environment: { ...gitEnvironment, ...options?.environment },
-        };
       }
+      options = {
+        ...options,
+        environment: { ...gitEnvironment, ...options?.environment },
+      };
       return parentDependencies.runRepositoryCommand(
         command,
         args,

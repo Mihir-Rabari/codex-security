@@ -2423,15 +2423,28 @@ describe("patch publication integrity", () => {
         result: scanResult,
         currentDirectory: directory,
         environment: gitSettings,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, {
-                ...options,
-                environment: { ...gitSettings, ...options?.environment },
-              })
-            : args[1] === "list"
-              ? ""
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          const gitOptions = {
+            ...options,
+            environment: { ...gitSettings, ...options?.environment },
+          };
+          if (command === "git")
+            return runGitRepositoryCommand(command, args, cwd, gitOptions);
+          if (args[1] === "list") {
+            expect(
+              resolve(
+                await runGitRepositoryCommand(
+                  "git",
+                  ["rev-parse", "--show-toplevel"],
+                  cwd,
+                  gitOptions,
+                ),
+              ),
+            ).toBe(root);
+            return "";
+          }
+          return "https://github.example.test/example/repository/pull/1";
+        },
         onCodex: async (_args, output) => {
           modelCalls++;
           expect(output?.appServer?.directory).toBe(directory);
