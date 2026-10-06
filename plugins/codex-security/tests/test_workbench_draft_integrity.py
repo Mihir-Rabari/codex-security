@@ -574,6 +574,39 @@ def test_canonical_worker_update_keeps_independent_alias_sibling(
     }
 
 
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("alias", [{"anchor": []}, {"anchor": "finding", "instance": {}}])
+def test_worker_update_preserves_structured_historical_identity(
+    tmp_path: Path, retry: bool, alias: dict
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    finding_path = scan_dir / "findings.json"
+    document = json.loads(finding_path.read_text())
+    finding = document["findings"][0]
+    finding["provenance"].update(
+        candidateId="candidate-a", workerId=worker_id, preservedIdentity=alias
+    )
+    finding["severity"]["level"] = "low"
+    finding_path.write_text(json.dumps(document))
+    updated = copy.deepcopy(finding)
+    updated["severity"]["level"] = "high"
+    updated["summary"] = "Stronger retained observation."
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [updated]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["findingCount"] == 1
+    assert not scan["resultsRecoveryNeeded"]
+    retained = scan["findings"][0]
+    assert retained["summary"] == updated["summary"]
+    assert retained["severity"]["level"] == "high"
+    assert retained["provenance"]["preservedIdentity"] == alias
+
+
 @pytest.mark.parametrize("renamed", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("history", ["sourceFindings", "previousFindings"])

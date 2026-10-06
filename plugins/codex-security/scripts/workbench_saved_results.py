@@ -582,9 +582,7 @@ def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
     )
 
 
-def _worker_candidate_key(
-    worker_id: str, candidate_id: str, finding: dict[str, Any]
-) -> tuple[str, str, Any, Any, Any]:
+def _worker_candidate_key(worker_id: str, candidate_id: str, finding: dict[str, Any]) -> str:
     """Identify one worker-local candidate without merging unrelated locations."""
     provenance = finding.get("provenance")
     identity = (
@@ -598,7 +596,7 @@ def _worker_candidate_key(
         identity = normalized.get("identity")
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
+    return _digest([worker_id, candidate_id, finding.get("ruleId"), anchor, instance])
 
 
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
@@ -1376,10 +1374,10 @@ def merge_saved_results(
         return key
 
     represented: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
-    canonical_candidates: set[tuple[str, str, Any, Any, Any]] = set()
+    represented_candidates: dict[str, str | None] = {}
+    canonical_candidates: set[str] = set()
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
+    represented_candidate_history: dict[str, set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
