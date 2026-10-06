@@ -879,6 +879,68 @@ describe("CodexSecurity finding validation", () => {
   );
 
   test.each([
+    { setting: "top-level", changed: true },
+    { setting: "top-level", changed: false },
+    { setting: "selected profile", changed: true },
+    { setting: "selected profile", changed: false },
+    { setting: "none", changed: false },
+  ] as const)(
+    "runs file-backed validation instructions through Codex, %p",
+    async ({ setting, changed }) => {
+      const instructions = join(await temporaryDirectory(), "instructions.md");
+      await writeFile(instructions, "Original synthetic instructions.");
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        yield* validationEvents(
+          JSON.stringify({
+            ...assessment,
+            report: await readFile(instructions, "utf8"),
+          }),
+        );
+      }
+      const python = await resolvePluginPython();
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      if (setting === "top-level") {
+        client.config.codexOverrides!["model_instructions_file"] = instructions;
+      } else if (setting === "selected profile") {
+        client.config.codexOverrides!["profile"] = "selected";
+        client.config.codexOverrides!["profiles"] = {
+          selected: { model_instructions_file: instructions },
+        };
+      }
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "file-backed-validation",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      const first = await client.validate(request);
+      expect(modelCalls).toBe(1);
+      if (changed)
+        await writeFile(instructions, "Updated synthetic instructions.");
+      const second = await client.validate(request);
+      expect(modelCalls).toBe(setting === "none" ? 1 : 2);
+      expect(second.report).toBe(
+        changed ? "Updated synthetic instructions." : first.report,
+      );
+      expect(
+        resolveCodexProfile(fixture.captured.codex!.config as JsonObject)[
+          "model_instructions_file"
+        ],
+      ).toBe(setting === "none" ? undefined : instructions);
+    },
+  );
+
+  test.each([
     "unchanged",
     "source contents",
     "recorded contents",

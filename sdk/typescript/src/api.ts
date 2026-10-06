@@ -728,6 +728,11 @@ export class CodexSecurity {
         );
         const source = await workflow.sourceSnapshot(inputs.repository);
         const model = scanModelConfiguration(session.effectiveConfig);
+        // Codex resolves file-backed instructions in its validation working directory.
+        const cacheable =
+          typeof resolveCodexProfile(session.effectiveConfig)[
+            "model_instructions_file"
+          ] !== "string";
         const binding = {
           // Increment when the standalone validation prompt or execution contract changes.
           version: 1,
@@ -776,7 +781,7 @@ export class CodexSecurity {
           contractDigest: workflowDigest(outputSchema),
         };
         const reviewKey = workflowDigest(binding);
-        const saved = await workflow.getReview(reviewKey);
+        const saved = cacheable ? await workflow.getReview(reviewKey) : null;
         if (saved !== null) {
           await checkTarget();
           const current = await workflow.sourceSnapshot(inputs.repository);
@@ -787,7 +792,7 @@ export class CodexSecurity {
           }
           return validationResultSchema.parse(saved);
         }
-        checkpoint = { workflow, binding, key: reviewKey };
+        if (cacheable) checkpoint = { workflow, binding, key: reviewKey };
       }
       const outputRoot =
         inputs.outputDir === null
