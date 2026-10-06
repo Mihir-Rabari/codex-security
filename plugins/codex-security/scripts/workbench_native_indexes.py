@@ -192,7 +192,7 @@ def _indexed_findings(
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
             COALESCE(
-                (SELECT MAX(decisions.rowid)
+                (SELECT MAX(decisions.decision_sequence)
                  FROM finding_decisions AS decisions
                  WHERE decisions.occurrence_id = occurrences.id),
                 triage.rowid
@@ -235,7 +235,7 @@ def _indexed_findings(
         if (
             status == "closed"
             and decision["close_reason"] in {"already_fixed", "false_positive"}
-            and latest["scan_sequence"] > decision["scan_sequence"]
+            and latest["scan_started_at"] > decision["decision_updated_at"]
         ):
             status = "open"
         scans = sorted(
@@ -298,11 +298,7 @@ def _indexed_active_findings(
     connection.create_function(
         "codex_security_finding_group",
         2,
-        lambda occurrence_id, finding_id: (
-            f"occurrence:{occurrence_id}"
-            if occurrence_id in uncertain_scans
-            else f"finding:{finding_id}"
-        ),
+        lambda occurrence_id, finding_id: f"finding:{finding_id}",
         deterministic=True,
     )
     query = settings.get("query", "")
@@ -316,18 +312,37 @@ def _indexed_active_findings(
             **settings,
         )
     }
+    history_scan_ids = allowed_scan_ids
+    if (
+        settings.get("repository") is not None
+        or settings.get("target_ids") is not None
+        or settings.get("target_paths") is not None
+    ):
+        history_scan_ids = set()
+        # Apply the same ownership checks to linked history, while retaining the
+        # requested checkout's presentation rows below.
+        for _ in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=history_scan_ids,
+            uncertain_scans=uncertain_scans,
+            include_resolved=True,
+        ):
+            pass
     combined = []
     for row in _indexed_findings(
         connection,
-        allowed_scan_ids,
-        allow_cross_target_matches=bool(settings.get("repository")),
+        history_scan_ids,
+        allow_cross_target_matches=True,
     ):
-        matched = [
-            active.pop(occurrence_id)
-            for occurrence_id in row["occurrence_ids"]
-            if occurrence_id in active
-        ]
-        if matched:
+        matched_by_target: dict[str, list[dict[str, Any]]] = {}
+        for occurrence_id in row["occurrence_ids"]:
+            finding = active.pop(occurrence_id, None)
+            if finding is not None:
+                matched_by_target.setdefault(
+                    "" if settings.get("repository") else finding["indexed_target_id"], []
+                ).append(finding)
+        for matched in matched_by_target.values():
             representative = max(
                 matched,
                 key=lambda finding: (
@@ -467,13 +482,15 @@ def _active_findings(
             COALESCE(targets.id, scans.target_path) AS indexed_target_id
         FROM scans
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
-        WHERE scans.status = 'complete'
+        WHERE (scans.status = 'complete'
+                OR (scans.status = 'failed' AND scans.seal_manifest_digest IS NOT NULL))
             {target_filter} {repository_filter} {current_owner_only}
         ORDER BY scans.rowid DESC
         """,
         target_values,
     ):
-        completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
+        if scan["status"] == "complete":
+            completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
         allowed_scan_ids.add(scan["id"])
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}

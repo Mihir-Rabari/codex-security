@@ -1017,7 +1017,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -3961,7 +3961,7 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
 )
 def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("workbench_source_excerpt.py")))
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(
@@ -3986,7 +3986,7 @@ def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator:
 
 @pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
 def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("workbench_source_excerpt.py")))
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(
@@ -4021,7 +4021,7 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
 def test_source_excerpt_preserves_final_lines(
     tmp_path: Path, source: bytes, expected_lines: list[str]
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("workbench_source_excerpt.py")))
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)

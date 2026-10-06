@@ -1379,6 +1379,7 @@ export function createCodexSecurityServer(): McpServer {
       scanActionResult(
         await runWorkbench([
           "list-global-findings",
+          ...(status === "closed" ? ["--include-resolved"] : []),
           ...optionalArg("--query", query),
           ...optionalArg("--severity", severity),
           ...optionalArg("--status", status),

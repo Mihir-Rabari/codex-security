@@ -1929,8 +1929,9 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (
-                        id, occurrence_id, status, close_reason, note, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        id, occurrence_id, status, close_reason, note, created_at, decision_sequence
+                    ) VALUES (?, ?, ?, ?, ?, ?,
+                        (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions))
                     """,
                     (
                         str(uuid.uuid4()),
@@ -2849,7 +2850,11 @@ def scan_result(
         occurrence_rows.append(occurrence)
     indexed_findings = (
         _indexed_scan_findings(connection, scan)
-        if occurrence_rows and scan["status"] == "complete"
+        if occurrence_rows
+        and (
+            scan["status"] == "complete"
+            or (scan["status"] == "failed" and scan["seal_manifest_digest"] is not None)
+        )
         else {}
     )
     finding_count = connection.execute(
@@ -3284,7 +3289,7 @@ def main() -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
-        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+        connect(deferred=args.command in {"get-scan", "get-finding", "list-scans", "database-info"})
     ) as connection:
         remediation.require_available(connection, args, require_scan)
         if args.command == "create-workspace":

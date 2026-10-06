@@ -867,6 +867,27 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "preserve finding decision append chronology",
+        """
+        ALTER TABLE finding_decisions
+        ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0;
+
+        WITH ordered AS (
+            SELECT id, ROW_NUMBER() OVER (
+                ORDER BY
+                    CASE WHEN id = 'legacy_' || occurrence_id THEN 0 ELSE 1 END,
+                    CASE WHEN id = 'legacy_' || occurrence_id THEN created_at ELSE '' END,
+                    CASE WHEN id = 'legacy_' || occurrence_id THEN id ELSE '' END,
+                    rowid
+            ) AS sequence
+            FROM finding_decisions
+        )
+        UPDATE finding_decisions
+        SET decision_sequence = (SELECT sequence FROM ordered WHERE ordered.id = finding_decisions.id);
+        """,
+    ),
 )
 
 

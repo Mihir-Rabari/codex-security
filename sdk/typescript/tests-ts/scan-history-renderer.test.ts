@@ -3,6 +3,38 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each([false, true])(
+    "keeps both evidence catalogs when modern evidence is %s",
+    (modern) => {
+      const output = renderScanHistory(
+        {
+          title: "Synthetic saved finding",
+          severity: { level: "high" },
+          codeEvidence: modern
+            ? [
+                {
+                  id: "modern",
+                  label: "Modern source",
+                  code: "modern_source();",
+                },
+              ]
+            : [],
+          code_evidence: [
+            { id: "legacy", label: "Legacy source", code: "legacy_source();" },
+          ],
+        },
+        "finding",
+        { color: false },
+      );
+      expect(output).toContain("Legacy source");
+      expect(output).toContain("legacy_source();");
+      if (modern) {
+        expect(output).toContain("Modern source");
+        expect(output).toContain("modern_source();");
+      }
+    },
+  );
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

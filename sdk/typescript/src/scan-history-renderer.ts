@@ -460,7 +460,10 @@ export function renderScanHistory(
         for (const section of sections) wrap(section, 4);
       }
     }
-    const codeEvidence = result["codeEvidence"] ?? result["code_evidence"];
+    const codeEvidence = [
+      result["codeEvidence"],
+      result["code_evidence"],
+    ].flatMap((catalog) => (Array.isArray(catalog) ? catalog : []));
     const rootCause = result["rootCause"] ?? result["root_cause"];
     const legacyRootCode =
       typeof rootCause === "object" &&
