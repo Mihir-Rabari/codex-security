@@ -2145,7 +2145,8 @@ def merge_saved_results(
                 continue
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
-                restore_legacy_identity(finding, normalized)
+                group = row_groups.get((relative, index))
+                restore_legacy_identity(finding, group or normalized)
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -2158,7 +2159,6 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if valid_finding(finding):
-                    group = row_groups.get((relative, index))
                     key = _finding_key(finding)
                     if group is not None:
                         key = group.setdefault("merge_key", key)

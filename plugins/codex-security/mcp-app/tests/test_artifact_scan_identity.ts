@@ -3002,3 +3002,61 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const variant of [
+    "legacy missing",
+    "explicit same",
+    "explicit changed",
+  ] as const) {
+    test(`${layout}: preserves canonical finding identity after revision (${variant})`, async (t) => {
+      const normal = await fixture(t, layout);
+      const recovered = await fixture(t, layout);
+      const initial = finding("Synthetic review", {
+        identity: {
+          anchor: "stable-authored",
+          instance: "report-1",
+          description: "Saved annotation",
+        },
+      });
+      for (const f of [normal, recovered])
+        await f.write({ ...f.draft(), findings: [initial] });
+      const revised = {
+        ...structuredClone(initial),
+        summary: "Revised synthetic evidence.",
+      };
+      if (variant === "legacy missing") delete revised.identity;
+      if (variant === "explicit changed")
+        revised.identity = {
+          anchor: "new-authored",
+          instance: "report-2",
+          description: "Revised annotation",
+        };
+      await normal.write({ ...normal.draft(), findings: [revised] });
+      const dest = path.join(recovered.root, "findings.json");
+      const doc = JSON.parse(await readFile(dest, "utf8"));
+      doc.findings[0].summary = revised.summary;
+      if (variant === "legacy missing") delete doc.findings[0].identity;
+      else doc.findings[0].identity = revised.identity;
+      await writeFile(dest, JSON.stringify(doc));
+      // Canonical legacy documents accept an omitted identity; no newer raw checkpoint exists.
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        false,
+      );
+      assert.deepEqual(result.recovered, result.normal);
+      assert.deepEqual(result.warnings, []);
+      const replay = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.deepEqual(replay.recovered, result.recovered);
+    });
+  }
+}
