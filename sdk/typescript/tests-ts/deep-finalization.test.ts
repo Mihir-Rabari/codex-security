@@ -458,7 +458,9 @@ for (const {
               const bound = (published["deepScan"] as Record<string, unknown>)[
                 "finalizationInput"
               ];
-              expect(bound).toMatchObject(originalFinalizationInput);
+              expect(bound).toMatchObject(
+                originalFinalizationInput as Record<string, unknown>,
+              );
               expect(bound).toMatchObject({
                 publicationSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
               });
