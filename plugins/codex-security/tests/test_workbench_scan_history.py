@@ -1713,3 +1713,68 @@ def test_history_timestamp_preserves_utc_completion_order(workbench_api, timesta
 def test_history_timestamp_keeps_unavailable_completion_order(workbench_api, timestamp):
     target_state = sys.modules["workbench_target_state"]
     assert target_state._timestamp_ns(timestamp) is None
+
+
+@pytest.mark.parametrize("matched", (False, True))
+@pytest.mark.parametrize("legacy_representative", (False, True))
+def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
+    tmp_path: Path, matched: bool, legacy_representative: bool
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    before = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-legacy-anchor",
+    )
+    after = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-current-anchor",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (before["scanId"],)
+        )
+        # Preserve the two possible imported report orders independently of completion order.
+        for scan, timestamp in (
+            (before, "2026-09-02T00:00:00Z" if legacy_representative else "2026-09-01T00:00:00Z"),
+            (after, "2026-09-01T00:00:00Z" if legacy_representative else "2026-09-02T00:00:00Z"),
+        ):
+            connection.execute(
+                "UPDATE finding_occurrences SET created_at = ? WHERE scan_id = ?",
+                (timestamp, scan["scanId"]),
+            )
+    if matched:
+        inputs = compare_scan_pair(state, before, after, "--include-matching-inputs")[
+            "matchingInputs"
+        ]
+        save_scan_matches(
+            state,
+            before,
+            after,
+            confirmed_match(
+                inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]
+            ),
+        )
+    create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, finding=False
+    )
+    global_findings = run_workbench(state, "list-global-findings")["findings"]
+    legacy = next(
+        finding for finding in global_findings if before["scanId"] in finding["knownScanIds"]
+    )
+    assert legacy["confirmedInLatestScan"] is (not matched)
+    if matched:
+        assert len(global_findings) == 1
+        assert set(legacy["knownScanIds"]) == {before["scanId"], after["scanId"]}
+        scoped = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+            "findings"
+        ]
+        assert len(scoped) == 1
+        assert scoped[0]["confirmedInLatestScan"] is False
