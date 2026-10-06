@@ -1075,7 +1075,7 @@ const scanOutputSchema: z.ZodType<Record<string, unknown> | undefined> = z
       failOnSeverity: FailureSeveritySchema.optional(),
       deepScanSources: z.record(z.string(), z.unknown()).optional(),
     }),
-    z.object({
+    z.looseObject({
       status: z.literal("failed"),
       code: z.literal("SCAN_FAILED"),
       message: z.string(),

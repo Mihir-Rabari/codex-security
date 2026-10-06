@@ -13,6 +13,7 @@ import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test, mock } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -106,6 +107,52 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test("the scan schema accepts runtime failures with stale installed-skills metadata", async () => {
+    const root = await temporaryDirectory("cli-failure-skills-");
+    const previousDataHome = process.env["XDG_DATA_HOME"];
+    const skillPath = join(root, "skills", "codex-security-scan");
+    try {
+      await mkdir(join(root, "incur"), { recursive: true });
+      await mkdir(skillPath, { recursive: true });
+      await writeFile(
+        join(skillPath, "SKILL.md"),
+        "Previously installed skill.",
+      );
+      await writeFile(
+        join(root, "incur", "codex-security.json"),
+        JSON.stringify({
+          hash: "previous-command-hash",
+          skills: ["codex-security-scan"],
+          paths: [skillPath],
+        }),
+      );
+      process.env["XDG_DATA_HOME"] = root;
+      const schema = captureCli(main, "stdout");
+      expect(
+        await schema.run(["scan", "--schema", "--json"], dependencies()),
+      ).toBe(0);
+      const validate = new Ajv2020({
+        strict: false,
+        validateFormats: false,
+      }).compile(JSON.parse(schema.text()).output);
+      const output = captureCli(main, "stdout");
+      const deps = dependencies();
+      deps.createSecurity = () => failingSecurity("Synthetic scan failure.");
+      expect(await output.run(["scan", ".", "--json"], deps)).toBe(2);
+      const failure = JSON.parse(output.text());
+      expect(failure).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        cta: { description: "Skills are out of date:" },
+      });
+      expect(validate(failure), JSON.stringify(validate.errors)).toBe(true);
+    } finally {
+      if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
+      else process.env["XDG_DATA_HOME"] = previousDataHome;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     const onTurn = mock<(repository: string, options: unknown) => void>();
     const stderr = captureCli(main, "stderr");
@@ -192,7 +239,7 @@ describe("CLI", () => {
         message: { type: "string" },
       },
       required: ["status", "code", "message"],
-      additionalProperties: false,
+      additionalProperties: {},
     });
 
     const rerunSchema = captureCli(main, "stdout");
