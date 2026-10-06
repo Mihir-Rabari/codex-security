@@ -1536,7 +1536,7 @@ describe("scan and patch workflow", () => {
                 return origin;
               }
               if (gitlab && args[0] === "ls-remote") {
-                expect(args[2]).toBe(origin);
+                expect(args[3]).toBe(origin);
                 return git(
                   ...args.map((value) => (value === origin ? remote : value)),
                 );
@@ -3118,9 +3118,11 @@ describe("patch change tracking", () => {
     return { directory, git, remote };
   }
 
-  test.each([false, true])(
-    "checks all push destinations before patching: second destination occupied=%s",
-    async (occupied) => {
+  test.each(["free", "occupied", "option"] as const)(
+    "checks all push destinations before patching: second destination=%s",
+    async (destination) => {
+      const occupied = destination === "occupied";
+      const option = destination === "option";
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
       git("clone", "--bare", directory, secondary);
@@ -3134,7 +3136,22 @@ describe("patch change tracking", () => {
           git("rev-parse", "HEAD"),
         );
       git("remote", "set-url", "--add", "--push", "origin", remote);
-      git("remote", "set-url", "--add", "--push", "origin", secondary);
+      const marker = join(directory, "upload-pack-marker");
+      const script = join(directory, "upload-pack.cjs");
+      if (option)
+        await writeFile(
+          script,
+          "require('node:fs').writeFileSync(process.argv[2], 'synthetic');\n",
+        );
+      const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
+      git(
+        "config",
+        "--add",
+        "remote.origin.pushurl",
+        option
+          ? `--upload-pack=${commandPath(process.execPath)} ${commandPath(script)} ${commandPath(marker)}`
+          : secondary,
+      );
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
@@ -3163,9 +3180,10 @@ describe("patch change tracking", () => {
                   : "https://github.example.test/example/repository/pull/1",
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(occupied ? 2 : 0);
-      expect(onCodex).toHaveBeenCalledTimes(occupied ? 0 : 1);
-      if (occupied) {
+      expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
+      expect(onCodex).toHaveBeenCalledTimes(occupied || option ? 0 : 1);
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      if (occupied || option) {
         expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
           before,
         );
@@ -3182,6 +3200,8 @@ describe("patch change tracking", () => {
   test.each(
     [
       "local",
+      "ssh-api",
+      "ssh-enterprise",
       "scp",
       "scp-mixed",
       "ssh-uri",
@@ -3232,15 +3252,25 @@ describe("patch change tracking", () => {
       const pushRemote =
         transport === "local"
           ? remote
-          : transport.startsWith("scp")
-            ? `git@${alias}:example/repository.git`
-            : transport.startsWith("ssh-uri")
-              ? `ssh://git@${alias}:2222/example/repository.git`
-              : "git@ssh.github.com:example/repository.git";
-      const lookupRemote =
-        transport === "local" || transport === "ssh-missing"
-          ? pushRemote
-          : "ssh://git@github.com/example/repository.git";
+          : transport === "ssh-api"
+            ? "git@github.com:push-owner/repository.git"
+            : transport === "ssh-enterprise"
+              ? "git@enterprise.example.test:push-owner/other-repository.git"
+              : transport.startsWith("scp")
+                ? `git@${alias}:example/repository.git`
+                : transport.startsWith("ssh-uri")
+                  ? `ssh://git@${alias}:2222/example/repository.git`
+                  : "git@ssh.github.com:example/repository.git";
+      const directLookup = ["local", "ssh-api", "ssh-enterprise"].includes(
+        transport,
+      );
+      const lookupRemote = directLookup
+        ? pushRemote
+        : "ssh://git@github.com/example/repository.git";
+      const sshArguments = [
+        ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
+        `git@${transport.startsWith("scp") || transport.startsWith("ssh-uri") ? alias : "ssh.github.com"}`,
+      ];
       if (transport !== "local") {
         git(
           "remote",
@@ -3270,6 +3300,8 @@ describe("patch change tracking", () => {
       const result = resultWithFindings(["high"]);
       let modelCalls = 0;
       let pushes = 0;
+      let repositoryLookups = 0;
+      let sshLookups = 0;
       const ownUrl = "https://github.example.test/upstream/repository/pull/8";
       const createdUrl =
         "https://github.example.test/upstream/repository/pull/9";
@@ -3295,8 +3327,9 @@ describe("patch change tracking", () => {
                   "-c",
                   `alias.codex-security-ssh-config=!${effectiveCommand} -G`,
                   "codex-security-ssh-config",
-                  alias,
+                  ...sshArguments,
                 ]);
+                sshLookups++;
                 return "hostname github.com";
               }
               if (args[0] === "push") {
@@ -3318,6 +3351,7 @@ describe("patch change tracking", () => {
                 expect(args).toEqual([
                   "ls-remote",
                   "--heads",
+                  "--",
                   pushRemote,
                   `refs/heads/${branch}`,
                 ]);
@@ -3332,12 +3366,8 @@ describe("patch change tracking", () => {
             }
             if (command === "ssh") {
               expect(effectiveCommand).toBeUndefined();
-              expect(args).toEqual([
-                "-G",
-                transport.startsWith("scp") || transport.startsWith("ssh-uri")
-                  ? alias
-                  : "ssh.github.com",
-              ]);
+              expect(args).toEqual(["-G", ...sshArguments]);
+              sshLookups++;
               if (transport === "ssh-missing" || transport === "ssh-failed")
                 throw Object.assign(new Error("Synthetic SSH lookup failure"), {
                   code: transport === "ssh-missing" ? "ENOENT" : 1,
@@ -3347,15 +3377,23 @@ describe("patch change tracking", () => {
                 : `hostname ${transport === "ssh-host" ? "ssh.github.com" : "github.com"}`;
             }
             if (args[0] === "repo") {
+              repositoryLookups++;
               expect(args).toEqual([
                 "repo",
                 "view",
-                lookupRemote,
+                directLookup || repositoryLookups % 2 === 1
+                  ? pushRemote
+                  : lookupRemote,
                 "--json",
                 "id",
                 "--jq",
                 ".id",
               ]);
+              if (repositoryLookups % 2 === 1 && !directLookup)
+                throw Object.assign(
+                  new Error("Synthetic unresolved API alias"),
+                  { code: 1 },
+                );
               return "synthetic-origin-id";
             }
             if (args[1] === "list") {
@@ -3385,12 +3423,20 @@ describe("patch change tracking", () => {
           },
         },
       );
+      const failedLookup = transport === "ssh-missing";
       expect(outcome.exitCode, outcome.stderr).toBe(
-        !resume && ownIncluded ? 2 : 0,
+        failedLookup || (!resume && ownIncluded) ? 2 : 0,
       );
-      expect(modelCalls).toBe(resume || ownIncluded ? 0 : 1);
-      expect(pushes).toBe(ownIncluded ? 0 : 1);
-      if (resume || !ownIncluded)
+      const attempts = !failedLookup && !resume && !ownIncluded ? 2 : 1;
+      expect(repositoryLookups).toBe(
+        (directLookup || failedLookup ? 1 : 2) * attempts,
+      );
+      expect(sshLookups).toBe(directLookup ? 0 : attempts);
+      expect(modelCalls).toBe(failedLookup || resume || ownIncluded ? 0 : 1);
+      expect(pushes).toBe(failedLookup || ownIncluded ? 0 : 1);
+      if (failedLookup)
+        expect(outcome.stderr).toContain("Synthetic unresolved API alias");
+      if (!failedLookup && (resume || !ownIncluded))
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
           ownIncluded ? ownUrl : createdUrl,
         );
@@ -3425,9 +3471,25 @@ describe("patch change tracking", () => {
     git("add", ".");
     git("commit", "-m", "Synthetic outer baseline");
     const target = scope === "root" ? root : directory;
+    const snapshots = new Map<string, Set<string>>();
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: target,
-      onRepositoryCommand: runGitRepositoryCommand,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        expect(cwd).not.toBe(nested);
+        if (args[0] === "-C") {
+          expect(cwd).toBe(root);
+          expect([root, nested]).toContain(args[1]!);
+        }
+        const index = options?.environment?.["GIT_INDEX_FILE"];
+        if (index !== undefined) {
+          expect(cwd).toBe(root);
+          const checkout = args[0] === "-C" ? args[1]! : cwd;
+          const indices = snapshots.get(checkout) ?? new Set<string>();
+          indices.add(index);
+          snapshots.set(checkout, indices);
+        }
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
       onCodex: async (_args, output) => {
         expect(output?.appServer?.directory).toBe(target);
         await writeFile(join(directory, "app.ts"), "fixed\n");
@@ -3441,6 +3503,14 @@ describe("patch change tracking", () => {
       "package/app.ts",
       "package/nested/app.ts",
     ]);
+    expect([...snapshots.keys()].sort()).toEqual([root, nested].sort());
+    expect(snapshots.get(root)!.size).toBe(2);
+    expect(snapshots.get(nested)!.size).toBe(2);
+    expect(
+      new Set([...snapshots.values()].flatMap((indices) => [...indices])).size,
+    ).toBe(4);
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+    expect(inner("diff", "--cached", "--name-only")).toBe("");
   });
   test.each([
     "regular",

@@ -6731,55 +6731,63 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
-  let headRemote = remote;
-  if (
-    !gitlab &&
-    host &&
-    (remote.startsWith("ssh://") || !remote.includes("://"))
-  ) {
-    const url = new URL(
-      remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
-    );
-    const sshCommand =
-      dependencies.environment["GIT_SSH_COMMAND"] ??
-      (await run("git", ["config", "--get", "core.sshCommand"]).catch(
-        (error: unknown) => {
-          if (isJsonObject(error) && error["code"] === 1) return undefined;
-          throw error;
-        },
-      ));
-    const settings = await (
-      sshCommand !== undefined ||
-      dependencies.environment["GIT_SSH"] !== undefined
-        ? run("git", [
-            "-c",
-            `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
-            "codex-security-ssh-config",
-            url.hostname,
-          ])
-        : run("ssh", ["-G", url.hostname])
-    ).catch((error: unknown) =>
-      isJsonObject(error) && typeof error["code"] === "number" ? "" : undefined,
-    );
-    if (settings !== undefined) {
+  const repositoryId = (remote: string) =>
+    run("gh", ["repo", "view", remote, "--json", "id", "--jq", ".id"]);
+  let headRepository: string | undefined;
+  if (!gitlab) {
+    try {
+      headRepository = await repositoryId(remote);
+    } catch (initialError) {
+      if (!host || !(remote.startsWith("ssh://") || !remote.includes("://")))
+        throw initialError;
+      const url = new URL(
+        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
+      );
+      const sshArguments = [
+        ...(url.port ? ["-p", url.port] : []),
+        url.username
+          ? `${decodeURIComponent(url.username)}@${url.hostname}`
+          : url.hostname,
+      ];
+      const sshCommand =
+        dependencies.environment["GIT_SSH_COMMAND"] ??
+        (await run("git", ["config", "--get", "core.sshCommand"]).catch(
+          (error: unknown) => {
+            if (isJsonObject(error) && error["code"] === 1) return undefined;
+            throw error;
+          },
+        ));
+      const settings = await (
+        sshCommand !== undefined ||
+        dependencies.environment["GIT_SSH"] !== undefined
+          ? run("git", [
+              "-c",
+              `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
+              "codex-security-ssh-config",
+              ...sshArguments,
+            ])
+          : run("ssh", ["-G", ...sshArguments])
+      ).catch((error: unknown) =>
+        isJsonObject(error) && typeof error["code"] === "number"
+          ? ""
+          : undefined,
+      );
+      if (settings === undefined) throw initialError;
       const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
       url.hostname =
         hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
       url.port = "";
-      headRemote = url.href;
+      if (url.hostname.toLowerCase() === host) throw initialError;
+      try {
+        headRepository = await repositoryId(url.href);
+      } catch (error) {
+        throw new CodexSecurityError(
+          `${errorMessage(initialError)}\n${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
     }
   }
-  const headRepository = gitlab
-    ? undefined
-    : await run("gh", [
-        "repo",
-        "view",
-        headRemote,
-        "--json",
-        "id",
-        "--jq",
-        ".id",
-      ]);
   const existing = await run(
     command,
     gitlab
@@ -6857,7 +6865,7 @@ async function preparePatchPublication(
       existing = Boolean(
         await dependencies.runRepositoryCommand(
           "git",
-          ["ls-remote", "--heads", remote, `refs/heads/${branch}`],
+          ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`],
           repository,
         ),
       );
@@ -7205,8 +7213,17 @@ async function changedPatchFiles(
     if (head === undefined) continue;
     const output = await dependencies.runRepositoryCommand(
       "git",
-      ["--literal-pathspecs", "diff", "--name-only", "-z", tree, head],
-      join(root, directory),
+      [
+        "-C",
+        join(root, directory),
+        "--literal-pathspecs",
+        "diff",
+        "--name-only",
+        "-z",
+        tree,
+        head,
+      ],
+      root,
       { trim: false },
     );
     for (const path of output.split("\0").filter(Boolean))
@@ -7246,12 +7263,12 @@ async function snapshotGitPatchState(
   const trees = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
     const checkout = join(repository, directory);
-    const tree = await snapshotPatchTree(checkout, dependencies);
+    const tree = await snapshotPatchTree(checkout, dependencies, repository);
     trees.set(directory, tree);
     const entries = await dependencies.runRepositoryCommand(
       "git",
-      ["ls-tree", "-r", "-z", tree],
-      checkout,
+      ["-C", checkout, "ls-tree", "-r", "-z", tree],
+      repository,
       { trim: false, maxBuffer: Infinity },
     );
     for (const entry of entries.split("\0")) {
@@ -7445,13 +7462,19 @@ async function assessPatchRisk(
 async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
+  commandRoot = repository,
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const environment = { GIT_INDEX_FILE: join(root, "index") };
   const run = (args: string[]) =>
-    dependencies.runRepositoryCommand("git", args, repository, {
-      environment,
-    });
+    dependencies.runRepositoryCommand(
+      "git",
+      commandRoot === repository ? args : ["-C", repository, ...args],
+      commandRoot,
+      {
+        environment,
+      },
+    );
   try {
     const heads = await run(["rev-parse", "--revs-only", "HEAD"]);
     await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
