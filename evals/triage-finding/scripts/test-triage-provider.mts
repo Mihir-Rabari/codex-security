@@ -434,7 +434,7 @@ test(
       "first & node/node",
       "second/node",
       "literal/{{custom_node}}",
-    ].map((name) => path.join(root, name));
+    ].map((name) => path.join(root, name)) as [string, string, string];
     for (const node of nodes) {
       fs.mkdirSync(path.dirname(node), { recursive: true });
       fs.writeFileSync(node, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
@@ -526,9 +526,9 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         const saved = structuredClone(context);
         const result = await provider.callApi(
           "Return synthetic launch details",
-          context,
+          context as Parameters<typeof provider.callApi>[1],
         );
-        assert.equal(result.error, undefined, result.error);
+        assert.equal(result.error, undefined, result.error!);
         const captured = JSON.parse(String(result.output));
         assert.equal(captured.node, node);
         assert.deepEqual(captured.directories, [
@@ -548,8 +548,8 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     const mixed = await load("{{prefix}}/{{env.NODE_BASENAME}}");
     try {
       const result = await mixed.callApi("synthetic", {
-        vars: { prefix: path.dirname(nodes[1]) },
-      });
+        vars: { prefix: path.dirname(nodes[1]!) },
+      } as unknown as Parameters<typeof mixed.callApi>[1]);
       assert.equal(JSON.parse(String(result.output)).node, nodes[1]);
     } finally {
       await mixed.cleanup?.();
@@ -562,15 +562,15 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       [undefined, "{{missing_node}}", "", process.execPath],
       [nodes[0], undefined, "", nodes[0]],
       [nodes[0], "{{custom_node}}", nodes[1], nodes[1]],
-    ]) {
+    ] as const) {
       if (ambient === undefined) delete process.env.CODEX_MCP_NODE_PATH;
       else process.env.CODEX_MCP_NODE_PATH = ambient;
       const provider = await load(template);
       try {
         const result = await provider.callApi("synthetic", {
           vars: { custom_node: value },
-        });
-        assert.equal(result.error, undefined, result.error);
+        } as unknown as Parameters<typeof provider.callApi>[1]);
+        assert.equal(result.error, undefined, result.error!);
         const captured = JSON.parse(String(result.output));
         const selected = fs.realpathSync(expected!);
         assert.equal(captured.node, selected);
@@ -580,11 +580,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       }
     }
     process.env.PROMPTFOO_DISABLE_TEMPLATING = "true";
-    const disabled = await load(nodes[2]);
+    const disabled = await load(nodes[2]!);
     try {
       const result = await disabled.callApi("synthetic", {
         vars: { custom_node: "other" },
-      });
+      } as unknown as Parameters<typeof disabled.callApi>[1]);
       assert.equal(JSON.parse(String(result.output)).node, nodes[2]);
     } finally {
       await disabled.cleanup?.();

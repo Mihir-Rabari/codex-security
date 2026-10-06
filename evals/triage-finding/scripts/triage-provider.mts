@@ -46,7 +46,8 @@ export default class TriageProvider implements ApiProvider {
         const requestedNode =
           (config.cli_env?.CODEX_MCP_NODE_PATH ??
             process.env.CODEX_MCP_NODE_PATH ??
-            process.execPath) || process.execPath;
+            process.execPath) ||
+          process.execPath;
         const environment = { ...process.env, ...config.cli_env };
         const resolveNodeCommand = (command: string) =>
           /[/\\]/.test(command)
