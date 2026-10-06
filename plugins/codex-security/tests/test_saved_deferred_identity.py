@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -408,7 +409,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
-        _, other_result = accepted_standard_worker(
+        other_worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker"
         )
         other_result.write_text(
@@ -428,7 +429,31 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         assert (
             any(row["id"] == candidate["id"] for row in coverage["deferred"]) is not rejected_here
         )
-        if outcome != "unresolved":
+        if outcome == "other_worker":
+            outcome_rows = [
+                row for row in coverage["surfaces"] if row.get("label") == rejection["label"]
+            ]
+            assert len(outcome_rows) == 1
+            projected = outcome_rows[0]
+            assert projected["id"] == f"{other_worker_id}-attempt-1-surface-1"
+            assert projected["candidateId"] == (
+                f"{other_worker_id}-attempt-1-candidate-"
+                + hashlib.sha256(rejection["candidateId"].encode()).hexdigest()
+            )
+            assert projected["provenance"] == {
+                "workerId": other_worker_id,
+                "attempt": 1,
+                "sourceId": rejection["id"],
+                "candidateId": rejection["candidateId"],
+            }
+            assert {
+                key: value
+                for key, value in projected.items()
+                if key not in {"id", "candidateId", "provenance"}
+            } == {
+                key: value for key, value in rejection.items() if key not in {"id", "candidateId"}
+            }
+        elif outcome == "rejected":
             assert rejection in coverage["surfaces"]
     assert recovered["surfaces"] == first_coverage["surfaces"]
     assert recovered["deferred"] == first_coverage["deferred"]
@@ -516,7 +541,7 @@ def test_unnamed_observation_does_not_replace_saved_context(
     observation: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     broad = {
         "id": "caller-review",
         "reason": "Review the caller paths.",
@@ -557,7 +582,27 @@ def test_unnamed_observation_does_not_replace_saved_context(
     for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert expected in pending
-        unnamed = [row for row in pending if row.get("id") != expected["id"]]
+        if layout == "worker" and observation == "explicit-update":
+            projected = [
+                row
+                for row in pending
+                if row.get("provenance", {}).get("sourceId") == expected["id"]
+            ]
+            assert len(projected) == 1
+            assert projected[0]["provenance"] == {
+                "workerId": worker_id,
+                "attempt": 1,
+                "sourceId": expected["id"],
+            }
+            assert {
+                key: value for key, value in projected[0].items() if key not in {"id", "provenance"}
+            } == {key: value for key, value in expected.items() if key != "id"}
+        unnamed = [
+            row
+            for row in pending
+            if row.get("id") != expected["id"]
+            and row.get("provenance", {}).get("sourceId") != expected["id"]
+        ]
         assert len(unnamed) == 1
         assert {key: value for key, value in unnamed[0].items() if key != "id"} == raw_row
         assert "candidateId" not in unnamed[0]

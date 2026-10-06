@@ -950,7 +950,15 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         json.loads((scan_dir / "coverage.json").read_text()),
     )
     for findings, coverage in (first[0], replay):
-        assert child_work in coverage["deferred"]
+        child_rows = [
+            row for row in coverage["deferred"] if row.get("reason") == child_work["reason"]
+        ]
+        assert len(child_rows) == 1
+        assert child_rows[0] == {
+            **child_work,
+            "id": f"{worker_id}-attempt-1-deferred-1",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": child_work["id"]},
+        }
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:

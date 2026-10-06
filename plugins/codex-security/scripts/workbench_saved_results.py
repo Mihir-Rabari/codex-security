@@ -756,7 +756,7 @@ def _generic_surface_updates(
     surface_schema: dict[str, Any],
     deferred_rows: dict[str, list[Any]],
     ambiguous_deferred: set[tuple[str | None, str]],
-) -> tuple[set[int], list[dict[str, Any]]]:
+) -> tuple[set[int], list[tuple[str, str | None, dict[str, Any]]]]:
     if not closed_deferred and not reopened_generic:
         return set(), []
 
@@ -773,7 +773,7 @@ def _generic_surface_updates(
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
     replaced: set[int] = set()
-    updates: list[dict[str, Any]] = []
+    updates: list[tuple[str, str | None, dict[str, Any]]] = []
     for relative, draft, owner in sources:
         closed_ids = {
             identity
@@ -845,7 +845,7 @@ def _generic_surface_updates(
                 continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
-            latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
+            latest_relative, latest_surface = max(matches, key=lambda match: source_order[match[0]])
             update = copy.deepcopy(latest_surface)
             refs = update.setdefault("receiptRefs", [])
             if isinstance(refs, list):
@@ -864,8 +864,9 @@ def _generic_surface_updates(
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
             )
-            if update not in updates:
-                updates.append(update)
+            entry = (latest_relative, owner, update)
+            if entry not in updates:
+                updates.append(entry)
     return replaced, updates
 
 
@@ -1233,7 +1234,15 @@ def merge_saved_results(
             provenance.pop(key, None)
         provenance.update(workerId=worker["id"], attempt=worker["attempt"])
         result["provenance"] = provenance
+        source_rows = source.get(field, [])
+        inferred_id = (
+            isinstance(source_rows, list)
+            and index <= len(source_rows)
+            and id(source_rows[index - 1]) in inferred_coverage_ids
+        )
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
+            if key == "id" and inferred_id:
+                continue
             if key in item:
                 result["provenance"][name] = item[key]
         if isinstance(item.get("candidateId"), str):
@@ -1268,6 +1277,18 @@ def merge_saved_results(
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
+
+    def projection_worker(relative: str, owner: str | None) -> Any | None:
+        worker = workers_by_id.get(owner)
+        return (
+            worker
+            if worker is not None
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"] == str(scan_dir / relative)
+            and drafts_by_path[relative].get("complete") is not False
+            else None
+        )
+
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -1323,6 +1344,7 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
+    inferred_coverage_ids: set[int] = set()
     # Older checkpoints can omit IDs already assigned in their published output.
     for field in ("deferred", "surfaces"):
         named_rows: dict[str | None, list[dict[str, Any]]] = {}
@@ -1364,6 +1386,7 @@ def merge_saved_results(
                     None,
                 )
                 if identity is not None:
+                    inferred_coverage_ids.add(id(row))
                     row["id"] = identity
                     reserved.add(identity)
 
@@ -1646,6 +1669,9 @@ def merge_saved_results(
     for relative, draft, owner in current_drafts:
         # A retry can retain older dispositions beside a newer explicit proof gap.
         pending_candidates = set()
+        valid_candidates = {
+            finding_candidate_id(finding) for finding in draft["findings"] if valid_finding(finding)
+        }
         for field in ("deferred", "surfaces"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -1653,6 +1679,8 @@ def merge_saved_results(
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
                 ):
                     if (pending := coverage_candidate(owner, item)) is not None:
+                        if pending[0] == owner and pending[1] in valid_candidates:
+                            continue
                         pending_candidates.add(pending)
                         order = candidate_order(relative, pending[0])
                         pending_candidate_orders[pending] = max(
@@ -1675,6 +1703,14 @@ def merge_saved_results(
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                     and (candidate := coverage_candidate(owner, item)) is not None
                     and candidate not in pending_candidates
+                    and (
+                        item["disposition"] != "reported"
+                        or any(
+                            valid_finding(finding)
+                            and finding_candidate_id(finding) == item["candidateId"]
+                            for finding in draft["findings"]
+                        )
+                    )
                 ):
                     outcomes.append((relative, candidate[0], candidate[1], item["disposition"]))
     ordered_candidates.update(pending_candidate_orders)
@@ -1776,7 +1812,18 @@ def merge_saved_results(
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
-        for surface in surface_updates:
+        for relative, owner, surface in surface_updates:
+            if (worker := projection_worker(relative, owner)) is not None:
+                source = drafts_by_path[relative]["coverage"]
+                index = next(
+                    offset
+                    for offset, row in enumerate(source["surfaces"], 1)
+                    if isinstance(row, dict) and row.get("id") == surface.get("id")
+                )
+                surface = project_missing_record("surfaces", surface, index, worker, source)
+                surface["receiptRefs"] = coverage_receipts(surface, worker, relative)
+                if coverage_record_retained("surfaces", surface):
+                    continue
             if surface not in coverage["surfaces"]:
                 coverage["surfaces"].append(surface)
         for surface in coverage["surfaces"]:
@@ -1791,6 +1838,19 @@ def merge_saved_results(
             identity,
         ) in resolved:
             continue
+        relative, index = next(
+            (relative, index)
+            for relative, _, source_owner in all_sources
+            if source_owner == owner
+            for index, row in enumerate(deferred_rows[relative], 1)
+            if row is item
+        )
+        if (worker := projection_worker(relative, owner)) is not None:
+            item = project_missing_record(
+                "deferred", item, index, worker, drafts_by_path[relative]["coverage"]
+            )
+            if coverage_record_retained("deferred", item):
+                continue
         pending = coverage.setdefault("deferred", [])
         if isinstance(pending, list) and item not in pending:
             pending.append(copy.deepcopy(item))
@@ -1815,9 +1875,9 @@ def merge_saved_results(
             if identity in by_id and surface != by_id[identity]:
                 ambiguous_surface_ids.add((owner, identity))
             by_id[identity] = surface
-    for _, draft, owner in all_sources:
+    for relative, draft, owner in all_sources:
         surfaces = draft["coverage"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        for index, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
             if (
                 isinstance(surface, dict)
                 and isinstance(surface.get("id"), str)
@@ -1827,6 +1887,15 @@ def merge_saved_results(
                 and isinstance(coverage.get("surfaces"), list)
             ):
                 retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
+                if (worker := projection_worker(relative, owner)) is not None:
+                    retained_surface = project_missing_record(
+                        "surfaces", retained_surface, index, worker, draft["coverage"]
+                    )
+                    retained_surface["receiptRefs"] = coverage_receipts(
+                        retained_surface, worker, relative
+                    )
+                    if coverage_record_retained("surfaces", retained_surface):
+                        continue
                 if retained_surface not in coverage["surfaces"]:
                     coverage["surfaces"].append(copy.deepcopy(retained_surface))
     selected_terminal_orders: dict[str, tuple[int, int]] = {}
@@ -2093,12 +2162,7 @@ def merge_saved_results(
         worker = workers_by_id.get(worker_id)
         # Only the accepted current output belongs to this worker attempt. An
         # unsuperseded archive can remain evidence after that output is lost.
-        project_coverage = (
-            worker is not None
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"] == str(scan_dir / relative)
-            and draft.get("complete") is not False
-        )
+        project_coverage = projection_worker(relative, worker_id) is not None
         if superseded and not selected_candidates and not retain_pending:
             continue
         if project_coverage:
@@ -2114,7 +2178,7 @@ def merge_saved_results(
                     {
                         "workerId": worker_id,
                         "attempt": worker["attempt"],
-                        "completeness": draft["coverage"]["completeness"],
+                        "completeness": draft["coverage"].get("completeness", "partial"),
                     }
                 )
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
