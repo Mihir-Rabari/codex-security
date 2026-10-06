@@ -3174,15 +3174,55 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
-  ])(
-    "uses the push repository to distinguish same-branch pull requests: resume=%s, own PR=%s",
-    async (resume, ownIncluded) => {
+  test.each(
+    [
+      "local",
+      "scp",
+      "ssh-uri",
+      "ssh-missing",
+      "ssh-failed",
+      "ssh-host",
+      "ssh-empty",
+    ].flatMap((transport) =>
+      [false, true].flatMap((resume) =>
+        [false, true].map((ownIncluded) => ({
+          transport,
+          resume,
+          ownIncluded,
+        })),
+      ),
+    ),
+  )(
+    "uses the push repository for $transport: resume=$resume, own PR=$ownIncluded",
+    async ({ transport, resume, ownIncluded }) => {
       const { directory, git, remote } = await publicationRepository();
+      const pushRemote =
+        transport === "local"
+          ? remote
+          : transport === "scp"
+            ? "git@github-work:example/repository.git"
+            : transport === "ssh-uri"
+              ? "ssh://git@github-work:2222/example/repository.git"
+              : "git@ssh.github.com:example/repository.git";
+      const lookupRemote =
+        transport === "local" || transport === "ssh-missing"
+          ? pushRemote
+          : "ssh://git@github.com/example/repository.git";
+      if (transport !== "local") {
+        git(
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.example.test/fetch-owner/repository.git",
+        );
+        git("remote", "set-url", "--push", "origin", pushRemote);
+        git(
+          "remote",
+          "add",
+          "upstream",
+          "https://github.example.test/upstream-owner/repository.git",
+        );
+      }
       const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
       if (resume) {
@@ -3209,14 +3249,57 @@ describe("patch change tracking", () => {
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args[0] === "push") pushes++;
+              if (args[0] === "push") {
+                pushes++;
+                expect(args).toEqual([
+                  "push",
+                  "--set-upstream",
+                  "origin",
+                  branch,
+                ]);
+                return runGitRepositoryCommand(
+                  command,
+                  ["push", "--set-upstream", remote, branch],
+                  cwd,
+                  options,
+                );
+              }
+              if (args[0] === "ls-remote") {
+                expect(args).toEqual([
+                  "ls-remote",
+                  "--heads",
+                  pushRemote,
+                  `refs/heads/${branch}`,
+                ]);
+                return runGitRepositoryCommand(
+                  command,
+                  ["ls-remote", "--heads", remote, `refs/heads/${branch}`],
+                  cwd,
+                  options,
+                );
+              }
               return runGitRepositoryCommand(command, args, cwd, options);
+            }
+            if (command === "ssh") {
+              expect(args).toEqual([
+                "-G",
+                transport === "scp" || transport === "ssh-uri"
+                  ? "github-work"
+                  : "ssh.github.com",
+              ]);
+              if (transport === "ssh-missing" || transport === "ssh-failed")
+                throw Object.assign(new Error("Synthetic SSH lookup failure"), {
+                  code: transport === "ssh-missing" ? "ENOENT" : 1,
+                });
+              return transport === "ssh-empty"
+                ? ""
+                : `hostname ${transport === "ssh-host" ? "ssh.github.com" : "github.com"}`;
             }
             if (args[0] === "repo") {
               expect(args).toEqual([
                 "repo",
                 "view",
-                remote,
+                lookupRemote,
                 "--json",
                 "id",
                 "--jq",
@@ -3360,4 +3443,77 @@ describe("patch change tracking", () => {
         );
     },
   );
+});
+
+describe("directory replacement publication", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  for (const state of ["clean", "unrelated", "dirty-nested", "staged-nested"])
+    test(`directory replacement ${state}`, async () => {
+      const root = await fixtures.create("synthetic-directory-replacement-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await mkdir(join(root, "entry"));
+      await writeFile(join(root, "entry/old.ts"), "original\n");
+      await writeFile(join(root, "other.ts"), "unrelated\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const dirtyNested = state.endsWith("nested");
+      if (state !== "clean")
+        await writeFile(join(root, "other.ts"), "unrelated local edits\n");
+      if (dirtyNested)
+        await writeFile(
+          join(root, "entry/old.ts"),
+          "original plus local edits\n",
+        );
+      if (state === "staged-nested") git("add", "entry/old.ts");
+      const remote = await fixtures.create("synthetic-local-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const before = git("rev-parse", "HEAD");
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "entry";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: root,
+          onWorkbench: () => savedScan(result, "scan-1", root),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            return command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[0] === "repo"
+                ? "synthetic-repository-id"
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.example.test/synthetic/project/pull/1";
+          },
+          onCodex: async (args, output) => {
+            const previous = await readFile(join(root, "entry/old.ts"), "utf8");
+            await rm(join(root, "entry"), { recursive: true });
+            await writeFile(join(root, "entry"), `fixed\n${previous}`);
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      const after = git("rev-parse", "HEAD"),
+        remoteRef = git("ls-remote", "origin");
+      expect(outcome.exitCode, outcome.stderr).toBe(dirtyNested ? 2 : 0);
+      if (dirtyNested) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(after).toBe(before);
+        expect(remoteRef).toBe("");
+        expect(await readFile(join(root, "entry"), "utf8")).toContain(
+          "original plus local edits",
+        );
+      } else {
+        expect(git("show", "HEAD:entry")).toBe("fixed\noriginal");
+        expect(remoteRef).toContain(after);
+      }
+      expect(await readFile(join(root, "other.ts"), "utf8")).toBe(
+        state === "clean" ? "unrelated\n" : "unrelated local edits\n",
+      );
+    });
 });

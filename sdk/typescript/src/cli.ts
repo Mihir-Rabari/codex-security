@@ -1201,7 +1201,7 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh" | "glab",
+    command: "git" | "gh" | "glab" | "ssh",
     args: readonly string[],
     repository: string,
     options?: {
@@ -6711,7 +6711,7 @@ async function patchPublicationDestination(
   branch: string,
   dependencies: CliDependencies,
 ) {
-  const run = (command: "git" | "gh" | "glab", args: string[]) =>
+  const run = (command: "git" | "gh" | "glab" | "ssh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   const remotes = (
     await run("git", ["remote", "get-url", "--push", "--all", "origin"])
@@ -6731,9 +6731,37 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  let headRemote = remote;
+  if (
+    !gitlab &&
+    host &&
+    (remote.startsWith("ssh://") || !remote.includes("://"))
+  ) {
+    const settings = await run("ssh", ["-G", host]).catch((error: unknown) =>
+      isJsonObject(error) && typeof error["code"] === "number" ? "" : undefined,
+    );
+    if (settings !== undefined) {
+      const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? host;
+      const url = new URL(
+        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
+      );
+      url.hostname =
+        hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
+      url.port = "";
+      headRemote = url.href;
+    }
+  }
   const headRepository = gitlab
     ? undefined
-    : await run("gh", ["repo", "view", remote, "--json", "id", "--jq", ".id"]);
+    : await run("gh", [
+        "repo",
+        "view",
+        headRemote,
+        "--json",
+        "id",
+        "--jq",
+        ".id",
+      ]);
   const existing = await run(
     command,
     gitlab
@@ -7030,9 +7058,15 @@ async function createPatchPullRequest(
       ...deleted
         .split("\0")
         .filter(Boolean)
-        .filter(
-          (file) => !lstatSync(resolve(root, file), { throwIfNoEntry: false }),
-        )
+        .filter((file) => {
+          try {
+            return !lstatSync(resolve(root, file), { throwIfNoEntry: false });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOTDIR")
+              return true;
+            throw error;
+          }
+        })
         .map((file) => relative(repository, resolve(root, file))),
     ]),
   ].filter((file) => dirtyFiles.has(file));
