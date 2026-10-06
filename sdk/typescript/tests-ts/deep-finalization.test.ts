@@ -448,6 +448,21 @@ for (const {
               (outcome === "canceled-during-publication" ||
                 outcome === "canceled-during-resumed-publication")
             ) {
+              const published = await runWorkbench(options, [
+                "get-deep-scan",
+                "--scan-id",
+                scanId,
+                "--thread-id",
+                threadId,
+              ]);
+              const bound = (published["deepScan"] as Record<string, unknown>)[
+                "finalizationInput"
+              ];
+              expect(bound).toMatchObject(originalFinalizationInput);
+              expect(bound).toMatchObject({
+                publicationSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+              });
+              originalFinalizationInput = bound;
               if (initialResumeUsage) {
                 expect(originalResumeSignal?.reason).toBeInstanceOf(
                   ScanCostLimitExceededError,
