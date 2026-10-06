@@ -177,6 +177,7 @@ const allowedFiles = new Set([
     "scan-execution",
     "execution-auth",
     "execution-preparation",
+    "execution-profile",
     "scan-events",
     "scan-monitoring",
     "scan-publication",
