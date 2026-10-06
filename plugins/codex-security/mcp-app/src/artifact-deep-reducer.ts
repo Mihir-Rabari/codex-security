@@ -108,11 +108,10 @@ export async function readDeepReductionSources(
           },
         }));
         const { coverage, ...reduction } = result;
-        const archived = await readArchivedWorkerCheckpoints({
-          ...context,
-          root: dirname(worker.resultPath),
-          layout: "worker",
-        });
+        const archived = await readArchivedWorkerCheckpoints(
+          { ...context, root: dirname(worker.resultPath), layout: "worker" },
+          false,
+        );
         return {
           workerId: worker.id,
           ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),

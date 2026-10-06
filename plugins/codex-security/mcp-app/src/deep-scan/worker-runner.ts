@@ -160,15 +160,21 @@ export class DeepScanWorkerRunner {
         await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
         discoveryValidated = true;
       },
-      beforeRetry: async (attempt) => {
-        await archiveDirectory(
-          artifactDir,
-          join(
-            workerRoot,
-            "attempts",
-            `attempt-${String(attempt).padStart(2, "0")}`,
-          ),
+      beforeRetry: async (attempt, resuming) => {
+        const attemptRoot = join(
+          workerRoot,
+          "attempts",
+          `attempt-${String(attempt).padStart(2, "0")}`,
         );
+        if (resuming) {
+          // Keep the conversation's files while preserving their host attempt.
+          await fs.cp(artifactDir, attemptRoot, {
+            recursive: true,
+            preserveTimestamps: true,
+          });
+        } else {
+          await archiveDirectory(artifactDir, attemptRoot);
+        }
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -332,7 +338,8 @@ export class DeepScanWorkerRunner {
           run.scanId,
         );
       },
-      beforeRetry: async (attempt) => {
+      beforeRetry: async (attempt, resuming) => {
+        if (resuming) return;
         const attemptRoot = join(
           reducerRoot,
           "attempts",
@@ -402,7 +409,7 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<void>;
-    beforeRetry: (attempt: number) => Promise<void>;
+    beforeRetry: (attempt: number, resuming?: boolean) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -573,6 +580,7 @@ export class DeepScanWorkerRunner {
             });
           }
         }
+        if (resumableThreadId) await input.beforeRetry(attempt, true);
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
             (1 + 0.3 * this.options.random()),

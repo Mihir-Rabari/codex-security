@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { promises as fsPromises } from "node:fs";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
@@ -35,6 +36,9 @@ export async function publishCoverageFixture(
     continueAfterResume = false,
     stopAfterDraft = false,
     receiptRetry = false,
+    streamRetry = false,
+    closeGeneric = false,
+    failClosedResult = false,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -154,6 +158,17 @@ export async function publishCoverageFixture(
         ? [{ question: `Deployment question ${index + 1}.` }]
         : [],
     };
+    if (closeGeneric) {
+      coverage.completeness = "partial";
+      coverage.surfaces[0].disposition = "needs_follow_up";
+      coverage.deferred = [
+        {
+          id: "review-task",
+          reason: "Finish the source review.",
+          surfaceIds: ["shared-surface"],
+        },
+      ];
+    }
     for (const field of [
       "surfaces",
       "explicitExclusions",
@@ -219,6 +234,70 @@ export async function publishCoverageFixture(
         },
         JSON.parse(bytes),
       );
+      if (closeGeneric) {
+        const before = await readFile(resultPath, "utf8");
+        const closed = JSON.parse(bytes);
+        closed.coverage.completeness = "complete";
+        closed.coverage.surfaces[0].disposition = "no_issue_found";
+        closed.coverage.deferred = [];
+        closed.coverage.resolvedDeferred = [
+          { id: "review-task", reason: "Source review completed." },
+        ];
+        const originalRename = fsPromises.rename;
+        let failures = 0;
+        fsPromises.rename = async (source, destination) => {
+          if (failClosedResult && destination === resultPath) {
+            failures++;
+            throw Object.assign(
+              new Error("Synthetic result replacement failure."),
+              { code: "EIO" },
+            );
+          }
+          return originalRename(source, destination);
+        };
+        try {
+          const publication = recordCodexSecurityWorkerScanDraft(
+            {
+              root: artifactDir,
+              repoRoot: targetPath,
+              layout: "worker",
+              scanId: run.scanId,
+            },
+            closed,
+          );
+          if (failClosedResult)
+            await assert.rejects(
+              publication,
+              /Synthetic result replacement failure/,
+            );
+          else await publication;
+        } finally {
+          fsPromises.rename = originalRename;
+        }
+        assert.equal(failures, Number(failClosedResult));
+        if (failClosedResult)
+          assert.equal(await readFile(resultPath, "utf8"), before);
+        const head = JSON.parse(
+          await readFile(
+            path.join(artifactDir, "checkpoint-head.json"),
+            "utf8",
+          ),
+        );
+        const selected = JSON.parse(
+          await readFile(
+            path.join(artifactDir, "checkpoints", head.checkpoint),
+            "utf8",
+          ),
+        );
+        assert.deepEqual(
+          selected.coverage.resolvedDeferred,
+          closed.coverage.resolvedDeferred,
+        );
+        assert.equal(
+          selected.coverage.surfaces[0].disposition,
+          "no_issue_found",
+        );
+      }
       for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
         const checkpointPath = path.join(artifactDir, "checkpoints", name);
         rawSources.set(checkpointPath, await readFile(checkpointPath, "utf8"));
@@ -304,6 +383,7 @@ export async function publishCoverageFixture(
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
+  let interruptedDiscovery;
   const executor = {
     async run(request) {
       assert.equal(
@@ -326,12 +406,37 @@ export async function publishCoverageFixture(
           if (receiptRetry) {
             await writeReceiptAttempt(request.artifactContext.root);
           }
+          if (streamRetry) {
+            await writeDiscovery(request.artifactContext.root, index);
+            interruptedDiscovery = {
+              thread,
+              root: request.artifactContext.root,
+              result: await readFile(
+                path.join(request.artifactContext.root, "result.json"),
+                "utf8",
+              ),
+            };
+            throw new Error(
+              "Synthetic stream interruption after recorded result.",
+            );
+          }
           return {
             threadId: thread,
             finalResponse: "Continue the unfinished audit.",
           };
         }
-        await writeDiscovery(request.artifactContext.root, index);
+        if (streamRetry && index === 0 && discoveryCalls === 2) {
+          assert.equal(request.resumeThreadId, interruptedDiscovery.thread);
+          assert.equal(request.artifactContext.root, interruptedDiscovery.root);
+          assert.equal(
+            await readFile(
+              path.join(request.artifactContext.root, "result.json"),
+              "utf8",
+            ),
+            interruptedDiscovery.result,
+            "same-thread retry preserves the original result bytes",
+          );
+        } else await writeDiscovery(request.artifactContext.root, index);
       } else {
         await recordCodexSecurityDeepReduction(
           {
@@ -431,6 +536,64 @@ export async function publishCoverageFixture(
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);
+  if (closeGeneric) {
+    const coverage = JSON.parse(
+      await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+    );
+    const surfaces = coverage.surfaces.filter(
+      (row) => row.label === "Archive route",
+    );
+    assert.equal(
+      surfaces.length,
+      1,
+      "generic closure replaces the retained host surface",
+    );
+    assert.equal(surfaces[0].disposition, "no_issue_found");
+    assert.equal(
+      coverage.deferred.some(
+        (row) => row.reason === "Finish the source review.",
+      ),
+      false,
+    );
+  }
+  if (streamRetry) {
+    const first = accepted.persistedWorkers.find(
+      (worker) => worker.kind === "discovery",
+    );
+    assert.equal(
+      first.attempt,
+      2,
+      "host accepted the resumed execution attempt",
+    );
+    const coverage = JSON.parse(
+      await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+    );
+    const rows = coverage.surfaces.filter(
+      (row) => row.provenance?.workerId === first.id,
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(
+      rows[0].provenance.attempt,
+      1,
+      "recorded coverage belongs to original execution attempt",
+    );
+    assert.match(rows[0].id, new RegExp(`^${first.id}-attempt-1-surface-`));
+    for (const field of ["explicitExclusions", "deferred", "openQuestions"])
+      for (const row of coverage[field] ?? [])
+        if (row.provenance?.workerId === first.id)
+          assert.equal(row.provenance.attempt, 1);
+    assert.deepEqual(
+      coverage.reviews
+        .filter((review) => review.workerId === first.id)
+        .map((review) => review.attempt)
+        .sort(),
+      [1, 2],
+    );
+    assert.equal(
+      await readFile(path.join(run.scanDir, rows[0].receiptRefs[0]), "utf8"),
+      "Synthetic review evidence.\n",
+    );
+  }
   if (receiptRetry) {
     const coverage = JSON.parse(
       await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),

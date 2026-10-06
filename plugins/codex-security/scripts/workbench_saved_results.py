@@ -864,10 +864,11 @@ def _generic_surface_updates(
             except ContractError:
                 continue
             replaced.update(
-                id(row)
-                for _, row in matches
+                identity
+                for saved_relative, row in matches
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+                for identity in (id(row), id(project_surface(saved_relative, row)))
             )
             if update not in updates:
                 updates.append(update)

@@ -1333,6 +1333,7 @@ async function preserveDeepThreatModel(
 
 export async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
+  relocateReceipts = true,
 ): Promise<SavedScanDraft[]> {
   const workerRoot = dirname(context.root);
   const attemptsRoot = join(workerRoot, "attempts");
@@ -1452,7 +1453,7 @@ export async function readArchivedWorkerCheckpoints(
       // The archive moved the receipts with this attempt. Rebase only the
       // retained projection; the original checkpoint bytes remain unchanged.
       for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
-        if (!Array.isArray(surface.receiptRefs)) continue;
+        if (!relocateReceipts || !Array.isArray(surface.receiptRefs)) continue;
         surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) =>
           ref.startsWith(archivePrefix)
             ? ref

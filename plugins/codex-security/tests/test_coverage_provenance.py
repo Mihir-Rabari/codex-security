@@ -1017,6 +1017,16 @@ def test_recovery_excludes_unaccepted_reducer_review_summaries(
             }
         )
     )
+    # This control publishes the parent before the worker results; explicit
+    # timestamps keep that chronology independent of filesystem clock resolution.
+    for path in [
+        scan.scan_dir / name for name in ["coverage.json", "findings.json", "scan-manifest.json"]
+    ]:
+        os.utime(path, ns=(100, 100))
+    for path in (scan.scan_dir / "checkpoints").glob("*.json"):
+        os.utime(path, ns=(100, 100))
+    os.utime(discovery, ns=(200, 200))
+    os.utime(reducer, ns=(300, 300))
     original = reducer.read_bytes()
     helper = (
         Path(__file__).resolve().parents[1]

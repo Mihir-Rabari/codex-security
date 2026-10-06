@@ -334,6 +334,11 @@ export function projectDiscoveryCoverage(
         if (field === "surfaces") {
           original.receiptRefs ??= [];
           normalized.receiptRefs ??= [];
+          const prefix = `${archivePrefix}${saved.attempt}/`;
+          for (const row of [original, normalized])
+            row.receiptRefs = (row.receiptRefs as string[]).map((ref) =>
+              ref.startsWith(prefix) ? ref.slice(prefix.length) : ref,
+            );
         }
         return isDeepStrictEqual(original, normalized);
       }),
