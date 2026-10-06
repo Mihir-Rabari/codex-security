@@ -278,3 +278,60 @@ test("duplicate retrieval and group listing preserve NUL-bearing IDs and model s
   );
   assert.deepEqual(listDedupeGroups(database, duplicate.findingId), stored);
 });
+
+test("unpaired surrogates cannot alias stored finding IDs or repository scopes", (t) => {
+  const database = open(t);
+  const replacement = finding(
+    database,
+    "finding-\ufffd",
+    [1, 0],
+    "repository-\ufffd",
+  );
+  const other = finding(database, "other", [1, 0], "repository-\ufffd");
+  for (const surrogate of ["\ud800", "\udfff"]) {
+    const malformedId = `finding-${surrogate}`;
+    assert.throws(
+      () => findPotentialDuplicates(database, malformedId),
+      TypeError,
+    );
+    assert.throws(
+      () =>
+        findPotentialDuplicates(
+          database,
+          replacement.findingId,
+          `repository-${surrogate}`,
+        ),
+      TypeError,
+    );
+    assert.throws(() => listDedupeGroups(database, malformedId), TypeError);
+    assert.throws(
+      () =>
+        storeDedupeGroups(
+          database,
+          [
+            [replacement.findingId, other.findingId],
+            [other.findingId, malformedId],
+          ],
+          "created",
+        ),
+      TypeError,
+    );
+    assert.equal(
+      database
+        .prepare("SELECT count(*) AS count FROM finding_dedupe_groups")
+        .get()!.count,
+      0,
+    );
+  }
+  assert.deepEqual(
+    findPotentialDuplicates(
+      database,
+      replacement.findingId,
+      "repository-\ufffd",
+    ),
+    {
+      finding: replacement,
+      potentialDuplicates: [other],
+    },
+  );
+});

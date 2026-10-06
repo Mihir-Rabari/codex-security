@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { parseJson } from "../helpers/json";
 import { transaction } from "./findings";
+import { requireSqliteText } from "./database";
 
 export interface DedupeGroup {
   groupId: string;
@@ -32,6 +33,7 @@ export function findPotentialDuplicates(
   repositoryId?: string,
 ) {
   return transaction(database, "BEGIN", () => {
+    requireSqliteText([findingId, repositoryId]);
     const source =
       repositoryId === undefined
         ? "finding_embeddings AS embeddings"
@@ -115,6 +117,7 @@ export function storeDedupeGroups(
       );
       const stored = new Map<string, DedupeGroup>();
       for (const group of groups) {
+        requireSqliteText(group);
         // Durable group IDs use code-point sorting and ASCII-escaped JSON.
         const findingIds = [...new Set(group)].sort((left, right) =>
           Buffer.compare(Buffer.from(left), Buffer.from(right)),
@@ -149,6 +152,7 @@ export function storeDedupeGroups(
 }
 
 export function listDedupeGroups(database: DatabaseSync, findingId: string) {
+  requireSqliteText([findingId]);
   const groups = new Map<string, DedupeGroup>();
   const rows = database.prepare(`
     SELECT groups.id, groups.created_at, json_quote(members.finding_id) AS finding_id_json
