@@ -2776,3 +2776,78 @@ for (const layout of ["standard", "diff", "deep"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff", "deep", "worker"] as const) {
+  for (const candidate of [false, true]) {
+    test(`${layout}: live revisions inherit the published identity from retained history (candidate=${candidate})`, async (t) => {
+      const normal = await fixture(t, layout === "worker" ? "deep" : layout);
+      const recovered = await fixture(t, layout === "worker" ? "deep" : layout);
+      let normalWriter = normal,
+        recoveredWriter = recovered;
+      const workers: Record<string, unknown>[] = [];
+      if (layout === "worker") {
+        const normalRoot = path.join(normal.root, "reviewer"),
+          recoveredRoot = path.join(recovered.root, "reviewer");
+        for (const root of [normalRoot, recoveredRoot]) await mkdir(root);
+        normalWriter = draftFixture(normalRoot, "worker");
+        recoveredWriter = draftFixture(recoveredRoot, "worker");
+        workers.push({
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: recoveredRoot,
+          result_manifest_path: null,
+          attempt: 1,
+        });
+      }
+      const original = finding("Synthetic historical revision", {
+        identity: { anchor: "stable-report" },
+        summary: "Original evidence.",
+        provenance: {
+          source: "local_plugin",
+          ...(candidate ? { candidateId: "candidate-1" } : {}),
+          ...(layout === "worker" ? { workerId: "reviewer" } : {}),
+        },
+      });
+      const { identity: _identity, ...revised } = structuredClone(original);
+      revised.summary = "Revised evidence.";
+      revised.provenance.previousFindings = [original];
+      for (const writer of [normalWriter, recoveredWriter])
+        await writer.write({ ...writer.draft(), findings: [original] });
+      for (let replay = 0; replay < 2; replay++) {
+        await normalWriter.write({
+          ...normalWriter.draft(),
+          findings: [revised],
+        });
+        await interruptDraftWrite(
+          path.join(
+            recoveredWriter.root,
+            layout === "worker" ? "result.json" : "findings.json",
+          ),
+          () =>
+            recoveredWriter.write({
+              ...recoveredWriter.draft(),
+              findings: [revised],
+            }),
+        );
+        if (layout === "worker") {
+          const saved = JSON.parse(
+            await readFile(path.join(normalWriter.root, "result.json"), "utf8"),
+          );
+          await normal.write({ ...normal.draft(), findings: saved.findings });
+        }
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          workers,
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 1);
+        assert.deepEqual(result.normal[0]!.identity, original.identity);
+        assert.equal(result.normal[0]!.summary, revised.summary);
+        assert.deepEqual(result.recovered, result.normal);
+        assert.deepEqual(result.warnings, []);
+      }
+    });
+  }
+}

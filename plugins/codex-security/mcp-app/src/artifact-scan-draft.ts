@@ -688,24 +688,6 @@ async function preserveScanDraft(
         disposition.finding ??= structuredClone(finding);
         continue;
       }
-      if (
-        result.findings.some((current) => {
-          const history = (current.provenance as JsonObject).previousFindings;
-          return (
-            Array.isArray(history) &&
-            history.some((previous) => {
-              if (
-                !isObject(previous) ||
-                !containsSavedFinding(previous, finding)
-              )
-                return false;
-              preserveFindingDetails(previous, finding);
-              return true;
-            })
-          );
-        })
-      )
-        continue;
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );
@@ -737,7 +719,24 @@ async function preserveScanDraft(
         ).length === 1
       ) {
         preserveFindingDetails(revisions[0]!, finding);
-      } else if (containing.length === 0) {
+      } else if (
+        !result.findings.some((current) => {
+          const history = (current.provenance as JsonObject).previousFindings;
+          return (
+            Array.isArray(history) &&
+            history.some((previous) => {
+              if (
+                !isObject(previous) ||
+                !containsSavedFinding(previous, finding)
+              )
+                return false;
+              preserveFindingDetails(previous, finding);
+              return true;
+            })
+          );
+        }) &&
+        containing.length === 0
+      ) {
         result.findings.push(structuredClone(finding));
       }
     }
