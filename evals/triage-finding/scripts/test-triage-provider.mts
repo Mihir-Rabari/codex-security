@@ -331,6 +331,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       PROMPTFOO_DISABLE_WAL_MODE: "true",
       PROMPTFOO_DISABLE_TEMPLATING: "",
       NODE_BASENAME: "node",
+      CODEX_MCP_NODE_PATH: "",
       OPENAI_API_KEY: "synthetic-test-key",
     };
     const original = new Map(
@@ -344,7 +345,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     });
     Object.assign(process.env, environment);
     const { loadApiProvider } = await import("promptfoo");
-    const load = (template: string) =>
+    const load = (template: string | undefined) =>
       loadApiProvider(
         `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
         {
@@ -356,7 +357,8 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
               skip_git_repo_check: true,
               model: "gpt-5.5",
               maxRetries: 0,
-              cli_env: { CODEX_MCP_NODE_PATH: template },
+              cli_env:
+                template === undefined ? {} : { CODEX_MCP_NODE_PATH: template },
             },
           },
         },
@@ -422,6 +424,31 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       assert.equal(JSON.parse(String(result.output)).node, nodes[1]);
     } finally {
       await mixed.cleanup?.();
+    }
+    for (const [ambient, template, value, expected] of [
+      [undefined, undefined, "", process.execPath],
+      ["", undefined, "", process.execPath],
+      [nodes[0], "", "", process.execPath],
+      [nodes[0], "{{custom_node}}", "", process.execPath],
+      [undefined, "{{missing_node}}", "", process.execPath],
+      [nodes[0], undefined, "", nodes[0]],
+      [nodes[0], "{{custom_node}}", nodes[1], nodes[1]],
+    ]) {
+      if (ambient === undefined) delete process.env.CODEX_MCP_NODE_PATH;
+      else process.env.CODEX_MCP_NODE_PATH = ambient;
+      const provider = await load(template);
+      try {
+        const result = await provider.callApi("synthetic", {
+          vars: { custom_node: value },
+        });
+        assert.equal(result.error, undefined, result.error);
+        const captured = JSON.parse(String(result.output));
+        const selected = fs.realpathSync(expected!);
+        assert.equal(captured.node, selected);
+        assert.deepEqual(captured.directories, [path.dirname(selected)]);
+      } finally {
+        await provider.cleanup?.();
+      }
     }
     process.env.PROMPTFOO_DISABLE_TEMPLATING = "true";
     const disabled = await load(nodes[2]);

@@ -32,11 +32,12 @@ export default class TriageProvider implements ApiProvider {
     if (!process.env.TRIAGE_RUNTIME_ROOT) {
       throw new Error("Run this evaluation through scripts/run-promptfoo.mts.");
     }
-    let requestedNode = render(
-      config.cli_env?.CODEX_MCP_NODE_PATH ??
-        process.env.CODEX_MCP_NODE_PATH ??
-        process.execPath,
-    );
+    let requestedNode =
+      render(
+        config.cli_env?.CODEX_MCP_NODE_PATH ??
+          process.env.CODEX_MCP_NODE_PATH ??
+          process.execPath,
+      ) || process.execPath;
     const environment = {
       ...process.env,
       ...Object.fromEntries(
