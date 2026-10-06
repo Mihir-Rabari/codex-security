@@ -21,6 +21,7 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { requireRegularFile } from "./deep-scan/artifacts.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -1347,6 +1348,7 @@ async function readArchivedWorkerCheckpoints(
   const archived: SavedScanDraft[] = [];
   const archivePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/attempts/`;
   const activePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/output/`;
+  const scanRoot = dirname(dirname(dirname(dirname(canonicalWorkerRoot))));
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
@@ -1439,13 +1441,21 @@ async function readArchivedWorkerCheckpoints(
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
       for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
-        surface.receiptRefs = (surface.receiptRefs as string[])
-          .map((ref) => posix.normalize(ref))
-          .map((ref) =>
-            ref.startsWith(archivePrefix)
-              ? ref
-              : `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`,
-          );
+        surface.receiptRefs = await Promise.all(
+          (surface.receiptRefs as string[]).map(async (value) => {
+            const ref = posix.normalize(value);
+            if (ref.startsWith(archivePrefix)) return ref;
+            if (!ref.startsWith(activePrefix)) {
+              try {
+                await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+                return ref;
+              } catch {
+                // Worker-output receipts moved with this archived attempt.
+              }
+            }
+            return `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`;
+          }),
+        );
       }
       archived.push({ ...draft, attempt: attempt.name });
     }

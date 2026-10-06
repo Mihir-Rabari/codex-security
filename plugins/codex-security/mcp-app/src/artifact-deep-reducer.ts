@@ -114,6 +114,7 @@ export async function readDeepReductionSources(
               await requireRegularFile(
                 join(bound.artifacts.scanDir, normalized),
                 bound.artifacts.scanDir,
+                true,
               );
               scanReceiptRefs.add(normalized);
             } catch {

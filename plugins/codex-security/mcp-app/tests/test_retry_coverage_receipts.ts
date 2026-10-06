@@ -115,3 +115,75 @@ for (const resume of [false, true]) {
     });
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    for (const receiptSpelling of [
+      "shared scan",
+      "equivalent shared scan",
+    ] as const) {
+      test(`archived shared receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${receiptSpelling} spelling`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "archived-shared-receipts-"),
+        );
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            receiptSpelling,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    for (const sharedReceipt of [false, true]) {
+      test(`empty receipt survives ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${sharedReceipt ? "shared" : "worker"} current evidence`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "empty-current-receipts-"),
+        );
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            sharedReceipt,
+            emptyReceipt: true,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+    for (const receiptSpelling of [
+      "shared scan",
+      "equivalent shared scan",
+    ] as const) {
+      test(`empty receipt survives ${resume ? "reconstruction" : "live retry"} and ${outcome} with archived ${receiptSpelling} evidence`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "empty-archived-receipts-"),
+        );
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            receiptSpelling,
+            emptyReceipt: true,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}

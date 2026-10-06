@@ -29,9 +29,12 @@ interface CoverageFixtureOptions {
     | "scan"
     | "equivalent scan"
     | "active scan"
-    | "equivalent active scan";
+    | "equivalent active scan"
+    | "shared scan"
+    | "equivalent shared scan";
   activeReceiptSpelling?: "worker" | "scan" | "equivalent scan";
   sharedReceipt?: boolean;
+  emptyReceipt?: boolean;
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
   retryFindings?: JsonObject[][];
@@ -102,6 +105,7 @@ export async function publishCoverageFixture(
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
     sharedReceipt = false,
+    emptyReceipt = false,
     retryPending = false,
     retryCoverage,
     retryFindings,
@@ -201,11 +205,30 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(
       path.join(artifactDir, "artifacts", "prior.txt"),
-      "Archived receipt.\n",
+      emptyReceipt ? "" : "Archived receipt.\n",
     );
     const archivedRef = `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`;
-    const receiptRef =
-      receiptSpelling === "worker"
+    const sharedPrior = "artifacts/01_context/false_positive_feedback.json";
+    const sharedPriorReceipt =
+      receiptSpelling === "shared scan" ||
+      receiptSpelling === "equivalent shared scan";
+    if (sharedPriorReceipt) {
+      await mkdir(path.dirname(path.join(run.scanDir, sharedPrior)), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(run.scanDir, sharedPrior),
+        emptyReceipt ? "" : "Archived receipt.\n",
+      );
+    }
+    const receiptRef = sharedPriorReceipt
+      ? sharedPrior.replace(
+          "artifacts/",
+          receiptSpelling === "equivalent shared scan"
+            ? "artifacts/./"
+            : "artifacts/",
+        )
+      : receiptSpelling === "worker"
         ? "artifacts/prior.txt"
         : receiptSpelling === "scan"
           ? archivedRef
@@ -332,7 +355,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(
       path.join(artifactDir, "artifacts", "review.md"),
-      "Synthetic review evidence.\n",
+      emptyReceipt ? "" : "Synthetic review evidence.\n",
     );
     const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
     const sharedRef = "artifacts/01_context/false_positive_feedback.json";
@@ -342,7 +365,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       });
       await writeFile(
         path.join(run.scanDir, sharedRef),
-        "Synthetic review evidence.\n",
+        emptyReceipt ? "" : "Synthetic review evidence.\n",
       );
     }
     const activeReceiptRef = sharedReceipt
@@ -660,7 +683,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       );
     assert.equal(
       await readFile(path.join(run.scanDir, current[0].receiptRefs[0]), "utf8"),
-      "Synthetic review evidence.\n",
+      emptyReceipt ? "" : "Synthetic review evidence.\n",
     );
     const prior = coverage.surfaces.filter((surface) =>
       surface.label.startsWith("Prior "),
@@ -691,13 +714,22 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "Verify the same candidate's second boundary.",
       ].sort(),
     );
-    assert.match(
-      prior[0].receiptRefs[0],
-      /\/attempts\/attempt-01\/artifacts\/prior\.txt$/,
-    );
+    if (
+      receiptSpelling === "shared scan" ||
+      receiptSpelling === "equivalent shared scan"
+    )
+      assert.equal(
+        prior[0].receiptRefs[0],
+        "artifacts/01_context/false_positive_feedback.json",
+      );
+    else
+      assert.match(
+        prior[0].receiptRefs[0],
+        /\/attempts\/attempt-01\/artifacts\/prior\.txt$/,
+      );
     assert.equal(
       await readFile(path.join(run.scanDir, prior[0].receiptRefs[0]), "utf8"),
-      "Archived receipt.\n",
+      emptyReceipt ? "" : "Archived receipt.\n",
     );
   }
   return { scanDir: run.scanDir, threadId, terminal };
