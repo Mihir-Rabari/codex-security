@@ -745,14 +745,30 @@ export class CodexSecurity {
             command: this.#codexCommand(),
             pluginVersion: runtime.plugin.version,
             validationSkillDigest: workflowDigest(
-              await readFile(
-                join(
-                  runtime.plugin.pluginRoot,
-                  "skills",
-                  "validation",
-                  "SKILL.md",
-                ),
-                "utf8",
+              await Promise.all(
+                [
+                  "skills/validation/SKILL.md",
+                  "skills/validation/references/validation-guidance.md",
+                  "references/static-finding-assessment.md",
+                  "references/artifact-storage.md",
+                  "references/scan-artifacts.md",
+                ].map(async (path) => {
+                  try {
+                    return await readFile(
+                      join(runtime.plugin.pluginRoot, path),
+                      "utf8",
+                    );
+                  } catch (error) {
+                    if (
+                      path !== "skills/validation/SKILL.md" &&
+                      isRecord(error) &&
+                      (error["code"] === "ENOENT" ||
+                        error["code"] === "ENOTDIR")
+                    )
+                      return null;
+                    throw error;
+                  }
+                }),
               ),
             ),
           }),

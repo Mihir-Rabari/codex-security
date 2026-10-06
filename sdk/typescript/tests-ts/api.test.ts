@@ -784,12 +784,29 @@ describe("CodexSecurity finding validation", () => {
     expect(modelCalls).toBe(6);
   });
 
-  test.each([false, true])(
-    "binds cached validation to same-version selected instructions, changed=%p",
-    async (changed) => {
+  test.each([
+    { instruction: null, customSkill: false },
+    { instruction: null, customSkill: true },
+    ...[
+      "skills/validation/SKILL.md",
+      "skills/validation/references/validation-guidance.md",
+      "references/static-finding-assessment.md",
+      "references/artifact-storage.md",
+      "references/scan-artifacts.md",
+    ].map((instruction) => ({ instruction, customSkill: false })),
+  ])(
+    "binds cached validation to same-version selected instructions, %p",
+    async ({ instruction, customSkill }) => {
       const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
       await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
       const skill = join(pluginRoot, "skills", "validation", "SKILL.md");
+      if (customSkill) {
+        await writeFile(skill, "Validate the supplied candidate.\n");
+        await rm(join(pluginRoot, "skills", "validation", "references"), {
+          recursive: true,
+        });
+        await rm(join(pluginRoot, "references"), { recursive: true });
+      }
       const python = await resolvePluginPython();
       let modelCalls = 0;
       const reviewKeys: string[] = [];
@@ -833,9 +850,9 @@ describe("CodexSecurity finding validation", () => {
       expect(await originalClient.validate(request)).toEqual(first);
       expect(modelCalls).toBe(1);
       await originalClient.close();
-      if (changed)
+      if (instruction !== null)
         await appendFile(
-          skill,
+          join(pluginRoot, instruction),
           "\nReview the synthetic validation instruction update.\n",
         );
       const resumed = await validationClient(
@@ -847,13 +864,13 @@ describe("CodexSecurity finding validation", () => {
       useWorkbench(resumed);
       await using client = resumed.client;
       const second = await client.validate(request);
-      expect(modelCalls).toBe(changed ? 2 : 1);
+      expect(modelCalls).toBe(instruction !== null ? 2 : 1);
       expect(second.report).toBe(
-        changed ? "Synthetic assessment 2." : first.report,
+        instruction !== null ? "Synthetic assessment 2." : first.report,
       );
       expect(await client.validate(request)).toEqual(second);
-      expect(modelCalls).toBe(changed ? 2 : 1);
-      expect(reviewKeys).toHaveLength(changed ? 2 : 1);
+      expect(modelCalls).toBe(instruction !== null ? 2 : 1);
+      expect(reviewKeys).toHaveLength(instruction !== null ? 2 : 1);
       expect(await workflow.getReview(reviewKeys[0]!)).toEqual(first);
       expect(resumed.captured.prompt ?? original.captured.prompt).toContain(
         JSON.stringify(skill),
