@@ -476,7 +476,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             continue
         root = git_output(submodule, "rev-parse", "--show-toplevel")
         try:
-            is_initialized = root is not None and Path(root).resolve() == submodule.resolve()
+            is_initialized = root is not None and Path(root).samefile(submodule)
         except OSError:
             is_initialized = False
         if not is_initialized:
@@ -574,10 +574,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
-        if (
-            nested_repository_root is not None
-            and Path(nested_repository_root).resolve() == path.resolve()
-        ):
+        if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
                 paths.extend(nested_paths)
@@ -716,9 +713,13 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
     excluded_relative = []
     for path in excluded:
         try:
-            excluded_relative.append(path.relative_to(repository))
+            relative_path = path.relative_to(repository)
         except ValueError:
-            continue
+            try:
+                relative_path = Path(pathspec) / path.relative_to(source)
+            except ValueError:
+                continue
+        excluded_relative.append(relative_path)
     destination.mkdir()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))

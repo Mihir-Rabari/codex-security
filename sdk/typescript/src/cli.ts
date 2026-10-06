@@ -195,6 +195,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -2068,13 +2069,22 @@ export async function main(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
-            const target =
+            let target =
               repositories.find(
                 (entry) => entry["targetPath"] === repository,
               ) ??
               repositories.find(
                 (entry) => entry["targetPath"] === canonicalRepository,
               );
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (await sameFile(storedPath, repository)) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []
