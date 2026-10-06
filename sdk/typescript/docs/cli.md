@@ -986,18 +986,18 @@ but their finding histories remain separate.
 Finding confirmation and automatic post-scan matching follow completion order
 in the workbench, without changing sealed report timestamps.
 
-| Command                                               | Purpose                                                    |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.      |
-| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                 |
-| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active. |
-| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                         |
-| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                            |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                    |
-| `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees.             |
-| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.           |
-| `findings list [REPOSITORY]`                          | List open findings.                                        |
-| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
+| Command                                               | Purpose                                                                          |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.                            |
+| `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                                       |
+| `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.                       |
+| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                               |
+| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                                                  |
+| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                          |
+| `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
+| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
+| `findings list [REPOSITORY]`                          | List open findings.                                                              |
+| `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                                      |
 
 Recipes save settings and authentication choice, not credentials. Reruns use the
 current checkout/context files and do not reload project files. Supply replacement

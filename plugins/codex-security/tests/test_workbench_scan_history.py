@@ -1466,3 +1466,154 @@ def test_cli_diff_launch_accepts_equal_refs_and_distinct_working_tree_base(tmp_p
                 base_revision,
                 head,
             )
+
+
+def test_history_repair_matches_legacy_generation_in_owned_checkout(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    second = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
+        )
+    pending = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert len(pending["batches"]) == 1
+    assert pending["batches"][0]["afterScanId"] == second["scanId"]
+    assert pending["batches"][0]["beforeScans"][0]["scanId"] == first["scanId"]
+
+
+def test_history_repair_keeps_triage_across_legacy_match(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    first = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-prior-anchor",
+    )
+    second = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-current-anchor",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
+        )
+    inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
+    prior = inputs["before"][0]["occurrenceId"]
+    current = inputs["after"][0]["occurrenceId"]
+    save_scan_matches(state, first, second, confirmed_match(prior, current))
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        prior,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "The synthetic finding is already prevented by its checked guard.",
+    )
+    rows = run_workbench(state, "list-global-findings", "--repository", str(repository))["findings"]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["occurrenceCount"] == 2
+    assert len(rows[0]["matchedFindingIds"]) == 2
+    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 0
+
+
+def test_history_repair_uses_completion_horizon_for_focused_matching(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    first = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-first-anchor",
+    )
+    second = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-second-anchor",
+    )
+    inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
+    save_scan_matches(
+        state,
+        first,
+        second,
+        confirmed_match(inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]),
+    )
+    focused = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-focused-anchor",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET started_at = '2026-01-01T00:00:00Z' WHERE id = ?",
+            (focused["scanId"],),
+        )
+    pending = run_workbench(
+        state,
+        "list-unmatched-scan-pairs",
+        "--repository",
+        str(repository),
+        "--after-scan-id",
+        focused["scanId"],
+    )
+    assert len(pending["batches"]) == 1
+    groups = pending["batches"][0].get("knownFindingGroups", [])
+    assert len(groups) == 1
+    assert len(groups[0]) == 2
+
+
+def test_history_repair_rebinds_only_unscanned_workspace(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    workspace = str(uuid.uuid4())
+    created = run_workbench(
+        state, "create-workspace", "--workspace-id", workspace, "--target-path", str(repository)
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        old = connection.execute(
+            "SELECT id, repository_identity FROM security_targets WHERE current_path = ?",
+            (str(repository),),
+        ).fetchone()
+    (repository / ".git").rename(tmp_path / "previous-git")
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    run_workbench(
+        state,
+        "save-workspace",
+        "--workspace-id",
+        workspace,
+        "--target-path",
+        str(repository),
+        "--scope",
+        ".",
+        "--mode",
+        "deep",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        new = connection.execute(
+            "SELECT id, repository_identity FROM security_targets WHERE current_path = ?",
+            (str(repository),),
+        ).fetchone()
+    assert old is not None and new is not None
+    assert new[0] == old[0]
+    assert new[1] != old[1]
+    assert created["targetMetadata"]["isGit"] is True

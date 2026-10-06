@@ -22,7 +22,6 @@ from workbench_target_state import (
     RepositoryIdentityCache,
     _timestamp_ns,
     scan_repository_generation,
-    scan_repository_group,
 )
 from workbench_validation import reject_non_finite_json
 
@@ -384,7 +383,7 @@ def list_unmatched_scan_pairs(
         candidates = [
             before
             for before in available[:index]
-            if scan_repository_group(before) == scan_repository_group(after)
+            if _same_repository(connection, before, after, identities=identities)
         ]
         previous = [
             before
@@ -411,7 +410,11 @@ def list_unmatched_scan_pairs(
             {
                 scan["id"]
                 for scan in selected
-                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
+                if (
+                    _scan_completion_order(scan) <= _scan_completion_order(after)
+                    if focus_scan_id is not None
+                    else (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
+                )
             },
         )
         batches.append(

@@ -16,7 +16,6 @@ from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FIND
 from workbench_target_state import (
     RepositoryIdentityCache,
     RepositoryScanScope,
-    scan_repository_group,
 )
 from workbench_validation import bounded_output_text
 
@@ -138,13 +137,13 @@ def _indexed_findings(
         """,
         (*before_values, *after_values),
     ):
-        before_repository = scan_repository_group(
+        before_repository = identities.group_for_scan(
             {
                 "target_id": match["before_target_id"],
                 "repository_generation": match["before_generation"],
             }
         )
-        after_repository = scan_repository_group(
+        after_repository = identities.group_for_scan(
             {
                 "target_id": match["after_target_id"],
                 "repository_generation": match["after_generation"],
@@ -188,7 +187,9 @@ def _indexed_findings(
         ),
         key=scan_history._scan_completion_order,
     )
-    latest_scan_by_repository = {scan_repository_group(row): row["id"] for row in completed_scans}
+    latest_scan_by_repository = {
+        identities.group_for_scan(row): row["id"] for row in completed_scans
+    }
     selected_latest_scan_id = completed_scans[-1]["id"] if completed_scans else None
 
     grouped: dict[tuple[tuple[str, str], str], list[sqlite3.Row]] = {}
@@ -231,7 +232,7 @@ def _indexed_findings(
         grouped.setdefault(
             group(
                 (
-                    scan_repository_group(row),
+                    identities.group_for_scan(row),
                     row["finding_id"],
                 )
             ),
@@ -257,7 +258,7 @@ def _indexed_findings(
         latest_scan_id = (
             selected_latest_scan_id
             if scan_scope is not None
-            else latest_scan_by_repository.get(scan_repository_group(latest))
+            else latest_scan_by_repository.get(identities.group_for_scan(latest))
         )
         findings.append(
             {
@@ -322,7 +323,7 @@ def list_repositories(
     scopes = {target_id: identities.scope(target_id) for target_id, _, _ in selected_targets}
     open_findings_by_group = (
         Counter(
-            scan_repository_group(row)
+            identities.group_for_scan(row)
             for row in _indexed_findings(connection, identities=identities)
             if row["status"] == "open"
         )

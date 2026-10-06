@@ -2382,8 +2382,12 @@ export async function main(
             }
             return outcome.data;
           }
+          const effectiveRecipe =
+            args.scanId === undefined && isJsonObject(recipe)
+              ? { ...recipe, repository: dependencies.currentDirectory() }
+              : recipe;
           scanArguments = await prepareScanArgumentsFromRecipe(
-            recipe,
+            effectiveRecipe,
             parentScanId,
             {
               scanPromptFile:
@@ -2403,9 +2407,6 @@ export async function main(
             },
             dependencies.currentDirectory(),
           );
-          if (args.scanId === undefined) {
-            scanArguments.repository = dependencies.currentDirectory();
-          }
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
         } catch (error) {

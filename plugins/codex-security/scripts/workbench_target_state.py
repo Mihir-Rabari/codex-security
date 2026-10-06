@@ -64,6 +64,15 @@ def _git_path(target: Path, *args: str) -> Path | None:
     return _path_from_git_bytes(value, target) if value is not None else None
 
 
+def _same_existing_path(first: Path | None, second: Path | None) -> bool:
+    if first is None or second is None:
+        return False
+    try:
+        return first.samefile(second)
+    except OSError:
+        return False
+
+
 def _registered_worktree(target: Path, root: Path, common: Path) -> bool:
     registered = git_bytes(target, "worktree", "list", "--porcelain", "-z")
     if registered is not None:
@@ -79,16 +88,15 @@ def _registered_worktree(target: Path, root: Path, common: Path) -> bool:
     try:
         mode = dotgit.lstat().st_mode
         if stat.S_ISDIR(mode):
-            return gitdir == common == Path(os.path.realpath(dotgit))
+            return _same_existing_path(gitdir, common) and _same_existing_path(gitdir, dotgit)
         if not stat.S_ISREG(mode) or gitdir is None or not gitdir.is_dir():
             return False
         forward = dotgit.read_bytes()
-        if (
-            not forward.startswith(b"gitdir: ")
-            or _path_from_git_bytes(forward[len(b"gitdir: ") :], root) != gitdir
+        if not forward.startswith(b"gitdir: ") or not _same_existing_path(
+            _path_from_git_bytes(forward[len(b"gitdir: ") :], root), gitdir
         ):
             return False
-        if gitdir == common:
+        if _same_existing_path(gitdir, common):
             configured = git_bytes(
                 target,
                 "config",
@@ -107,10 +115,10 @@ def _registered_worktree(target: Path, root: Path, common: Path) -> bool:
             ):
                 return False
             configured_root = _path_from_git_bytes(fields[1], gitdir, strip_line_feed=False)
-            return configured_root is not None and str(configured_root) == str(root)
-        return gitdir.parent == common / "worktrees" and _path_from_git_bytes(
-            (gitdir / "gitdir").read_bytes(), gitdir
-        ) == Path(os.path.realpath(dotgit))
+            return _same_existing_path(configured_root, root)
+        return _same_existing_path(gitdir.parent, common / "worktrees") and _same_existing_path(
+            _path_from_git_bytes((gitdir / "gitdir").read_bytes(), gitdir), dotgit
+        )
     except (OSError, ValueError):
         return False
 
@@ -618,6 +626,13 @@ class RepositoryIdentityCache:
     def scope_for_path(self, target_path: str) -> RepositoryScanScope:
         return self._scope_for_state(self.for_path(target_path))
 
+    def group_for_scan(self, scan: sqlite3.Row | dict) -> tuple[str, str]:
+        if scan_repository_generation(scan) is None:
+            scope = self.scope(scan["target_id"])
+            if scope.available and scope.generation is not None and scope.contains(scan):
+                return ("repository", scope.generation)
+        return scan_repository_group(scan)
+
     def scope_for_scan(self, scan: sqlite3.Row | dict) -> RepositoryScanScope:
         requested = self.for_row(scan)
         generation = scan_repository_generation(scan)
@@ -748,21 +763,26 @@ def normalize_pre_release_repository_identities(connection: sqlite3.Connection) 
 
 
 def _bind_unscanned_repository_identity(
-    connection: sqlite3.Connection, target_id: str, target_path: str, identity: str
+    connection: sqlite3.Connection,
+    target_id: str,
+    target_path: str,
+    identity: str,
+    *,
+    previous_identity: str | None = None,
 ) -> bool:
     return (
         connection.execute(
             """
         UPDATE security_targets
         SET repository_identity = ?
-        WHERE id = ? AND current_path = ? AND repository_identity IS NULL
+        WHERE id = ? AND current_path = ? AND repository_identity IS ?
             AND NOT EXISTS (
                 SELECT 1 FROM scans
                 WHERE scans.target_id = security_targets.id
                     OR scans.target_path = security_targets.current_path
             )
         """,
-            (identity, target_id, target_path),
+            (identity, target_id, target_path, previous_identity),
         ).rowcount
         == 1
     )
@@ -851,6 +871,25 @@ def register_security_target(
     state = _inspect_repository_target(
         connection, target_id, target_path, existing["repository_identity"]
     )
+    if (
+        not state.has_historical_scans
+        and state.live_identity is not None
+        and state.live_identity != existing["repository_identity"]
+    ):
+        _bind_unscanned_repository_identity(
+            connection,
+            target_id,
+            target_path,
+            state.live_identity,
+            previous_identity=existing["repository_identity"],
+        )
+        existing = connection.execute(target_query, (target_path,)).fetchone()
+        if existing is None:
+            raise SystemExit("The repository target changed while it was being registered.")
+        target_id = str(existing["id"])
+        state = _inspect_repository_target(
+            connection, target_id, target_path, existing["repository_identity"]
+        )
     if verify_ownership:
         state.require_owner()
     if existing["repository_identity"] is None:
