@@ -1198,13 +1198,6 @@ def merge_saved_results(
     projected_coverage = parent["coverage"] if parent else {}
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
     reviews = projected_coverage.get("reviews")
-    reviewed_attempts = {
-        (review.get("workerId"), review.get("attempt"))
-        for review in (reviews if isinstance(reviews, list) else [])
-        if isinstance(review, dict)
-        and isinstance(review.get("workerId"), str)
-        and isinstance(review.get("attempt"), int)
-    }
 
     def coverage_receipts(item: dict[str, Any], worker: Any, relative: str) -> Any:
         refs = item.get("receiptRefs", [])
