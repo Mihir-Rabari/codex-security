@@ -120,6 +120,23 @@ test("escapes terminal controls in database helper diagnostics", async () => {
   expect(result.stderr).not.toContain("\u202e");
 });
 
+test("successful database helper JSON escapes terminal controls without changing the path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-controls-"));
+  directories.push(directory);
+  const state = join(directory, "state\u009b\u202e\u{e0001}");
+  const result = await runCodexCommand(
+    { command: "node" },
+    [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+    { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+  );
+  expect(result.success).toBe(true);
+  expect(JSON.parse(result.stdout)).toEqual({
+    databasePath: join(await realpath(state), "workbench.sqlite3"),
+  });
+  expect(result.stdout.trimEnd()).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+  expect(result.stdout).toContain("\\udb40\\udc01");
+});
+
 async function start(
   store: SqliteFindingsStore,
   embeddings = embedder,

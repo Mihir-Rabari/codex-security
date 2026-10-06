@@ -158,6 +158,74 @@ test("configured state paths resolve symlinks before parent traversal", async ()
   );
 });
 
+test("configured directory links create missing destinations privately", async () => {
+  const directory = await temporary.create("workbench-dangling-");
+  for (const nested of [false, true]) {
+    const destination = join(directory, `destination-${nested}`, "state");
+    const alias = join(directory, `alias-${nested}`);
+    await symlink(
+      destination,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const result = await databaseInfo({
+      CODEX_SECURITY_STATE_DIR: nested ? join(alias, "nested") : alias,
+    });
+    assert.equal(
+      result.databasePath,
+      join(destination, ...(nested ? ["nested"] : []), "workbench.sqlite3"),
+    );
+    assert.equal((await stat(result.databasePath)).isFile(), true);
+    if (process.platform !== "win32")
+      assert.equal((await stat(destination)).mode & 0o777, 0o700);
+  }
+});
+
+test(
+  "an ASCII state alias opens its raw-byte POSIX target without changing a sibling database",
+  { skip: process.platform === "win32" },
+  async () => {
+    const directory = await temporary.create("workbench-raw-target-");
+    const target = Buffer.concat([
+      Buffer.from(directory + "/state-"),
+      Buffer.from([0xff]),
+    ]);
+    await mkdir(target);
+    const alias = join(directory, "alias");
+    await symlink(target, alias);
+    const sibling = join(directory, "state-\ufffd");
+    await mkdir(sibling);
+    const existing = new DatabaseSync(join(alias, "workbench.sqlite3"));
+    existing.exec(
+      "CREATE TABLE retained (value TEXT); INSERT INTO retained VALUES ('original')",
+    );
+    existing.close();
+    const result = await databaseInfo({ CODEX_SECURITY_STATE_DIR: alias });
+    assert.equal(
+      result.databasePath,
+      directory + "/state-\udcff/workbench.sqlite3",
+    );
+    const database = new DatabaseSync(join(alias, "workbench.sqlite3"));
+    try {
+      assert.equal(
+        database.prepare("SELECT value FROM retained").get()?.value,
+        "original",
+      );
+      assert.equal(
+        database
+          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+          .get()?.version,
+        41,
+      );
+    } finally {
+      database.close();
+    }
+    await assert.rejects(stat(join(sibling, "workbench.sqlite3")), {
+      code: "ENOENT",
+    });
+  },
+);
+
 test("preview index history does not skip findings, embedding or checkpoint migrations", () => {
   const database = memory();
   try {

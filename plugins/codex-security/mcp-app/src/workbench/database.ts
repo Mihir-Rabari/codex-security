@@ -1,15 +1,52 @@
-import { chmodSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
 import { applyMigrations } from "./migrations";
+import { decodePosixBytes, encodePosixPath } from "../helpers/posix-path";
+
+function createStateDirectory(path: string): void {
+  const nativePath =
+    process.platform === "win32" ? path : encodePosixPath(path);
+  try {
+    mkdirSync(nativePath, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    if (
+      !["ENOENT", "EEXIST"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    )
+      throw error;
+    const entry = lstatSync(nativePath, { throwIfNoEntry: false });
+    if (entry?.isSymbolicLink()) {
+      const target =
+        process.platform === "win32"
+          ? readlinkSync(nativePath)
+          : decodePosixBytes(readlinkSync(nativePath, { encoding: "buffer" }));
+      createStateDirectory(
+        isAbsolute(target) ? target : `${dirname(path)}${sep}${target}`,
+      );
+      return;
+    }
+    const parent = dirname(path);
+    if (entry || parent === path) throw error;
+    createStateDirectory(parent);
+    mkdirSync(nativePath, { recursive: true, mode: 0o700 });
+  }
+}
 
 export async function openWorkbenchDatabase(
   databasePath: string,
   { deferred = false }: { deferred?: boolean } = {},
 ): Promise<DatabaseSync> {
-  mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
+  createStateDirectory(dirname(databasePath));
   for (let attempt = 0; ; attempt++) {
     const database = new DatabaseSync(databasePath);
     try {
@@ -47,11 +84,18 @@ export async function databaseInfo(
         "plugins",
         "codex-security",
       ].join(sep);
-  mkdirSync(state, { recursive: true, mode: 0o700 });
-  const databasePath = join(realpathSync.native(state), "workbench.sqlite3");
-  const database = await openWorkbenchDatabase(databasePath, {
-    deferred: true,
-  });
+  // Keep an ASCII alias usable even when its destination has raw POSIX bytes.
+  const database = await openWorkbenchDatabase(
+    `${state}${sep}workbench.sqlite3`,
+    { deferred: true },
+  );
   database.close();
+  const canonicalState =
+    process.platform === "win32"
+      ? realpathSync.native(state)
+      : decodePosixBytes(
+          realpathSync.native(encodePosixPath(state), { encoding: "buffer" }),
+        );
+  const databasePath = join(canonicalState, "workbench.sqlite3");
   return { databasePath };
 }

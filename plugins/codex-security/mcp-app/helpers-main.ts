@@ -71,7 +71,19 @@ if (command === "resolve-security-md") {
       return;
     }
     const { databaseInfo } = await import("./src/workbench/database");
-    console.log(JSON.stringify(await databaseInfo()));
+    console.log(
+      JSON.stringify(await databaseInfo()).replace(
+        /[\p{Cc}\p{Cf}]/gu,
+        (character) =>
+          character
+            .split("")
+            .map(
+              (unit) =>
+                `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+            )
+            .join(""),
+      ),
+    );
   })().catch((error: unknown) => {
     console.error(
       escapeControls(error instanceof Error ? error.message : String(error)),
