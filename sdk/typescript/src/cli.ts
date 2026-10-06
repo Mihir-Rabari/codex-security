@@ -5356,7 +5356,10 @@ export async function main(
             ? await runPatchRiskAssessment(
                 {
                   repository: gitRepository,
-                  environment,
+                  environment: {
+                    ...(environment ?? dependencies.environment),
+                    ...gitEnvironment,
+                  },
                   base: patchGitBase!,
                   files,
                   configuration: options,
@@ -6741,20 +6744,16 @@ async function patchPublicationDestination(
 ) {
   const run = (command: "git" | "gh" | "glab" | "ssh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
-  const remotes = [
-    ...(
-      await run("git", ["remote", "get-url", "--push", "--all", "origin"])
-    ).split("\n"),
-    await run("git", ["remote", "get-url", "origin"]),
-  ];
-  const remote =
-    remotes.find(
-      (remote) =>
-        !isAbsolute(remote) &&
-        !win32.isAbsolute(remote) &&
-        !remote.startsWith("file://") &&
-        patchRemoteHost(remote),
-    ) ?? "";
+  const pushRemotes = (
+    await run("git", ["remote", "get-url", "--push", "--all", "origin"])
+  ).split("\n");
+  const fetchRemote = await run("git", ["remote", "get-url", "origin"]);
+  const isNetwork = (remote: string) =>
+    !isAbsolute(remote) &&
+    !win32.isAbsolute(remote) &&
+    !remote.startsWith("file://") &&
+    patchRemoteHost(remote);
+  const remote = [...pushRemotes, fetchRemote].find(isNetwork) ?? "";
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -6769,73 +6768,7 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
-  const repositoryId = (remote: string) =>
-    run("gh", [
-      "repo",
-      "view",
-      ...(remote ? [remote] : []),
-      "--json",
-      "id",
-      "--jq",
-      ".id",
-    ]);
-  let headRepository: string | undefined;
-  if (!gitlab) {
-    try {
-      headRepository = await repositoryId(remote);
-    } catch (initialError) {
-      if (!host) throw initialError;
-      const url = new URL(
-        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
-      );
-      if (!["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol))
-        throw initialError;
-      url.protocol = "ssh:";
-      const sshArguments = [
-        ...(url.port ? ["-p", url.port] : []),
-        url.username
-          ? `${decodeURIComponent(url.username)}@${url.hostname}`
-          : url.hostname,
-      ];
-      const sshCommand =
-        dependencies.environment["GIT_SSH_COMMAND"] ??
-        (await run("git", ["config", "--get", "core.sshCommand"]).catch(
-          (error: unknown) => {
-            if (isJsonObject(error) && error["code"] === 1) return undefined;
-            throw error;
-          },
-        ));
-      const settings = await (
-        sshCommand !== undefined ||
-        dependencies.environment["GIT_SSH"] !== undefined
-          ? run("git", [
-              "-c",
-              `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
-              "codex-security-ssh-config",
-              ...sshArguments,
-            ])
-          : run("ssh", ["-G", ...sshArguments])
-      ).catch((error: unknown) =>
-        isJsonObject(error) && typeof error["code"] === "number"
-          ? ""
-          : undefined,
-      );
-      if (settings === undefined) throw initialError;
-      const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
-      url.hostname =
-        hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
-      url.port = "";
-      try {
-        headRepository = await repositoryId(url.href);
-      } catch (error) {
-        throw new CodexSecurityError(
-          `${errorMessage(initialError)}\n${errorMessage(error)}`,
-          { cause: error },
-        );
-      }
-    }
-  }
-  const existing = await run(
+  const output = await run(
     command,
     gitlab
       ? [
@@ -6859,19 +6792,91 @@ async function patchPublicationDestination(
           "--state",
           "all",
           "--json",
-          "url,headRefOid,headRepository",
+          "url,headRefOid,headRepository,isCrossRepository",
           "--jq",
-          `[.[] | select(.headRepository.id == ${JSON.stringify(headRepository)})][0] | select(. != null) | {url, head: .headRefOid}`,
+          "[.[] | {url, head: .headRefOid, repository: .headRepository.id, crossRepository: .isCrossRepository}]",
         ],
   );
-  return {
-    remote,
-    gitlab,
-    command,
-    existing: existing
-      ? (JSON.parse(existing) as { url: string; head: string })
-      : undefined,
-  };
+  const candidates = (
+    gitlab ? (output ? [JSON.parse(output)] : []) : JSON.parse(output)
+  ) as {
+    url: string;
+    head: string;
+    repository?: string | null;
+    crossRepository?: boolean;
+  }[];
+  if (gitlab || !candidates.length)
+    return { remote, gitlab, command, existing: candidates[0] };
+  const apiHost = new URL(candidates[0]!.url).hostname;
+  let existing = candidates.find(
+    (candidate) => candidate.repository && !candidate.crossRepository,
+  );
+  for (const remotes of [pushRemotes, [fetchRemote]]) {
+    let hosted = false;
+    for (const remote of remotes.filter(isNetwork)) {
+      const url = new URL(
+        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
+      );
+      const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+      if (url.hostname.toLowerCase() === "ssh.github.com")
+        url.hostname = "github.com";
+      if (url.hostname.toLowerCase() !== apiHost && ssh) {
+        const sshArguments = [
+          ...(url.port ? ["-p", url.port] : []),
+          url.username
+            ? `${decodeURIComponent(url.username)}@${url.hostname}`
+            : url.hostname,
+        ];
+        const sshCommand =
+          dependencies.environment["GIT_SSH_COMMAND"] ??
+          (await run("git", ["config", "--get", "core.sshCommand"]).catch(
+            (error: unknown) => {
+              if (isJsonObject(error) && error["code"] === 1) return undefined;
+              throw error;
+            },
+          ));
+        const settings = await (
+          sshCommand !== undefined ||
+          dependencies.environment["GIT_SSH"] !== undefined
+            ? run("git", [
+                "-c",
+                `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
+                "codex-security-ssh-config",
+                ...sshArguments,
+              ])
+            : run("ssh", ["-G", ...sshArguments])
+        ).catch((error: unknown) => {
+          if (isJsonObject(error) && typeof error["code"] === "number")
+            return "";
+          throw error;
+        });
+        const hostname =
+          /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
+        url.hostname =
+          hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
+      }
+      if (url.hostname.toLowerCase() === apiHost) {
+        hosted = true;
+        if (ssh) {
+          url.protocol = "ssh:";
+          url.port = "";
+        }
+        const id = await run("gh", [
+          "repo",
+          "view",
+          url.href,
+          "--json",
+          "id",
+          "--jq",
+          ".id",
+        ]);
+        existing = candidates.find((candidate) => candidate.repository === id);
+        if (existing) break;
+      }
+    }
+    if (hosted) break;
+  }
+  return { remote, gitlab, command, existing };
 }
 
 async function patchRepositoryRoot(

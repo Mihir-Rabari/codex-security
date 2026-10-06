@@ -746,7 +746,7 @@ describe("scan and patch workflow", () => {
           }
           return args[1] === "create"
             ? "https://github.example.test/example/repository/pull/15"
-            : "";
+            : "[]";
         },
       },
       {
@@ -967,7 +967,7 @@ describe("scan and patch workflow", () => {
                 commandOptions,
               );
             }
-            if (args[1] === "list") return "";
+            if (args[1] === "list") return "[]";
             pullRequestArguments = args;
             return url;
           },
@@ -1425,7 +1425,7 @@ describe("scan and patch workflow", () => {
               );
             }
             githubCommands.push([...args]);
-            if (args[1] === "list") return "";
+            if (args[1] === "list") return "[]";
             pullRequestArguments = args;
             return url;
           },
@@ -1551,13 +1551,21 @@ describe("scan and patch workflow", () => {
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[0] === "repo") return "synthetic-origin-id";
-            if (args[1] === "list")
-              return publishedUrl
-                ? JSON.stringify({
-                    url: publishedUrl,
-                    head: git("rev-parse", `refs/heads/${branch}`),
-                  })
-                : "";
+            if (args[1] === "list") {
+              const candidate = {
+                url: publishedUrl,
+                head: publishedUrl
+                  ? git("rev-parse", `refs/heads/${branch}`)
+                  : "",
+                repository: "synthetic-origin-id",
+                crossRepository: false,
+              };
+              return gitlab
+                ? publishedUrl
+                  ? JSON.stringify(candidate)
+                  : ""
+                : JSON.stringify(publishedUrl ? [candidate] : []);
+            }
             expect(args[1]).toBe("create");
             if (failure === "create" && failOnce) {
               failOnce = false;
@@ -1691,6 +1699,7 @@ describe("scan and patch workflow", () => {
                 args[1] !== "list" &&
                 !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
+            if (command === "gh" && args[1] === "list") return "[]";
             return status === "outside" && args.includes("--name-only")
               ? "src/finding-1.ts\0"
               : "";
@@ -2012,6 +2021,7 @@ describe("scan and patch workflow", () => {
         onRepositoryCommand: (command, args) => {
           if (args.includes("--cached")) return "";
           published ||= command === "gh" && args[1] === "create";
+          if (command === "gh" && args[1] === "list") return "[]";
           return command === "gh" && args[1] === "create"
             ? url
             : args.includes("--name-only")
@@ -2131,7 +2141,7 @@ describe("scan and patch workflow", () => {
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
-            return args[1] === "create" ? url : "";
+            return args[1] === "create" ? url : command === "gh" ? "[]" : "";
           },
         },
         {
@@ -2144,11 +2154,11 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode).toBe(0);
-      expect(publicationCommands.map((args) => args[1])).toEqual(
-        client === "glab"
-          ? ["list", "list", "create"]
-          : ["view", "list", "view", "list", "create"],
-      );
+      expect(publicationCommands.map((args) => args[1])).toEqual([
+        "list",
+        "list",
+        "create",
+      ]);
       if (client === "glab") {
         expect(publicationCommands.slice(1)).toEqual([
           [
@@ -2436,7 +2446,7 @@ describe("patch publication integrity", () => {
                 ),
               ),
             ).toBe(root);
-            return "";
+            return "[]";
           }
           return "https://github.example.test/example/repository/pull/1";
         },
@@ -2465,6 +2475,18 @@ describe("patch publication integrity", () => {
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
               expect(request.files).toEqual(["package/app.ts"]);
+              expect(
+                resolve(
+                  await runGitRepositoryCommand(
+                    "git",
+                    ["rev-parse", "--show-toplevel"],
+                    request.repository,
+                    {
+                      environment: request.environment ?? current.environment,
+                    },
+                  ),
+                ),
+              ).toBe(root);
               return patchRiskAssessment();
             };
           },
@@ -2542,7 +2564,7 @@ describe("patch publication integrity", () => {
           command === "git"
             ? runGitRepositoryCommand(command, args, cwd, options)
             : args[1] === "list"
-              ? ""
+              ? "[]"
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
           await rm(join(directory, "old.ts"), { force: true });
@@ -2611,7 +2633,7 @@ describe("patch publication integrity", () => {
             return 0;
           },
           onRepositoryCommand: (command, args, cwd, options) => {
-            if (command !== "git") return "";
+            if (command !== "git") return "[]";
             if (failure === "commit result" && args.includes("commit")) {
               runGitRepositoryCommand(command, args, cwd, options);
               throw new Error("Synthetic commit result failure");
@@ -2675,10 +2697,14 @@ describe("patch publication integrity", () => {
               return "";
             }
             expect(command).toBe(client);
-            return JSON.stringify({
-              url: "https://example.test/requests/1",
+            if (args[0] === "repo") return "synthetic-origin-id";
+            const candidate = {
+              url: `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository/requests/1`,
               head: "earlier-commit",
-            });
+              repository: "synthetic-origin-id",
+              crossRepository: false,
+            };
+            return JSON.stringify(client === "glab" ? candidate : [candidate]);
           },
         },
       );
@@ -2738,7 +2764,7 @@ describe("patch publication integrity", () => {
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
               : args[1] === "list"
-                ? ""
+                ? "[]"
                 : "https://github.example.test/example/repository/pull/1",
           onCodex: async (args, output) => {
             await writeFile(
@@ -2809,12 +2835,16 @@ describe("patch publication integrity", () => {
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
               : existing === "remote" || existing === "push remote"
-                ? ""
-                : JSON.stringify({
-                    url: "https://github.example.test/example/repository/pull/1",
-                    head: git("rev-parse", "HEAD"),
-                    state: existing,
-                  }),
+                ? "[]"
+                : JSON.stringify([
+                    {
+                      url: "https://github.example.test/example/repository/pull/1",
+                      head: git("rev-parse", "HEAD"),
+                      repository: "synthetic-origin-id",
+                      crossRepository: false,
+                      state: existing,
+                    },
+                  ]),
         },
       );
       expect(outcome.exitCode).toBe(2);
@@ -2962,7 +2992,7 @@ describe("patch publication integrity", () => {
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
               : args[1] === "list"
-                ? ""
+                ? "[]"
                 : "https://github.example.test/example/repository/pull/1",
           onCodex: async (args, output) => {
             await writeFile(
@@ -3022,7 +3052,7 @@ describe("patch publication integrity", () => {
         onRepositoryCommand: (command, args, cwd, options) =>
           command === "git"
             ? runGitRepositoryCommand(command, args, cwd, options)
-            : "",
+            : "[]",
         onCodex: async (args, output) => {
           await writeFile(join(nested, "app.ts"), "fixed\n");
           completePatches(args, output);
@@ -3071,7 +3101,7 @@ describe("patch publication integrity", () => {
               command === "git"
                 ? runGitRepositoryCommand(command, args, cwd, options)
                 : args[1] === "list"
-                  ? ""
+                  ? "[]"
                   : "https://github.example.test/example/repository/pull/1",
             onCodex: async (_args, output) => {
               await writeFile(join(directory, "app.ts"), "fixed\n");
@@ -3276,7 +3306,7 @@ describe("patch change tracking", () => {
               : args[0] === "repo"
                 ? "synthetic-origin-id"
                 : args[1] === "list"
-                  ? ""
+                  ? "[]"
                   : "https://github.example.test/example/repository/pull/1",
         },
       );
@@ -3315,6 +3345,14 @@ describe("patch change tracking", () => {
   test.each(
     [
       "local",
+      "ssh-mirror",
+      "https-mirror",
+      "ssh-mirror-only",
+      "https-mirror-only",
+      "renamed",
+      "transferred",
+      "multiple-hosted",
+      "no-candidates",
       "local-first",
       "file-first",
       "windows-first",
@@ -3349,11 +3387,13 @@ describe("patch change tracking", () => {
       "ssh-uri-core-executable",
     ].flatMap((transport) =>
       [false, true].flatMap((resume) =>
-        [false, true].map((ownIncluded) => ({
-          transport,
-          resume,
-          ownIncluded,
-        })),
+        (transport === "no-candidates" ? [false] : [false, true]).map(
+          (ownIncluded) => ({
+            transport,
+            resume,
+            ownIncluded,
+          }),
+        ),
       ),
     ),
   )(
@@ -3387,50 +3427,73 @@ describe("patch change tracking", () => {
       ].includes(transport);
       const localOnly =
         transport.startsWith("local-fetch") || transport === "local-push-only";
-      const fetchRemote =
-        "https://github.example.test/fetch-owner/repository.git";
+      const hostingHost =
+        transport === "ssh-enterprise"
+          ? "enterprise.example.test"
+          : "github.com";
+      const hostingUrl = `https://${hostingHost}`;
+      const fetchRemote = `${hostingUrl}/fetch-owner/repository.git`;
+      const mirror = transport.includes("mirror")
+        ? `${transport.startsWith("ssh") ? "ssh://git@" : "https://"}mirror.example.test/srv/git/repository.git`
+        : undefined;
       const sshScheme = transport.includes("git+ssh")
         ? "git+ssh"
         : transport.includes("ssh+git")
           ? "ssh+git"
           : "ssh";
       const pushRemote =
-        localFirst || transport === "network-push-only"
-          ? "https://github.example.test/push-owner/repository.git"
-          : transport === "local" || localOnly
-            ? remote
-            : transport === "scp-userless"
-              ? "github.com:example/repository.git"
-              : transport === "ssh-api"
-                ? "git@github.com:push-owner/repository.git"
-                : transport === "ssh-enterprise"
-                  ? "git@enterprise.example.test:push-owner/other-repository.git"
-                  : transport.startsWith("scp")
-                    ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
-                    : transport.startsWith("ssh-uri")
-                      ? `${sshScheme}://git@${alias}:2222/example/repository.git`
-                      : "git@ssh.github.com:example/repository.git";
-      const directLookup =
-        localFirst ||
-        localOnly ||
-        ["local", "network-push-only", "ssh-api", "ssh-enterprise"].includes(
-          transport,
-        );
+        mirror && transport.endsWith("only")
+          ? mirror
+          : transport === "renamed"
+            ? `${hostingUrl}/push-owner/old-name.git`
+            : transport === "transferred"
+              ? `${hostingUrl}/old-owner/repository.git`
+              : localFirst ||
+                  mirror ||
+                  [
+                    "network-push-only",
+                    "multiple-hosted",
+                    "no-candidates",
+                  ].includes(transport)
+                ? `${hostingUrl}/push-owner/repository.git`
+                : transport === "local" || localOnly
+                  ? remote
+                  : transport === "scp-userless"
+                    ? "github.com:example/repository.git"
+                    : transport === "ssh-api"
+                      ? "git@github.com:push-owner/repository.git"
+                      : transport === "ssh-enterprise"
+                        ? "git@enterprise.example.test:push-owner/other-repository.git"
+                        : transport.startsWith("scp")
+                          ? `git@${alias}:${transport.includes("absolute") ? "/" : ""}example/repository.git`
+                          : transport.startsWith("ssh-uri")
+                            ? `${sshScheme}://git@${alias}:2222/example/repository.git`
+                            : `git@${["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ? alias : "ssh.github.com"}:example/repository.git`;
+      const aliasLookup =
+        (transport.startsWith("scp") && transport !== "scp-userless") ||
+        transport.startsWith("ssh-uri") ||
+        ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport);
       const lookupRemote =
         transport === "local" || transport === "local-push-only"
           ? undefined
-          : transport.startsWith("local-fetch")
+          : localOnly ||
+              (mirror && transport.endsWith("only")) ||
+              ["ssh-failed", "ssh-empty"].includes(transport)
             ? fetchRemote
-            : directLookup
+            : pushRemote.startsWith("https://")
               ? pushRemote
-              : transport === "scp-userless"
-                ? "ssh://github.com/example/repository.git"
-                : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
+              : transport === "ssh-api"
+                ? "ssh://git@github.com/push-owner/repository.git"
+                : transport === "ssh-enterprise"
+                  ? "ssh://git@enterprise.example.test/push-owner/other-repository.git"
+                  : transport === "scp-userless"
+                    ? "ssh://github.com/example/repository.git"
+                    : `ssh://git@github.com/${transport.includes("absolute") ? "/" : ""}example/repository.git`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
         transport === "scp-userless"
           ? "github.com"
-          : `git@${transport.startsWith("scp") || transport.startsWith("ssh-uri") ? alias : "ssh.github.com"}`,
+          : `git@${aliasLookup ? alias : "ssh.github.com"}`,
       ];
       if (transport !== "local") {
         git("remote", "set-url", "origin", fetchRemote);
@@ -3439,21 +3502,28 @@ describe("patch change tracking", () => {
           "set-url",
           "--push",
           "origin",
-          localFirst
-            ? transport === "file-first"
-              ? pathToFileURL(remote).href
-              : transport === "windows-first"
-                ? "C:\\synthetic\\mirror.git"
-                : remote
-            : pushRemote,
+          mirror ??
+            (transport === "multiple-hosted"
+              ? `${hostingUrl}/first-owner/repository.git`
+              : localFirst
+                ? transport === "file-first"
+                  ? pathToFileURL(remote).href
+                  : transport === "windows-first"
+                    ? "C:\\synthetic\\mirror.git"
+                    : remote
+                : pushRemote),
         );
-        if (localFirst)
+        if (
+          localFirst ||
+          (mirror && !transport.endsWith("only")) ||
+          transport === "multiple-hosted"
+        )
           git("remote", "set-url", "--add", "--push", "origin", pushRemote);
         git(
           "remote",
           "add",
           "upstream",
-          "https://github.example.test/upstream-owner/repository.git",
+          `${hostingUrl}/upstream-owner/repository.git`,
         );
       }
       if (transport.endsWith("push-only"))
@@ -3474,9 +3544,8 @@ describe("patch change tracking", () => {
       let pushes = 0;
       let repositoryLookups = 0;
       let sshLookups = 0;
-      const ownUrl = "https://github.example.test/upstream/repository/pull/8";
-      const createdUrl =
-        "https://github.example.test/upstream/repository/pull/9";
+      const ownUrl = `${hostingUrl}/upstream/repository/pull/8`;
+      const createdUrl = `${hostingUrl}/upstream/repository/pull/9`;
       const outcome = await runWorkflow(
         resume
           ? ["patch", "--resume-pr", branch, "--json"]
@@ -3530,8 +3599,15 @@ describe("patch change tracking", () => {
             }
             if (command === "ssh") {
               expect(effectiveCommand).toBeUndefined();
-              expect(args).toEqual(["-G", ...sshArguments]);
               sshLookups++;
+              if (
+                mirror?.startsWith("ssh:") &&
+                args.at(-1) === "git@mirror.example.test"
+              ) {
+                expect(args).toEqual(["-G", "git@mirror.example.test"]);
+                return "hostname mirror.example.test";
+              }
+              expect(args).toEqual(["-G", ...sshArguments]);
               if (transport === "ssh-missing" || transport === "ssh-failed")
                 throw Object.assign(new Error("Synthetic SSH lookup failure"), {
                   code: transport === "ssh-missing" ? "ENOENT" : 1,
@@ -3545,21 +3621,19 @@ describe("patch change tracking", () => {
               expect(args).toEqual([
                 "repo",
                 "view",
-                ...(directLookup
-                  ? lookupRemote
-                    ? [lookupRemote]
-                    : []
-                  : [repositoryLookups % 2 === 1 ? pushRemote : lookupRemote!]),
+                transport === "multiple-hosted" && repositoryLookups % 2 === 1
+                  ? `${hostingUrl}/first-owner/repository.git`
+                  : lookupRemote!,
                 "--json",
                 "id",
                 "--jq",
                 ".id",
               ]);
-              if (repositoryLookups % 2 === 1 && !directLookup)
-                throw Object.assign(
-                  new Error("Synthetic unresolved API alias"),
-                  { code: 1 },
-                );
+              if (
+                transport === "multiple-hosted" &&
+                repositoryLookups % 2 === 1
+              )
+                return "synthetic-first-id";
               return "synthetic-origin-id";
             }
             if (args[1] === "list") {
@@ -3571,13 +3645,32 @@ describe("patch change tracking", () => {
                 "--state",
                 "all",
                 "--json",
-                "url,headRefOid,headRepository",
+                "url,headRefOid,headRepository,isCrossRepository",
                 "--jq",
-                '[.[] | select(.headRepository.id == "synthetic-origin-id")][0] | select(. != null) | {url, head: .headRefOid}',
+                "[.[] | {url, head: .headRefOid, repository: .headRepository.id, crossRepository: .isCrossRepository}]",
               ]);
-              return ownIncluded
-                ? JSON.stringify({ url: ownUrl, head: commit })
-                : "";
+              return JSON.stringify(
+                transport === "no-candidates"
+                  ? []
+                  : [
+                      {
+                        url: `${hostingUrl}/upstream/repository/pull/7`,
+                        head: commit,
+                        repository: "synthetic-foreign-id",
+                        crossRepository: true,
+                      },
+                      ...(ownIncluded
+                        ? [
+                            {
+                              url: ownUrl,
+                              head: commit,
+                              repository: "synthetic-origin-id",
+                              crossRepository: !!lookupRemote,
+                            },
+                          ]
+                        : []),
+                    ],
+              );
             }
             return createdUrl;
           },
@@ -3595,13 +3688,19 @@ describe("patch change tracking", () => {
       );
       const attempts = !failedLookup && !resume && !ownIncluded ? 2 : 1;
       expect(repositoryLookups).toBe(
-        (directLookup || failedLookup ? 1 : 2) * attempts,
+        (failedLookup || !lookupRemote || transport === "no-candidates"
+          ? 0
+          : transport === "multiple-hosted"
+            ? 2
+            : 1) * attempts,
       );
-      expect(sshLookups).toBe(directLookup ? 0 : attempts);
+      expect(sshLookups).toBe(
+        (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) * attempts,
+      );
       expect(modelCalls).toBe(failedLookup || resume || ownIncluded ? 0 : 1);
       expect(pushes).toBe(failedLookup || ownIncluded ? 0 : 1);
       if (failedLookup)
-        expect(outcome.stderr).toContain("Synthetic unresolved API alias");
+        expect(outcome.stderr).toContain("Synthetic SSH lookup failure");
       if (!failedLookup && (resume || !ownIncluded))
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
           ownIncluded ? ownUrl : createdUrl,
@@ -3796,7 +3895,7 @@ describe("patch change tracking", () => {
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
               : args[1] === "list"
-                ? ""
+                ? "[]"
                 : "https://github.example.test/example/repository/pull/1",
           onCodex: async (args, output) => {
             await writeFile(join(root, ".gitignore"), "local.env\n");
@@ -3860,7 +3959,7 @@ describe("directory replacement publication", () => {
               : args[0] === "repo"
                 ? "synthetic-repository-id"
                 : args[1] === "list"
-                  ? ""
+                  ? "[]"
                   : "https://github.example.test/synthetic/project/pull/1";
           },
           onCodex: async (args, output) => {
