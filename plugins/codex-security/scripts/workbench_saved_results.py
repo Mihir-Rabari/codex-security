@@ -423,7 +423,7 @@ def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -
 
 
 def _frozen_checkpoint_heads(
-    scan_dir: Path, scan_id: str, sources: dict[str, str]
+    scan_dir: Path, scan_id: str, sources: dict[str, str], *, skip_unreadable: bool = False
 ) -> dict[str, str]:
     times = _frozen_source_times(scan_dir, scan_id, sources)
     heads: dict[str, tuple[int, str]] = {}
@@ -432,9 +432,14 @@ def _frozen_checkpoint_heads(
         directory = _checkpoint_head_directory(relative)
         if directory is None or directory == Path("."):
             continue
-        head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
-        if digest != expected_digest:
-            raise ContractError("checkpoint changed after the scan stopped")
+        try:
+            head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
+            if digest != expected_digest:
+                raise ContractError("checkpoint changed after the scan stopped")
+        except (ContractError, OSError, ValueError):
+            if skip_unreadable:
+                continue
+            raise
         selected = (directory / "checkpoints" / head["checkpoint"]).as_posix()
         observation = (times.get(relative, observed), selected)
         key = directory.as_posix()
@@ -531,7 +536,9 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             return True
         published_heads = manifest_scan.get("preservedCheckpointHeads")
         if published_heads is None:
-            published_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], published_sources)
+            published_heads = _frozen_checkpoint_heads(
+                scan_dir, scan["id"], published_sources, skip_unreadable=True
+            )
         checkpoint_heads = dict(published_heads)
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
@@ -2469,9 +2476,11 @@ def preserve_scan_results_locked(
                 try:
                     captured.update(
                         _capture_saved_source(
-                            scan_dir, relative, scan_id, kind=kind, snapshot_head=False
+                            scan_dir, relative, scan_id, kind=kind, checkpoint_heads=exc.heads
                         )
                     )
+                except _CheckpointSnapshotError as remaining:
+                    captured.update(remaining.captured)
                 except (ContractError, OSError, ValueError):
                     continue
             retained_sources = {path: value[0] for path, value in captured.items()}
@@ -2517,6 +2526,19 @@ def preserve_scan_results_locked(
             scan_id,
             raw_frozen_sources,
         )
+
+    def retain_sources() -> None:
+        if retained_state is not None:
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET retained_source_digests_json = ?, "
+                    "retained_checkpoint_heads_json = ? "
+                    "WHERE id = ? AND retained_source_digests_json IS ?",
+                    retained_state,
+                )
+
+    if scan["canceled_at"] is not None:
+        retain_sources()
     prepared = _prepare_scan_finalization(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
@@ -2524,14 +2546,8 @@ def preserve_scan_results_locked(
         completion_warnings=warnings,
         draft_documents=documents,
     )
-    if retained_state is not None:
-        with connection:
-            connection.execute(
-                "UPDATE scans SET retained_source_digests_json = ?, "
-                "retained_checkpoint_heads_json = ? "
-                "WHERE id = ? AND retained_source_digests_json IS ?",
-                retained_state,
-            )
+    if scan["canceled_at"] is None:
+        retain_sources()
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(

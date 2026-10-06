@@ -1397,3 +1397,167 @@ def test_snapshot_write_failure_keeps_stopped_publication_pending(
     )["scan"]
     assert replayed["findingCount"] == (1 if disposition == "reported" else 0)
     assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("snapshot_failure", [False, True])
+@pytest.mark.parametrize("advance_after_cancel", [False, True])
+def test_cancellation_captures_each_remaining_workers_current_head(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    snapshot_failure,
+    advance_after_cancel,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    first = add_worker(workbench_db, scan, status="running")
+    first.write_text(json.dumps(save_disposition(scan, first.parent, "reported")))
+    second = add_worker(workbench_db, scan, status="running")
+    scan.findings[0]["identity"]["anchor"] = "second-original"
+    second.write_text(json.dumps(save_disposition(scan, second.parent, "reported")))
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET created_at = ? WHERE artifact_dir = ?",
+            ("2026-01-01T00:00:00Z", str(first.parent)),
+        )
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET created_at = ? WHERE artifact_dir = ?",
+            ("2026-01-02T00:00:00Z", str(second.parent)),
+        )
+    saved = workbench_api["saved_results"]
+    write = saved.write_scan_local_bytes
+    first_directory = first.parent.relative_to(scan.scan_dir).as_posix()
+    raced = False
+
+    def publish_second_during_first_snapshot(root, relative, contents):
+        nonlocal raced
+        if relative.startswith(first_directory + "/checkpoint-heads/") and not raced:
+            raced = True
+            scan.findings[0]["identity"]["anchor"] = "second-selected-before-cancel"
+            save_disposition(scan, second.parent, "reported")
+            if snapshot_failure:
+                raise OSError("Synthetic first worker snapshot failure")
+        return write(root, relative, contents)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "write_scan_local_bytes", publish_second_during_first_snapshot)
+        saved.cancel_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
+    assert raced
+    if advance_after_cancel:
+        scan.findings[0]["identity"]["anchor"] = "second-selected-after-cancel"
+        save_disposition(scan, second.parent, "reported")
+    retained = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert retained["findingCount"] >= 2
+    anchors = {
+        finding["identity"]["anchor"]
+        for finding in json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    }
+    assert "second-selected-before-cancel" in anchors
+    assert "second-selected-after-cancel" not in anchors
+
+
+@pytest.mark.parametrize("blocked_report", [False, True])
+def test_cancellation_freezes_sources_before_report_preparation(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    blocked_report,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="running")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    report = scan.scan_dir / "report.md"
+    if blocked_report:
+        report.unlink()
+        report.mkdir()
+    saved = workbench_api["saved_results"]
+    saved.cancel_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, thread_id=None),
+    )
+    row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    assert row["canceled_at"] is not None
+    assert row["retained_source_digests_json"] is not None
+    if blocked_report:
+        report.rmdir()
+    scan.findings[0]["identity"]["anchor"] = "published-after-cancellation"
+    save_disposition(scan, result.parent, "reported")
+    retained = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert retained["findingCount"] == 1
+    assert all(
+        finding["identity"]["anchor"] != "published-after-cancellation"
+        for finding in json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    )
+
+
+@pytest.mark.parametrize("missing_old_checkpoint", [False, True])
+def test_legacy_unreadable_head_does_not_hide_another_workers_new_evidence(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    missing_old_checkpoint,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    checkpoint = (
+        result.parent
+        / "checkpoints"
+        / json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
+    )
+    saved = workbench_api["saved_results"]
+    prepare = saved._prepare_scan_finalization
+
+    def legacy_publication(*args, **kwargs):
+        kwargs["draft_documents"][0]["scan"].pop("preservedCheckpointHeads")
+        return prepare(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_prepare_scan_finalization", legacy_publication)
+        workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET retained_checkpoint_heads_json = NULL WHERE id = ?", (scan.scan_id,)
+        )
+    before = {
+        name: (scan.scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    assert (
+        workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
+        is False
+    )
+    if missing_old_checkpoint:
+        checkpoint.unlink()
+    scan.findings[0]["identity"]["anchor"] = "independent-new-worker"
+    other = add_worker(workbench_db, scan, status="canceled")
+    save_disposition(scan, other.parent, "reported")
+    assert (
+        workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
+        is True
+    )
+    assert all((scan.scan_dir / name).read_bytes() == content for name, content in before.items())
