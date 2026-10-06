@@ -1349,8 +1349,13 @@ def merge_saved_results(
         current_owner = current_owner if isinstance(current_owner, str) else None
         previous_owner = previous_owner if isinstance(previous_owner, str) else None
         if (
-            not current_candidate
-            and not previous_candidate
+            (
+                (not current_candidate and not previous_candidate)
+                or (
+                    isinstance(finding.get("provenance", {}).get("preservedIdentity"), dict)
+                    and isinstance(previous.get("provenance", {}).get("preservedIdentity"), dict)
+                )
+            )
             and isinstance(finding.get("identity"), dict)
             and isinstance(previous.get("identity"), dict)
             and id(finding) not in inferred_identities
@@ -1409,7 +1414,7 @@ def merge_saved_results(
                     key,
                     finding.get("provenance", {}).get("workerId"),
                     finding_candidate_id(finding),
-                    explicit_finding_key(finding) if not finding_candidate_id(finding) else None,
+                    explicit_finding_key(finding),
                 ]
             )
         return key

@@ -2076,8 +2076,9 @@ def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("current_identity", ["anchor", "instance", "same"])
 @pytest.mark.parametrize("changed_alias_note", [False, True])
+@pytest.mark.parametrize("candidate", ["none", "shared", "independent"])
 def test_saved_alias_metadata_preserves_explicit_worker_siblings(
-    tmp_path, retry, current_identity, changed_alias_note
+    tmp_path, retry, current_identity, changed_alias_note, candidate
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
@@ -2094,6 +2095,11 @@ def test_saved_alias_metadata_preserves_explicit_worker_siblings(
         second["identity"]["instance"] = "independent"
     if changed_alias_note:
         second["provenance"]["preservedIdentity"]["note"] = "Later metadata."
+    if candidate != "none":
+        first["provenance"]["candidateId"] = "shared-candidate"
+        second["provenance"]["candidateId"] = (
+            "independent-candidate" if candidate == "independent" else "shared-candidate"
+        )
     for name in ("findings.json", "scan-manifest.json", "coverage.json"):
         (scan_dir / name).unlink()
     _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
@@ -2103,12 +2109,19 @@ def test_saved_alias_metadata_preserves_explicit_worker_siblings(
 
     stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
     scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-    expected = 1 if current_identity == "same" else 2
+    expected = 1 if current_identity == "same" and candidate != "independent" else 2
     assert not scan["resultsRecoveryNeeded"]
     assert scan["findingCount"] == expected
-    assert {json.dumps(row["identity"], sort_keys=True) for row in scan["findings"]} == {
-        json.dumps(row["identity"], sort_keys=True) for row in (first, second)
-    }
+    if candidate == "independent" and current_identity == "same":
+        assert {row["provenance"]["candidateId"] for row in scan["findings"]} == {
+            "shared-candidate",
+            "independent-candidate",
+        }
+        assert {row["identity"]["anchor"] for row in scan["findings"]} == {"current-observation"}
+    else:
+        assert {json.dumps(row["identity"], sort_keys=True) for row in scan["findings"]} == {
+            json.dumps(row["identity"], sort_keys=True) for row in (first, second)
+        }
     assert len({row["findingId"] for row in scan["findings"]}) == expected
     findings = scan["findings"]
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
