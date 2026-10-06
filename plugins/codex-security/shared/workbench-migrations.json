@@ -313,7 +313,8 @@
       "ALTER TABLE finding_workflows ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'pending';",
       "ALTER TABLE finding_workflows ADD COLUMN publish_error TEXT;",
       "ALTER TABLE finding_workflows ADD COLUMN dedupe_status TEXT NOT NULL DEFAULT 'pending';",
-      "ALTER TABLE finding_workflows ADD COLUMN dedupe_error TEXT;"
+      "ALTER TABLE finding_workflows ADD COLUMN dedupe_error TEXT;",
+      "UPDATE finding_workflows SET\n    repository_path = json_extract(results_json, '$.repositoryPath'),\n    scan_request_digest = json_extract(results_json, '$.scanRequestDigest'),\n    scan_id = json_extract(results_json, '$.scanId'),\n    scan_dir = json_extract(results_json, '$.scanDir'),\n    artifact_digest = json_extract(results_json, '$.artifactDigest'),\n    destination = json_extract(results_json, '$.destination'),\n    scope_repository_id = json_extract(results_json, '$.scope.repositoryId'),\n    scope_all_repositories = json_extract(results_json, '$.scope.allRepositories'),\n    scan_status = json_extract(results_json, '$.stages.scan.status'),\n    scan_error = json_extract(results_json, '$.stages.scan.error'),\n    publish_status = json_extract(results_json, '$.stages.publish.status'),\n    publish_error = json_extract(results_json, '$.stages.publish.error'),\n    dedupe_status = json_extract(results_json, '$.stages.dedupe.status'),\n    dedupe_error = json_extract(results_json, '$.stages.dedupe.error');"
     ]
   },
   {
@@ -332,7 +333,8 @@
       "ALTER TABLE finding_workflow_reviews ADD COLUMN model TEXT;",
       "ALTER TABLE finding_workflow_reviews ADD COLUMN effort TEXT;",
       "ALTER TABLE finding_workflow_reviews ADD COLUMN settings_digest TEXT;",
-      "ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;"
+      "ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;",
+      "UPDATE finding_workflow_reviews SET\n    review_contract_version = json_extract(prompt_digest, '$.version'),\n    codex_version = json_extract(prompt_digest, '$.codexVersion'),\n    source_repository_path = json_extract(prompt_digest, '$.source.repository'),\n    source_revision = json_extract(prompt_digest, '$.source.revision'),\n    source_refs_digest = json_extract(prompt_digest, '$.source.refsDigest'),\n    source_content_digest = json_extract(prompt_digest, '$.source.content'),\n    scope_repository_id = json_extract(prompt_digest, '$.scope.repositoryId'),\n    scope_all_repositories = json_extract(prompt_digest, '$.scope.allRepositories'),\n    model = json_extract(prompt_digest, '$.model'),\n    effort = json_extract(prompt_digest, '$.effort'),\n    settings_digest = json_extract(prompt_digest, '$.settingsDigest'),\n    contract_digest = json_extract(prompt_digest, '$.contractDigest'),\n    prompt_digest = json_extract(prompt_digest, '$.promptDigest');"
     ]
   },
   {

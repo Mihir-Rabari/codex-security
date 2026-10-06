@@ -16,72 +16,15 @@ MIGRATIONS = tuple(
 )
 
 
-def migrate_finding_workflow_review_columns(connection: sqlite3.Connection) -> None:
-    for row in connection.execute(
-        "SELECT workflow_id, review_key, prompt_digest FROM finding_workflow_reviews"
-    ).fetchall():
-        binding = json.loads(row["prompt_digest"])
-        source = binding["source"]
-        scope = binding["scope"]
-        connection.execute(
-            """UPDATE finding_workflow_reviews SET review_contract_version = ?, codex_version = ?,
-            source_repository_path = ?, source_revision = ?, source_refs_digest = ?,
-            source_content_digest = ?, scope_repository_id = ?, scope_all_repositories = ?,
-            model = ?, effort = ?, settings_digest = ?, prompt_digest = ?, contract_digest = ?
-            WHERE workflow_id = ? AND review_key = ?""",
-            (
-                binding["version"],
-                binding["codexVersion"],
-                source["repository"],
-                source["revision"],
-                source["refsDigest"],
-                source["content"],
-                scope.get("repositoryId"),
-                scope.get("allRepositories"),
-                binding["model"],
-                binding["effort"],
-                binding.get("settingsDigest"),
-                binding["promptDigest"],
-                binding["contractDigest"],
-                row["workflow_id"],
-                row["review_key"],
-            ),
-        )
-
-
-def migrate_finding_workflow_columns(connection: sqlite3.Connection) -> None:
-    # Rename/backfill in place so existing checkpoint foreign keys and rows survive.
+def migrate_finding_workflow_results(connection: sqlite3.Connection) -> None:
     for row in connection.execute("SELECT id, results_json FROM finding_workflows").fetchall():
-        state = json.loads(row["results_json"])
-        scope = state.get("scope", {})
-        stages = state["stages"]
+        stages = json.loads(row["results_json"])["stages"]
         results = {stage: value["result"] for stage, value in stages.items() if "result" in value}
         if "pendingWrite" in stages["dedupe"]:
             results["dedupePendingWrite"] = stages["dedupe"]["pendingWrite"]
         connection.execute(
-            """UPDATE finding_workflows SET
-            repository_path = ?, scan_request_digest = ?, scan_id = ?, scan_dir = ?,
-            artifact_digest = ?, destination = ?, scope_repository_id = ?, scope_all_repositories = ?,
-            scan_status = ?, scan_error = ?, publish_status = ?, publish_error = ?,
-            dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE id = ?""",
-            (
-                state.get("repositoryPath"),
-                state.get("scanRequestDigest"),
-                state.get("scanId"),
-                state.get("scanDir"),
-                state.get("artifactDigest"),
-                state.get("destination"),
-                scope.get("repositoryId"),
-                scope.get("allRepositories"),
-                stages["scan"]["status"],
-                stages["scan"].get("error"),
-                stages["publish"]["status"],
-                stages["publish"].get("error"),
-                stages["dedupe"]["status"],
-                stages["dedupe"].get("error"),
-                json.dumps(results, allow_nan=False),
-                row["id"],
-            ),
+            "UPDATE finding_workflows SET results_json = ? WHERE id = ?",
+            (json.dumps(results, allow_nan=False), row["id"]),
         )
 
 
@@ -124,9 +67,7 @@ def apply_migrations(
                 for statement in sql_statements(sql):
                     connection.execute(statement)
                 if version == 38:
-                    migrate_finding_workflow_columns(connection)
-                elif version == 39:
-                    migrate_finding_workflow_review_columns(connection)
+                    migrate_finding_workflow_results(connection)
             if version not in applied:
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -249,20 +190,13 @@ def normalize_pre_release_execution_profile_migrations(
 def move_pre_release_migration(
     connection: sqlite3.Connection, old_version: int, new_version: int, name: str
 ) -> None:
-    migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = ?", (old_version,)
-    ).fetchone()
-    if migration is None or migration["name"] != name:
-        return
     if (
         connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = ?", (new_version,)
+            "SELECT 1 FROM schema_migrations WHERE version = ? AND name = ?", (old_version, name)
         ).fetchone()
-        is not None
+        is None
     ):
-        raise SystemExit(
-            "The Codex Security database has an unsupported pre-release migration history."
-        )
+        return
     connection.execute(
         "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
         (new_version, old_version, name),
