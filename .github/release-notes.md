@@ -19,6 +19,7 @@
 - preserve canonical parent IDs for scan reruns ([#1244](https://github.com/openai/codex-security/pull/1244))
 - keep workbench-derived fields out of worker draft guidance ([#1177](https://github.com/openai/codex-security/pull/1177))
 - reject SQL injection without an execution sink ([#1053](https://github.com/openai/codex-security/pull/1053))
+- update Codex CLI and SDK to 0.162.0-alpha.16 ([#1321](https://github.com/openai/codex-security/pull/1321))
 
 <!-- release-section: highlights:end -->
 
