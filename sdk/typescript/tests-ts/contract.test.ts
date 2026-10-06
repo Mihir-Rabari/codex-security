@@ -1552,3 +1552,38 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("producer version");
   });
 });
+
+for (const sourceWorkerId of [
+  "",
+  { worker: "synthetic-worker" },
+  ["synthetic-worker"],
+  null,
+]) {
+  test(`loads sealed v1 coverage with historical owner metadata ${JSON.stringify(sourceWorkerId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["sourceWorkerId"] = sourceWorkerId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        reason: "Historical saved review remains pending.",
+        sourceWorkerId,
+        surfaceIds: [coverage["surfaces"][0]["id"]],
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.surfaces[0]!["sourceWorkerId"]).toEqual(
+      sourceWorkerId,
+    );
+    expect(loaded.coverage.deferred[0]!["sourceWorkerId"]).toEqual(
+      sourceWorkerId,
+    );
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}

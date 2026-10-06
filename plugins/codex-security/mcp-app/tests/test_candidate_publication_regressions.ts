@@ -219,3 +219,73 @@ for (const mode of ["standard", "diff"] as const) {
     assert.equal(independent.findings.length, 2);
   });
 }
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const sharedId of [false, true]) {
+    test(`preserves owner-linked ${mode} deferred surfaces with sharedId=${sharedId}`, async (t) => {
+      const f = await fixture(t, mode);
+      const earlier = {
+        id: sharedId ? "review" : "earlier-review",
+        label: "Earlier worker review",
+        sourceWorkerId: "worker-before",
+        disposition: "needs_follow_up",
+        notes: "Earlier independent review evidence.",
+      };
+      await f.write(
+        f.draft({
+          surfaces: [earlier],
+          deferred: [
+            {
+              id: "earlier-pending",
+              candidateId: "earlier-candidate",
+              sourceWorkerId: "worker-before",
+              reason: "Earlier independent proof gap.",
+              surfaceIds: [earlier.id],
+            },
+          ],
+        }),
+      );
+      const current = {
+        id: "review",
+        label: "Current worker review",
+        sourceWorkerId: "worker-after",
+        disposition: "needs_follow_up",
+        notes: "Current independent review evidence.",
+      };
+      const next = f.draft({
+        surfaces: [current],
+        deferred: [
+          {
+            id: "current-pending",
+            candidateId: "current-candidate",
+            sourceWorkerId: "worker-after",
+            reason: "Current independent proof gap.",
+            surfaceIds: [current.id],
+          },
+        ],
+      });
+      for (let replay = 0; replay < 2; replay++) {
+        await f.write(next);
+        const coverage = await f.read();
+        for (const original of [earlier, current]) {
+          const pending = coverage.deferred.find(
+            (row: any) => row.sourceWorkerId === original.sourceWorkerId,
+          );
+          assert.ok(
+            pending,
+            "each independent worker's pending work remains available",
+          );
+          const linked = coverage.surfaces.find(
+            (row: any) => row.id === pending.surfaceIds[0],
+          );
+          assert.equal(linked?.sourceWorkerId, original.sourceWorkerId);
+          assert.equal(linked.notes, original.notes);
+        }
+        assert.equal(
+          new Set(coverage.surfaces.map((row: any) => row.id)).size,
+          coverage.surfaces.length,
+        );
+      }
+    });
+  }
+}

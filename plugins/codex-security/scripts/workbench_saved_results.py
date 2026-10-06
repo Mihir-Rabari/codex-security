@@ -2045,11 +2045,10 @@ def merge_saved_results(
 
     ordered_candidates = {
         (owner, identity)
-        for owner, row in reopened_rows
+        for (owner, _), (_, row, _) in active_deferred.items()
         if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
-        and (owner, identity) in candidate_ids
     }
-    ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
+    ordered_outcomes = {}
 
     outcomes: list[tuple[str, str | None, str, str]] = []
     for relative, draft, owner in current_drafts:
@@ -2085,7 +2084,7 @@ def merge_saved_results(
         if any(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
-            and modified >= order
+            and (modified[1] >= order[1] if relative == "parent" and owner else modified >= order)
             for (saved_owner, _), (modified, row, _) in active_deferred.items()
         ):
             continue

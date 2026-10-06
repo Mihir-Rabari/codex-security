@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   mkdir,
   mkdtemp,
@@ -2520,4 +2522,138 @@ for (const sharedCandidate of [true, false]) {
     );
     assert.deepEqual(actual.unresolvedCandidates, rows);
   });
+}
+
+const { recordCodexSecurityScanDraftViaWorkbench } = await loadModule(
+  "artifact-scan-draft.ts",
+);
+const { createScanArtifactContext } = await loadModule("artifact-context.ts");
+for (const termination of ["complete-scan", "cancel-scan"] as const) {
+  for (const receipt of ["missing", "valid", "none"] as const) {
+    test(`workbench Diff ${termination} retains recovered candidate with ${receipt} receipt`, async (t) => {
+      const directory = await fixture(t);
+      const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
+      const python = process.env.PYTHON?.trim() || "python3";
+      const initialized = JSON.parse(
+        execFileSync(
+          python,
+          [
+            "-c",
+            `
+import json, sys, uuid
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_test_support import initialize_git_repository, run_workbench, start_delivered_scan
+root = Path(sys.argv[2])
+state, target = root / "state", root / "target"
+revision = initialize_git_repository(target)
+workspace = str(uuid.uuid4())
+run_workbench(state, "create-workspace", "--workspace-id", workspace)
+run_workbench(state, "save-workspace", "--workspace-id", workspace, "--target-path", str(target),
+              "--scope", ".", "--mode", "diff", "--diff-target-kind", "commit", "--diff-head-revision", revision)
+started = start_delivered_scan(state, "--workspace-id", workspace, "--scan-root", str(root / "scans"))["results"]
+print(json.dumps(started))
+`,
+            path.join(pluginRoot, "tests"),
+            directory.root,
+          ],
+          { encoding: "utf8" },
+        ),
+      );
+      const workbench = async (args: string[]) =>
+        JSON.parse(
+          execFileSync(
+            python,
+            [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
+            {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                CODEX_SECURITY_STATE_DIR: path.join(directory.root, "state"),
+              },
+            },
+          ),
+        );
+      const context = await createScanArtifactContext(
+        initialized.scanId,
+        workbench,
+        { requireRunning: true },
+      );
+      const savedCandidate = candidate("receipt-review");
+      await writeLedger(context, [savedCandidate]);
+      const receiptPath = "artifacts/review/synthetic-receipt.txt";
+      if (receipt === "valid") {
+        await mkdir(path.join(context.root, "artifacts/review"), {
+          recursive: true,
+        });
+        await writeFile(
+          path.join(context.root, receiptPath),
+          "Synthetic receipt evidence.\n",
+        );
+      }
+      await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        {
+          ...draft(),
+          scanId: context.scanId,
+          complete: termination === "complete-scan",
+          coverage: {
+            completeness: "partial",
+            explicitExclusions: [],
+            deferred: [
+              {
+                id: "receipt-proof-gap",
+                candidateId: savedCandidate.candidate_id,
+                reason: "The submitted candidate still has a proof gap.",
+                candidate: savedCandidate,
+                surfaceIds: ["receipt-decision"],
+              },
+            ],
+            surfaces: [
+              {
+                id: "receipt-decision",
+                candidateId: savedCandidate.candidate_id,
+                label: "Synthetic receipt review",
+                disposition: "rejected",
+                notes: "The submitted terminal decision needs its receipt.",
+                receiptRefs: receipt === "none" ? [] : [receiptPath],
+              },
+            ],
+          },
+        },
+        workbench,
+      );
+      await workbench([termination, "--scan-id", context.scanId]);
+      const coverage = await readCoverage(context);
+      const stopped = await workbench([
+        "get-scan",
+        "--scan-id",
+        context.scanId,
+      ]);
+      const surface = coverage.surfaces.find(
+        (row: FixtureObject) => row.candidateId === savedCandidate.candidate_id,
+      );
+      assert.equal(
+        surface.disposition,
+        receipt === "missing" ? "needs_follow_up" : "rejected",
+      );
+      assert.equal(
+        stopped.scan.progress.candidates.unresolved,
+        receipt === "missing" ? 1 : 0,
+      );
+      if (receipt === "missing") {
+        assert.ok(
+          coverage.deferred.some(
+            (row: FixtureObject) =>
+              row.candidateId === savedCandidate.candidate_id,
+          ),
+        );
+        assert.ok(
+          stopped.scan.warnings.some((warning: string) =>
+            warning.startsWith("Skipped malformed coverage receipt"),
+          ),
+        );
+      }
+    });
+  }
 }

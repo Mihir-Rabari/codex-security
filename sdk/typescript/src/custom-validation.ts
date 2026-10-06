@@ -536,7 +536,7 @@ export async function runCustomValidation(options: {
         candidate: candidate.finding,
         reason,
         paths: candidate.finding.locations.map((location) => location.path),
-        surfaceIds: candidate.surfaceIds,
+        surfaceIds: [...surfaceIds],
       });
     }
     if (

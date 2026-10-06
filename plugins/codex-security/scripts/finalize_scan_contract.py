@@ -1221,6 +1221,7 @@ def _recover_unsealed_coverage(
         partial = True
 
     surface_ids: set[str] = set()
+    recovered_candidates: list[tuple[dict[str, Any], str]] = []
     for field, label in (
         ("surfaces", "coverage surface"),
         ("explicitExclusions", "coverage exclusion"),
@@ -1246,6 +1247,7 @@ def _recover_unsealed_coverage(
                     if surface_id in surface_ids:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
+                    warning_start = len(warnings)
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
                         warnings.append(
@@ -1303,9 +1305,44 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                if (
+                    surface_recovered
+                    and disposition in ("rejected", "not_applicable")
+                    and isinstance(item.get("candidateId"), str)
+                ):
+                    recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
             recovered.append(item)
 
         coverage[field] = recovered
+
+    deferred_ids = {item["id"] for item in coverage["deferred"]}
+    for surface, reason in recovered_candidates:
+        if any(
+            item.get("candidateId") == surface["candidateId"]
+            and item.get("sourceWorkerId") == surface.get("sourceWorkerId")
+            for item in coverage["deferred"]
+        ):
+            continue
+        identity = surface["id"]
+        suffix = 2
+        while identity in deferred_ids:
+            identity = f"{surface['id']}-{suffix}"
+            suffix += 1
+        deferred_ids.add(identity)
+        coverage["deferred"].append(
+            {
+                "id": identity,
+                "candidateId": surface["candidateId"],
+                "reason": reason,
+                "surfaceIds": [surface["id"]],
+                **{
+                    field: copy.deepcopy(surface[field])
+                    for field in ("sourceWorkerId", "candidate", "finding")
+                    if field in surface
+                    and (field == "sourceWorkerId" or isinstance(surface[field], dict))
+                },
+            }
+        )
 
     if discarded_findings:
         for surface in coverage["surfaces"]:

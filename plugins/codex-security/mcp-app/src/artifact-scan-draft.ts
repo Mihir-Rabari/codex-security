@@ -895,8 +895,9 @@ async function preserveScanDraft(
   result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
   );
-  result.coverage.surfaces = normalizeSurfaces(
-    result.coverage.surfaces as JsonObject[],
+  result.coverage = normalizeCoverageEntries(
+    result.coverage,
+    normalizeSurfaces(result.coverage.surfaces as JsonObject[]),
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
@@ -2594,7 +2595,10 @@ function normalizeLegacyCandidateEntry(item: JsonObject): JsonObject {
   return item;
 }
 
-function normalizeCoverageEntries(coverage: JsonObject): JsonObject {
+function normalizeCoverageEntries(
+  coverage: JsonObject,
+  preparedSurfaces?: JsonObject[],
+): JsonObject {
   const surfaces = coverage.surfaces as JsonObject[];
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
@@ -2603,29 +2607,36 @@ function normalizeCoverageEntries(coverage: JsonObject): JsonObject {
   );
   const surfaceIds = new Set<string>();
   const renamedSurfaces = new Map<string, string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface.id === "string";
-    const baseId = explicitId
-      ? (surface.id as string)
-      : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
-    let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-      let suffix = 2;
-      do {
-        id = `${baseId}-${suffix}`;
-        suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-    }
-    surfaceIds.add(id);
+  const normalizedSurfaces =
+    preparedSurfaces ??
+    surfaces.map((surface, index) => {
+      const explicitId = typeof surface.id === "string";
+      const baseId = explicitId
+        ? (surface.id as string)
+        : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
+      let id = baseId;
+      if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+        let suffix = 2;
+        do {
+          id = `${baseId}-${suffix}`;
+          suffix += 1;
+        } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+      }
+      surfaceIds.add(id);
+      return {
+        ...surface,
+        id,
+        receiptRefs: surface.receiptRefs ?? [],
+      };
+    });
+  for (const [index, surface] of surfaces.entries()) {
     const originalKey = candidateKey(surface.id, surface.sourceWorkerId);
-    if (explicitId && !renamedSurfaces.has(originalKey!))
-      renamedSurfaces.set(originalKey!, id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface.receiptRefs ?? [],
-    };
-  });
+    if (typeof surface.id === "string" && !renamedSurfaces.has(originalKey!))
+      renamedSurfaces.set(
+        originalKey!,
+        normalizedSurfaces[index]!.id as string,
+      );
+  }
   const deferred = coverage.deferred as JsonObject[];
   // Reserve later owned identities before deriving any earlier missing ones.
   const deferredIds = new Set(

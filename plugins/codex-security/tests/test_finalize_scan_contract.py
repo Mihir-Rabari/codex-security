@@ -2374,6 +2374,63 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
+    def test_recovered_receipt_decision_retains_owned_pending_evidence(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for disposition in ("rejected", "not_applicable"):
+            for previous_owner in (None, "worker-current", "worker-other"):
+                with self.subTest(disposition=disposition, previous_owner=previous_owner):
+                    self.coverage = copy.deepcopy(original)
+                    self.coverage["completeness"] = "partial"
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="candidate-review",
+                        sourceWorkerId="worker-current",
+                        disposition=disposition,
+                        receiptRefs=["artifacts/review/missing-receipt.txt"],
+                        candidate={"evidence": "Saved candidate evidence remains available."},
+                    )
+                    previous = None
+                    if previous_owner is not None:
+                        previous = {
+                            "id": surface["id"],
+                            "candidateId": "candidate-review",
+                            "sourceWorkerId": previous_owner,
+                            "reason": "Independent authored proof gap.",
+                            "candidate": {"evidence": "Independent saved candidate evidence."},
+                            "surfaceIds": [surface["id"]],
+                        }
+                        self.coverage["deferred"].append(copy.deepcopy(previous))
+                    self.write_scan()
+                    warnings = []
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, completion_warnings=warnings
+                    )
+                    recovered = prepared[4]
+                    self.assertEqual(recovered["surfaces"][0]["disposition"], "needs_follow_up")
+                    pending = next(
+                        row
+                        for row in recovered["deferred"]
+                        if row.get("sourceWorkerId") == "worker-current"
+                    )
+                    self.assertEqual(pending["surfaceIds"], [surface["id"]])
+                    if previous_owner == "worker-current":
+                        self.assertEqual(pending, previous)
+                    else:
+                        self.assertEqual(pending["candidate"], surface["candidate"])
+                        self.assertIn(warnings[0], pending["reason"])
+                    if previous is not None:
+                        self.assertIn(previous, recovered["deferred"])
+                    self.assertEqual(
+                        len({row["id"] for row in recovered["deferred"]}),
+                        len(recovered["deferred"]),
+                    )
+                    self.assertTrue(
+                        any(
+                            warning.startswith("Skipped malformed coverage receipt")
+                            for warning in warnings
+                        )
+                    )
+
     def test_rejects_missing_coverage_receipt(self) -> None:
         self.coverage["surfaces"][0]["receiptRefs"] = ["artifacts/02_discovery/work_ledger.jsonl"]
         self.write_scan()

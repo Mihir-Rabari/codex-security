@@ -1634,3 +1634,65 @@ for (const prior of ["rejected", "not_applicable"] as const) {
     }
   }
 }
+
+for (const mapped of [false, true]) {
+  test(`repeated custom validation retains historical follow-up links, mapped=${mapped}`, async () => {
+    const f = await fixture();
+    const finding = f.findings.findings[0]!;
+    finding.provenance["candidateId"] = "validated-candidate";
+    finding.provenance["sourceWorkerId"] = "worker-current";
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    const previous = {
+      id: "saved-follow-up",
+      ...(mapped ? { candidateId: "validated-candidate" } : {}),
+      sourceWorkerId: "worker-current",
+      label: "Earlier route review",
+      disposition: "needs_follow_up" as const,
+      receiptRefs: [],
+      notes: "The historical proof gap remains available.",
+      annotation: "Retain this historical annotation.",
+    };
+    coverage.surfaces.push(previous);
+    coverage.completeness = "partial";
+    coverage.deferred = [
+      {
+        id: "saved-pending",
+        candidateId: "validated-candidate",
+        sourceWorkerId: "worker-current",
+        reason: "Earlier candidate proof gap.",
+        surfaceIds: [previous.id],
+      },
+    ];
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () => JSON.stringify(result("deferred")),
+    });
+    const pending = await loadResult(f.scanDir);
+    if (!mapped)
+      expect(pending.coverage.deferred[0]!.surfaceIds).toContain(previous.id);
+    // A later producer publishes the same candidate for its next validation.
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const manifest = await json<ScanManifest>(
+      join(f.scanDir, "scan-manifest.json"),
+    );
+    manifest.scan.scope.validationMode = "custom_pending";
+    await save(join(f.scanDir, "scan-manifest.json"), manifest);
+    await runCustomValidation({
+      ...f,
+      run: async () => JSON.stringify(result("reportable")),
+    });
+    const saved = await loadResult(f.scanDir);
+    expect(
+      saved.coverage.surfaces.find((row) => row.id === previous.id),
+    ).toMatchObject({
+      disposition: "reported",
+      notes: previous.notes,
+      annotation: previous.annotation,
+    });
+    expect(saved.coverage.deferred).toEqual([]);
+  });
+}

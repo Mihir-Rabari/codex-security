@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -147,3 +148,83 @@ def test_recovery_scopes_matching_legacy_parent_candidate_without_duplication(
             )
             assert result is not None
     assert (scan_dir / "coverage.json").read_bytes() == original_parent
+
+
+@pytest.mark.parametrize("checkpoint_time", [100, 200, 300])
+@pytest.mark.parametrize("same_owner", [False, True])
+def test_legacy_owned_parent_respects_pending_only_checkpoint_order(
+    tmp_path: Path, checkpoint_time: int, same_owner: bool
+) -> None:
+    from workbench_test_support import (
+        load_script,
+        saved_discovery_worker,
+        saved_draft,
+        write_checkpoint,
+        write_completed_contract,
+    )
+
+    module = load_script("workbench_saved_results")
+    finalizer = load_script("finalize_scan_contract")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("synthetic source\n")
+    scan_id = "legacy-owned-candidate"
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["provenance"].update(candidateId="candidate-review", workerId="worker-one")
+    findings_path.write_text(json.dumps(findings))
+    manifest, _, _ = finalizer.finalize_scan(scan_dir)
+    parent_bytes = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("findings.json", "coverage.json", "scan-manifest.json")
+    }
+    os.utime(scan_dir / "coverage.json", ns=(200, 200))
+    owner = "worker-one" if same_owner else "worker-two"
+    output = scan_dir / "artifacts/deep_discovery" / owner / "output"
+    pending = {
+        "id": "pending-review",
+        "candidateId": "candidate-review",
+        "reason": "The worker still needs independent validation.",
+        "candidate": {"evidence": "Pending worker evidence remains available."},
+    }
+    checkpoint = write_checkpoint(output / "checkpoints", saved_draft(scan_id, deferred=[pending]))
+    os.utime(checkpoint, ns=(checkpoint_time, checkpoint_time))
+    original_checkpoint = checkpoint.read_bytes()
+    binding = {
+        "status": "failed",
+        "coverageMode": "deep_repository",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+    }
+    warnings = []
+    documents = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        [saved_discovery_worker(output, owner)],
+        warnings,
+        stopped=True,
+        reason="Synthetic interruption.",
+    )
+    assert documents is not None
+    assert warnings == []
+    rows = [
+        row for row in documents[2]["deferred"] if row.get("candidateId") == pending["candidateId"]
+    ]
+    expected = not same_owner or checkpoint_time >= 200
+    assert bool(rows) is expected
+    if expected:
+        assert rows[0]["sourceWorkerId"] == owner
+        assert rows[0]["candidate"] == pending["candidate"]
+        assert rows[0]["reason"] == pending["reason"]
+    assert len(documents[1]["findings"]) == 1
+    assert documents[1]["findings"][0]["summary"] == finding["summary"]
+    assert checkpoint.read_bytes() == original_checkpoint
+    assert {name: (scan_dir / name).read_bytes() for name in parent_bytes} == parent_bytes
