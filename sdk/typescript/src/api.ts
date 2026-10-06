@@ -3967,10 +3967,11 @@ export async function runScanEvents(
       );
       const helper = (
         await import(
-          pathToFileURL(join(options.pluginRoot, "mcp/helpers.mjs")).href
+          pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
         )
       ).default;
-      const draft: ScanDraftInput = helper.parseCanonicalScanDraft({
+      const draft: ScanDraftInput = await helper.readScanAuditDraft({
+        root: options.scanDir,
         scanId: options.scanId ?? manifest.scan.id,
         manifest,
         findings,

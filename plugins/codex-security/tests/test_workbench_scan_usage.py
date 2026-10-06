@@ -1349,3 +1349,120 @@ def test_rejected_receipt_preserves_priced_legacy_usage(tmp_path: Path, workbenc
     assert total == _counts(1000, 0, 0)
     assert warnings == set()
     assert models == {"gpt-5.6-sol": _counts(1000, 0, 0)}
+
+
+@pytest.mark.parametrize(
+    "case", ["history", "history-gap", "pre-window-reset", "counter-categories"]
+)
+def test_completion_usage_matches_its_admitted_window_and_model_partition(tmp_path, case):
+    fixture = _start_scan(tmp_path)
+    start = fixture.started_at
+
+    def receipt(
+        second, response, input_tokens, output_tokens, cumulative_input, cumulative_output=0
+    ):
+        return _event(
+            start + timedelta(seconds=second),
+            "token_usage_record",
+            {
+                "thread_id": "scan-parent",
+                "response_id": response,
+                "model": "gpt-5.6-sol",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                },
+                "thread_token_usage": {
+                    "input_tokens": cumulative_input,
+                    "output_tokens": cumulative_output,
+                    "total_tokens": cumulative_input + cumulative_output,
+                },
+            },
+        )
+
+    if case in {"history", "history-gap"}:
+        events = [
+            receipt(-2, "history", 900, 0, 900),
+            receipt(0, "owned", 20, 0, 920 if case == "history" else 940),
+        ]
+        expected = _counts(20, 0, 0)
+        partial = case == "history-gap"
+    elif case == "pre-window-reset":
+        events = [
+            _token_event(start - timedelta(seconds=3), 1000, 0),
+            _token_event(start - timedelta(seconds=2), 100, 0),
+            _token_event(start, 120, 0),
+        ]
+        expected = _counts(20, 0, 0)
+        partial = False
+    else:
+        events = [receipt(0, "owned", 100, 50, 100, 50), _token_event(start, 200, 10)]
+        expected = _counts(200, 0, 50)
+        partial = True
+    events.insert(
+        0,
+        _event(
+            start - timedelta(seconds=5),
+            "turn_context",
+            {"turn_id": "scan-turn", "model": "gpt-5.6-sol"},
+        ),
+    )
+    _state_graph(
+        fixture.environment, {"scan-parent": _rollout(tmp_path, "scan-parent", events)}, []
+    )
+    # Exercise complete-scan's public usage validation, not just the private reader.
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert all(usage[key] == value for key, value in expected.items())
+    assert usage["coverage"] == ("partial" if partial else "complete")
+    assert usage.get("warnings", []) == (["token_receipts_incomplete"] if partial else [])
+    for key in expected:
+        assert sum(part[key] for part in usage["modelUsage"]) == usage[key]
+
+
+@pytest.mark.parametrize("foreign_first", [False, True])
+def test_foreign_response_cumulative_does_not_hide_an_earlier_owned_gap(
+    tmp_path, workbench_api, foreign_first
+):
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+    def receipt(second, response, count, cumulative, turn="scan-turn"):
+        return _event(
+            start + timedelta(seconds=second),
+            "token_usage_record",
+            {
+                "thread_id": "parent",
+                "turn_id": turn,
+                "response_id": response,
+                "model": "gpt-5.6-sol",
+                "usage": {"input_tokens": count, "output_tokens": 0, "total_tokens": count},
+                "thread_token_usage": {
+                    "input_tokens": cumulative,
+                    "output_tokens": 0,
+                    "total_tokens": cumulative,
+                },
+            },
+        )
+
+    history = receipt(-2, "history", 900, 900)
+    foreign = receipt(
+        1 if foreign_first else 2,
+        "foreign",
+        20 if foreign_first else 900,
+        920 if foreign_first else 1840,
+        "other-turn",
+    )
+    owned = receipt(2 if foreign_first else 1, "owned", 20, 940)
+    events = [history, *([foreign, owned] if foreign_first else [owned, foreign])]
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=None,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert total == _counts(20, 0, 0)
+    assert warnings == (set() if foreign_first else {"token_receipts_incomplete"})
+    assert models == {"gpt-5.6-sol": _counts(20, 0, 0)}

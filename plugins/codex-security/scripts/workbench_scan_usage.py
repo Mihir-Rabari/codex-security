@@ -692,6 +692,8 @@ def _read_rollout_usage(
     response_usage_observed = False
     response_tokens = 0
     expected_response_tokens = 0
+    response_baseline_tokens = 0
+    excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
 
     with session.path.open("rb") as source:
@@ -773,19 +775,29 @@ def _read_rollout_usage(
                 if timestamp is None:
                     warnings.add("token_record_invalid")
                     continue
-                if timestamp < started_at or (
-                    completed_at is not None and timestamp > completed_at
-                ):
+                cumulative = _token_snapshot(
+                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
+                )
+                if timestamp < started_at:
+                    if cumulative is not None:
+                        response_baseline_tokens = max(
+                            response_baseline_tokens, cumulative["totalTokens"]
+                        )
+                    continue
+                if completed_at is not None and timestamp > completed_at:
                     continue
                 if (
                     owner_turn_id is not None
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
+                    if cumulative is not None:
+                        excluded_response_tokens[response_id] = (
+                            usage["totalTokens"],
+                            cumulative["totalTokens"],
+                        )
                     continue
                 response_ids.add(response_id)
-                cumulative = _token_snapshot(
-                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
-                )
+                excluded_response_tokens.pop(response_id, None)
                 if cumulative is not None:
                     expected_response_tokens = max(
                         expected_response_tokens, cumulative["totalTokens"]
@@ -812,13 +824,15 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            if timestamp < started_at:
+                # A compaction before this scan changes its starting counter.
+                previous = snapshot
+                continue
             if snapshot["totalTokens"] < previous["totalTokens"]:
                 warnings.add("token_counter_regressed")
                 continue
             delta = {key: max(0, value - previous[key]) for key, value in snapshot.items()}
             previous = snapshot
-            if timestamp < started_at:
-                continue
             if completed_at is not None and timestamp > completed_at:
                 continue
             if owner_turn_id is not None and current_turn_id != owner_turn_id:
@@ -835,13 +849,34 @@ def _read_rollout_usage(
                     local_models.setdefault(current_model, _empty_token_usage()), delta
                 )
 
-    if counter_total["totalTokens"] > total["totalTokens"]:
+    if (
+        counter_total["inputTokens"] > total["inputTokens"]
+        or counter_total["outputTokens"] > total["outputTokens"]
+    ):
         remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
-        total = dict(counter_total)
+        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+        if (
+            remainder["cachedInputTokens"] + remainder["cacheWriteInputTokens"]
+            > remainder["inputTokens"]
+        ):
+            # Conflicting cache categories cannot classify the additional input.
+            remainder["cachedInputTokens"] = remainder["cacheWriteInputTokens"] = 0
+        _add_token_usage(total, remainder)
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
+        if response_usage_observed and remainder["totalTokens"]:
+            warnings.add("token_receipts_incomplete")
     if response_usage_observed:
         warnings.discard("token_counter_regressed")
-    if expected_response_tokens > response_tokens:
+    if (
+        expected_response_tokens
+        - response_baseline_tokens
+        - sum(
+            tokens
+            for tokens, cumulative in excluded_response_tokens.values()
+            if response_baseline_tokens < cumulative <= expected_response_tokens
+        )
+        > response_tokens
+    ):
         warnings.add("token_receipts_incomplete")
     if model_usage is not None:
         for model, usage in local_models.items():

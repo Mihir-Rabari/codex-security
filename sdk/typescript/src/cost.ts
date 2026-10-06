@@ -63,6 +63,8 @@ interface SessionUsage {
   responseUsageObserved: boolean;
   responseTokens: number;
   expectedResponseTokens: number;
+  responseBaselineTokens: number;
+  excludedResponseTokens: Map<string, { tokens: number; cumulative: number }>;
   counterRegressed: boolean;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
@@ -122,6 +124,8 @@ function createSessionUsage(): SessionUsage {
     responseUsageObserved: false,
     responseTokens: 0,
     expectedResponseTokens: 0,
+    responseBaselineTokens: 0,
+    excludedResponseTokens: new Map(),
     counterRegressed: false,
     calls: new Map(),
     activities: [],
@@ -427,12 +431,19 @@ export class ScanCostTracker {
       ) {
         usageSessions.set(threadId, session);
       }
+      const counterLowerBound =
+        session.responseUsageObserved && session.usage && session.counterUsage
+          ? addTokenUsage(
+              session.usage,
+              counterRemainder(session.counterUsage, session.usage),
+            )
+          : session.counterUsage;
       if (
-        session.counterUsage &&
-        session.counterUsage.total_tokens >
+        counterLowerBound &&
+        counterLowerBound.total_tokens >
           (usages.get(threadId)?.total_tokens ?? -1)
       ) {
-        usages.set(threadId, session.counterUsage);
+        usages.set(threadId, counterLowerBound);
       }
       const receipt = usages.get(threadId);
       if (
@@ -449,7 +460,23 @@ export class ScanCostTracker {
     for (const [threadId, session] of usageSessions) {
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
-        session.expectedResponseTokens > session.responseTokens
+        (session.responseUsageObserved &&
+          session.usage !== null &&
+          session.counterUsage !== null &&
+          counterRemainder(session.counterUsage, session.usage).total_tokens >
+            0) ||
+        session.expectedResponseTokens -
+          session.responseBaselineTokens -
+          [...session.excludedResponseTokens.values()].reduce(
+            (total, receipt) =>
+              total +
+              (receipt.cumulative <= session.expectedResponseTokens &&
+              receipt.cumulative > session.responseBaselineTokens
+                ? receipt.tokens
+                : 0),
+            0,
+          ) >
+          session.responseTokens
       )
         incomplete = true;
       if (session.pendingLineBytes > 0 && !this.#receipts.get(threadId))
@@ -763,6 +790,20 @@ function readSessionEvent(
       typeof payload["turn_id"] === "string"
         ? payload["turn_id"]
         : session.currentTurnId;
+    const cumulative = tokenUsage(payload["thread_token_usage"]);
+    const timestamp = sessionStartedAt(event["timestamp"]);
+    if (
+      attribution &&
+      timestamp !== null &&
+      timestamp < Date.parse(attribution.startedAt)
+    ) {
+      if (cumulative)
+        session.responseBaselineTokens = Math.max(
+          session.responseBaselineTokens,
+          cumulative.total_tokens,
+        );
+      return;
+    }
     if (
       attribution &&
       !isAttributedScanEvent(
@@ -771,10 +812,21 @@ function readSessionEvent(
         turnId,
         event["timestamp"],
       )
-    )
+    ) {
+      if (
+        cumulative &&
+        timestamp !== null &&
+        (!attribution.completedAt ||
+          timestamp <= Date.parse(attribution.completedAt))
+      )
+        session.excludedResponseTokens.set(responseId, {
+          tokens: usage.total_tokens,
+          cumulative: cumulative.total_tokens,
+        });
       return;
+    }
     session.responseIds.add(responseId);
-    const cumulative = tokenUsage(payload["thread_token_usage"]);
+    session.excludedResponseTokens.delete(responseId);
     if (cumulative)
       session.expectedResponseTokens = Math.max(
         session.expectedResponseTokens,
@@ -945,6 +997,15 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) {
+    const timestamp = sessionStartedAt(event["timestamp"]);
+    if (
+      attribution &&
+      timestamp !== null &&
+      timestamp < Date.parse(attribution.startedAt)
+    ) {
+      session.previousUsage = ownUsage;
+      return;
+    }
     const delta =
       session.previousUsage === null
         ? ownUsage
@@ -1125,6 +1186,38 @@ function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
+}
+
+function counterRemainder(
+  counter: ScanTokenUsage,
+  receipts: ScanTokenUsage,
+): ScanTokenUsage {
+  const extra = {
+    input_tokens: Math.max(0, counter.input_tokens - receipts.input_tokens),
+    cached_input_tokens: Math.max(
+      0,
+      counter.cached_input_tokens - receipts.cached_input_tokens,
+    ),
+    cache_write_input_tokens: Math.max(
+      0,
+      counter.cache_write_input_tokens - receipts.cache_write_input_tokens,
+    ),
+    output_tokens: Math.max(0, counter.output_tokens - receipts.output_tokens),
+    reasoning_output_tokens: Math.max(
+      0,
+      counter.reasoning_output_tokens - receipts.reasoning_output_tokens,
+    ),
+  };
+  // Conflicting counter categories cannot remove exact response usage or
+  // classify the cache portion of additional, unpriced input.
+  return (
+    tokenUsage(extra) ??
+    tokenUsage({
+      ...extra,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+    })!
+  );
 }
 
 function subtractTokenUsage(
