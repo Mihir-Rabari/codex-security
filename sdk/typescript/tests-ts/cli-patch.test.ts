@@ -4625,6 +4625,10 @@ describe("patch change tracking", () => {
       else if (kind === "gitlink")
         git("clone", "--local", root, join(root, "local.env"));
       else await symlink("absent-synthetic-target", join(root, "local.env"));
+      const nestedIgnore =
+        kind === "gitlink"
+          ? await readFile(join(root, "local.env/.gitignore"))
+          : undefined;
       const remote = await fixtures.create("synthetic-ignore-remote-");
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
@@ -4658,8 +4662,8 @@ describe("patch change tracking", () => {
         expect(
           repositoryGit(join(root, "local.env"))("rev-parse", "HEAD"),
         ).toBe(head);
-        expect(await readFile(join(root, "local.env/.gitignore"), "utf8")).toBe(
-          "# baseline\n",
+        expect(await readFile(join(root, "local.env/.gitignore"))).toEqual(
+          nestedIgnore!,
         );
       } else
         expect(await readlink(join(root, "local.env"))).toBe(
