@@ -20,7 +20,9 @@ export async function resumeSelectedDeepScan(input: {
       pluginRoot: string;
       runWorkbench: WorkbenchRunner;
       signal: AbortSignal;
+      prepareCompletion?: boolean;
     }) => Promise<void>;
   };
-  await helper.resumeSelectedDeepScan(input);
+  // The SDK reconciles the explicit budget before preparing parent completion.
+  await helper.resumeSelectedDeepScan({ ...input, prepareCompletion: false });
 }

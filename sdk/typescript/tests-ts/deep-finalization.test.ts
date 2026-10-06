@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
   ScanCostLimitExceededError,
@@ -17,6 +17,8 @@ import {
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
+import { ScanCostTracker } from "../src/cost.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -122,6 +124,7 @@ const outcomes = [
   "closed-during-publication",
   "budget-during-publication",
   "budget-after-deep-finish",
+  "budget-at-final-reconciliation",
   "budget-during-resumed-publication",
   "closed-during-resumed-publication",
   "lost-completion-response",
@@ -308,6 +311,22 @@ for (const {
               ].join("\n")
             : ""),
       );
+    const originalStop = ScanCostTracker.prototype.stop;
+    const stopSpy =
+      outcome === "budget-at-final-reconciliation"
+        ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+            async function (
+              this: ScanCostTracker,
+              ...args: Parameters<ScanCostTracker["stop"]>
+            ) {
+              if (!budgetTriggered) {
+                budgetTriggered = true;
+                await recordBudgetUsage();
+              }
+              return originalStop.apply(this, args);
+            },
+          )
+        : null;
     let closePromise: Promise<void> | undefined;
     const makeClient = () =>
       new TestClient(
@@ -514,15 +533,21 @@ for (const {
                       },
                     ],
                     coverage: {
-                      completeness: "partial",
+                      completeness:
+                        outcome === "budget-at-final-reconciliation"
+                          ? "complete"
+                          : "partial",
                       surfaces: [],
                       explicitExclusions: [],
-                      deferred: [
-                        {
-                          id: "dependency",
-                          reason: "A dependency remains unreviewed.",
-                        },
-                      ],
+                      deferred:
+                        outcome === "budget-at-final-reconciliation"
+                          ? []
+                          : [
+                              {
+                                id: "dependency",
+                                reason: "A dependency remains unreviewed.",
+                              },
+                            ],
                     },
                   };
                   const seeded = JSON.parse(
@@ -973,6 +998,7 @@ for (const {
     } finally {
       clearTimeout(keepAlive);
       await client.close();
+      stopSpy?.mockRestore();
     }
   };
   test(name, runCase, 30_000);

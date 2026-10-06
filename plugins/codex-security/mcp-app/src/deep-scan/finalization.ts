@@ -126,6 +126,7 @@ export async function resumeSelectedDeepScan(input: {
   runWorkbench: RunArtifactWorkbench;
   signal: AbortSignal;
   handoffClaimToken?: string;
+  prepareCompletion?: boolean;
 }): Promise<void> {
   const store = new WorkbenchDeepScanStore(input.runWorkbench);
   const run = await store.get(input.scanId, input.threadId);
@@ -139,7 +140,7 @@ export async function resumeSelectedDeepScan(input: {
       : []),
   ];
   if (run.status === "succeeded") {
-    await input.runWorkbench(prepare);
+    if (input.prepareCompletion !== false) await input.runWorkbench(prepare);
     return;
   }
   try {
@@ -179,7 +180,7 @@ export async function resumeSelectedDeepScan(input: {
       .get(input.scanId, input.threadId)
       .catch(() => null);
     if (committed?.status !== "succeeded") throw error;
-    await input.runWorkbench(prepare);
+    if (input.prepareCompletion !== false) await input.runWorkbench(prepare);
   }
 }
 
