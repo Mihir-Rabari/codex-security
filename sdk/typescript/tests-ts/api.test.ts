@@ -2061,9 +2061,8 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each([false, true])(
-    "archives accepted output before starting, cancellation=%s",
-    async (cancelRegistration) => {
+  for (const cancelRegistration of [false, true]) {
+    test(`archives accepted output before starting, cancellation=${cancelRegistration}`, async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2138,8 +2137,8 @@ describe("CodexSecurity orchestration", () => {
       );
       await expect(stat(output)).resolves.toBeDefined();
       await client.close();
-    },
-  );
+    });
+  }
 
   test("reports the real scan failure when scan cleanup also fails", async () => {
     const root = await temporaryDirectory();
