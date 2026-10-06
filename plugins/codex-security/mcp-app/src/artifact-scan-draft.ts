@@ -1107,12 +1107,20 @@ async function readCheckpointHead(
     ["checkpoint-head.json"],
     label,
   );
-  const head = parseJsonObject(saved.contents, label);
+  let head: JsonObject;
+  try {
+    head = parseJsonObject(saved.contents, label);
+  } catch (error) {
+    if (kind === "archived") return;
+    throw error;
+  }
   if (
     typeof head.checkpoint !== "string" ||
     !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-  )
+  ) {
+    if (kind === "archived") return;
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
+  }
   // Reselecting an immutable checkpoint updates only the head file.
   return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
 }
@@ -1167,14 +1175,22 @@ async function readSavedCheckpoints(
       );
     }
     const label = `${kind} scan checkpoint`;
-    const draft = parseJsonObject(
-      await readArtifactText(context, ["checkpoints", entry.name], label),
+    const contents = await readArtifactText(
+      context,
+      ["checkpoints", entry.name],
       label,
     );
-    const input =
-      kind === "current"
-        ? parsePersistedCheckpoint(draft)
-        : parsePersistedScanDraft(draft);
+    let input: ScanDraftInput;
+    try {
+      const draft = parseJsonObject(contents, label);
+      input =
+        kind === "current"
+          ? parsePersistedCheckpoint(draft)
+          : parsePersistedScanDraft(draft);
+    } catch (error) {
+      if (kind === "archived") continue;
+      throw error;
+    }
     if (kind === "archived") requireMatchingScan(context, input);
     else if (input.scanId !== context.scanId) {
       throw new Error(
@@ -1364,17 +1380,20 @@ export async function readArchivedWorkerCheckpoints(
     const head = await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
-      checkpointHead = parsePersistedScanDraft(
-        parseJsonObject(
-          await readArtifactText(
-            attemptContext,
-            ["checkpoints", head.checkpoint],
-            "archived scan checkpoint head",
-          ),
-          "archived scan checkpoint head",
-        ),
+      const contents = await readArtifactText(
+        attemptContext,
+        ["checkpoints", head.checkpoint],
+        "archived scan checkpoint head",
       );
-      requireMatchingScan(context, checkpointHead);
+      try {
+        checkpointHead = parsePersistedScanDraft(
+          parseJsonObject(contents, "archived scan checkpoint head"),
+        );
+      } catch {
+        // Failed attempts can retain malformed checkpoints beside valid current output.
+      }
+      if (checkpointHead !== undefined)
+        requireMatchingScan(context, checkpointHead);
     }
     const resultMetadata = await lstatIfExists(
       join(attemptRoot, "result.json"),

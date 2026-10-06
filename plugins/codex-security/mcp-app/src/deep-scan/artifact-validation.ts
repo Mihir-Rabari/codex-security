@@ -319,7 +319,7 @@ export function projectDiscoveryCoverage(
   };
   const reviews = [{ ...current, completeness: coverage.completeness }];
   const origin = (field: string, item: unknown) => {
-    const saved = archived.find((saved) =>
+    const saved = archived.findLast((saved) =>
       ((saved.coverage[field] as unknown[] | undefined) ?? []).some((row) =>
         isDeepStrictEqual(row, item),
       ),
@@ -337,12 +337,14 @@ export function projectDiscoveryCoverage(
   const prefix = (provenance: typeof current) =>
     `${worker.id}-attempt-${provenance.attempt ?? "unknown"}`;
   const surfaces = coverage.surfaces as Record<string, unknown>[];
-  const surfaceIds = new Map(
-    surfaces.map((surface, index) => [
-      surface.id,
-      `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
-    ]),
-  );
+  const surfaceIds = new Map<unknown, string>();
+  for (const [index, surface] of surfaces.entries()) {
+    if (!surfaceIds.has(surface.id))
+      surfaceIds.set(
+        surface.id,
+        `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
+      );
+  }
   const project = (
     item: Record<string, unknown>,
     field: string,

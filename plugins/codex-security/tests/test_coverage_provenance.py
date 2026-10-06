@@ -179,3 +179,133 @@ def test_recovery_uses_host_reviews_without_discovery_review_extensions(
     published = (scan.scan_dir / "coverage.json").read_bytes()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
+
+
+@pytest.mark.parametrize("missing_completeness", [False, True])
+@pytest.mark.parametrize("retry_publication", [False, True])
+def test_malformed_saved_completeness_preserves_other_valid_coverage(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    missing_completeness,
+    retry_publication,
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    source = {
+        **scan.coverage,
+        "surfaces": [
+            {"id": "reviewed", "label": "Retained evidence", "disposition": "no_issue_found"}
+        ],
+    }
+    if missing_completeness:
+        source.pop("completeness")
+    result.write_text(
+        json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": source})
+    )
+    original = result.read_bytes()
+    saved = workbench_api["saved_results"]
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        saved.fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    recovered = saved.recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert not recovered["resultsRecoveryNeeded"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert any(row["label"] == "Retained evidence" for row in coverage["surfaces"])
+    assert coverage["completeness"] == "partial"
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("retained_attempt", [1, 2])
+@pytest.mark.parametrize("retry_publication", [False, True])
+def test_missing_deferred_uses_retained_surface_from_its_reviewed_attempt(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retained_attempt, retry_publication
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
+    surface = {
+        "id": "retained",
+        "label": "Retained surface",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    deferred = {"id": "new-gap", "reason": "Verify retained surface.", "surfaceIds": ["retained"]}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "surfaces": [surface],
+                    "deferred": [deferred],
+                },
+            }
+        )
+    )
+    projected_id = f"{worker_id}-attempt-{retained_attempt}-surface-1"
+    parent = {
+        **scan.coverage,
+        "completeness": "partial",
+        "surfaces": [
+            {
+                **surface,
+                "id": projected_id,
+                "provenance": {
+                    "workerId": worker_id,
+                    "attempt": retained_attempt,
+                    "sourceId": "retained",
+                },
+            }
+        ],
+        "deferred": [],
+        "reviews": [
+            {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+            for attempt in {retained_attempt, 2}
+        ],
+    }
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(parent))
+    original = result.read_bytes()
+    saved = workbench_api["saved_results"]
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        saved.fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    saved.recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
+    published = (scan.scan_dir / "coverage.json").read_bytes()
+    coverage = json.loads(published)
+    task = next(row for row in coverage["deferred"] if row["reason"] == deferred["reason"])
+    assert task["surfaceIds"] == [projected_id]
+    assert projected_id in {row["id"] for row in coverage["surfaces"]}
+    assert result.read_bytes() == original
+    saved.recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
+    assert (scan.scan_dir / "coverage.json").read_bytes() == published
