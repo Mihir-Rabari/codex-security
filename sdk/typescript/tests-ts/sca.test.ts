@@ -192,6 +192,7 @@ async function fixture(
     advisoryDetails?: string;
     homeVariable?: "HOME" | "USERPROFILE";
     configuredGitHubHome?: boolean;
+    gitHubConfig?: "xdg" | "appdata" | "explicit";
   } = {},
 ) {
   const root = await temporaryDirectory("codex-security-sca-");
@@ -270,6 +271,18 @@ process.exit(child.status ?? 1);
       : {}),
     ...(options.configuredGitHubHome
       ? { GH_CONFIG_DIR: join(root, "selected-gh-home") }
+      : {}),
+    ...(options.gitHubConfig
+      ? {
+          XDG_CONFIG_HOME:
+            options.gitHubConfig === "appdata"
+              ? undefined
+              : join(root, "xdg-config"),
+          AppData: join(root, "application-data"),
+          ...(options.gitHubConfig === "explicit"
+            ? { GH_CONFIG_DIR: join(root, "explicit-gh-config") }
+            : {}),
+        }
       : {}),
     PATH: process.env["PATH"] ?? "",
     ...Object.fromEntries(
@@ -1546,3 +1559,82 @@ test("dependency source snapshots preserve per-scan process environment, protect
   expect(sourceCalls[0]!.signal!.aborted).toBe(true);
   expect(sourceCalls[1]!.signal!.aborted).toBe(true);
 });
+
+test.each(["xdg", "explicit"] as const)(
+  "dependency triage protects the effective %s GitHub credential directory",
+  async (gitHubConfig) => {
+    const f = await fixture({ homeVariable: "HOME", gitHubConfig });
+    await using security = f.client;
+    expect(
+      (
+        await security.scanDependencies({
+          repositoryPath: f.repository,
+          outputDir: f.outputDir,
+        })
+      ).status,
+    ).toBe("completed");
+    const options = f.captured.codex!;
+    const permissions = parseToml(options.configOverrides![1]!)[
+      "permissions"
+    ] as Record<string, JsonObject>;
+    const filesystem = permissions["codex_security_dependencies"]![
+      "filesystem"
+    ] as JsonObject;
+    const directory =
+      gitHubConfig === "explicit"
+        ? f.environment.GH_CONFIG_DIR!
+        : join(f.environment.XDG_CONFIG_HOME!, "gh");
+    expect(filesystem[directory]).toEqual({ ".": "deny" });
+    expect(options.env!["XDG_CONFIG_HOME"]).toBe(f.environment.XDG_CONFIG_HOME);
+    expect(options.env!["GH_CONFIG_DIR"]).toBe(f.environment.GH_CONFIG_DIR);
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "dependency triage protects the Windows AppData GitHub credential directory",
+  async () => {
+    const f = await fixture({
+      homeVariable: "USERPROFILE",
+      gitHubConfig: "appdata",
+    });
+    await using security = f.client;
+    await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    });
+    const permissions = parseToml(f.captured.codex!.configOverrides![1]!)[
+      "permissions"
+    ] as Record<string, JsonObject>;
+    expect(
+      (permissions["codex_security_dependencies"]!["filesystem"] as JsonObject)[
+        join(f.environment.AppData!, "GitHub CLI")
+      ],
+    ).toEqual({ ".": "deny" });
+  },
+);
+
+test.each(["completed", "malformed", "truncated"] as const)(
+  "dependency triage retains originating threads after a later %s assessment",
+  async (middle) => {
+    const f = await fixture({ turns: ["completed", middle, "completed"] });
+    await using security = f.client;
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+    });
+    expect(result.assessments.map((assessment) => assessment.threadId)).toEqual(
+      ["sca-thread", "sca-thread-2", "sca-thread-3"],
+    );
+    expect(result.assessments.map((assessment) => assessment.status)).toEqual([
+      "completed",
+      middle === "completed" ? "completed" : "failed",
+      "completed",
+    ]);
+    expect(f.turns[1]!.evidence.assessments[0]!.threadId).toBe("sca-thread");
+    expect(f.turns[2]!.evidence.assessments[1]!.threadId).toBe("sca-thread-2");
+    const saved = JSON.parse(
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+    );
+    expect(saved.assessments).toEqual(result.assessments);
+  },
+);

@@ -316,6 +316,10 @@
           "matchId": {
             "type": "string"
           },
+          "threadId": {
+            "type": "string",
+            "description": "Originating Codex thread, once the assessment has started."
+          },
           "status": {
             "enum": ["not_started", "completed", "failed", "cancelled"]
           },

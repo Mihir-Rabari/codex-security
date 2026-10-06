@@ -98,6 +98,10 @@ export interface ScaMatch {
 }
 export interface ScaAssessment {
   matchId: string;
+  /**
+   * Originating Codex thread, once the assessment has started.
+   */
+  threadId?: string;
   status: "not_started" | "completed" | "failed" | "cancelled";
   verdict: "confirmed" | "not_actionable" | "needs_review" | null;
   triage: TriageFinding | null;

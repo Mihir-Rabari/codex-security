@@ -1410,6 +1410,9 @@ before model authentication. Zero matches with complete coverage require no
 model call. Model errors preserve the scanner evidence and return `partial`.
 Each matched advisory gets a separate assessment turn. The SDK saves completed
 assessments before continuing, and an invalid response affects only its match.
+Each assessment retains its originating `threadId` once its Codex thread starts,
+including when that assessment fails. Older saved assessments may omit this
+field.
 Retained triage ranks apply within each single-match result; they do not form a
 priority queue across the scan. The recorded skill digest includes the triage
 skill, output schema, and required local assessment references.

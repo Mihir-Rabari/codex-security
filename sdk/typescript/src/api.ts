@@ -881,6 +881,7 @@ export class CodexSecurity {
                     typeof event["thread_id"] === "string"
                   ) {
                     result!.model.threadId = event["thread_id"];
+                    result!.assessments[index]!.threadId = event["thread_id"];
                     tracker.recordUsage(null, event["thread_id"]);
                     tracker.start(event["thread_id"]);
                   }
@@ -889,6 +890,8 @@ export class CodexSecurity {
               });
               tracker.recordUsage(turn.usage, turn.threadId);
               result.model.threadId = turn.threadId;
+              if (turn.threadId !== null)
+                result.assessments[index]!.threadId = turn.threadId;
               throwIfAborted(signal, outputDir);
               if (turn.status !== "completed")
                 throw new CodexSecurityError(
@@ -920,6 +923,8 @@ export class CodexSecurity {
                 "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
               );
             throwIfAborted(signal, outputDir);
+            const threadId = result.assessments[index]!.threadId;
+            if (threadId !== undefined) assessment.threadId = threadId;
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
             const snapshot = await tracker.refresh().catch((error: unknown) => {
