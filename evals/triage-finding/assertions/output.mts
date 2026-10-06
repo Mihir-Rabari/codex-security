@@ -45,6 +45,12 @@ export function extractJson(
     let depth = 0;
     let start = 0;
     for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}\[\]]/gs)) {
+      if (
+        depth === 0 &&
+        match[0] === "[" &&
+        /^\[\d+\](?:\(|\[)/u.test(text.slice(match.index))
+      )
+        continue;
       if (match[0] === "{" || match[0] === "[") {
         if (depth++ === 0) start = match.index;
       } else if (

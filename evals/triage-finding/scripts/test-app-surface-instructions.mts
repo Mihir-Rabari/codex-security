@@ -100,6 +100,9 @@ const connectorDecision = {
 for (const answer of [
   JSON.stringify(connectorDecision),
   `Decision for /repos/{owner}/{repo}/code-scanning/alerts:\n\`\`\`json\n${JSON.stringify(connectorDecision, null, 2)}\n\`\`\``,
+  `Use the connector [1](references/github-rest-intake.md).\n${JSON.stringify(connectorDecision)}`,
+  `Use the connector [1](references/github-rest-intake.md).\n\`\`\`json\n${JSON.stringify(connectorDecision)}\n\`\`\``,
+  `Use the connector [1][transport].\n${JSON.stringify(connectorDecision)}`,
 ]) {
   const result = githubIntake(answer, connectorContext);
   assert.equal(result.pass, true, result.reason);
@@ -132,6 +135,7 @@ for (const answer of [
   JSON.stringify([connectorDecision]),
   `\`\`\`json\n${JSON.stringify([connectorDecision])}\n\`\`\``,
   `${JSON.stringify(connectorDecision)}\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}`,
+  `${JSON.stringify(connectorDecision)}\n[1]`,
   `\`\`\`json\n${JSON.stringify(connectorDecision)}\n\`\`\`\n\`\`\`json\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}\n\`\`\``,
 ]) {
   assert.equal(githubIntake(answer, connectorContext).pass, false, answer);
