@@ -5209,7 +5209,12 @@ export async function main(
             );
             let patchRisk: PatchRiskAssessment | undefined;
             if (patchRiskBase !== undefined) {
-              const files = verifiedPatchFiles(selected, patches);
+              const files = await verifiedPatchFiles(
+                selected,
+                patches,
+                patchRiskBase,
+                dependencies,
+              );
               if (files.length > 0) {
                 patchRisk = await runPatchRiskAssessment(
                   {
@@ -5237,7 +5242,12 @@ export async function main(
               ? await createPatchPullRequest(
                   selected.repository,
                   publication,
-                  verifiedPatchFiles(selected, patches),
+                  await verifiedPatchFiles(
+                    selected,
+                    patches,
+                    publication,
+                    dependencies,
+                  ),
                   errorOutput,
                   dependencies,
                   patchRisk?.summary,
@@ -7472,11 +7482,13 @@ async function resumePatchPullRequest(
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
-function verifiedPatchFiles(
+async function verifiedPatchFiles(
   selected: SelectedFindings,
   patches: readonly FindingPatch[],
-): string[] {
-  return [
+  base: Pick<PatchPublication, "root" | "tree" | "context">,
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  const files = [
     ...new Set(
       patches.flatMap(({ status, files }) =>
         status === "verified" ? files : [],
@@ -7494,6 +7506,69 @@ function verifiedPatchFiles(
     }
     return path;
   });
+  const { root, tree, context } = base;
+  const directory = await realpath(selected.repository).catch(
+    () => context.directory,
+  );
+  if (files.length === 0 || directory === context.directory) return files;
+  const bound = await bindPatchCommandContext(
+    selected.repository,
+    root,
+    context,
+    dependencies,
+  );
+  const before = await patchTreeEntries(root, root, tree, bound.dependencies);
+  const after = await patchTreeEntries(
+    root,
+    root,
+    await snapshotPatchTree(root, bound.dependencies),
+    bound.dependencies,
+  );
+  // Keep the original subtree's moved files and changed caller links, without
+  // selecting unreported destination files. Only reported paths select children.
+  const locations = (file: string) => [
+    resolve(context.directory, file),
+    resolve(directory, file),
+    resolve(selected.repository, file),
+  ];
+  const reported = new Set(files.flatMap(locations));
+  const ancestors = new Set<string>();
+  for (const file of [
+    ...reported,
+    ...[...before.keys()]
+      .map((file) => relative(context.directory, resolve(root, file)))
+      .filter((file) => !isOutsidePath(file))
+      .flatMap(locations),
+  ]) {
+    for (let path = file; !ancestors.has(path); path = dirname(path))
+      ancestors.add(path);
+  }
+  const changed = new Set(
+    [...new Set([...before.keys(), ...after.keys()])]
+      .filter((file) => before.get(file) !== after.get(file))
+      .map((file) => resolve(root, file))
+      .filter((file) => {
+        if (ancestors.has(file)) return true;
+        for (
+          let path = dirname(file);
+          path !== dirname(path);
+          path = dirname(path)
+        )
+          if (reported.has(path)) return true;
+        return false;
+      }),
+  );
+  return [...changed]
+    .filter((file) => {
+      for (
+        let path = dirname(file);
+        path !== dirname(path);
+        path = dirname(path)
+      )
+        if (changed.has(path)) return false;
+      return true;
+    })
+    .map((file) => relative(context.directory, file));
 }
 
 async function createPatchPullRequest(
@@ -7518,6 +7593,13 @@ async function createPatchPullRequest(
     context,
     dependencies,
   );
+  const currentDirectory = await realpath(repository).catch(() => directory);
+  if (currentDirectory !== directory) {
+    for (const file of [...dirtyFiles]) {
+      if (!isOutsidePath(file))
+        dirtyFiles.add(relative(directory, resolve(currentDirectory, file)));
+    }
+  }
   dependencies = bound.dependencies;
   repository = root;
   if (ignoredFiles.size > 0) {
@@ -7543,6 +7625,10 @@ async function createPatchPullRequest(
     );
     for (const file of ignoredFiles) {
       if (publishable.has(file)) dirtyFiles.add(file);
+      if (!isOutsidePath(file)) {
+        const moved = relative(directory, resolve(currentDirectory, file));
+        if (publishable.has(moved)) dirtyFiles.add(moved);
+      }
     }
   }
   const deleted =
@@ -9978,7 +10064,12 @@ async function executeScan(
         const pullRequest = await createPatchPullRequest(
           selected.repository,
           publication,
-          verifiedPatchFiles(selected, patches),
+          await verifiedPatchFiles(
+            selected,
+            patches,
+            publication,
+            dependencies,
+          ),
           errorOutput,
           dependencies,
         );

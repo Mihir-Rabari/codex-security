@@ -11,6 +11,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   readlink,
   realpath,
   rename,
@@ -8140,6 +8141,357 @@ describe("patch worktree root identity", () => {
       );
       if (operation === "replace") expect(published).toBe("");
       else expect(published).toContain("refs/heads/codex-security/patch-");
+    },
+  );
+});
+
+describe("in-repository directory moves", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  test.each([
+    {
+      route: "saved",
+      publish: false,
+      local: "clean",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "clean",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "clean",
+      destination: "root",
+      caller: "component",
+    },
+    {
+      route: "inline",
+      publish: true,
+      local: "clean",
+      destination: "root",
+      caller: "component",
+    },
+    {
+      route: "inline",
+      publish: true,
+      local: "clean",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "dirty",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "staged",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "ignored",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "ignored-reported",
+      caller: "component",
+      destination: "source",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "clean",
+      destination: "source",
+      caller: "alias",
+    },
+    {
+      route: "inline",
+      publish: true,
+      local: "clean",
+      destination: "source",
+      caller: "alias",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "nested-new",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "reported-directory",
+      destination: "source",
+      caller: "component",
+    },
+  ])(
+    "preserves complete $route moves; publish=$publish local=$local destination=$destination caller=$caller",
+    async ({ route, publish, local, destination, caller }) => {
+      const root = await fixtures.create("patch-internal-directory-move-");
+      const repository = join(root, "repository");
+      const component = join(repository, "component");
+      const requested =
+        caller === "alias" ? join(repository, "alias") : component;
+      const source =
+        destination === "root" ? repository : join(repository, "source");
+      const prefix = destination === "root" ? "" : "source/";
+      const remote = join(root, "remote.git");
+      await mkdir(component, { recursive: true });
+      await writeFile(join(component, "app.ts"), "unsafe\n");
+      await writeFile(join(component, "sibling.ts"), "unchanged sibling\n");
+      if (local === "nested-new")
+        await writeFile(join(component, "marker.ts"), "original marker\n");
+      if (caller === "alias")
+        await symlink(
+          component,
+          requested,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      await writeFile(join(repository, "unrelated.ts"), "unrelated original\n");
+      await writeFile(join(repository, ".gitignore"), "/component/local.txt\n");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const originalHead = git("rev-parse", "HEAD");
+      if (local === "dirty" || local === "staged") {
+        await writeFile(
+          join(component, "sibling.ts"),
+          "preexisting local edit\n",
+        );
+        if (local === "staged") git("add", "component/sibling.ts");
+      }
+      if (local.startsWith("ignored"))
+        await writeFile(
+          join(component, "local.txt"),
+          "preexisting ignored edit\n",
+        );
+      const index = await readFile(join(repository, ".git/index"));
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const scan = resultWithFindings(["high"]);
+      scan.findings.findings[0]!.locations[0]!.path = "app.ts";
+      let assessments = 0;
+      const outcome = await runWorkflow(
+        [
+          ...(route === "saved"
+            ? ["patch", "--scan", "scan-1", "--assess-patch-risk"]
+            : ["scan", requested, "--patch"]),
+          ...(publish ? ["--create-pr"] : []),
+          "--json",
+        ],
+        {
+          currentDirectory: requested,
+          result: scan,
+          onWorkbench: () => savedScan(scan, "scan-1", requested),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              expect(artifact.changedFiles).toContain(`${prefix}app.ts`);
+              expect(artifact.changedFiles).toContain(`${prefix}sibling.ts`);
+              expect(artifact.changedFiles).toContain("component/app.ts");
+              expect(artifact.changedFiles).not.toContain("unrelated.ts");
+              expect(artifact.changedFiles).not.toContain(
+                `${prefix}marker.ts/unreported.ts`,
+              );
+              if (local === "reported-directory")
+                expect(artifact.changedFiles).toContain(
+                  `${prefix}reported/fixed.ts`,
+                );
+              expect(artifact.changedFiles).not.toContain(
+                `${prefix}unreported.ts`,
+              );
+              if (local !== "ignored-reported")
+                expect(artifact.changedFiles).not.toContain(
+                  `${prefix}local.txt`,
+                );
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("+fixed");
+              if (process.platform !== "win32") {
+                expect(artifact.changedFiles).toContain(
+                  caller === "alias" ? "alias" : "component",
+                );
+                expect(patch).toContain("component/sibling.ts");
+                expect(patch).toContain("deleted file mode");
+              }
+              assessments++;
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              if (destination === "root") {
+                for (const file of await readdir(component))
+                  await rename(join(component, file), join(source, file));
+                await rm(component, { recursive: true });
+              } else await rename(component, source);
+              if (caller === "alias") await rm(requested, { recursive: true });
+              await symlink(
+                source,
+                requested,
+                process.platform === "win32" ? "junction" : "dir",
+              );
+              await writeFile(join(source, "app.ts"), "fixed\n");
+              if (local === "reported-directory") {
+                await mkdir(join(source, "reported"));
+                await writeFile(
+                  join(source, "reported/fixed.ts"),
+                  "reported fixed file\n",
+                );
+              }
+              if (local === "nested-new") {
+                await rm(join(source, "marker.ts"));
+                await mkdir(join(source, "marker.ts"));
+                await writeFile(
+                  join(source, "marker.ts/unreported.ts"),
+                  "unreported nested file\n",
+                );
+              }
+              await writeFile(
+                join(source, "unreported.ts"),
+                "unreported new file\n",
+              );
+              await writeFile(
+                join(repository, "unrelated.ts"),
+                "unrelated model edit\n",
+              );
+              if (
+                local === "ignored-reported" ||
+                local === "reported-directory"
+              )
+                output?.stdout.write(
+                  JSON.stringify({
+                    patches: [
+                      {
+                        occurrenceId: "occ_1",
+                        status: "verified",
+                        files: [
+                          "app.ts",
+                          local === "ignored-reported"
+                            ? "local.txt"
+                            : "reported",
+                        ],
+                        verification:
+                          "The exploit fails and focused tests pass.",
+                      },
+                    ],
+                  }),
+                );
+              else completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+      expect(assessments, outcome.stderr).toBe(route === "saved" ? 1 : 0);
+      expect(await readFile(join(source, "app.ts"), "utf8")).toBe("fixed\n");
+      expect(await readFile(join(repository, "unrelated.ts"), "utf8")).toBe(
+        "unrelated model edit\n",
+      );
+      if (
+        local === "dirty" ||
+        local === "staged" ||
+        local === "ignored-reported"
+      ) {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Cannot publish files with uncommitted changes before patching",
+        );
+        expect(git("rev-parse", "HEAD")).toBe(originalHead);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(repository, ".git/index"))).toEqual(index);
+        expect(
+          await readFile(
+            join(
+              source,
+              local.startsWith("ignored") ? "local.txt" : "sibling.ts",
+            ),
+            "utf8",
+          ),
+        ).toBe(
+          local.startsWith("ignored")
+            ? "preexisting ignored edit\n"
+            : "preexisting local edit\n",
+        );
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      if (local === "ignored") {
+        expect(await readFile(join(source, "local.txt"), "utf8")).toBe(
+          "preexisting ignored edit\n",
+        );
+        expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
+          "local.txt",
+        );
+      }
+      if (publish) {
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+        expect(git("show", `HEAD:${prefix}app.ts`)).toBe("fixed");
+        expect(git("show", `HEAD:${prefix}sibling.ts`)).toBe(
+          "unchanged sibling",
+        );
+        expect(git("show", "HEAD:unrelated.ts")).toBe("unrelated original");
+        if (local === "reported-directory")
+          expect(git("show", `HEAD:${prefix}reported/fixed.ts`)).toBe(
+            "reported fixed file",
+          );
+        expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
+          "unreported.ts",
+        );
+        expect(await readFile(join(source, "unreported.ts"), "utf8")).toBe(
+          "unreported new file\n",
+        );
+        if (process.platform === "win32")
+          expect(
+            git(
+              "show",
+              `HEAD:${caller === "alias" ? "alias" : "component"}/app.ts`,
+            ),
+          ).toBe("fixed");
+        else {
+          if (caller === "alias")
+            expect(git("show", "HEAD:alias")).toBe(source);
+          expect(
+            git(
+              "ls-files",
+              "--stage",
+              caller === "alias" ? "alias" : "component",
+            ),
+          ).toStartWith("120000 ");
+        }
+      } else {
+        expect(git("rev-parse", "HEAD")).toBe(originalHead);
+        expect(git("ls-remote", "origin")).toBe("");
+      }
     },
   );
 });
