@@ -28,6 +28,8 @@ const failureReasons: Record<string, string> = {
   "policy-turn": "Request flagged for possible cybersecurity risk.",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-refusal-text":
+    "This request was refused because of the safety policy.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -496,6 +498,9 @@ test.each([
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
   "Request refusal due to the safety policy.",
+  "This request was refused because of the safety policy.",
+  "The content policy requires refusal of this request.",
+  "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
   "I'm not able to help with that.",
