@@ -7411,35 +7411,20 @@ async function nestedPatchGitDependencies(
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
-  // Keep relative alternate-object paths in the selected repository's Git context.
-  const directory = await patchRepositoryRoot(repository, dependencies);
+  // Resolve "." in Git's actual setup directory, including an outside invocation.
+  const directory = (
+    await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+      repository,
+      { trim: false, environment: { GIT_OBJECT_DIRECTORY: "." } },
+    )
+  ).replace(/\n$/u, "");
   const objectDirectory = await configuredPatchObjectDirectory(
     repository,
     dependencies,
   );
-  const alternateObjects =
-    objectDirectory === undefined
-      ? undefined
-      : [
-          // Git's alternate list accepts C-quoted paths, including its delimiter.
-          `"${objectDirectory.replace(
-            /[\\"\u0000-\u001f\u007f]/gu,
-            (character) =>
-              `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
-          )}"`,
-          ...(environmentValue(
-            dependencies.environment,
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-          ) === undefined
-            ? []
-            : [
-                environmentValue(
-                  dependencies.environment,
-                  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                )!,
-              ]),
-        ].join(delimiter);
-  let nestedObjectDirectory: string | undefined;
+  let alternateObjects: string | undefined;
   const nested: CliDependencies = {
     ...dependencies,
     runRepositoryCommand: (command, args, checkout, options) =>
@@ -7468,7 +7453,7 @@ async function nestedPatchGitDependencies(
                 )
                 .map((name) => [name, undefined]),
             ),
-            GIT_OBJECT_DIRECTORY: nestedObjectDirectory,
+            GIT_OBJECT_DIRECTORY: objectDirectory,
             ...(alternateObjects === undefined
               ? {}
               : { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }),
@@ -7486,9 +7471,29 @@ async function nestedPatchGitDependencies(
         { trim: false, environment: { GIT_OBJECT_DIRECTORY: objectDirectory } },
       )
     ).replace(/\n$/u, "");
-    // Git accepts configured primary storage even without a local objects directory.
-    if (!existsSync(join(commonDirectory, "objects")))
-      nestedObjectDirectory = objectDirectory;
+    const localObjects = join(commonDirectory, "objects");
+    if (existsSync(localObjects)) {
+      // Retain local reads while writing to the caller's configured primary pool.
+      // Git's alternate list accepts C-quoted paths, including its delimiter.
+      alternateObjects = [
+        `"${localObjects.replace(
+          /[\\"\u0000-\u001f\u007f]/gu,
+          (character) =>
+            `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
+        )}"`,
+        ...(environmentValue(
+          dependencies.environment,
+          "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ) === undefined
+          ? []
+          : [
+              environmentValue(
+                dependencies.environment,
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+              )!,
+            ]),
+      ].join(delimiter);
+    }
   }
   return nested;
 }

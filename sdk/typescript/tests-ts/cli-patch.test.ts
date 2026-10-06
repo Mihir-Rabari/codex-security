@@ -4105,6 +4105,7 @@ describe("patch publication integrity", () => {
     "nested environment",
     "nested objects",
     "nested shared primary objects",
+    "nested read-only local primary objects",
     "nested relative primary objects",
     "nested quoted primary objects",
     "nested missing local primary objects",
@@ -4179,6 +4180,8 @@ describe("patch publication integrity", () => {
         await rename(join(gitDirectory, "objects"), primaryObjects);
         if (!kind.includes("missing local"))
           await mkdir(join(gitDirectory, "objects"));
+        if (kind.includes("read-only local"))
+          await chmod(join(gitDirectory, "objects"), 0o555);
         await cp(join(directory, ".git", "objects"), primaryObjects, {
           recursive: true,
           force: false,
@@ -4701,6 +4704,98 @@ test.each(["untracked", "tracked"])(
       expect(await readFile(join(repository, "user-notes.txt"), "utf8")).toBe(
         "unrelated notes from concurrent work\n",
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(["absolute", "relative"])(
+  "preserves %s nested alternates from an outside invocation",
+  async (kind) => {
+    const root = await temporaryDirectory("patch-outside-alternate-");
+    const repository = join(root, "repository");
+    const invocation = join(root, "invocation");
+    const nested = join(repository, "nested");
+    const pool = join(invocation, "pool", "objects");
+    try {
+      await mkdir(repository);
+      await mkdir(invocation);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      await mkdir(nested);
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      await mkdir(dirname(pool));
+      await rename(join(nested, ".git", "objects"), pool);
+      await mkdir(join(nested, ".git", "objects"));
+      expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
+      const gitEnvironment = {
+        GIT_DIR: join(repository, ".git"),
+        GIT_WORK_TREE: repository,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES:
+          kind === "relative" ? relative(invocation, pool) : pool,
+      };
+      expect(
+        gitText(
+          [
+            "--git-dir",
+            join(nested, ".git"),
+            "--work-tree",
+            nested,
+            "rev-parse",
+            "HEAD^{tree}",
+          ],
+          { cwd: invocation, env: { ...process.env, ...gitEnvironment } },
+        ).trim(),
+      ).toMatch(/^[0-9a-f]+$/);
+      let calls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: invocation,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            calls++;
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              output.stdout.write(patchRiskAssessment().report);
+            } else {
+              await writeFile(join(repository, "app.ts"), "fixed\n");
+              await writeFile(join(nested, "app.ts"), "fixed\n");
+              output?.stdout.write("Fixed and checked.");
+            }
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(calls).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: [
+          relative(invocation, join(repository, "app.ts")).split(sep).join("/"),
+          relative(invocation, join(nested, "app.ts")).split(sep).join("/"),
+        ],
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
