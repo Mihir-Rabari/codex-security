@@ -44,10 +44,14 @@ export function extractJson(
     candidates.length = 0;
     let depth = 0;
     let start = 0;
-    for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}]/gs)) {
-      if (match[0] === "{") {
+    for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}\[\]]/gs)) {
+      if (match[0] === "{" || match[0] === "[") {
         if (depth++ === 0) start = match.index;
-      } else if (match[0] === "}" && depth > 0 && --depth === 0) {
+      } else if (
+        (match[0] === "}" || match[0] === "]") &&
+        depth > 0 &&
+        --depth === 0
+      ) {
         candidates.push(text.slice(start, match.index + 1));
       }
     }
@@ -56,15 +60,18 @@ export function extractJson(
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      if (parsed && parsed.schema_version === schemaVersion) {
-        if (!requireSingle) return parsed;
-        matches.push(parsed);
-      }
+      if (requireSingle) matches.push(parsed);
+      else if (parsed && parsed.schema_version === schemaVersion) return parsed;
     } catch {
       // The response may contain more than one fenced block. Try the next one.
     }
   }
-  if (matches.length === 1) return matches[0];
+  if (
+    matches.length === 1 &&
+    !Array.isArray(matches[0]) &&
+    matches[0].schema_version === schemaVersion
+  )
+    return matches[0];
   throw new Error(failureMessage);
 }
 
