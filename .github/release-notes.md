@@ -15,6 +15,8 @@
 - align sealed scan reader compatibility ([#1175](https://github.com/openai/codex-security/pull/1175))
 - run consistent checks for Markdown changes ([#1257](https://github.com/openai/codex-security/pull/1257))
 - align triage graders with supported behavior ([#1245](https://github.com/openai/codex-security/pull/1245))
+- recover incomplete staging and preserve bundles ([#1255](https://github.com/openai/codex-security/pull/1255))
+- preserve canonical parent IDs for scan reruns ([#1244](https://github.com/openai/codex-security/pull/1244))
 
 <!-- release-section: highlights:end -->
 
