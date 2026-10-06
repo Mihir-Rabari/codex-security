@@ -341,7 +341,9 @@ export function projectDiscoveryCoverage(
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? [])
         .map((ref) => posix.normalize(ref))
         .map((ref) =>
-          ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
+          ref.startsWith(archivePrefix) || ref.startsWith(`${artifactPrefix}/`)
+            ? ref
+            : `${artifactPrefix}/${ref}`,
         ),
     })),
     explicitExclusions: (

@@ -25,6 +25,7 @@ interface CoverageFixtureOptions {
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
   receiptSpelling?: "worker" | "scan" | "equivalent scan";
+  activeReceiptSpelling?: "worker" | "scan" | "equivalent scan";
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
   retryFindings?: JsonObject[][];
@@ -93,6 +94,7 @@ export async function publishCoverageFixture(
     stopBeforeDraft = false,
     receiptRetry = false,
     receiptSpelling = "worker",
+    activeReceiptSpelling = "worker",
     retryPending = false,
     retryCoverage,
     retryFindings,
@@ -318,6 +320,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       path.join(artifactDir, "artifacts", "review.md"),
       "Synthetic review evidence.\n",
     );
+    const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
+    const activeReceiptRef =
+      activeReceiptSpelling === "worker"
+        ? "artifacts/review.md"
+        : activeReceiptSpelling === "scan"
+          ? activeQualifiedRef
+          : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
     if (receiptRetry) {
       await recordCodexSecurityWorkerScanDraft(
@@ -338,7 +347,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                 id: "current",
                 label: "Current review",
                 disposition: "no_issue_found",
-                receiptRefs: ["artifacts/review.md"],
+                receiptRefs: [activeReceiptRef],
               },
             ],
             explicitExclusions: [],
