@@ -1374,6 +1374,17 @@ def merge_saved_results(
         if key in finding_positions and distinct_candidates(
             finding, findings[finding_positions[key]]
         ):
+            # An accepted parent can omit optional worker ownership. Reuse its
+            # actual position only when the candidate and content match uniquely.
+            matches = [
+                position
+                for position, index in finding_positions.items()
+                if _finding_key(findings[index]) == key
+                and not distinct_candidates(finding, findings[index])
+                and _finding_content(finding) == _finding_content(findings[index])
+            ]
+            if len(matches) == 1:
+                return matches[0]
             return _digest(
                 [key, finding.get("provenance", {}).get("workerId"), finding_candidate_id(finding)]
             )
