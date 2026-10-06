@@ -183,6 +183,41 @@ const sampleSpec = {
   seed: "test-seed",
   labelCounts: { true_positive: 4, false_positive: 6 },
 };
+// Keep the established v1 collation when comparing paired sample runs.
+const collationRepositories = [
+  "example/a-b",
+  "example/a_b",
+  "example/A",
+  "example/a",
+  "example/Z",
+  "example/z",
+];
+const collationDataset = Array.from({ length: 48 }, (_, index) =>
+  benchmarkRecord({
+    repo_name: collationRepositories[index % collationRepositories.length],
+    ground_truth: index < 24 ? "true_positive" : "false_positive",
+    metadata: {
+      source: "synthetic",
+      cwe_id: "CWE-79",
+      languages: ["JavaScript"],
+    },
+    to_analyzer: {
+      ...positive.to_analyzer,
+      locations: [
+        { ...positive.to_analyzer.locations[0], file: `src/file-${index}.js` },
+      ],
+    },
+  }),
+);
+assert.deepEqual(
+  selectRepresentativeSample(collationDataset, {
+    profile: "test-v1-collation",
+    seed: "test-v1-collation",
+    labelCounts: { true_positive: 6, false_positive: 6 },
+  }).map(({ index }) => index),
+  [0, 1, 10, 14, 21, 22, 32, 34, 36, 37, 44, 46],
+);
+
 const selectedSample = selectRepresentativeSample(sampleDataset, sampleSpec);
 const selectedAgain = selectRepresentativeSample(sampleDataset, sampleSpec);
 

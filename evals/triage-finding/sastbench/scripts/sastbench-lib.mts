@@ -324,7 +324,7 @@ function allocateSampleCounts(
 }
 
 function compareText(left: string, right: string) {
-  return left < right ? -1 : left > right ? 1 : 0;
+  return left.localeCompare(right, "en-US");
 }
 
 function representativeSortKey(entry: SampleEntry) {
