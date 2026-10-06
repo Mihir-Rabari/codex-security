@@ -6830,57 +6830,58 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
-  const existing = await run(
-    command,
-    gitlab
-      ? [
-          "mr",
-          "list",
-          "--all",
-          "--source-branch",
-          branch,
-          "--output",
-          "json",
-          "--jq",
-          ".[0] | select(. != null) | {url: .web_url, head: .sha, state}",
-          "--repo",
-          remote,
-        ]
-      : [
-          "pr",
-          "list",
-          "--head",
-          branch,
-          "--state",
-          "all",
-          "--json",
-          "url,state,headRefOid,headRepository",
-          "--jq",
-          "map({url, head: .headRefOid, state, repositoryId: .headRepository.id}) | tojson",
-        ],
-  );
+  const requestArguments = gitlab
+    ? [
+        "mr",
+        "list",
+        "--all",
+        "--source-branch",
+        branch,
+        "--output",
+        "json",
+        "--jq",
+        ".[0] | select(. != null) | {url: .web_url, head: .sha, state}",
+        "--repo",
+        remote,
+      ]
+    : [
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "all",
+        "--json",
+        "url,state,headRefOid,headRepository",
+        "--jq",
+        "map({url, head: .headRefOid, state, repositoryId: .headRepository.id}) | tojson",
+      ];
+  const existing = await run(command, requestArguments);
   type ExistingRequest = {
     url: string;
     head: string;
     state: string;
     repositoryId?: string;
   };
-  const candidates = gitlab
+  let candidates = gitlab
     ? []
     : (JSON.parse(existing || "[]") as ExistingRequest[]);
   let found =
     gitlab && existing ? (JSON.parse(existing) as ExistingRequest) : undefined;
+  let limit = 30;
   if (candidates.length > 0) {
+    const requestUrl = new URL(candidates[0]!.url);
     const names = (await run("git", ["remote"])).split("\n");
     let lookup = "codex-security-push";
     while (names.some((name) => name.startsWith(lookup))) lookup += "-";
+    let lookupError: unknown;
     for (const pushRemote of remotes) {
       const config = await run("git", [
         "rev-parse",
         "--sq-quote",
         ...names.map((name) => `remote.${name}.gh-resolved=`),
         `remote.${lookup}.url=${pushRemote}`,
-        `remote.${lookup}context.url=${new URL("..", candidates[0]!.url)}`,
+        `remote.${lookup}context.url=${new URL("..", requestUrl)}`,
         `remote.${lookup}.gh-resolved=base`,
       ]);
       const options = {
@@ -6892,7 +6893,7 @@ async function patchPublicationDestination(
             .filter(Boolean)
             .join(" "),
           GH_REPO: "",
-          GH_HOST: new URL(candidates[0]!.url).host,
+          GH_HOST: requestUrl.host,
         },
       };
       if (
@@ -6905,21 +6906,38 @@ async function patchPublicationDestination(
       ) {
         continue;
       }
-      const headRepository = JSON.parse(
-        await dependencies.runRepositoryCommand(
+      let repositoryJson: string;
+      try {
+        repositoryJson = await dependencies.runRepositoryCommand(
           "gh",
           ["repo", "view", "--json", "id,url", "--jq", "tojson"],
           repository,
           options,
-        ),
-      ) as { id: string; url: string };
-      found = candidates.find(
-        (candidate) =>
-          candidate.repositoryId === headRepository.id &&
-          new URL(candidate.url).host === new URL(headRepository.url).host,
-      );
+        );
+      } catch (error) {
+        lookupError ??= error;
+        continue;
+      }
+      const headRepository = JSON.parse(repositoryJson) as {
+        id: string;
+        url: string;
+      };
+      for (;;) {
+        found = candidates.find(
+          (candidate) =>
+            candidate.repositoryId === headRepository.id &&
+            new URL(candidate.url).host === new URL(headRepository.url).host,
+        );
+        if (found || candidates.length < limit) break;
+        limit *= 2;
+        candidates = JSON.parse(
+          (await run("gh", [...requestArguments, "--limit", String(limit)])) ||
+            "[]",
+        ) as ExistingRequest[];
+      }
       if (found) break;
     }
+    if (!found && lookupError !== undefined) throw lookupError;
   }
   return {
     remote,

@@ -848,6 +848,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     ["github", "open", "explicit-host"],
     ["github", "open", "token-only"],
     ["github", "open", "second-push"],
+    ["github", "open", "later-page"],
+    ["github", "open", "denied-first"],
+    ["github", "open", "denied-all"],
+    ["github", "open", "denied-unmatched"],
     ["github", "closed", "host-only"],
     ["gitlab", "open", "host-only"],
     ["gitlab", "closed", "host-only"],
@@ -856,40 +860,62 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
     async (provider, state, context) => {
       const root = await temporaryDirectory("codex-security-gh-color-");
       const url = "https://forge.example.test/example/repository/pull/15";
+      const multiplePushes =
+        context === "second-push" || context.startsWith("denied-");
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
         fetch: (request) =>
           new URL(request.url).pathname === "/identity"
-            ? Response.json({
-                id: new URL(request.url).searchParams.get("id"),
-                url,
-              })
-            : Response.json([
-                ...(provider === "github"
-                  ? [
-                      {
+            ? context.startsWith("denied-") &&
+              (context === "denied-all" ||
+                new URL(request.url).searchParams.get("id") === "R_first")
+              ? Response.json(
+                  {
+                    message: `Synthetic lookup denied ${new URL(request.url).searchParams.get("id")}`,
+                  },
+                  { status: 404 },
+                )
+              : Response.json({
+                  id: new URL(request.url).searchParams.get("id"),
+                  url,
+                })
+            : Response.json(
+                [
+                  ...(provider === "github"
+                    ? Array.from(
+                        { length: context === "later-page" ? 30 : 1 },
+                        (_, index) => ({
+                          url: url.replace("/15", `/${index + 100}`),
+                          state: "CLOSED",
+                          headRefOid: "unrelated-commit",
+                          headRepository: { id: "R_other" },
+                        }),
+                      )
+                    : []),
+                  provider === "github"
+                    ? {
                         url,
-                        state: "CLOSED",
-                        headRefOid: "unrelated-commit",
-                        headRepository: { id: "R_other" },
+                        state: state === "open" ? "OPEN" : "CLOSED",
+                        headRefOid: "saved-commit",
+                        headRepository: {
+                          id:
+                            context === "denied-unmatched"
+                              ? "R_unmatched"
+                              : "R_synthetic",
+                        },
+                      }
+                    : {
+                        web_url: url,
+                        state: state === "open" ? "opened" : "closed",
+                        sha: "saved-commit",
+                        description: "synthetic description ".repeat(60_000),
                       },
-                    ]
-                  : []),
-                provider === "github"
-                  ? {
-                      url,
-                      state: state === "open" ? "OPEN" : "CLOSED",
-                      headRefOid: "saved-commit",
-                      headRepository: { id: "R_synthetic" },
-                    }
-                  : {
-                      web_url: url,
-                      state: state === "open" ? "opened" : "closed",
-                      sha: "saved-commit",
-                      description: "synthetic description ".repeat(60_000),
-                    },
-              ]),
+                ].slice(
+                  0,
+                  Number(new URL(request.url).searchParams.get("limit") ?? 30),
+                ),
+              ),
       });
       try {
         const environment = {
@@ -914,7 +940,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 expect(args[0]).not.toBe("push");
                 if (args[0] === "remote")
                   return args[1] === "get-url"
-                    ? context === "second-push"
+                    ? multiplePushes
                       ? "https://forge.example.test/first/repository.git\nhttps://forge.example.test/example/repository.git"
                       : `https://${provider === "gitlab" ? "gitlab.com" : "forge.example.test"}/example/repository.git`
                     : "origin";
@@ -936,11 +962,18 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 identity ? "identity" : "fixture",
                 server.url,
               );
+              if (!identity)
+                endpoint.searchParams.set(
+                  "limit",
+                  args.includes("--limit")
+                    ? args[args.indexOf("--limit") + 1]!
+                    : "30",
+                );
               if (identity)
                 endpoint.searchParams.set(
                   "id",
-                  context === "second-push" &&
-                    options?.environment?.GIT_CONFIG_PARAMETERS?.includes(
+                  multiplePushes &&
+                    options?.environment?.["GIT_CONFIG_PARAMETERS"]?.includes(
                       "remote.codex-security-push.url=https://forge.example.test/first/repository.git",
                     )
                     ? "R_first"
@@ -965,7 +998,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     GH_TOKEN: "synthetic-token",
                     GH_NO_UPDATE_NOTIFIER: "1",
                     CLICOLOR_FORCE:
-                      provider === "github" && context !== "second-push"
+                      provider === "github" &&
+                      !["second-push", "later-page"].includes(context)
                         ? "1"
                         : "0",
                   },
@@ -976,8 +1010,17 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             },
           },
         );
-        expect(outcome.exitCode, outcome.stderr).toBe(state === "open" ? 0 : 2);
-        if (state === "open") expect(outcome.stderr).toContain(url);
+        const denied =
+          context === "denied-all" || context === "denied-unmatched";
+        expect(outcome.exitCode, outcome.stderr).toBe(
+          !denied && state === "open" ? 0 : 2,
+        );
+        if (denied) {
+          expect(outcome.stderr).toContain("Synthetic lookup denied R_first");
+          expect(outcome.stderr).not.toContain(
+            "Synthetic lookup denied R_synthetic",
+          );
+        } else if (state === "open") expect(outcome.stderr).toContain(url);
         else {
           expect(outcome.stderr).toContain("no longer open");
           expect(outcome.stderr).not.toContain("Retry from this repository");
