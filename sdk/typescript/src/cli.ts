@@ -1838,16 +1838,20 @@ export async function main(
     argv[cliCommandIndex(argv)] === "scan" && !isScanImportCommand(argv);
   const scanJsonFormat = scanCommand ? jsonOutputFormat(argv) : undefined;
   const reportArgumentError = async (message: string): Promise<number> => {
-    errorOutput.write(`codex-security: ${message}\n`);
+    errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
     if (scanJsonFormat !== undefined) {
       const error = { code: "SCAN_FAILED", message };
       const failure = argv.includes("--full-output")
         ? { ok: false, error, meta: { command: "scan" } }
         : { status: "failed", ...error };
-      await writeCliOutput(
-        output,
-        `${JSON.stringify(failure, null, scanJsonFormat === "json" ? 2 : undefined)}\n`,
-      );
+      try {
+        await writeCliOutput(
+          output,
+          `${JSON.stringify(failure, null, scanJsonFormat === "json" ? 2 : undefined)}\n`,
+        );
+      } catch (error) {
+        errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+      }
     }
     return 2;
   };

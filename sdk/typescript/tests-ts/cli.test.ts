@@ -5062,3 +5062,56 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
   });
 });
+
+for (const format of [["--json"], ["--format", "jsonl"]]) {
+  test(`argument error preserves JSON text and escapes terminal controls (${format})`, async () => {
+    const flag = "--unknown\u001b[2J";
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, flag],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text()).message).toContain(flag);
+    expect(stderr.text()).not.toContain("\u001b");
+  });
+  test(`argument error reports actual stdout failure (${format})`, async () => {
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("SYNTHETIC_ARGUMENT_STDOUT_FAILED"));
+      },
+    });
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, "--unknown"],
+        stdout,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("SYNTHETIC_ARGUMENT_STDOUT_FAILED");
+  });
+  test(`ordinary argument error retains its existing JSON response (${format})`, async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", ...format, "--unknown"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message: "Unknown flag: --unknown",
+    });
+    expect(stderr.text()).toBe("codex-security: Unknown flag: --unknown\n");
+  });
+}
