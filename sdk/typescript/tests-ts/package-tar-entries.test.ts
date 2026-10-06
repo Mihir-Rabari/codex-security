@@ -106,6 +106,21 @@ describe("plain npm tar entries", () => {
     }
   });
 
+  test.each([0, 0x30])("accepts basic V7 regular typeflag %i", (type) => {
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(Buffer.from("readme"), {
+            name: "package/README.md",
+            type,
+            magic: "\0".repeat(6),
+            version: "\0\0",
+          }),
+        ),
+      ),
+    ).toEqual([{ path: "package/README.md", size: 6 }]);
+  });
+
   test("rejects alternate ustar signatures", () => {
     for (const options of [
       { magic: "ustar " },

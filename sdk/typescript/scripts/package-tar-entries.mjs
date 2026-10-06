@@ -25,7 +25,9 @@ export function plainTarEntries(archiveBytes) {
     const directory = header[156] === 0x35;
     if (
       (header[156] !== 0 && header[156] !== 0x30 && !directory) ||
-      (signature !== "ustar\0" + "00" && signature !== "ustar  \0")
+      (signature !== "ustar\0" + "00" &&
+        signature !== "ustar  \0" &&
+        signature !== "\0".repeat(8))
     ) {
       invalidTarEntry();
     }
