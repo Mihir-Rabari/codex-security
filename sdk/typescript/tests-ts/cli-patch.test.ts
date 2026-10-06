@@ -3178,7 +3178,9 @@ describe("patch change tracking", () => {
     [
       "local",
       "scp",
+      "scp-mixed",
       "ssh-uri",
+      "ssh-uri-mixed",
       "ssh-missing",
       "ssh-failed",
       "ssh-host",
@@ -3196,13 +3198,16 @@ describe("patch change tracking", () => {
     "uses the push repository for $transport: resume=$resume, own PR=$ownIncluded",
     async ({ transport, resume, ownIncluded }) => {
       const { directory, git, remote } = await publicationRepository();
+      const alias = transport.endsWith("-mixed")
+        ? "GitHub-Work"
+        : "github-work";
       const pushRemote =
         transport === "local"
           ? remote
-          : transport === "scp"
-            ? "git@github-work:example/repository.git"
-            : transport === "ssh-uri"
-              ? "ssh://git@github-work:2222/example/repository.git"
+          : transport.startsWith("scp")
+            ? `git@${alias}:example/repository.git`
+            : transport.startsWith("ssh-uri")
+              ? `ssh://git@${alias}:2222/example/repository.git`
               : "git@ssh.github.com:example/repository.git";
       const lookupRemote =
         transport === "local" || transport === "ssh-missing"
@@ -3283,8 +3288,8 @@ describe("patch change tracking", () => {
             if (command === "ssh") {
               expect(args).toEqual([
                 "-G",
-                transport === "scp" || transport === "ssh-uri"
-                  ? "github-work"
+                transport.startsWith("scp") || transport.startsWith("ssh-uri")
+                  ? alias
                   : "ssh.github.com",
               ]);
               if (transport === "ssh-missing" || transport === "ssh-failed")

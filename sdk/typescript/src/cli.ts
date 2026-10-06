@@ -6737,14 +6737,17 @@ async function patchPublicationDestination(
     host &&
     (remote.startsWith("ssh://") || !remote.includes("://"))
   ) {
-    const settings = await run("ssh", ["-G", host]).catch((error: unknown) =>
-      isJsonObject(error) && typeof error["code"] === "number" ? "" : undefined,
+    const url = new URL(
+      remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
+    );
+    const settings = await run("ssh", ["-G", url.hostname]).catch(
+      (error: unknown) =>
+        isJsonObject(error) && typeof error["code"] === "number"
+          ? ""
+          : undefined,
     );
     if (settings !== undefined) {
-      const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? host;
-      const url = new URL(
-        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
-      );
+      const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
       url.hostname =
         hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
       url.port = "";
