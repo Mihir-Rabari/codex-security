@@ -509,8 +509,8 @@ export async function runCustomValidation(options: {
                 surface["sourceWorkerId"],
               ) === key
             : previousSurfaceIds.has(surface.id) &&
-              (typeof surface["sourceWorkerId"] !== "string" ||
-                surface["sourceWorkerId"] === sourceWorkerId);
+              candidateIdentity(candidateId!, surface["sourceWorkerId"]) ===
+                key;
         if (sameCandidate) surfaceIds.add(surface.id);
       }
     }

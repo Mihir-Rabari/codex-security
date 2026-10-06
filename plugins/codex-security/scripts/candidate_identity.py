@@ -163,7 +163,9 @@ def resolved_candidate_surface_keys(
             item,
             [
                 surface
-                for surface in draft["coverage"].get("surfaces", [])
+                for surfaces in [draft["coverage"].get("surfaces")]
+                if isinstance(surfaces, list)
+                for surface in surfaces
                 if isinstance(surface, dict)
             ],
         )

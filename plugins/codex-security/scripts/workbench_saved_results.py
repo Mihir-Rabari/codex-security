@@ -1073,7 +1073,10 @@ def _reconcile_stopped_diff_sources(
                 if not isinstance(retained_finding, dict):
                     retained_finding = state[1]["finding"] = finding
                 if finding not in _retained_findings(retained_finding):
-                    _append_finding_history(retained_finding.setdefault("provenance", {}), finding)
+                    provenance = retained_finding.get("provenance")
+                    _append_finding_history(
+                        provenance if isinstance(provenance, dict) else state[1], finding
+                    )
             else:
                 _append_finding_history(state[1], finding)
         result["findings"] = retained

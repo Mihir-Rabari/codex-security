@@ -1883,3 +1883,71 @@ for (const owner of [
     }
   }
 }
+
+for (const owner of [undefined, "", " ", "other-worker"]) {
+  for (const disposition of [
+    "reportable",
+    "deferred",
+    "suppressed",
+    "not_applicable",
+  ] as const) {
+    test(`legacy linked follow-up uses effective owner: ${JSON.stringify(owner)}/${disposition}`, async () => {
+      const f = await fixture();
+      const finding = f.findings.findings[0]!;
+      finding.provenance["candidateId"] = "validated-candidate";
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      const historical = {
+        id: "legacy-linked-proof",
+        ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+        label: "Historical proof",
+        disposition: "needs_follow_up" as const,
+        receiptRefs: [],
+        notes: "Original proof evidence.",
+      };
+      coverage.surfaces.push(historical);
+      coverage.completeness = "partial";
+      coverage.deferred = [
+        {
+          id: "legacy-gap",
+          candidateId: "validated-candidate",
+          ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+          reason: "Earlier candidate gap.",
+          surfaceIds: [historical.id],
+        },
+      ];
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result(disposition)),
+      });
+      const saved = await loadResult(f.scanDir);
+      const row = saved.coverage.surfaces.find(
+        (item) => item.id === historical.id,
+      )!;
+      if (owner === "other-worker") {
+        expect(row).toEqual(historical);
+        expect(
+          saved.coverage.deferred.some((item) => item.id === "legacy-gap"),
+        ).toBe(true);
+      } else {
+        expect(row.disposition).toBe(
+          disposition === "reportable"
+            ? "reported"
+            : disposition === "deferred"
+              ? "needs_follow_up"
+              : disposition === "suppressed"
+                ? "rejected"
+                : "not_applicable",
+        );
+        expect(
+          saved.coverage.deferred.some((item) => item.id === "legacy-gap"),
+        ).toBe(disposition === "deferred");
+      }
+      expect(row.notes).toBe(historical.notes);
+      expect(row["sourceWorkerId"]).toEqual(owner);
+    });
+  }
+}

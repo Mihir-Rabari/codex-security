@@ -430,3 +430,62 @@ for (const mode of ["standard", "diff"] as const) {
     });
   }
 }
+
+for (const provenance of [undefined, null, "Saved annotation", {}]) {
+  for (const disposition of ["rejected", "not_applicable"] as const) {
+    test(`preserves compact rejected candidate evidence: ${JSON.stringify(provenance)}/${disposition}`, async (t) => {
+      const f = await fixture(t, "standard");
+      const original = finding("earlier", "src/handler.ts");
+      const canonical = {
+        ...original,
+        provenance: {
+          ...original.provenance,
+          candidateId: "candidate-evidence",
+        },
+      };
+      await f.write({ ...f.draft({}, true), findings: [canonical] });
+      const compact = {
+        title: "Earlier authored evidence",
+        ...(provenance === undefined ? {} : { provenance }),
+      };
+      await f.write(
+        f.draft(
+          {
+            surfaces: [
+              {
+                id: "candidate-decision",
+                candidateId: "candidate-evidence",
+                label: "Reviewed candidate",
+                disposition,
+                finding: compact,
+                notes: "Authored review rationale.",
+              },
+            ],
+          },
+          true,
+        ),
+      );
+      const coverage = await f.read();
+      const row = coverage.surfaces.find(
+        (item: { candidateId?: string }) =>
+          item.candidateId === "candidate-evidence",
+      );
+      if (provenance && typeof provenance === "object") {
+        assert.equal(row.finding.title, compact.title);
+        assert.deepEqual(row.finding.provenance.previousFindings, [canonical]);
+      } else {
+        assert.deepEqual(row.finding, compact);
+        assert.deepEqual(row.previousFindings, [canonical]);
+      }
+      assert.equal(row.notes, "Authored review rationale.");
+      await f.write(f.draft({}, true));
+      assert.deepEqual(
+        (await f.read()).surfaces.find(
+          (item: { candidateId?: string }) =>
+            item.candidateId === "candidate-evidence",
+        ),
+        row,
+      );
+    });
+  }
+}

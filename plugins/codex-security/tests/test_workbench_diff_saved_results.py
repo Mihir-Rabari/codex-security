@@ -1500,3 +1500,81 @@ def test_stopped_diff_dismissal_resolves_unique_cross_owner_linked_surface(
     )
     assert any(row.get("id") == linked["id"] for row in saved["surfaces"]) is shared
     assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("surfaces", [None, 1, {"legacy": "annotation"}, []])
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+def test_stopped_diff_dismissal_recovers_nonarray_saved_surfaces(
+    tmp_path: Path, surfaces, termination: str
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"] = surfaces
+    coverage["deferred"][0]["surfaceIds"] = ["saved-proof"]
+    coverage_path.write_text(json.dumps(coverage))
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    arguments = ["--message", "Stopped after review."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+    for attempt in range(2):
+        saved = json.loads(coverage_path.read_text())
+        assert not any(
+            row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"]
+        )
+        assert any(row.get("id") == "other-review" for row in saved["deferred"])
+        assert (scan_dir / "report.md").is_file()
+        if attempt == 0 and termination == "fail-scan":
+            run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+
+
+@pytest.mark.parametrize("provenance", [None, "Saved annotation", {}, "absent"])
+def test_stopped_diff_retains_opaque_embedded_finding_provenance(
+    tmp_path: Path, provenance
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    checkpoint["findings"] = [finding]
+    checkpoint["coverage"].update(surfaces=[], deferred=[])
+    saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    original_checkpoint = saved.read_bytes()
+    embedded = {"title": "Earlier authored evidence"}
+    if provenance != "absent":
+        embedded["provenance"] = provenance
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(
+        surfaces=[],
+        explicitExclusions=[],
+        deferred=[
+            {
+                "id": "authored-gap",
+                "candidateId": candidate["candidate_id"],
+                "reason": "Authored proof gap remains open.",
+                "finding": embedded,
+            }
+        ],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    ledger.unlink()
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    for attempt in range(2):
+        restored = json.loads(coverage_path.read_text())
+        row = next(
+            item
+            for item in restored["deferred"]
+            if item.get("candidateId") == candidate["candidate_id"]
+        )
+        if isinstance(provenance, dict):
+            assert row["finding"]["title"] == embedded["title"]
+            assert row["finding"]["provenance"]["previousFindings"] == [finding]
+        else:
+            assert row["finding"] == embedded
+            assert row["previousFindings"] == [finding]
+        assert row["reason"] == "Authored proof gap remains open."
+        assert (scan_dir / "report.md").is_file()
+        if attempt == 0:
+            run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert saved.read_bytes() == original_checkpoint

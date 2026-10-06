@@ -756,9 +756,17 @@ async function preserveScanDraft(
           ? undefined
           : dispositions.find((item) => coverageKey(item) === candidateId);
       if (disposition) {
-        if (isObject(disposition.finding))
-          preserveFindingDetails(disposition.finding, finding);
-        else disposition.finding = structuredClone(finding);
+        if (isObject(disposition.finding)) {
+          if (isObject(disposition.finding.provenance))
+            preserveFindingDetails(disposition.finding, finding);
+          else
+            disposition.previousFindings = exactUnion(
+              Array.isArray(disposition.previousFindings)
+                ? disposition.previousFindings
+                : [],
+              [finding],
+            );
+        } else disposition.finding = structuredClone(finding);
         continue;
       }
       const matches = result.findings.filter((current) =>
