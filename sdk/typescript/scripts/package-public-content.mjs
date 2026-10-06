@@ -21,7 +21,7 @@ export function assertPublicPackageContents(
       compressedParts.set(name, parts);
     } else if (/\.br$/iu.test(path)) {
       assertPublicBrotli(bytes, path);
-    } else {
+    } else if (!/\.png$/iu.test(path)) {
       assertPublicText(bytes.toString("utf8"));
     }
   }
@@ -45,7 +45,7 @@ function assertPublicBrotli(bytes, path) {
   assertPublicText(result.buffer.toString("utf8"));
 }
 
-function assertPublicText(contents) {
+export function assertPublicText(contents) {
   if (internalMarker.test(contents)) {
     throw new Error("npm tarball contains an internal reference.");
   }

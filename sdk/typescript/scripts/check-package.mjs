@@ -13,7 +13,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { packageDistFiles } from "./package-dist-files.mjs";
-import { assertNoInternalReferences } from "./package-internal-references.mjs";
+import {
+  assertPublicPackageContents,
+  MAX_EXPANDED_ASSET_BYTES,
+} from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { plainTarEntries } from "./package-tar-entries.mjs";
@@ -39,7 +42,6 @@ if (archive === undefined || args.length > 2) {
 }
 
 const archivePath = resolve(archive);
-const MAX_EXPANDED_ASSET_BYTES = 32 * 1024 * 1024;
 const compressedArchive = readFileSync(archivePath);
 const archiveBytes = gunzipSync(compressedArchive, {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
@@ -118,23 +120,20 @@ for (const file of pluginPaths) {
   }
 }
 
-const allowedRoot = new Set([
-  "package/package.json",
-  "package/README.md",
-  "package/LICENSE",
-  "package/bin/codex-security.mjs",
-  "package/docs/dedupe-records.md",
-  "package/schemas/project-config.schema.json",
-]);
 const distFiles = new Set(packageDistFiles);
 for (const file of distFiles) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
 }
+const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
+for (const file of [...allowedFiles]) {
+  const parts = file.split("/");
+  for (let index = 1; index < parts.length; index++) {
+    allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
+  }
+}
 const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
-  const allowed =
-    allowedRoot.has(file) || distFiles.has(file) || pluginEntries.has(file);
-  if (!allowed || unsafePath.test(file) || file.includes("\\")) {
+  if (!allowedFiles.has(file) || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);
   }
 }
@@ -143,7 +142,9 @@ const listing = tar(["-tvzf", "-"], "utf8");
 const listingLines = regularTarListingLines(listing);
 if (
   listingLines.length !== entries.length ||
-  listingLines.some((line) => !line.startsWith("-"))
+  listingLines.some(
+    (line, index) => line.startsWith("d") !== entries[index].endsWith("/"),
+  )
 ) {
   invalidTarEntry();
 }
@@ -162,10 +163,14 @@ function extractedArchiveFiles() {
   const rawSizes = new Map();
   const expectedPaths = new Map();
   for (const { path, size } of rawEntries) {
-    if (expectedPaths.get(path) === "directory") invalidTarEntry();
-    rawSizes.set(path, size);
-    expectedPaths.set(path, "file");
-    const parts = path.split("/");
+    const directory = path.endsWith("/");
+    const extractedPath = directory ? path.slice(0, -1) : path;
+    const type = directory ? "directory" : "file";
+    const previousType = expectedPaths.get(extractedPath);
+    if (previousType !== undefined && previousType !== type) invalidTarEntry();
+    if (!directory) rawSizes.set(path, size);
+    expectedPaths.set(extractedPath, type);
+    const parts = extractedPath.split("/");
     for (let index = 1; index < parts.length; index++) {
       const directory = parts.slice(0, index).join("/");
       if (rawSizes.has(directory)) invalidTarEntry();
@@ -222,7 +227,7 @@ function extractedArchiveFiles() {
     }
     visit(extractionRoot);
 
-    if (expectedPaths.size !== 0 || archiveFiles.size !== rawEntries.length) {
+    if (expectedPaths.size !== 0 || archiveFiles.size !== rawSizes.size) {
       invalidTarEntry();
     }
     return archiveFiles;
@@ -260,7 +265,7 @@ for (const file of files) {
   }
 }
 
-assertNoInternalReferences(archiveFiles, MAX_EXPANDED_ASSET_BYTES);
+assertPublicPackageContents(archiveFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(

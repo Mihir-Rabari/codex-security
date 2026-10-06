@@ -23,7 +23,7 @@ const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
 
 describe("plain npm tar entries", () => {
-  test.each([" ", " \0"])(
+  test.each([" ", " \0", "\0"])(
     "accepts package size fields ending in %j",
     (terminator) => {
       expect(
@@ -59,7 +59,9 @@ describe("plain npm tar entries", () => {
   );
 
   test("rejects every unsupported tar entry type", () => {
-    for (const type of [0x31, 0x32, 0x35, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78]) {
+    for (const type of [
+      0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78,
+    ]) {
       expect(() =>
         plainTarEntries(
           archive(
@@ -73,15 +75,24 @@ describe("plain npm tar entries", () => {
     }
   });
 
-  test("rejects alternate size encodings", () => {
+  test("accepts an empty size field for an empty file", () => {
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(Buffer.alloc(0), {
+            name: "package/README.md",
+            sizeField: Buffer.alloc(12),
+          }),
+        ),
+      ),
+    ).toEqual([{ path: "package/README.md", size: 0 }]);
+  });
+
+  test("rejects invalid or binary size encodings", () => {
     const base256 = Buffer.alloc(12);
     base256[0] = 0x80;
     base256[11] = 1;
-    for (const sizeField of [
-      base256,
-      octal(1, 12),
-      Buffer.from(" 0000000001 "),
-    ]) {
+    for (const sizeField of [base256, Buffer.from("00000000008\0")]) {
       expect(() =>
         plainTarEntries(
           archive(
@@ -149,27 +160,70 @@ describe("plain npm tar entries", () => {
     }
   });
 
-  test("rejects nonzero padding and data after the terminator", () => {
-    const record = tarRecord(Buffer.from("x"), {
-      name: "package/README.md",
-    });
-    const badPadding = Buffer.from(record);
-    badPadding[badPadding.length - 1] = 1;
+  test("accepts explicit empty directory members", () => {
+    expect(
+      plainTarEntries(
+        archive(tarRecord(Buffer.alloc(0), { name: "package/", type: 0x35 })),
+      ),
+    ).toEqual([{ path: "package/", size: 0 }]);
+    expect(() =>
+      plainTarEntries(
+        archive(tarRecord(Buffer.from("x"), { name: "package/", type: 0x35 })),
+      ),
+    ).toThrow(invalidTarEntryError);
+  });
+
+  test("accepts GNU headers without treating timestamps as a path prefix", () => {
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(Buffer.from("readme"), {
+            name: "package/README.md",
+            magic: "ustar ",
+            version: " \0",
+            prefix: "00000000000",
+          }),
+        ),
+      ),
+    ).toEqual([{ path: "package/README.md", size: 6 }]);
+  });
+
+  test("accepts padding, optional end markers, and zero blocks between files", () => {
+    const record = tarRecord(Buffer.from("x"), { name: "package/README.md" });
+    record[record.length - 1] = 1;
     const secondRecord = tarRecord(Buffer.from("y"), {
       name: "package/LICENSE",
     });
 
+    expect(plainTarEntries(record)).toEqual([
+      { path: "package/README.md", size: 1 },
+    ]);
+    for (const zeroBlocks of [1, 2]) {
+      expect(
+        plainTarEntries(
+          Buffer.concat([
+            record,
+            Buffer.alloc(blockSize * zeroBlocks),
+            secondRecord,
+          ]),
+        ),
+      ).toEqual([
+        { path: "package/README.md", size: 1 },
+        { path: "package/LICENSE", size: 1 },
+      ]);
+    }
+  });
+
+  test("still scans padding and rejects partial blocks or truncated contents", () => {
+    const record = tarRecord(Buffer.from("x"), { name: "package/README.md" });
+    const paddingMarker = Buffer.from(record);
+    paddingMarker.write("go/example", blockSize + 1);
+    expect(() => plainTarEntries(paddingMarker)).toThrow(
+      internalReferenceError,
+    );
     for (const bytes of [
-      archive(badPadding),
-      Buffer.concat([record, Buffer.alloc(blockSize), secondRecord]),
-      Buffer.concat([
-        record,
-        Buffer.alloc(blockSize * 2),
-        secondRecord,
-        Buffer.alloc(blockSize * 2),
-      ]),
       Buffer.concat([archive(record), Buffer.alloc(1)]),
-      record,
+      record.subarray(0, blockSize),
     ]) {
       expect(() => plainTarEntries(bytes)).toThrow(invalidTarEntryError);
     }

@@ -28,11 +28,17 @@ const pluginContract = {
   shippedExact: ["scripts/launch_codex_security_mcp"],
 };
 
-function packageTar(
+function packageTar({
   trailingZeroBytes = 0,
   sizeTerminator = " ",
   type = 0x30,
-): Buffer {
+  compatibleLayout = false,
+}: {
+  trailingZeroBytes?: number;
+  sizeTerminator?: string;
+  type?: number;
+  compatibleLayout?: boolean;
+} = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
     "package/_bundled_plugin/scripts/launch_codex_security_mcp",
@@ -40,6 +46,8 @@ function packageTar(
   const paths = [
     "package/package.json",
     "package/README.md",
+    "package/docs/cli.md",
+    "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
     "package/schemas/project-config.schema.json",
     "package/LICENSE",
@@ -59,13 +67,35 @@ function packageTar(
         : path.endsWith(".json") || path.endsWith(".map")
           ? Buffer.from("{}\n")
           : Buffer.from("fixture\n");
-    return tarRecord(contents, {
+    const record = tarRecord(contents, {
       name: path,
       type,
       mode: executablePaths.includes(path) ? 0o755 : 0o644,
       sizeField: octal(contents.length, 12, sizeTerminator),
+      ...(compatibleLayout ? { magic: "ustar ", version: " \0" } : {}),
     });
+    if (compatibleLayout) record[record.length - 1] = 1;
+    return record;
   });
+  if (compatibleLayout) {
+    const directories = new Set<string>();
+    for (const path of paths) {
+      const parts = path.split("/");
+      for (let index = 1; index < parts.length; index++) {
+        directories.add(`${parts.slice(0, index).join("/")}/`);
+      }
+    }
+    return Buffer.concat([
+      ...[...directories].map((name) =>
+        tarRecord(Buffer.alloc(0), {
+          name,
+          type: 0x35,
+          mode: 0o755,
+        }),
+      ),
+      ...records.flatMap((record) => [Buffer.alloc(512), record]),
+    ]);
+  }
   return archive(...records, Buffer.alloc(trailingZeroBytes));
 }
 
@@ -107,12 +137,17 @@ describe("npm package tar listings", () => {
   test("accepts equivalent bounded gzip representations", () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
     try {
-      const tarBytes = packageTar(31 * 1024 * 1024);
+      const tarBytes = packageTar({ trailingZeroBytes: 31 * 1024 * 1024 });
       const archives = [
         ["default", gzipSync(tarBytes)],
         ["level-0", gzipSync(tarBytes, { level: 0 })],
-        ["npm-size-field", gzipSync(packageTar(0, " \0"))],
-        ["nul-regular-file", gzipSync(packageTar(0, " ", 0))],
+        ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
+        ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
+        ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
+        [
+          "compatible-tar-layout",
+          gzipSync(packageTar({ compatibleLayout: true })),
+        ],
       ] as const;
       expect(archives[0][1].length).toBeLessThan(1024 * 1024);
       expect(archives[1][1].length).toBeGreaterThan(31 * 1024 * 1024);

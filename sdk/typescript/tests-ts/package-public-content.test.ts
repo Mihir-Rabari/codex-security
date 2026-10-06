@@ -66,6 +66,21 @@ describe("npm package public contents", () => {
     },
   );
 
+  test("skips binary PNG contents checked by the package digest", () => {
+    expect(() =>
+      assertPublicPackageContents(
+        new Map([["package/logo.png", Buffer.from("go/synthetic-reference")]]),
+      ),
+    ).not.toThrow();
+  });
+
+  test("keeps the expanded Brotli size bound", () => {
+    const bytes = brotliCompressSync(Buffer.alloc(32 * 1024 * 1024 + 1));
+    expect(() =>
+      assertPublicPackageContents(compressedFiles(bytes, false)),
+    ).toThrow();
+  });
+
   test("checks tar metadata", () => {
     expect(() =>
       assertPublicPackageContents(new Map(), Buffer.from("go/synthetic-owner")),
