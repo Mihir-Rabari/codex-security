@@ -71,9 +71,7 @@ for (const resume of [false, true]) {
               ...(field === "surfaces"
                 ? {
                     sourceId:
-                      item.label === "Archive route"
-                        ? "shared-surface"
-                        : "shared-surface-2",
+                      index % 2 === 0 ? "shared-surface" : "shared-surface-2",
                   }
                 : {}),
               ...(field === "deferred"

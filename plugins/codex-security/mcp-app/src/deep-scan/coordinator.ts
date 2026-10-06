@@ -950,6 +950,7 @@ export class DeepScanCoordinator {
   private async recoverCompletedReducers(
     discoveries: AcceptedDiscovery[],
   ): Promise<{ resultPath?: string; result?: DeepReductionInput }> {
+    const discoveryIds = new Set(discoveries.map((worker) => worker.id));
     const inputs = this.state.persistedDedupInputs ?? [];
     let resultPath: string | undefined;
     let latestResult: DeepReductionInput | undefined;
@@ -969,12 +970,10 @@ export class DeepScanCoordinator {
           `Completed reducer ${worker.id} has no persisted result manifest.`,
         );
       }
-      const accepted = inputs
+      const consumed = inputs
         .filter((input) => input.dedupWorkerId === worker.id)
-        .map((input) =>
-          discoveries.find((source) => source.id === input.discoveryWorkerId),
-        );
-      if (accepted.length === 0 || accepted.some((value) => !value)) {
+        .map((input) => discoveryIds.has(input.discoveryWorkerId));
+      if (consumed.length === 0 || consumed.some((value) => !value)) {
         throw new Error(
           `Completed reducer ${worker.id} has incomplete persisted inputs.`,
         );
@@ -1004,9 +1003,9 @@ export class DeepScanCoordinator {
         deepReducer: {
           scanRoot: this.artifacts.scanDir,
           claimedWorkers: accepted.map((source) => ({
-            id: source!.id,
-            resultPath: source!.resultPath,
-            attempt: source!.attempt,
+            id: source.id,
+            resultPath: source.resultPath,
+            attempt: source.attempt,
           })),
         },
       });
