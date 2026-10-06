@@ -25,6 +25,74 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test.each(["canonical", "original"])(
+    "lists saved findings by %s path through a repository directory link",
+    async (savedPath) => {
+      const root = await temporaryDirectory("codex-security-findings-link-");
+      try {
+        const repository = join(root, "repository");
+        const alias = join(root, "repository link");
+        const otherAlias = join(root, "other link");
+        await mkdir(repository);
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        await symlink(
+          repository,
+          otherAlias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        for (const args of [[], [alias]]) {
+          const stdout = captureCli(main, "stdout");
+          const calls: Array<readonly string[]> = [];
+          expect(
+            await stdout.run(
+              ["findings", "list", ...args, "--json"],
+              dependencies({
+                currentDirectory: alias,
+                onWorkbench: (args): JsonObject => {
+                  calls.push(args);
+                  return args[0] === "list-repositories"
+                    ? {
+                        repositories: [
+                          { targetId: "other-alias", targetPath: otherAlias },
+                          ...(savedPath === "original"
+                            ? [{ targetId: "other", targetPath: repository }]
+                            : []),
+                          {
+                            targetId: "selected",
+                            targetPath:
+                              savedPath === "canonical" ? repository : alias,
+                          },
+                        ],
+                      }
+                    : {
+                        findings: [{ title: "Saved finding" }],
+                        nextOffset: null,
+                      };
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(calls[1]).toEqual([
+            "list-global-findings",
+            "--target-id",
+            "selected",
+            "--status",
+            "open",
+          ]);
+          expect(JSON.parse(stdout.text())).toEqual({
+            repository: alias,
+            findings: [{ title: "Saved finding" }],
+          });
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   test("findings list matches directory identity when realpath preserves alias spelling", async () => {
     const root = await temporaryDirectory("finding-repository-identity-");
     const originalRealpath = fs.realpath;
