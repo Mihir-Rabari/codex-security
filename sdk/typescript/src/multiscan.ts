@@ -43,6 +43,8 @@ import type { CoverageDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
   bundledPluginRoot,
+  canonicalConfigPath,
+  expandHome,
   executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
@@ -432,10 +434,11 @@ async function runCampaign(
         if (!resumed.reportSealed) {
           await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
         }
-        await rm(resumed.checkout, {
-          recursive: true,
-          force: true,
-        }).catch(() => undefined);
+        if (resumed.checkout === checkout) {
+          await rm(checkout, { recursive: true, force: true }).catch(
+            () => undefined,
+          );
+        }
         policyFailed ||= receipt.policyFailed === true;
         if (resumed.completeness === "complete") completed += 1;
         else {
@@ -1232,26 +1235,43 @@ async function loadResumableScan(
     scope.excludePaths.length !== 0
   )
     return undefined;
+  const completeness = coverage.completeness;
+  const matchesOutcome =
+    completeness === "complete"
+      ? receipt.status === "completed"
+      : (receipt.status === "completed_with_incomplete_coverage" &&
+          (receipt.coverage ?? completeness) === completeness) ||
+        (receipt.status === "failed" &&
+          receipt.error === "Multiscan repository coverage is incomplete.");
+  if (!matchesOutcome) return undefined;
   let expectedPaths = ["."];
   if (requestedPaths !== undefined) {
-    const scopeCheckout = await mkdtemp(
-      join(campaignRoot, "scope-validation-"),
-    );
+    const scopeRoot = await mkdtemp(join(campaignRoot, "scope-validation-"));
+    const scopeCheckout = join(scopeRoot, basename(matchedRoot));
     try {
+      await mkdir(scopeCheckout, { mode: 0o700 });
       await checkoutRevision(receipt, scopeCheckout, signal, githubHost);
       expectedPaths = [
         ...(
           await normalizeTarget(
             scopeCheckout,
-            requestedPaths.map((path) =>
-              isAbsolute(path) ? relative(matchedRoot, path) || "." : path,
+            await Promise.all(
+              requestedPaths.map(async (path) => {
+                const expanded = expandHome(path);
+                return isAbsolute(expanded)
+                  ? relative(
+                      matchedRoot,
+                      await canonicalConfigPath(expanded),
+                    ) || "."
+                  : expanded;
+              }),
             ),
             signal,
           )
         ).paths,
       ];
     } finally {
-      await rm(scopeCheckout, { recursive: true, force: true });
+      await rm(scopeRoot, { recursive: true, force: true });
     }
     if (
       receipt.scope !== undefined &&
@@ -1277,7 +1297,6 @@ async function loadResumableScan(
   ) {
     return undefined;
   }
-  const completeness = coverage.completeness;
   if (
     completeness === "complete" &&
     (coverage.deferred.length !== 0 ||
@@ -1320,6 +1339,8 @@ async function loadResumableScan(
     for (const evidence of finding.code_evidence ?? []) {
       evidenceIds.add(evidence.id);
     }
+    // Sealed legacy details retain their original references through loadContract.
+    if (finding.code_evidence !== undefined) continue;
     for (const section of [
       finding.rootCause,
       finding.validation,
@@ -1339,20 +1360,12 @@ async function loadResumableScan(
       }
     }
   }
-  const matchesOutcome =
-    completeness === "complete"
-      ? receipt.status === "completed"
-      : (receipt.status === "completed_with_incomplete_coverage" &&
-          (receipt.coverage ?? completeness) === completeness) ||
-        (receipt.status === "failed" &&
-          receipt.error === "Multiscan repository coverage is incomplete.");
-  return matchesOutcome
-    ? {
-        completeness,
-        checkout: matchedRoot,
-        reportSealed: await hasSealedReport(path, manifest, signal),
-      }
-    : undefined;
+
+  return {
+    completeness,
+    checkout: matchedRoot,
+    reportSealed: await hasSealedReport(path, manifest, signal),
+  };
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {
