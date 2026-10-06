@@ -603,8 +603,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 )
                   return "https://gitlab.com/example/repository.git";
                 if (
-                  args[0] === "ls-remote" &&
-                  args[3] === "https://gitlab.com/example/repository.git"
+                  providerEnvironment.GLAB_CONFIG_DIR !== undefined &&
+                  args[0] === "ls-remote"
                 )
                   args = [...args.slice(0, 3), remote, ...args.slice(4)];
                 return runGitRepositoryCommand(command, args, directory, {
@@ -904,6 +904,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       }
       const multiplePushes =
         context === "second-push" || context.startsWith("denied-");
+      let selectedIdentityConfig = "";
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
@@ -980,6 +981,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             ...(nativeIdentity ? { currentDirectory: repository } : {}),
             onRepositoryCommand: async (command, args, _directory, options) => {
               if (command === "git") {
+                if (args[0] === "config" && args[1] === "--file") {
+                  selectedIdentityConfig = args[3]!;
+                  return runGitRepositoryCommand(command, args, root, options);
+                }
                 if (
                   nativeIdentity &&
                   (args[0] === "remote" || args.includes("--sq-quote"))
@@ -1048,9 +1053,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 endpoint.searchParams.set(
                   "id",
                   multiplePushes &&
-                    options?.environment?.["GIT_CONFIG_PARAMETERS"]?.includes(
-                      "remote.codex-security-push.url=https://forge.example.test/first/repository.git",
-                    )
+                    selectedIdentityConfig ===
+                      "url.https://forge.example.test/first/repository.git.insteadOf"
                     ? "R_first"
                     : "R_synthetic",
                 );
@@ -3772,7 +3776,9 @@ describe("patch publication integrity", () => {
           }
           if (
             (failure === "commit" && args.includes("commit")) ||
-            (failure === "checkpoint" && args[0] === "config")
+            (failure === "checkpoint" &&
+              args[0] === "config" &&
+              args[1] === "--local")
           )
             throw new Error(`Synthetic ${failure} failure`);
           return runGitRepositoryCommand(command, args, cwd, options);
@@ -5972,6 +5978,74 @@ describe("patch change tracking", () => {
     },
   );
 
+  for (const rewriting of [
+    "ordinary",
+    "overlapping",
+    "equal-length",
+    "push-instead",
+    "trailing-space",
+    "equals",
+  ]) {
+    test.skipIf(rewriting === "trailing-space" && process.platform === "win32")(
+      `preserves the resolved push destination with ${rewriting} configuration`,
+      async () => {
+        const { directory, git } = await publicationRepository();
+        const container = await fixtures.create("patch-resolved-url-");
+        const raw = join(
+          container,
+          rewriting === "equals" ? "repository=v2" : "project",
+        );
+        const remote = rewriting === "trailing-space" ? `${raw} ` : `${raw}-v2`;
+        git("init", "--bare", remote);
+        git(
+          "remote",
+          "set-url",
+          "origin",
+          rewriting === "ordinary" ||
+            rewriting === "trailing-space" ||
+            rewriting === "equals"
+            ? remote
+            : raw,
+        );
+        if (rewriting === "equal-length")
+          git("config", `url.${remote}-incorrect.insteadOf`, remote);
+        if (rewriting === "overlapping" || rewriting === "equal-length")
+          git("config", `url.${remote}.insteadOf`, raw);
+        if (rewriting === "push-instead")
+          git("config", `url.${remote}.pushInsteadOf`, raw);
+        git("push", "origin", "HEAD:refs/heads/native-control");
+        const result = resultWithFindings(["high"]);
+        const outcome = await runWorkflow(
+          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: directory,
+            onWorkbench: () => savedScan(result, "scan-1", directory),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (args, output) => {
+              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+              completePatches(args, output);
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(
+          git(
+            "--git-dir",
+            remote,
+            "rev-parse",
+            "refs/heads/codex-security/patch-scan-1",
+          ),
+        ).toBe(git("rev-parse", "HEAD"));
+      },
+    );
+  }
+
   test.each(["named", "userless"])(
     "resumes publication with %s SSH available only in Git's subprocess PATH",
     async (kind) => {
@@ -6028,9 +6102,22 @@ describe("patch change tracking", () => {
                     crossRepository: true,
                   },
                 ]);
-              const selectedRemote = execFileSync(
+              const selectedToken = execFileSync(
                 gitExecutable,
                 ["config", "--get", "remote.codex-security-push.url"],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                  encoding: "utf8",
+                },
+              ).trim();
+              const selectedRemote = execFileSync(
+                gitExecutable,
+                ["ls-remote", "--get-url", selectedToken],
                 {
                   cwd: options?.directory ?? cwd,
                   env: {
@@ -6413,8 +6500,19 @@ describe("patch change tracking", () => {
               return runGitRepositoryCommand(command, args, cwd, options);
             }
             if (args[0] === "repo") {
-              const selectedRemote = gitText(
+              const selectedToken = gitText(
                 ["config", "--get", "remote.codex-security-push.url"],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                },
+              ).trim();
+              const selectedRemote = gitText(
+                ["ls-remote", "--get-url", selectedToken],
                 {
                   cwd: options?.directory ?? cwd,
                   env: {
@@ -7450,12 +7548,17 @@ describe("patch worktree root identity", () => {
       })),
     ),
     { route: "ordinary", operation: "replace", layout: "nested invocation" },
+    ...["stable", "replace"].map((operation) => ({
+      route: "ordinary",
+      operation,
+      layout: "external invocation",
+    })),
   ])(
     "preserves checkout identity for $route $operation with $layout",
     async ({ route, operation, layout }) => {
       const root = await fixtures.create("patch-root-identity-");
       const foreignRoot = await fixtures.create("patch-root-unselected-");
-      const external = layout === "external metadata";
+      const external = layout !== "nested invocation";
       for (const parent of [root, foreignRoot]) {
         const worktree = join(parent, "worktree");
         await mkdir(join(worktree, "component"), { recursive: true });
@@ -7493,18 +7596,36 @@ describe("patch worktree root identity", () => {
       const foreignIndex = await readFile(join(foreignMetadata, "index"));
       const foreignStatus = foreignGit("status", "--porcelain=v1");
       const directory =
-        operation === "alias"
-          ? join(root, "worktree-alias")
-          : external
-            ? worktree
-            : join(worktree, "component");
+        layout === "external invocation"
+          ? root
+          : operation === "alias"
+            ? join(root, "worktree-alias")
+            : external
+              ? worktree
+              : join(worktree, "component");
       if (operation === "alias")
         await symlink(
           worktree,
           directory,
           process.platform === "win32" ? "junction" : "dir",
         );
-      const environment = external ? { GIT_DIR: join("..", ".git") } : {};
+      const environment =
+        layout === "external invocation"
+          ? { GIT_WORK_TREE: worktree }
+          : external
+            ? { GIT_DIR: join("..", ".git") }
+            : {};
+      const foreignBlob = foreignGit("hash-object", join(foreign, "keep.ts"));
+      const originalObjects = () =>
+        repositoryGit(root)(
+          "--git-dir",
+          join(root, ".git"),
+          "cat-file",
+          "--batch-all-objects",
+          "--batch-check=%(objectname)",
+        ).split("\n");
+      if (layout === "external invocation")
+        expect(originalObjects()).not.toContain(foreignBlob);
       const scan = resultWithFindings(["high"]);
       scan.findings.findings[0]!.locations[0]!.path = "keep.ts";
       const argv =
@@ -7545,6 +7666,8 @@ describe("patch worktree root identity", () => {
         },
       });
       expect(modelCalls).toBe(1);
+      if (layout === "external invocation")
+        expect(originalObjects()).not.toContain(foreignBlob);
       expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
       expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
       expect(await readFile(join(foreignMetadata, "index"))).toEqual(

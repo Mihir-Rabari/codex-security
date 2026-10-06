@@ -6794,17 +6794,52 @@ interface PatchPublication {
   root: string;
 }
 
+async function withResolvedPatchRemote<T>(
+  remote: string,
+  repository: string,
+  dependencies: CliDependencies,
+  run: (token: string, include: string) => Promise<T>,
+): Promise<T> {
+  const directory = await mkdtemp(join(tmpdir(), "codex-security-remote-"));
+  const config = join(directory, "config");
+  try {
+    await writeFile(config, "", { mode: 0o600 });
+    await dependencies.runRepositoryCommand(
+      "git",
+      ["config", "--file", config, `url.${remote}.insteadOf`, directory],
+      repository,
+    );
+    const include = await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--sq-quote", `include.path=${config}`],
+      repository,
+    );
+    return await run(directory, include);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function patchPublicationDestination(
   repository: string,
   branch: string,
   dependencies: CliDependencies,
 ) {
-  const run = (command: "git" | "gh" | "glab", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (
+    command: "git" | "gh" | "glab",
+    args: string[],
+    options?: { trim: boolean },
+  ) => dependencies.runRepositoryCommand(command, args, repository, options);
   const remotes = (
-    await run("git", ["remote", "get-url", "--push", "--all", "origin"])
-  ).split("\n");
-  const fetchRemote = await run("git", ["remote", "get-url", "origin"]);
+    await run("git", ["remote", "get-url", "--push", "--all", "origin"], {
+      trim: false,
+    })
+  )
+    .replace(/\n$/u, "")
+    .split("\n");
+  const fetchRemote = (
+    await run("git", ["remote", "get-url", "origin"], { trim: false })
+  ).replace(/\n$/u, "");
   const isNetwork = (remote: string) =>
     !isAbsolute(remote) &&
     !win32.isAbsolute(remote) &&
@@ -6924,71 +6959,83 @@ async function patchPublicationDestination(
               .replace(/\.git$/u, "")}`;
         }
       }
-      const config = await run("git", [
-        "rev-parse",
-        "--sq-quote",
-        ...names.map((name) => `remote.${name}.gh-resolved=`),
-        `remote.${lookup}.url=${identityRemote}`,
-        `remote.${lookup}context.url=${new URL("..", requestUrl)}`,
-        `remote.${lookup}.gh-resolved=base`,
-      ]);
-      const options = {
-        environment: {
-          GIT_CONFIG_PARAMETERS: [
-            dependencies.environment["GIT_CONFIG_PARAMETERS"],
-            config,
-          ]
-            .filter(Boolean)
-            .join(" "),
-          GH_REPO: "",
-          GH_HOST: requestUrl.hostname,
-        },
-      };
-      const selected = await dependencies.runRepositoryCommand(
-        "gh",
-        ["repo", "set-default", "--view"],
+      await withResolvedPatchRemote(
+        identityRemote,
         repository,
-        options,
+        dependencies,
+        async (token, include) => {
+          const config = await run("git", [
+            "rev-parse",
+            "--sq-quote",
+            ...names.map((name) => `remote.${name}.gh-resolved=`),
+            `remote.${lookup}.url=${token}`,
+            `remote.${lookup}context.url=${new URL("..", requestUrl)}`,
+            `remote.${lookup}.gh-resolved=base`,
+          ]);
+          const options = {
+            environment: {
+              GIT_CONFIG_PARAMETERS: [
+                dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                config,
+                include,
+              ]
+                .filter(Boolean)
+                .join(" "),
+              GH_REPO: "",
+              GH_HOST: requestUrl.hostname,
+            },
+          };
+          const selected = await dependencies.runRepositoryCommand(
+            "gh",
+            ["repo", "set-default", "--view"],
+            repository,
+            options,
+          );
+          if (!selected) return;
+          hosted = true;
+          let repositoryJson: string;
+          try {
+            repositoryJson = await dependencies.runRepositoryCommand(
+              "gh",
+              [
+                "repo",
+                "view",
+                ...(requestUrl.port ? [`${requestUrl.host}/${selected}`] : []),
+                "--json",
+                "id,url",
+                "--jq",
+                "tojson",
+              ],
+              repository,
+              options,
+            );
+          } catch (error) {
+            lookupError ??= error;
+            return;
+          }
+          const headRepository = JSON.parse(repositoryJson) as {
+            id: string;
+            url: string;
+          };
+          for (;;) {
+            found = candidates.find(
+              (candidate) =>
+                candidate.repositoryId === headRepository.id &&
+                new URL(candidate.url).host ===
+                  new URL(headRepository.url).host,
+            );
+            if (found || candidates.length < limit) break;
+            limit *= 2;
+            candidates = JSON.parse(
+              (await run("gh", [
+                ...requestArguments,
+                "--limit",
+                String(limit),
+              ])) || "[]",
+            ) as ExistingRequest[];
+          }
+        },
       );
-      if (!selected) continue;
-      hosted = true;
-      let repositoryJson: string;
-      try {
-        repositoryJson = await dependencies.runRepositoryCommand(
-          "gh",
-          [
-            "repo",
-            "view",
-            ...(requestUrl.port ? [`${requestUrl.host}/${selected}`] : []),
-            "--json",
-            "id,url",
-            "--jq",
-            "tojson",
-          ],
-          repository,
-          options,
-        );
-      } catch (error) {
-        lookupError ??= error;
-        continue;
-      }
-      const headRepository = JSON.parse(repositoryJson) as {
-        id: string;
-        url: string;
-      };
-      for (;;) {
-        found = candidates.find(
-          (candidate) =>
-            candidate.repositoryId === headRepository.id &&
-            new URL(candidate.url).host === new URL(headRepository.url).host,
-        );
-        if (found || candidates.length < limit) break;
-        limit *= 2;
-        candidates = JSON.parse(
-          (await run("gh", [...requestArguments, "--limit", String(limit)])) ||
-            "[]",
-        ) as ExistingRequest[];
-      }
       if (found) break;
     }
     if (!hosted && ![...remotes, fetchRemote].some(isNetwork))
@@ -7085,13 +7132,11 @@ async function bindPatchCommandContext(
       (await lstat(path)).isDirectory() ? path : undefined,
     )
     .catch(() => undefined);
-  if (currentDirectory !== context.directory) {
-    if ((await realpath(repository)) !== context.root)
-      throw new CodexSecurityError(
-        "The patch repository is no longer available at its original path.",
-      );
-    directory = repository;
-  }
+  if ((await realpath(repository)) !== context.root)
+    throw new CodexSecurityError(
+      "The patch repository is no longer available at its original path.",
+    );
+  if (currentDirectory !== context.directory) directory = repository;
   return {
     directory,
     dependencies: {
@@ -7138,17 +7183,33 @@ async function preparePatchPublication(
     for (const remote of destination.remotes) {
       if (existing) break;
       existing = Boolean(
-        await dependencies.runRepositoryCommand(
-          "git",
-          [
-            "ls-remote",
-            "--heads",
-            "--",
-            remote,
-            ...refs,
-            `refs/heads/${branch}/*`,
-          ],
+        await withResolvedPatchRemote(
+          remote,
           repository,
+          dependencies,
+          (token, include) =>
+            dependencies.runRepositoryCommand(
+              "git",
+              [
+                "ls-remote",
+                "--heads",
+                "--",
+                token,
+                ...refs,
+                `refs/heads/${branch}/*`,
+              ],
+              repository,
+              {
+                environment: {
+                  GIT_CONFIG_PARAMETERS: [
+                    dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                    include,
+                  ]
+                    .filter(Boolean)
+                    .join(" "),
+                },
+              },
+            ),
         ),
       );
     }
@@ -7174,7 +7235,7 @@ async function preparePatchPublication(
       "diff",
       "--cached",
       "--name-only",
-      "--no-relative",
+      "--relative=",
       "--no-renames",
       "-z",
       tree,
@@ -7389,7 +7450,7 @@ async function createPatchPullRequest(
           [
             "diff",
             "--name-only",
-            "--no-relative",
+            "--relative=",
             "--no-renames",
             "--diff-filter=D",
             "-z",
@@ -7427,12 +7488,15 @@ async function createPatchPullRequest(
     );
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
+  const stagingDirectory = isOutsidePath(relative(root, bound.directory))
+    ? root
+    : bound.directory;
   const pathspec = files.map((file) =>
-    relative(bound.directory, resolve(directory, file)),
+    relative(stagingDirectory, resolve(directory, file)),
   );
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  const runFiles = (args: string[]) => run(["-C", bound.directory, ...args]);
+  const runFiles = (args: string[]) => run(["-C", stagingDirectory, ...args]);
   await runFiles([
     "--literal-pathspecs",
     "add",
@@ -7603,7 +7667,7 @@ async function changedPatchFiles(
     [
       "--literal-pathspecs",
       "diff",
-      "--no-relative",
+      "--relative=",
       "--name-only",
       "-z",
       base.tree,
@@ -7960,7 +8024,7 @@ async function assessPatchRisk(
       run([
         "--literal-pathspecs",
         "diff",
-        ...(request.directory === undefined ? [] : ["--no-relative"]),
+        ...(request.directory === undefined ? [] : ["--relative="]),
         "--binary",
         "--full-index",
         `--output=${patchPath}`,
@@ -7972,7 +8036,7 @@ async function assessPatchRisk(
         [
           "--literal-pathspecs",
           "diff",
-          ...(request.directory === undefined ? [] : ["--no-relative"]),
+          ...(request.directory === undefined ? [] : ["--relative="]),
           "--name-only",
           "-z",
           request.base,
