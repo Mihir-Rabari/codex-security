@@ -304,5 +304,120 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         .length,
       1,
     );
+
+    // Prompt-specific settings merge and render separately for each concurrent
+    // case, including the original configuration saved for retry and resume.
+    const templatedConfig = path.join(root, "templated.json");
+    fs.writeFileSync(
+      templatedConfig,
+      JSON.stringify({
+        providers: [
+          {
+            ...provider,
+            config: {
+              ...provider.config,
+              cli_env: {
+                ...provider.config.cli_env,
+                CODEX_MCP_NODE_PATH: "{{node_path}}",
+              },
+              additional_directories: ["{{permission_root}}"],
+            },
+          },
+        ],
+        prompts: [
+          "hello",
+          {
+            id: "hello with an override",
+            label: "per-case runtime override",
+            config: {
+              cli_env: {
+                ...provider.config.cli_env,
+                CODEX_MCP_NODE_PATH: "{{override_node_path}}",
+              },
+              additional_directories: ["{{override_permission_root}}"],
+            },
+          },
+        ],
+        tests: [customNode, selectedNode].map((nodePath) => ({
+          vars: {
+            node_path: nodePath,
+            permission_root: path.dirname(nodePath),
+            override_node_path:
+              nodePath === customNode ? selectedNode : customNode,
+            override_permission_root: path.dirname(
+              nodePath === customNode ? selectedNode : customNode,
+            ),
+          },
+          assert: [{ type: "equals", value: "ok" }],
+        })),
+      }),
+    );
+    const templatedEnvironment = {
+      ...environment,
+      PROMPTFOO_CONFIG_DIR: path.join(root, "templated-state"),
+    };
+    const startingRows = rows.length;
+    fs.writeFileSync(fail, "");
+    const templatedInitial = await invoke(
+      [
+        "eval",
+        "-c",
+        templatedConfig,
+        "--max-concurrency",
+        "2",
+        "--no-cache",
+        "--no-share",
+        "--no-progress-bar",
+      ],
+      templatedEnvironment,
+    );
+    assert.notEqual(templatedInitial.code, 0, templatedInitial.output);
+    assert.match(templatedInitial.output, /synthetic retryable failure/);
+    fs.rmSync(fail);
+    const templatedRetry = await invoke(
+      [
+        "eval",
+        "--retry-errors",
+        "--no-cache",
+        "--no-share",
+        "--no-progress-bar",
+      ],
+      templatedEnvironment,
+    );
+    assert.equal(templatedRetry.code, 0, templatedRetry.output);
+    const templatedDatabase = new Database(
+      path.join(templatedEnvironment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+    );
+    templatedDatabase.prepare("DELETE FROM eval_results").run();
+    templatedDatabase.close();
+    const templatedResume = await invoke(
+      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
+      templatedEnvironment,
+    );
+    assert.equal(templatedResume.code, 0, templatedResume.output);
+    const templatedRows = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Capture)
+      .slice(startingRows);
+    assert.equal(templatedRows.length, 12);
+    assert.equal(new Set(templatedRows.map((row) => row.cwd)).size, 3);
+    assert.equal(
+      templatedRows.filter((row) => row.nodePath === customNode).length,
+      6,
+    );
+    assert.equal(
+      templatedRows.filter((row) => row.nodePath === selectedNode).length,
+      6,
+    );
+    for (const row of templatedRows) {
+      assert.deepEqual(row.proxies, proxies);
+      assert.equal(fs.existsSync(row.cwd), false);
+      assert.deepEqual(row.directories, [
+        path.dirname(row.nodePath),
+        path.dirname(row.nodePath),
+      ]);
+    }
   },
 );
