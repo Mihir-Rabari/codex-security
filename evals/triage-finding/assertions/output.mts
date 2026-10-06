@@ -65,106 +65,27 @@ export function parseExpected(
   return trim ? terms.flatMap((term) => term.trim() || []) : terms;
 }
 
-export function extractJson(
+export function extractTriageResult(
   output: unknown,
-  schemaVersion: string | undefined,
-  {
-    requireSingle = false,
-    failureMessage = `Could not find a parseable ${schemaVersion} JSON block.`,
-  }: { requireSingle?: boolean; failureMessage?: string } = {},
+  failureMessage = "Could not find a parseable triage-finding/v0 JSON result",
 ) {
   const text = outputText(output);
   const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(
     (match) => match[1].trim(),
   );
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
   const candidates =
-    fencedBlocks.length > 0
-      ? fencedBlocks
-      : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
-  if (requireSingle) {
-    candidates.length = 0;
-    const fences: Array<{ start: number; end: number }> = [];
-    let opening: { start: number; marker: string } | undefined;
-    for (const line of text.matchAll(/^.*$/gm)) {
-      if (opening) {
-        const closing = new RegExp(
-          `^ {0,3}${opening.marker[0]}{${opening.marker.length},}[ \\t]*\\r?$`,
-        );
-        if (closing.test(line[0])) {
-          fences.push({
-            start: opening.start,
-            end: line.index + line[0].length,
-          });
-          opening = undefined;
-        }
-      } else {
-        const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line[0]);
-        if (marker) opening = { start: line.index, marker: marker[1] };
-      }
-    }
-    if (opening) fences.push({ start: opening.start, end: text.length });
-    const inFence = (index: number) =>
-      fences.some((fence) => index >= fence.start && index < fence.end);
-    const references = new Set(
-      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*(?:\r?\n[ \t]*)?\S+/gm)]
-        .filter((match) => !inFence(match.index))
-        .map((match) => match[1]),
-    );
-    let citationEnd = 0;
-    let depth = 0;
-    let start = 0;
-    for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}\[\]]/gs)) {
-      if (match.index < citationEnd) continue;
-      if (depth === 0 && match[0] === "[" && !inFence(match.index)) {
-        const citation =
-          /^\[\d+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\]|:[ \t]*(?:\r?\n[ \t]*)?\S+)/u.exec(
-            text.slice(match.index),
-          );
-        if (citation) {
-          citationEnd = match.index + citation[0].length;
-          continue;
-        }
-        const shortcut = /^\[(\d+)\]/u.exec(text.slice(match.index));
-        if (shortcut && references.has(shortcut[1])) {
-          citationEnd = match.index + shortcut[0].length;
-          continue;
-        }
-      }
-      if (match[0] === "{" || match[0] === "[") {
-        if (depth++ === 0) start = match.index;
-      } else if (
-        (match[0] === "}" || match[0] === "]") &&
-        depth > 0 &&
-        --depth === 0
-      ) {
-        candidates.push(text.slice(start, match.index + 1));
-      }
-    }
-  }
-  const matches: Record<string, unknown>[] = [];
+    fencedBlocks.length > 0 ? fencedBlocks : [text.slice(start, end + 1)];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      if (requireSingle) matches.push(parsed);
-      else if (parsed && parsed.schema_version === schemaVersion) return parsed;
+      const parsed = JSON.parse(candidate) as TriageResult;
+      if (parsed && parsed.schema_version === "triage-finding/v0") {
+        return parsed;
+      }
     } catch {
       // The response may contain more than one fenced block. Try the next one.
     }
   }
-  if (
-    matches.length === 1 &&
-    !Array.isArray(matches[0]) &&
-    (schemaVersion === undefined || matches[0].schema_version === schemaVersion)
-  )
-    return matches[0];
   throw new Error(failureMessage);
-}
-
-export function extractTriageResult(
-  output: unknown,
-  failureMessage = "Could not find a parseable triage-finding/v0 JSON result",
-) {
-  return extractJson(output, "triage-finding/v0", {
-    failureMessage,
-  }) as unknown as TriageResult;
 }

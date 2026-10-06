@@ -1,8 +1,4 @@
-import {
-  outputText as textFor,
-  hasTriageJson,
-  extractJson,
-} from "./output.mts";
+import { outputText as textFor, hasTriageJson } from "./output.mts";
 import type { AssertionContext } from "../types.ts";
 
 function repositoryName(value: string) {
@@ -194,20 +190,13 @@ const checks: Record<
 
   explicit_connector: (text, context) => {
     const repository = repositoryName(context.vars.target_repo as string);
-    let decision;
-    try {
-      decision = extractJson(text, undefined, {
-        requireSingle: true,
-        failureMessage: "must return one connector decision JSON object",
-      });
-    } catch (error) {
-      return [(error as Error).message];
-    }
-    const scope = decision.scope as Record<string, unknown> | undefined;
+    const decision = structuredAnswer(text);
+    if (!decision)
+      return ["must return the connector decision as a JSON object"];
     const failures = [];
     if (
       Object.keys(decision ?? {}).length !== 3 ||
-      Object.keys(scope ?? {}).length !== 2
+      Object.keys(decision?.scope ?? {}).length !== 2
     )
       failures.push(
         "must return only transport, fallback, and scope with only account and repository",
@@ -221,8 +210,8 @@ const checks: Record<
         "must explain the limitation and request approval before REST fallback",
       );
     if (
-      scope?.account !== "user_specified_or_approved" ||
-      scope?.repository !== repository
+      decision?.scope?.account !== "user_specified_or_approved" ||
+      decision?.scope?.repository !== repository
     )
       failures.push(
         "must scope the REST fallback to the specified account and exact repository",
@@ -231,17 +220,10 @@ const checks: Record<
   },
 
   default_rest: (text) => {
-    try {
-      const decision = extractJson(text, undefined, {
-        requireSingle: true,
-        failureMessage: "must return one transport decision JSON object",
-      });
-      return decision.transport === "rest" && Object.keys(decision).length === 1
-        ? []
-        : ["must select REST when the user has not requested the Connector"];
-    } catch (error) {
-      return [(error as Error).message];
-    }
+    const decision = structuredAnswer(text);
+    return decision?.transport === "rest" && Object.keys(decision).length === 1
+      ? []
+      : ["must select REST when the user has not requested the Connector"];
   },
 
   explicit_issue: (text) => {
