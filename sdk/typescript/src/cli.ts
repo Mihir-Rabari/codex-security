@@ -5377,6 +5377,10 @@ export async function main(
             )
               commandDirectory = gitRepository;
             commandEnvironment = commandContext.environment;
+            gitDependencies.environment = {
+              ...dependencies.environment,
+              ...commandEnvironment,
+            };
           }
           const { files, rootFiles: publicationFiles } =
             await changedPatchFiles(
@@ -6917,6 +6921,25 @@ async function patchCommandContext(
   ] as const) {
     if (dependencies.environment[name] !== undefined)
       environment[name] = await gitPath(["--path-format=absolute", ...args]);
+  }
+  if (
+    dependencies.environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] !== undefined
+  ) {
+    const objects = await dependencies.runRepositoryCommand(
+      "git",
+      ["count-objects", "-v"],
+      repository,
+      { trim: false },
+    );
+    // Git resolves and C-quotes alternate paths in the original command context.
+    environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
+      .split("\n")
+      .filter((line) => line.startsWith("alternate: "))
+      .map((line) => {
+        const path = line.slice("alternate: ".length);
+        return path.startsWith('"') ? path : JSON.stringify(path);
+      })
+      .join(delimiter);
   }
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
