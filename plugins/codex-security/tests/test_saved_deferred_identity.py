@@ -892,3 +892,58 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
         assert recovered[1]["findings"][0]["summary"] == "Consolidated evidence."
         assert recovered[1]["findings"][0]["identity"] == {"anchor": "candidate-1"}
     assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("reversed_rows", [False, True])
+@pytest.mark.parametrize("revised_identity", ["explicit", "implicit"])
+def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
+    tmp_path, saved_results, reversed_rows, revised_identity
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic first review",
+        "summary": "Original first evidence.",
+        "identity": {"anchor": "shared-review", "instance": "first"},
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+    }
+    sibling = {
+        **{key: value for key, value in first.items() if key != "identity"},
+        "title": "Independent review",
+        "summary": "Independent evidence remains active.",
+    }
+    original, unchanged = (first, sibling) if revised_identity == "explicit" else (sibling, first)
+    revised = {**original, "title": "Revised review", "summary": "Revised evidence."}
+    rows = [first, sibling]
+    latest_rows = [revised, sibling] if revised_identity == "explicit" else [first, revised]
+    if reversed_rows:
+        rows.reverse()
+        latest_rows.reverse()
+    initial = saved_draft("identity-scan", findings=rows)
+    latest = saved_draft("identity-scan", findings=latest_rows, complete=True)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, latest], initial)
+    output = Path(worker["artifact_dir"])
+    # Publication stopped after selecting the reconciled checkpoint, before replacing result.json.
+    os.utime(output / "result.json", ns=(100, 100))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(latest)}.json"}))
+    os.utime(head, ns=(300, 300))
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for result in (documents, replay):
+        findings = result[1]["findings"]
+        assert len(findings) == 2
+        retained = next(row for row in findings if row["title"] == revised["title"])
+        assert retained["summary"] == revised["summary"]
+        if revised_identity == "explicit":
+            assert retained["identity"] == first["identity"]
+        assert any(row["summary"] == unchanged["summary"] for row in findings)
+        assert any(
+            row["summary"] == original["summary"]
+            for row in retained["provenance"]["previousFindings"]
+        )
+    assert documents[1] == replay[1]

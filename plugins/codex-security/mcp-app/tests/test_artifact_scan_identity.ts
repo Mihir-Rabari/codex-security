@@ -1970,41 +1970,57 @@ for (const layout of ["standard", "diff", "deep"] as const) {
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
-  for (const reversed of [false, true]) {
-    test(`${layout}: ambiguous unmatched sibling survives exact batch assignment (reversed=${reversed})`, async (t) => {
-      const normal = await fixture(t, layout),
-        recovered = await fixture(t, layout);
-      const first = finding("First review"),
-        second = finding("Second review"),
-        added = finding("Added review");
-      for (const f of [normal, recovered]) {
-        await f.write({ ...f.draft(), findings: [first, second] });
-        await dateDraftFiles(f.root, 100);
-      }
-      const rows = reversed ? [added, second] : [second, added];
-      await normal.write({ ...normal.draft(), findings: rows });
-      const update = { ...recovered.draft(), findings: rows };
-      await draftApi.saveScanDraftCheckpoint(recovered.context, update, false);
-      const { handoffClaimToken: _claim, ...checkpoint } = update;
-      await utimes(
-        path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
-        200,
-        200,
-      );
-      const result = await recoverAndFinalize(
-        normal,
-        recovered,
-        [],
-        true,
-        true,
-      );
-      assert.equal(result.normal.length, 3);
-      assert.equal(result.recovered.length, 3);
-      const ordered = (rows: RecoveredFinding[]) =>
-        [...rows].sort((a, b) => a.title.localeCompare(b.title));
-      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
-      assert.deepEqual(result.warnings, []);
-    });
+  for (const candidate of [false, true]) {
+    for (const reversed of [false, true]) {
+      test(`${layout}: ambiguous unmatched sibling survives exact batch assignment (reversed=${reversed}, candidate=${candidate})`, async (t) => {
+        const normal = await fixture(t, layout),
+          recovered = await fixture(t, layout);
+        const first = finding("First review"),
+          second = finding("Second review"),
+          added = finding(
+            "Added review",
+            candidate
+              ? {
+                  provenance: {
+                    source: "local_plugin",
+                    candidateId: "new-candidate",
+                  },
+                }
+              : {},
+          );
+        for (const f of [normal, recovered]) {
+          await f.write({ ...f.draft(), findings: [first, second] });
+          await dateDraftFiles(f.root, 100);
+        }
+        const rows = reversed ? [added, second] : [second, added];
+        await normal.write({ ...normal.draft(), findings: rows });
+        const update = { ...recovered.draft(), findings: rows };
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          update,
+          false,
+        );
+        const { handoffClaimToken: _claim, ...checkpoint } = update;
+        await utimes(
+          path.join(recovered.root, "checkpoints", checkpointName(checkpoint)),
+          200,
+          200,
+        );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 3);
+        assert.equal(result.recovered.length, 3);
+        const ordered = (rows: RecoveredFinding[]) =>
+          [...rows].sort((a, b) => a.title.localeCompare(b.title));
+        assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+        assert.deepEqual(result.warnings, []);
+      });
+    }
   }
   for (const field of ["reportId", "ledgerRowId"]) {
     test(`${layout}: compatible ${field} enrichment identifies its existing sibling`, async (t) => {

@@ -1909,6 +1909,21 @@ def merge_saved_results(
             for group in matches:
                 latest = group["latest"]
                 if (
+                    isinstance(value.get("identity"), dict)
+                    and sum(
+                        isinstance(sibling, dict)
+                        and isinstance(sibling.get("identity"), dict)
+                        and _semantic_identity_key(sibling, _finding_identity(sibling))
+                        == _semantic_identity_key(value, _finding_identity(value))
+                        for sibling in draft["findings"]
+                    )
+                    == 1
+                    and group["identity"] is not None
+                    and _semantic_identity_key(value, _finding_identity(value))
+                    == _semantic_identity_key(value, group["identity"])
+                ):
+                    rank = 4
+                elif (
                     owner == group["owner"]
                     and same_raw_content(value, latest)
                     and _identity_candidate(value) == _identity_candidate(latest)
@@ -1944,10 +1959,27 @@ def merge_saved_results(
                     assigned[index] = group
                     claimed.add(group["key"])
                     break
-        for rank in (3, 2, 1, 0):
+        for rank in (4, 3, 2, 1, 0):
             options = {
-                index: [group for group, score in matches if score >= rank]
-                for index, _, _, _, matches in pending
+                index: [
+                    group
+                    for group, score in matches
+                    if score >= rank
+                    and (
+                        group["key"] not in claimed
+                        or (
+                            rank == 0
+                            and not (
+                                finding_candidate_id(value)
+                                and any(
+                                    finding_candidate_id(previous) == finding_candidate_id(value)
+                                    for previous in group["rows"]
+                                )
+                            )
+                        )
+                    )
+                ]
+                for index, value, _, _, matches in pending
                 if index not in assigned
             }
             counts = {}
