@@ -2036,3 +2036,57 @@ test("aligns component columns by terminal width and retains trailing cost", asy
   ).toBe(1);
   dashboard.stop();
 });
+
+test.each([16, 25, 120])(
+  "preserves markup after clipped prefixes at width %i",
+  (columns) => {
+    for (const worker of [undefined, 1]) {
+      for (const kind of ["message", "reasoning"] as const) {
+        for (const markup of ["`x`", "[x](https://example.test/report)"]) {
+          const stderr = capture(true);
+          const dashboard = createDashboard(
+            { ...stderr.stream, columns, rows: 60 },
+            { color: true },
+          );
+          dashboard.start();
+          dashboard.record({
+            id: "clipped-markup",
+            worker,
+            kind,
+            status: "completed",
+            description: markup,
+            paths: [],
+          });
+          const frame = stderr.text().split("\u001B[H").at(-1)!;
+          expect(frame).toContain(
+            markup.startsWith("`")
+              ? "\u001B[2mx\u001B[22m"
+              : "\u001B]8;;https://example.test/report\u0007x\u001B]8;;\u0007",
+          );
+          dashboard.stop();
+        }
+      }
+      const stderr = capture(true);
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(
+        { ...stderr.stream, columns, rows: 60 },
+        { color: true, input },
+      );
+      dashboard.start();
+      input.emit("data", "d");
+      dashboard.recordDetails({
+        threadId: "synthetic-thread",
+        parentThreadId: null,
+        worker,
+        event: {
+          type: "event_msg",
+          payload: { type: "agent_message", message: "`x`" },
+        },
+      });
+      expect(stderr.text().split("\u001B[H").at(-1)!).toContain(
+        "\u001B[2mx\u001B[22m",
+      );
+      dashboard.stop();
+    }
+  },
+);

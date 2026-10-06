@@ -954,7 +954,10 @@ export class ScanDashboard {
         }
 
         const source = worker === undefined ? "main" : `worker ${worker}`;
-        const prefix = `  [${formatLocalTime(recordedAt)}] ${source} · `;
+        const prefix = fitActivityPrefix(
+          `  [${formatLocalTime(recordedAt)}] ${source} · `,
+          width,
+        );
         const code: string[] = [];
         const bold: string[] = [];
         if (prose) {
@@ -1002,6 +1005,7 @@ export class ScanDashboard {
       kind: DashboardActivityLine["kind"],
       generatedPrefix = "",
     ): void => {
+      prefix = fitActivityPrefix(prefix, width);
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });
@@ -1261,8 +1265,12 @@ function formatLocalTime(timestamp: number): string {
     .join(":");
 }
 
+function fitActivityPrefix(prefix: string, width: number): string {
+  return width <= 2 ? "" : fitLine(prefix, width - 2);
+}
+
 function wrapActivity(prefix: string, value: string, width: number): string[] {
-  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
+  prefix = fitActivityPrefix(prefix, width);
   const available = Math.max(1, width - stringWidth(prefix));
   const continuation = " ".repeat(prefix.length);
   const lines: string[] = [];
@@ -1384,7 +1392,7 @@ function columnChunks(
 }
 
 function wrapCode(prefix: string, value: string, width: number): string[] {
-  prefix = width <= 2 ? "" : fitLine(prefix, width - 2);
+  prefix = fitActivityPrefix(prefix, width);
   const prefixWidth = stringWidth(prefix);
   const continuation = " ".repeat(prefixWidth);
   return columnChunks(
