@@ -4356,7 +4356,11 @@ describe("patch change tracking", () => {
               expect(environment["GIT_COMMON_DIR"]).toBe(
                 gitEnvironment.GIT_COMMON_DIR,
               );
-              expect(environment["GIT_DIR"]).toBe(
+              expect(
+                environment["GIT_DIR"] === undefined
+                  ? undefined
+                  : resolve(environment["GIT_DIR"]),
+              ).toBe(
                 settings === "relative" || (target !== root && cwd === root)
                   ? join(root, ".git")
                   : gitEnvironment.GIT_DIR,
