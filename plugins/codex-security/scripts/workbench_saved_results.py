@@ -1646,12 +1646,6 @@ def merge_saved_results(
                     if field == "surfaces":
                         normalized.setdefault("id", _saved_coverage_id(item))
                         normalized.setdefault("receiptRefs", [])
-                    try:
-                        _validate_schema_node(
-                            normalized, coverage_schema[field]["items"], f"coverage.{field}"
-                        )
-                    except ContractError:
-                        continue
                     if field == "surfaces":
                         verified = {
                             "completeness": "partial",
@@ -1671,6 +1665,13 @@ def merge_saved_results(
                             or verified["surfaces"][0]["disposition"] != item["disposition"]
                         ):
                             continue
+                        normalized = verified["surfaces"][0]
+                    try:
+                        _validate_schema_node(
+                            normalized, coverage_schema[field]["items"], f"coverage.{field}"
+                        )
+                    except ContractError:
+                        continue
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
         (owner, candidate_id)
@@ -1959,6 +1960,8 @@ def merge_saved_results(
                         for path in selected_models
                         if path in authoritative_heads or path in current_results
                     ]
+                    if not any(path in authoritative_heads for path in selected_models):
+                        authoritative_models = selected_models
                     head_path = max(
                         authoritative_models or selected_models,
                         key=lambda path: (source_order[path], path in authoritative_heads),
@@ -2523,6 +2526,7 @@ def preserve_scan_results_locked(
     retained_state = None
     if (
         frozen_source_digests is None
+        or scan["retained_checkpoint_heads_json"] is None
         or recovery_source_digests is not None
         or (saved_model_source is None and model_source)
     ):

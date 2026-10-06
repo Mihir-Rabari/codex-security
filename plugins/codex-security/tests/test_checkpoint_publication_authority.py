@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
+import subprocess
+import sys
 import uuid
 from argparse import Namespace
 
@@ -1096,8 +1099,11 @@ def test_invalid_explicit_recovery_does_not_freeze_unpublishable_selection(
 
 
 @pytest.mark.parametrize("selected_model", [False, True], ids=["omitted", "replacement"])
+@pytest.mark.parametrize(
+    "result_model", [False, True], ids=["unmodeled-result", "older-result-model"]
+)
 def test_model_less_selected_head_keeps_latest_accepted_model(
-    workbench_api, workbench_db, publication_scan, selected_model
+    workbench_api, workbench_db, publication_scan, selected_model, result_model
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan, status="canceled")
@@ -1125,8 +1131,15 @@ def test_model_less_selected_head_keeps_latest_accepted_model(
     os.utime(checkpoint, ns=(300, 300))
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
     os.utime(head, ns=(300, 300))
-    result.write_text(json.dumps(original))
-    os.utime(result, ns=(400, 400))
+    result.write_text(
+        json.dumps(
+            {
+                **original,
+                **({"threatModel": {"summary": "Older result model."}} if result_model else {}),
+            }
+        )
+    )
+    os.utime(result, ns=(150, 150) if result_model else (400, 400))
     originals = {path: path.read_bytes() for path in [result, older, newer, checkpoint, head]}
     workbench_api["fail_scan"](
         workbench_db,
@@ -1238,7 +1251,7 @@ def test_tied_rejection_requires_valid_surface_before_removing_finding(
     assert result.read_bytes() == original
 
 
-@pytest.mark.parametrize("receipt_state", ["missing", "present", "optional"])
+@pytest.mark.parametrize("receipt_state", ["missing", "present", "present-relative", "optional"])
 @pytest.mark.parametrize("head_time", [300, 400], ids=["tied", "newer"])
 def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
     workbench_api, workbench_db, publication_scan, receipt_state, head_time
@@ -1250,8 +1263,12 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
     os.utime(result, ns=(300, 300))
     rejected = save_disposition(scan, result.parent, "rejected")
     if receipt_state != "optional":
-        rejected["coverage"]["surfaces"][0]["receiptRefs"] = ["artifacts/review.txt"]
-        if receipt_state == "present":
+        rejected["coverage"]["surfaces"][0]["receiptRefs"] = [
+            "./artifacts/review.txt"
+            if receipt_state == "present-relative"
+            else "artifacts/review.txt"
+        ]
+        if receipt_state.startswith("present"):
             receipt = scan.scan_dir / "artifacts" / "review.txt"
             receipt.parent.mkdir(exist_ok=True)
             receipt.write_text("Synthetic rejected candidate review.")
@@ -1682,4 +1699,79 @@ def test_legacy_ordering_failure_does_not_hide_new_worker_evidence(
                 "scan"
             ]["findingCount"]
             == 2
+        )
+
+
+@pytest.mark.parametrize("canceled", [False, True], ids=["failed", "canceled"])
+def test_legacy_retained_heads_survive_loss_after_terminal_output(
+    workbench_api, workbench_db, publication_scan, tmp_path, canceled
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET retained_checkpoint_heads_json = NULL, seal_manifest_digest = NULL, "
+            "canceled_at = ? WHERE id = ?",
+            (scan.timestamp if canceled else None, scan.scan_id),
+        )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md"):
+        (scan.scan_dir / name).unlink()
+    database = tmp_path / "legacy-stop.sqlite3"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+    child_program = """
+import json, os, runpy, sqlite3, sys
+from argparse import Namespace
+from types import SimpleNamespace
+api = runpy.run_path(sys.argv[1], run_name="legacy_stopped_publication_loss")
+api["deep_scan"].configure(SimpleNamespace(**{**api, "preserve_stopped_results": api["preserve_stopped_results_after_transition"]}))
+saved = api["saved_results"]
+write = saved._write_prepared_scan_finalization
+def lose_process(*args, **kwargs):
+    write(*args, **kwargs)
+    os._exit(73)
+saved._write_prepared_scan_finalization = lose_process
+connection = sqlite3.connect(sys.argv[2])
+connection.row_factory = sqlite3.Row
+connection.execute("PRAGMA foreign_keys = ON")
+saved.preserve_scan_results(api["_WORKBENCH_DB_CONTEXT"], connection, Namespace(scan_id=sys.argv[3], claim_token=None, thread_id=None, coordinator_generation=None))
+raise AssertionError("terminal write was not reached")
+"""
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child_program,
+            workbench_api["__file__"],
+            str(database),
+            scan.scan_id,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 73, child.stderr
+    assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 1
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        replayed = workbench_api["saved_results"].preserve_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            connection,
+            Namespace(
+                scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+            ),
+        )["scan"]
+        assert replayed["findingCount"] == 1
+        assert not replayed["resultsRecoveryNeeded"]
+        assert (
+            connection.execute(
+                "SELECT retained_checkpoint_heads_json FROM scans WHERE id = ?", (scan.scan_id,)
+            ).fetchone()[0]
+            is not None
         )
