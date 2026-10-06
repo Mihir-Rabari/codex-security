@@ -51,7 +51,11 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
             ("candidate", "originalCandidates"),
             ("finding", "previousFindings"),
         ):
-            values = [row[field]] if field in row else []
+            values = (
+                [row[field]]
+                if field in row and (field not in destination or row[field] != destination[field])
+                else []
+            )
             if isinstance(row.get(archive), list):
                 values.extend(row[archive])
             if not values:
@@ -61,6 +65,22 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
             for value in values:
                 if value not in destination[archive]:
                     destination[archive].append(copy.deepcopy(value))
+
+
+def project_resolved_candidate_rows(
+    rows: list[Any], field: str, owner: str | None, states: dict[Any, tuple[str, dict[str, Any]]]
+) -> list[Any]:
+    retained = []
+    for row in rows:
+        state = states.get(coverage_candidate_key(row, owner)) if isinstance(row, dict) else None
+        if state is None or (
+            field != "deferred" and row.get("disposition") not in ("rejected", "not_applicable")
+        ):
+            retained.append(row)
+        else:
+            destination = state[1]["provenance"] if state[0] == "reported" else state[1]
+            archive_candidate_payloads(destination, [row])
+    return retained
 
 
 def archive_resolved_diff_payloads(

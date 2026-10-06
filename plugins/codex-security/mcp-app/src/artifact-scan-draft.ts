@@ -760,7 +760,8 @@ async function preserveScanDraft(
         if (candidateRow) {
           if (
             pending.candidate !== undefined &&
-            candidateRow.candidate !== undefined
+            candidateRow.candidate !== undefined &&
+            !isDeepStrictEqual(candidateRow.candidate, pending.candidate)
           )
             candidateRow.originalCandidates = exactUnion(
               Array.isArray(candidateRow.originalCandidates)

@@ -300,7 +300,9 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
             item for item in recovered["surfaces"] if item.get("candidateId") == candidate_id
         ]
         current = next(item for item in decisions if item["id"] == "current-decision")
-        assert current == coverage["surfaces"][0]
+        expected = coverage["surfaces"][0]
+        assert {key: current[key] for key in expected} == expected
+        assert set(current) - set(expected) <= {"originalCandidates", "previousFindings"}
         generated = [item for item in decisions if "candidate" in item]
         assert len(generated) == int(owner is not None)
         if generated:
@@ -1087,7 +1089,12 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["progress"]["candidates"]["unresolved"] == int(reopened)
         coverage = json.loads(coverage_path.read_text())
-        assert (terminal in coverage["surfaces"]) is (not reopened)
+        matching = [row for row in coverage["surfaces"] if row.get("id") == terminal["id"]]
+        assert bool(matching) is (not reopened)
+        if matching:
+            assert len(matching) == 1
+            assert {key: matching[0][key] for key in terminal} == terminal
+            assert set(matching[0]) - set(terminal) <= {"originalCandidates", "previousFindings"}
         assert accepted.read_bytes() == accepted_bytes
 
     assert_accepted()
@@ -1653,7 +1660,9 @@ def test_stopped_diff_recovers_receipts_before_freezing_authored_gap(
         "unresolved"
     ] == int(malformed_receipts)
     if rows:
-        assert original_pending in rows
+        assert any(
+            {key: row.get(key) for key in original_pending} == original_pending for row in rows
+        )
     assert any(row.get("id") == "other-review" for row in saved["deferred"])
 
 
@@ -1806,6 +1815,89 @@ def test_stopped_diff_archives_deferred_evidence_on_authored_resolution(
 
     assert_retained()
     ledger.unlink()
+    if termination == "fail-scan":
+        run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    else:
+        run_workbench(state, "get-scan", "--scan-id", scan_id)
+    assert_retained()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+def test_stopped_diff_replacement_archives_prior_terminal_payload(
+    tmp_path: Path, termination: str, field: str
+) -> None:
+    state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    historical = {
+        "id": "historical-terminal",
+        "candidateId": candidate["candidate_id"],
+        "label": "Historical candidate review",
+        "disposition": "rejected",
+        "receiptRefs": [],
+        "notes": "Previous authored decision.",
+        "candidate": {**candidate, "annotation": "Original terminal candidate evidence."},
+        "finding": {"title": "Original compact terminal finding."},
+        "previousFindings": [{**finding, "summary": "Original full terminal finding."}],
+    }
+    if field == "explicitExclusions":
+        historical.update(pattern="README.md", reason="Authored exclusion review.")
+    coverage["surfaces"] = []
+    coverage["explicitExclusions"] = []
+    coverage["deferred"] = [{"id": "independent-gap", "reason": "Independent review remains."}]
+    coverage[field] = [historical]
+    for old in (True, False):
+        submitted = copy.deepcopy(coverage)
+        if not old:
+            submitted[field] = [
+                {
+                    key: value
+                    for key, value in historical.items()
+                    if key not in ("candidate", "finding", "previousFindings")
+                }
+            ]
+            submitted[field][0].update(id="current-terminal", notes="Current authored decision.")
+        staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+        staged.write_text(
+            json.dumps(
+                {
+                    "manifest": {"scan": {"complete": False}},
+                    "findings": {"findings": []},
+                    "coverage": submitted,
+                }
+            )
+        )
+        run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    ledger.unlink()
+    checkpoints = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state, termination, "--scan-id", scan_id, *arguments)
+
+    def contains(value: object, expected: object) -> bool:
+        if value == expected:
+            return True
+        if isinstance(value, list):
+            return any(contains(item, expected) for item in value)
+        return isinstance(value, dict) and any(contains(item, expected) for item in value.values())
+
+    def assert_retained() -> None:
+        saved = json.loads(coverage_path.read_text())
+        for payload in [
+            historical["candidate"],
+            historical["finding"],
+            *historical["previousFindings"],
+        ]:
+            assert contains(saved, payload)
+        rows = saved[field]
+        assert any(row.get("notes") == "Current authored decision." for row in rows)
+        assert not any(row.get("notes") == "Previous authored decision." for row in rows)
+        assert any(row.get("id") == "independent-gap" for row in saved["deferred"])
+        assert all(path.read_bytes() == original for path, original in checkpoints.items())
+
+    assert_retained()
     if termination == "fail-scan":
         run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     else:

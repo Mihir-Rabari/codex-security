@@ -60,6 +60,7 @@ from workbench_budget_candidates import (
     _diff_candidate_reason,
     archive_candidate_payloads,
     archive_resolved_diff_payloads,
+    project_resolved_candidate_rows,
     recover_candidate_receipts,
 )
 from workbench_budget_candidates import (
@@ -1054,16 +1055,9 @@ def _reconcile_stopped_diff_sources(
         for field in ("surfaces", "explicitExclusions", "deferred"):
             items = result["coverage"].get(field)
             if isinstance(items, list):
-                result["coverage"][field] = [
-                    item
-                    for item in items
-                    if not isinstance(item, dict)
-                    or coverage_candidate_key(item, owner) not in states
-                    or (
-                        field != "deferred"
-                        and item.get("disposition") not in ("rejected", "not_applicable")
-                    )
-                ]
+                result["coverage"][field] = project_resolved_candidate_rows(
+                    items, field, owner, states
+                )
         return result
 
     return (
