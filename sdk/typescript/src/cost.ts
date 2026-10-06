@@ -701,6 +701,7 @@ async function readSessionUsage(
     if (isMissingFile(error)) return;
     throw error;
   }
+  const initialOffset = session.offset;
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
@@ -710,7 +711,10 @@ async function readSessionUsage(
         buffer.length,
         session.offset,
       );
-      if (bytesRead === 0) return;
+      if (bytesRead === 0) {
+        if (session.offset !== initialOffset) reconcileReceiptCounters(session);
+        return;
+      }
       session.offset += bytesRead;
       try {
         readSessionChunk(
@@ -860,45 +864,39 @@ function readSessionEvent(
         : session.currentTurnId;
     const cumulative = tokenUsage(payload["thread_token_usage"]);
     const timestamp = sessionStartedAt(event["timestamp"]);
-    const cumulativeTokens =
+    if (
       cumulative &&
       (attribution === null ||
         (timestamp !== null &&
           (!attribution.completedAt ||
             timestamp <= Date.parse(attribution.completedAt))))
-        ? receiptCounterTotal(
-            session,
-            responseId,
-            usage.total_tokens,
-            cumulative.total_tokens,
-            timestamp,
-            attribution &&
-              timestamp !== null &&
-              timestamp < Date.parse(attribution.startedAt)
-              ? "baseline"
-              : attribution &&
-                  !isAttributedScanEvent(
-                    attribution,
-                    session.threadId!,
-                    turnId,
-                    event["timestamp"],
-                  )
-                ? "excluded"
-                : "owned",
-          )
-        : null;
+    )
+      recordReceiptCounter(
+        session,
+        responseId,
+        usage.total_tokens,
+        cumulative.total_tokens,
+        timestamp,
+        attribution &&
+          timestamp !== null &&
+          timestamp < Date.parse(attribution.startedAt)
+          ? "baseline"
+          : attribution &&
+              !isAttributedScanEvent(
+                attribution,
+                session.threadId!,
+                turnId,
+                event["timestamp"],
+              )
+            ? "excluded"
+            : "owned",
+      );
     if (
       attribution &&
       timestamp !== null &&
       timestamp < Date.parse(attribution.startedAt)
-    ) {
-      if (cumulativeTokens !== null)
-        session.responseBaselineTokens = Math.max(
-          session.responseBaselineTokens,
-          cumulativeTokens,
-        );
+    )
       return;
-    }
     if (
       attribution &&
       !isAttributedScanEvent(
@@ -907,21 +905,9 @@ function readSessionEvent(
         turnId,
         event["timestamp"],
       )
-    ) {
-      if (cumulativeTokens !== null)
-        session.excludedResponseTokens.set(responseId, {
-          tokens: usage.total_tokens,
-          cumulative: cumulativeTokens,
-        });
+    )
       return;
-    }
     session.responseIds.add(responseId);
-    session.excludedResponseTokens.delete(responseId);
-    if (cumulativeTokens !== null)
-      session.expectedResponseTokens = Math.max(
-        session.expectedResponseTokens,
-        cumulativeTokens,
-      );
     if (!session.responseUsageObserved) {
       // Exact receipts include compaction and survive counter resets. Keep the
       // legacy counter as an independent lower bound, never add it to receipts.
@@ -1151,16 +1137,15 @@ function readSessionEvent(
   }
 }
 
-function receiptCounterTotal(
+function recordReceiptCounter(
   session: SessionUsage,
   responseId: string,
   tokens: number,
   cumulative: number,
   timestamp: number | null,
   kind: "baseline" | "owned" | "excluded",
-): number {
-  const previous = session.responseCounterRecords.get(responseId);
-  if (previous) return previous.offset + previous.end;
+): void {
+  if (session.responseCounterRecords.has(responseId)) return;
   const current = {
     start: cumulative - tokens,
     end: cumulative,
@@ -1169,6 +1154,9 @@ function receiptCounterTotal(
     kind,
   };
   session.responseCounterRecords.set(responseId, current);
+}
+
+function reconcileReceiptCounters(session: SessionUsage): void {
   const timeline = [...session.responseCounterRecords].map(([id, record]) => ({
     id: id as string | null,
     record,
@@ -1230,7 +1218,6 @@ function receiptCounterTotal(
   session.responseBaselineTokens = baseline;
   session.expectedResponseTokens = expected;
   session.excludedResponseTokens = excluded;
-  return current.offset + current.end;
 }
 
 function uuid7Order(value: unknown): bigint | null {

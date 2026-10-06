@@ -3071,6 +3071,7 @@ test.each([
   "legacy-baseline-complete",
   "copied-prefix-first",
   "copied-continuation-first",
+  "long-monotonic-rollout",
 ])(
   "receipt completeness preserves native timeline evidence: %s",
   async (scenario) => {
@@ -3133,6 +3134,15 @@ test.each([
       );
       expected = 200;
       partial = true;
+    } else if (scenario === "long-monotonic-rollout") {
+      events = [
+        ...header,
+        ...Array.from({ length: 2000 }, (_, index) =>
+          receipt(index + 1, `response-${index}`, 1, index + 1),
+        ),
+      ];
+      expected = 2000;
+      partial = false;
     } else if (scenario.startsWith("legacy-baseline")) {
       events = [
         ...header,

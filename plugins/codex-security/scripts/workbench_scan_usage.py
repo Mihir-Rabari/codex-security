@@ -732,15 +732,15 @@ def _read_rollout_usage(
     response_counter_baseline: tuple[int, datetime] | None = None
     response_counter_records: dict[str, _ResponseCounterRecord] = {}
 
-    def receipt_counter_total(
+    def record_receipt_counter(
         response_id: str, tokens: int, cumulative: int, timestamp: datetime, kind: str
-    ) -> int:
+    ) -> None:
+        response_counter_records.setdefault(
+            response_id, _ResponseCounterRecord(cumulative - tokens, cumulative, timestamp, kind)
+        )
+
+    def reconcile_receipt_counters() -> None:
         nonlocal response_baseline_tokens, expected_response_tokens, excluded_response_tokens
-        recorded = response_counter_records.get(response_id)
-        if recorded is not None:
-            return recorded.offset + recorded.end
-        current = _ResponseCounterRecord(cumulative - tokens, cumulative, timestamp, kind)
-        response_counter_records[response_id] = current
         timeline = [
             (identity, record, False) for identity, record in response_counter_records.items()
         ]
@@ -786,7 +786,6 @@ def _read_rollout_usage(
         response_baseline_tokens = baseline
         expected_response_tokens = expected
         excluded_response_tokens = excluded
-        return current.offset + current.end
 
     excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
@@ -875,8 +874,8 @@ def _read_rollout_usage(
                 )
                 if completed_at is not None and timestamp > completed_at:
                     continue
-                cumulative_tokens = (
-                    receipt_counter_total(
+                if cumulative is not None:
+                    record_receipt_counter(
                         response_id,
                         usage["totalTokens"],
                         cumulative["totalTokens"],
@@ -888,27 +887,14 @@ def _read_rollout_usage(
                         and payload.get("turn_id", current_turn_id) != owner_turn_id
                         else "owned",
                     )
-                    if cumulative is not None
-                    else None
-                )
                 if timestamp < started_at:
-                    if cumulative_tokens is not None:
-                        response_baseline_tokens = max(response_baseline_tokens, cumulative_tokens)
                     continue
                 if (
                     owner_turn_id is not None
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
-                    if cumulative_tokens is not None:
-                        excluded_response_tokens[response_id] = (
-                            usage["totalTokens"],
-                            cumulative_tokens,
-                        )
                     continue
                 response_ids.add(response_id)
-                excluded_response_tokens.pop(response_id, None)
-                if cumulative_tokens is not None:
-                    expected_response_tokens = max(expected_response_tokens, cumulative_tokens)
                 if not response_usage_observed:
                     response_usage_observed = True
                     total = _empty_token_usage()
@@ -959,6 +945,8 @@ def _read_rollout_usage(
                 _add_token_usage(
                     local_models.setdefault(current_model, _empty_token_usage()), delta
                 )
+
+    reconcile_receipt_counters()
 
     if (
         counter_total["inputTokens"] > total["inputTokens"]
