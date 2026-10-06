@@ -5,6 +5,7 @@ import { assertNoError } from "./assertions.ts";
 import { consumeStreamLines, writeMessage } from "./support/streams.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { hash, randomUUID } from "node:crypto";
 import {
@@ -1044,7 +1045,12 @@ try {
     clientInfo: { name: "codex-security-smoke", version: "0.1.0" },
   });
   assertNoError(initialized);
-  assert.equal(initialized.result.capabilities.resources, undefined);
+  assert.deepEqual(
+    initialized.result.capabilities.resources,
+    existsSync(path.join(pluginRoot, "mcp", "local.html"))
+      ? { listChanged: true }
+      : undefined,
+  );
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
     {},
