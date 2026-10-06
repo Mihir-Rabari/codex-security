@@ -1526,7 +1526,13 @@ describe("scan and patch workflow", () => {
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
               if (gitlab && args[0] === "remote") {
-                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                expect(args).toEqual([
+                  "remote",
+                  "get-url",
+                  "--push",
+                  "--all",
+                  "origin",
+                ]);
                 return origin;
               }
               if (gitlab && args[0] === "ls-remote") {
@@ -1545,6 +1551,7 @@ describe("scan and patch workflow", () => {
               return git(...args);
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
+            if (args[0] === "repo") return "synthetic-origin-id";
             if (args[1] === "list")
               return publishedUrl
                 ? JSON.stringify({
@@ -1681,7 +1688,9 @@ describe("scan and patch workflow", () => {
           },
           onRepositoryCommand: (command, args) => {
             commandStarted ||=
-              (command !== "git" && args[1] !== "list") ||
+              (command !== "git" &&
+                args[1] !== "list" &&
+                !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
             return status === "outside" && args.includes("--name-only")
               ? "src/finding-1.ts\0"
@@ -2113,7 +2122,13 @@ describe("scan and patch workflow", () => {
               if (args.includes("--show-toplevel")) return SAVED_REPOSITORY;
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
-                expect(args).toEqual(["remote", "get-url", "--push", "origin"]);
+                expect(args).toEqual([
+                  "remote",
+                  "get-url",
+                  "--push",
+                  "--all",
+                  "origin",
+                ]);
                 return origin;
               }
               return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
@@ -2133,11 +2148,11 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode).toBe(0);
-      expect(publicationCommands.map((args) => args[1])).toEqual([
-        "list",
-        "list",
-        "create",
-      ]);
+      expect(publicationCommands.map((args) => args[1])).toEqual(
+        client === "glab"
+          ? ["list", "list", "create"]
+          : ["view", "list", "view", "list", "create"],
+      );
       if (client === "glab") {
         expect(publicationCommands.slice(1)).toEqual([
           [
@@ -3081,6 +3096,173 @@ const runGitRepositoryCommand: NonNullable<
 describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
+
+  async function publicationRepository() {
+    const directory = await fixtures.create("patch-destination-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await mkdir(join(directory, "src"));
+    await writeFile(join(directory, "src/finding-1.ts"), "original\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic baseline");
+    const remote = await fixtures.create("patch-destination-origin-");
+    git("init", "--bare", remote);
+    git("remote", "add", "origin", remote);
+    return { directory, git, remote };
+  }
+
+  test.each([false, true])(
+    "checks all push destinations before patching: second destination occupied=%s",
+    async (occupied) => {
+      const { directory, git, remote } = await publicationRepository();
+      const secondary = await fixtures.create("patch-destination-secondary-");
+      git("clone", "--bare", directory, secondary);
+      const branch = "codex-security/patch-scan-1";
+      if (occupied)
+        git(
+          "--git-dir",
+          secondary,
+          "update-ref",
+          `refs/heads/${branch}`,
+          git("rev-parse", "HEAD"),
+        );
+      git("remote", "set-url", "--add", "--push", "origin", remote);
+      git("remote", "set-url", "--add", "--push", "origin", secondary);
+      const before = git("ls-remote", secondary, `refs/heads/${branch}`);
+      const result = resultWithFindings(["high"]);
+      const onCodex = mock(
+        async (
+          args: readonly string[],
+          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+        ) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+      );
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onCodex,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[0] === "repo"
+                ? "synthetic-origin-id"
+                : args[1] === "list"
+                  ? ""
+                  : "https://github.example.test/example/repository/pull/1",
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(occupied ? 2 : 0);
+      expect(onCodex).toHaveBeenCalledTimes(occupied ? 0 : 1);
+      if (occupied) {
+        expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
+          before,
+        );
+        expect(git("ls-remote", remote)).toBe("");
+      } else {
+        for (const target of [remote, secondary])
+          expect(git("ls-remote", target, `refs/heads/${branch}`)).toContain(
+            git("rev-parse", "HEAD"),
+          );
+      }
+    },
+  );
+
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "uses the push repository to distinguish same-branch pull requests: resume=%s, own PR=%s",
+    async (resume, ownIncluded) => {
+      const { directory, git, remote } = await publicationRepository();
+      const branch = "codex-security/patch-scan-1";
+      const commit = git("rev-parse", "HEAD");
+      if (resume) {
+        git("branch", branch);
+        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+        git(
+          "config",
+          `branch.${branch}.codexSecurityPatchPullRequestBody`,
+          "Synthetic body",
+        );
+      }
+      const result = resultWithFindings(["high"]);
+      let modelCalls = 0;
+      let pushes = 0;
+      const ownUrl = "https://github.example.test/upstream/repository/pull/8";
+      const createdUrl =
+        "https://github.example.test/upstream/repository/pull/9";
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git") {
+              if (args[0] === "push") pushes++;
+              return runGitRepositoryCommand(command, args, cwd, options);
+            }
+            if (args[0] === "repo") {
+              expect(args).toEqual([
+                "repo",
+                "view",
+                remote,
+                "--json",
+                "id",
+                "--jq",
+                ".id",
+              ]);
+              return "synthetic-origin-id";
+            }
+            if (args[1] === "list") {
+              expect(args).toEqual([
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "url,headRefOid,headRepository",
+                "--jq",
+                '[.[] | select(.headRepository.id == "synthetic-origin-id")][0] | select(. != null) | {url, head: .headRefOid}',
+              ]);
+              return ownIncluded
+                ? JSON.stringify({ url: ownUrl, head: commit })
+                : "";
+            }
+            return createdUrl;
+          },
+          onCodex: async (args, output) => {
+            modelCalls++;
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        !resume && ownIncluded ? 2 : 0,
+      );
+      expect(modelCalls).toBe(resume || ownIncluded ? 0 : 1);
+      expect(pushes).toBe(ownIncluded ? 0 : 1);
+      if (resume || !ownIncluded)
+        expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
+          ownIncluded ? ownUrl : createdUrl,
+        );
+    },
+  );
+
   test.each([
     "root",
     "package",

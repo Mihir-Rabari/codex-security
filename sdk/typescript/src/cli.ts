@@ -6713,7 +6713,10 @@ async function patchPublicationDestination(
 ) {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
-  const remote = await run("git", ["remote", "get-url", "--push", "origin"]);
+  const remotes = (
+    await run("git", ["remote", "get-url", "--push", "--all", "origin"])
+  ).split("\n");
+  const remote = remotes[0]!;
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -6728,6 +6731,9 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  const headRepository = gitlab
+    ? undefined
+    : await run("gh", ["repo", "view", remote, "--json", "id", "--jq", ".id"]);
   const existing = await run(
     command,
     gitlab
@@ -6752,13 +6758,14 @@ async function patchPublicationDestination(
           "--state",
           "all",
           "--json",
-          "url,headRefOid",
+          "url,headRefOid,headRepository",
           "--jq",
-          ".[0] | select(. != null) | {url, head: .headRefOid}",
+          `[.[] | select(.headRepository.id == ${JSON.stringify(headRepository)})][0] | select(. != null) | {url, head: .headRefOid}`,
         ],
   );
   return {
     remote,
+    remotes,
     gitlab,
     command,
     existing: existing
@@ -6798,14 +6805,17 @@ async function preparePatchPublication(
       branch,
       dependencies,
     );
-    existing = Boolean(
-      destination.existing ||
-      (await dependencies.runRepositoryCommand(
-        "git",
-        ["ls-remote", "--heads", destination.remote, `refs/heads/${branch}`],
-        repository,
-      )),
-    );
+    existing = Boolean(destination.existing);
+    for (const remote of destination.remotes) {
+      if (existing) break;
+      existing = Boolean(
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["ls-remote", "--heads", remote, `refs/heads/${branch}`],
+          repository,
+        ),
+      );
+    }
   }
   if (existing) {
     throw new CodexSecurityError(
