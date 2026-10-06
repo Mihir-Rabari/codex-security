@@ -32,7 +32,6 @@
   "dependencies": {
     "@openai/codex-sdk": "0.162.0-alpha.15",
     "@opencode-ai/sdk": "1.18.33",
-    "nunjucks": "3.2.4",
     "promptfoo": "0.123.1"
   }
 }
