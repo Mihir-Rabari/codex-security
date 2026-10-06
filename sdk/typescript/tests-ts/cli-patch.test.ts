@@ -8785,14 +8785,17 @@ describe("patch worktree root identity", () => {
   );
 });
 
-test.each(["absolute", "relative"])(
+test.each(["absolute", "relative", "parent primary pool"])(
   "preserves %s nested alternates from an outside invocation",
   async (kind) => {
     const root = await temporaryDirectory("patch-outside-alternate-");
     const repository = join(root, "repository");
     const invocation = join(root, "invocation");
     const nested = join(repository, "nested");
-    const pool = join(invocation, "pool", "objects");
+    const pool =
+      kind === "parent primary pool"
+        ? join(repository, ".git", "objects")
+        : join(invocation, "pool", "objects");
     try {
       await mkdir(repository);
       await mkdir(invocation);
@@ -8811,8 +8814,16 @@ test.each(["absolute", "relative"])(
       await writeFile(join(nested, "app.ts"), "original\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic nested baseline");
-      await mkdir(dirname(pool));
-      await rename(join(nested, ".git", "objects"), pool);
+      if (kind === "parent primary pool") {
+        await cp(join(nested, ".git", "objects"), pool, {
+          recursive: true,
+          force: false,
+        });
+        await rm(join(nested, ".git", "objects"), { recursive: true });
+      } else {
+        await mkdir(dirname(pool));
+        await rename(join(nested, ".git", "objects"), pool);
+      }
       await mkdir(join(nested, ".git", "objects"));
       expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
       const gitEnvironment = {

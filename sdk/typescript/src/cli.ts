@@ -7173,22 +7173,35 @@ async function patchCommandContext(
       "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     ) !== undefined
   ) {
-    const objects = await dependencies.runRepositoryCommand(
-      "git",
-      ["count-objects", "-v"],
-      repository,
-      { trim: false, directory },
+    const emptyObjects = await mkdtemp(
+      join(tmpdir(), "codex-security-alternates-"),
     );
-    // Git resolves and C-quotes alternate paths in the original command context.
-    environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
-      .split("\n")
-      .filter((line) => line.startsWith("alternate: "))
-      .map((line) => {
-        const path = line.slice("alternate: ".length);
-        return path.startsWith('"') ? path : JSON.stringify(path);
-      })
-      .join(delimiter);
+    try {
+      const objects = await dependencies.runRepositoryCommand(
+        "git",
+        ["count-objects", "-v"],
+        repository,
+        {
+          trim: false,
+          directory,
+          environment: { GIT_OBJECT_DIRECTORY: emptyObjects },
+        },
+      );
+      // An empty primary keeps Git from omitting alternates needed by nested checkouts.
+      // Git resolves and C-quotes them in the original command context.
+      environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
+        .split("\n")
+        .filter((line) => line.startsWith("alternate: "))
+        .map((line) => {
+          const path = line.slice("alternate: ".length);
+          return path.startsWith('"') ? path : JSON.stringify(path);
+        })
+        .join(delimiter);
+    } finally {
+      await rm(emptyObjects, { recursive: true, force: true });
+    }
   }
+
   const physicalDirectory = await realpath(directory);
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
