@@ -1,8 +1,69 @@
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
+import findingsSchema from "../../../plugins/codex-security/schemas/findings.schema.json";
+import { semanticFinding } from "./helpers/semantic-scan.js";
 import {
+  prepareScanFindings,
   preserveFindingDetails,
   type JsonObject,
 } from "../src/scan-semantics.js";
+
+const validateIdentity = new Ajv2020().compile(
+  findingsSchema.properties.findings.items.properties.identity,
+);
+
+test.each([
+  [".env exposure", "env-exposure"],
+  ["_internal request", "internal-request"],
+  ["/route mismatch", "route-mismatch"],
+  ["-._/", "finding-1"],
+  ["control.", "control."],
+  ["control_", "control_"],
+  ["control/", "control/"],
+])(
+  "generated finding identities satisfy the canonical schema for %s",
+  (source, anchor) => {
+    for (const fromCandidate of [false, true]) {
+      const finding = semanticFinding({
+        title: fromCandidate ? "Original finding title" : source,
+        extensions: {
+          ...(fromCandidate ? { candidateId: source } : {}),
+          ledgerRowId: ".ledger_entry/",
+        },
+      });
+      const before = structuredClone(finding);
+      const [prepared] = prepareScanFindings([finding]);
+      expect(validateIdentity(prepared!.identity)).toBe(true);
+      expect(prepared!.identity).toEqual({
+        anchor,
+        instance: "ledger_entry/",
+      });
+      expect(prepared!.title).toBe(before.title);
+      expect(prepared!.extensions).toEqual(before.extensions);
+      expect(finding).toEqual(before);
+    }
+  },
+);
+
+test("explicit finding identities and original diagnostic text remain unchanged", () => {
+  const identity = {
+    anchor: "authored/anchor.",
+    instance: "authored_instance/",
+  };
+  const finding = semanticFinding({
+    title: ".env exposure",
+    identity,
+    extensions: {
+      candidateId: "_original-candidate",
+      ledgerRowId: ".original",
+    },
+  });
+  const before = structuredClone(finding);
+  const [prepared] = prepareScanFindings([finding]);
+  expect(prepared).toEqual({ ...before, identity });
+  expect(validateIdentity(prepared!.identity)).toBe(true);
+  expect(finding).toEqual(before);
+});
 
 const evidence = {
   severity: "high",
