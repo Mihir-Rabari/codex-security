@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { test, type TestContext } from "node:test";
+import { after, test, type TestContext } from "node:test";
 import { importSource } from "./import-module.ts";
+import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { stringifyJson } from "../src/helpers/json.ts";
 import type * as Duplicates from "../src/workbench/duplicates.ts";
 import type * as Migrations from "../src/workbench/migrations.ts";
@@ -12,8 +16,11 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 
-function memory(t: TestContext) {
-  const database = new DatabaseSync(":memory:");
+const temporary = createTemporaryDirectories(true);
+after(() => temporary.cleanup());
+
+function open(t: TestContext, path = ":memory:") {
+  const database = new DatabaseSync(path);
   t.after(() => database.close());
   database.exec("PRAGMA foreign_keys = ON");
   applyMigrations(database);
@@ -22,12 +29,15 @@ function memory(t: TestContext) {
 
 function finding(
   database: DatabaseSync,
-  index: number,
+  index: number | string,
   vector = [1, 0],
   repository = "synthetic-repository",
   model = "synthetic-model",
 ) {
-  const findingId = `csf_${String(index).padStart(24, "0")}`;
+  const findingId =
+    typeof index === "number"
+      ? `csf_${String(index).padStart(24, "0")}`
+      : index;
   const document = { findingId, extensions: { opaqueId: 9007199254740993n } };
   database
     .prepare(
@@ -48,7 +58,7 @@ function finding(
 }
 
 test("duplicate retrieval filters before scoring and loads only the stable top 50 documents", (t) => {
-  const database = memory(t);
+  const database = open(t);
   const entries = Array.from({ length: 62 }, (_, index) =>
     finding(database, index + 1),
   );
@@ -88,7 +98,7 @@ test("duplicate retrieval filters before scoring and loads only the stable top 5
 });
 
 test("cosine scoring handles large and scaled vectors without argument spreading", (t) => {
-  const database = memory(t);
+  const database = open(t);
   const vector = Array<number>(150_000).fill(0);
   vector[0] = 1e-300;
   const anchor = finding(database, 1, vector);
@@ -114,7 +124,7 @@ test("cosine scoring handles large and scaled vectors without argument spreading
 });
 
 test("cosine scoring includes the threshold and excludes scores below it", (t) => {
-  const database = memory(t);
+  const database = open(t);
   const anchor = finding(database, 1, [7, 0]);
   const boundary = finding(database, 2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
   finding(database, 3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
@@ -125,7 +135,7 @@ test("cosine scoring includes the threshold and excludes scores below it", (t) =
 });
 
 test("dedupe retries retain durable hashes, first timestamps, and overlapping groups", (t) => {
-  const database = memory(t);
+  const database = open(t);
   const a = finding(database, 1).findingId;
   const b = finding(database, 2).findingId;
   const c = finding(database, 3).findingId;
@@ -167,7 +177,7 @@ test("dedupe retries retain durable hashes, first timestamps, and overlapping gr
 });
 
 test("a missing member rolls back the entire dedupe batch and leaves the connection usable", (t) => {
-  const database = memory(t);
+  const database = open(t);
   const a = finding(database, 1).findingId;
   const b = finding(database, 2).findingId;
   assert.deepEqual(
@@ -191,4 +201,48 @@ test("a missing member rolls back the entire dedupe batch and leaves the connect
     0,
   );
   assert.ok("groups" in storeDedupeGroups(database, [[a, b]], "retry"));
+});
+
+test("Python and Node retries preserve Unicode group identities and timestamps", async (t) => {
+  const path = join(
+    await temporary.create("workbench-duplicates-"),
+    "workbench.sqlite3",
+  );
+  const database = open(t, path);
+  const ids = [
+    "finding-λ",
+    "finding-\u{10000}",
+    "finding-\ue000",
+    "finding-\u007f",
+  ];
+  for (const id of ids) finding(database, id);
+  const original = JSON.parse(
+    execFileSync(
+      process.env.PYTHON ?? "python",
+      [
+        "-I",
+        "-c",
+        `import json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_findings import store_dedupe_groups
+with sqlite3.connect(sys.argv[2]) as db:
+    db.row_factory = sqlite3.Row
+    print(json.dumps(store_dedupe_groups(db, json.load(sys.stdin), "first")))`,
+        fileURLToPath(new URL("../../scripts/", import.meta.url)),
+        path,
+      ],
+      { input: JSON.stringify([ids]), encoding: "utf8" },
+    ),
+  );
+  assert.deepEqual(
+    storeDedupeGroups(database, [[...ids].reverse()], "later"),
+    original,
+  );
+  assert.deepEqual(listDedupeGroups(database, ids[0]), original);
+  assert.equal(
+    database
+      .prepare("SELECT count(*) AS count FROM finding_dedupe_groups")
+      .get()!.count,
+    1,
+  );
 });

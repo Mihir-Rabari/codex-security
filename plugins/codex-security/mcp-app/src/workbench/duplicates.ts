@@ -111,11 +111,17 @@ export function storeDedupeGroups(
       );
       const stored = new Map<string, DedupeGroup>();
       for (const group of groups) {
-        const findingIds = [...new Set(group)].sort();
-        // Finding IDs are ASCII; this encoding preserves existing group identities.
+        // Durable group IDs use code-point sorting and ASCII-escaped JSON.
+        const findingIds = [...new Set(group)].sort((left, right) =>
+          Buffer.compare(Buffer.from(left), Buffer.from(right)),
+        );
+        const encoded = JSON.stringify(findingIds).replace(
+          /[\u007f-\uffff]/g,
+          (character) =>
+            `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+        );
         const groupId =
-          "fdg_" +
-          createHash("sha256").update(JSON.stringify(findingIds)).digest("hex");
+          "fdg_" + createHash("sha256").update(encoded).digest("hex");
         insertGroup.run(groupId, timestamp);
         for (const findingId of findingIds)
           insertMember.run(groupId, findingId);
