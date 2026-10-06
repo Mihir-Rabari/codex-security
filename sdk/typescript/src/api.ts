@@ -1581,7 +1581,8 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        // Reload the file's provider instead of overlaying generated defaults.
+        // Reload file settings, retaining only standard provider values that
+        // the caller explicitly overrode rather than preflight's projection.
         const provider = scanModelProvider(preflightConfig);
         if (isExternalModelProvider(provider)) {
           const fileProfile = await readCodexFileProfile(
@@ -1591,6 +1592,22 @@ export class CodexSecurity {
           const providers = fileProfile["model_providers"];
           if (isRecord(providers) && isRecord(providers[provider])) {
             delete recipeConfig["model_providers"];
+            const explicitProviders =
+              this.config.codexOverrides?.["model_providers"];
+            const explicitProvider = isRecord(explicitProviders)
+              ? explicitProviders[provider]
+              : undefined;
+            const savedProvider: JsonObject = {};
+            if (isRecord(explicitProvider)) {
+              for (const [key, value] of Object.entries(
+                EXTERNAL_CODEX_PROVIDERS[provider],
+              )) {
+                if (explicitProvider[key] === value) savedProvider[key] = value;
+              }
+            }
+            if (Object.keys(savedProvider).length > 0) {
+              recipeConfig["model_providers"] = { [provider]: savedProvider };
+            }
           }
         }
       }

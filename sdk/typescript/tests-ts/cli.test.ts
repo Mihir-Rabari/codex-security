@@ -3154,6 +3154,61 @@ describe("CLI", () => {
     },
   );
 
+  test.each([
+    ["openrouter", OPENROUTER_CODEX_PROVIDER],
+    ["fireworks", FIREWORKS_CODEX_PROVIDER],
+  ] as const)(
+    "fills missing file-profile %s defaults without replacing refinements",
+    async (provider, defaults) => {
+      const home = await temporaryDirectory("codex-security-partial-provider-");
+      for (const refinement of [
+        { request_max_retries: 4 },
+        {
+          request_max_retries: 4,
+          base_url: "http://127.0.0.1:1/v1",
+          env_key: "SYNTHETIC_FILE_PROVIDER_KEY",
+        },
+      ]) {
+        await writeFile(
+          join(home, "review.config.toml"),
+          `model="synthetic-model"\n[model_providers.${provider}]\n` +
+            Object.entries(refinement)
+              .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+              .join(""),
+        );
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              'profile="review"',
+              "--json",
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: { CODEX_HOME: home },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(
+          (await mergedCodexConfig(selected!, home))["model_providers"],
+        ).toEqual({
+          [provider]: { ...defaults, ...refinement },
+        });
+      }
+    },
+  );
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 

@@ -316,6 +316,67 @@ describe("Codex configuration", () => {
     });
   });
 
+  test.each(
+    ["exporter", "trace_exporter", "metrics_exporter"].flatMap((exporter) =>
+      ["otlp-http", "otlp-grpc"].flatMap((protocol) =>
+        [undefined, "explicit-client.key", "~/native/client.key"].map(
+          (explicit) => ({
+            exporter,
+            protocol,
+            explicit,
+          }),
+        ),
+      ),
+    ),
+  )(
+    "preserves OTEL file origins before explicit TLS overrides: %j",
+    async ({ exporter, protocol, explicit }) => {
+      const home = await temporaryDirectory();
+      const paths = {
+        "ca-certificate": "tls/ca.pem",
+        "client-certificate": "tls/client.pem",
+        "client-private-key": "tls/client.key",
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        `[otel.${exporter}.${protocol}.tls]\n` +
+          Object.entries(paths)
+            .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+            .join(""),
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : {
+              otel: {
+                [exporter]: {
+                  [protocol]: { tls: { "client-private-key": explicit } },
+                },
+              },
+            }),
+      };
+      const original = structuredClone(overrides);
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["otel"]).toEqual({
+        [exporter]: {
+          [protocol]: {
+            tls: {
+              "ca-certificate": join(home, paths["ca-certificate"]),
+              "client-certificate": join(home, paths["client-certificate"]),
+              "client-private-key":
+                explicit ?? join(home, paths["client-private-key"]),
+            },
+          },
+        },
+      });
+      expect(overrides).toEqual(original);
+    },
+  );
+
   test.each([undefined, "other helpers", "~/helpers"])(
     "retains inherited command auth cwd unless the profile overrides it: %s",
     async (cwd) => {

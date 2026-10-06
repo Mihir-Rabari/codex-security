@@ -1188,7 +1188,11 @@ ${commandAuth ? "" : 'env_key = "SYNTHETIC_GATEWAY_KEY"'}${
 [model_providers.synthetic.auth]
 command = "./synthetic-auth"
 cwd = ${JSON.stringify(path.join(codexHome, "helpers"))}
-refresh_interval_ms = 2000`
+refresh_interval_ms = 2000
+[otel.exporter.otlp-http.tls]
+ca-certificate = ${JSON.stringify(path.join(codexHome, "tls", "ca.pem"))}
+client-certificate = ${JSON.stringify(path.join(codexHome, "tls", "client.pem"))}
+client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))}`
             : ""
         }`,
       );

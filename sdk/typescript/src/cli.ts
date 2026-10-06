@@ -9435,11 +9435,20 @@ async function parseScanCodexOverrides(
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
-    // The file supplies this provider. Keep explicit CLI refinements without
-    // combining native command auth with a generated env-key definition.
+    // Fill missing defaults without replacing file settings or combining
+    // native command auth with the generated env-key definition.
+    const generated: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
+    for (const key of Object.keys(providers[provider])) delete generated[key];
+    if (providers[provider]["auth"] !== undefined) delete generated["env_key"];
     delete result["model_providers"];
+    if (Object.keys(generated).length > 0) {
+      result["model_providers"] = { [provider]: generated };
+    }
     if (explicit["model_providers"] !== undefined) {
-      result["model_providers"] = explicit["model_providers"];
+      result["model_providers"] = mergeCodexOverrides(
+        (result["model_providers"] as JsonObject | undefined) ?? {},
+        explicit["model_providers"] as JsonObject,
+      );
     }
   }
   return result;
