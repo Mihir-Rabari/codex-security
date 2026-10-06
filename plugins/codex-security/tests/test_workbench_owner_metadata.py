@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from test_workbench_checkpoint_heads import select
 from workbench_test_support import write_checkpoint, write_completed_contract
 
 
@@ -379,3 +380,135 @@ def test_saved_surface_collision_updates_links_for_the_matching_owner(
         assert item["surfaceIds"] == [retained[item["sourceWorkerId"]]["id"]]
     assert coverage_path.read_bytes() == parent_bytes
     assert checkpoint.read_bytes() == checkpoint_bytes
+
+
+@pytest.mark.parametrize("worker_observation", ["older", "tied", "newer"])
+def test_saved_source_owner_finding_follows_parent_worker_observation_order(
+    tmp_path: Path, workbench_api, worker_observation: str
+) -> None:
+    scan_id = "parent-worker-outcome-order"
+    scan_dir, manifest, finding, coverage = saved_parent(tmp_path, scan_id)
+    manifest["scan"]["sealedAt"] = "2026-01-01T00:00:00Z"
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    finding["provenance"].pop("workerId", None)
+    finding["provenance"].update(candidateId="candidate-one", sourceWorkerId="worker-one")
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": [finding]}))
+    coverage.update(completeness="complete", deferred=[])
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    parent_time = 1_700_000_000_000_000_000
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan_dir / name, ns=(parent_time, parent_time))
+    output = scan_dir / "worker"
+    output.mkdir()
+    result_path = output / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "scanId": scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    "completeness": "complete",
+                    "surfaces": [
+                        {
+                            "candidateId": "candidate-one",
+                            "label": "Worker review",
+                            "disposition": "rejected",
+                            "notes": "Saved worker dismissal.",
+                        }
+                    ],
+                    "deferred": [],
+                },
+            }
+        )
+    )
+    worker_time = (
+        parent_time + {"older": -1, "tied": 0, "newer": 1}[worker_observation] * 1_000_000_000
+    )
+    os.utime(result_path, ns=(worker_time, worker_time))
+    checkpoint = write_checkpoint(output / "checkpoints", json.loads(result_path.read_text()))
+    os.utime(checkpoint, ns=(worker_time, worker_time))
+    select(output, checkpoint, worker_time)
+    workers = [
+        {
+            "id": "worker-one",
+            "kind": "discovery",
+            "status": "succeeded",
+            "artifact_dir": str(output),
+            "result_manifest_path": str(result_path),
+            "attempt": 1,
+        }
+    ]
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    warnings: list[str] = []
+    result = workbench_api["saved_results"].merge_saved_results(
+        scan_dir, scan_id, binding, workers, warnings, stopped=True, reason="Stopped after review."
+    )
+    assert result is not None
+    assert warnings == []
+    assert len(result[1]["findings"]) == (1 if worker_observation == "older" else 0)
+
+
+@pytest.mark.parametrize(
+    "unresolved", [1, [], [{"id": "pending-reducer", "reason": "Pending reducer evidence."}]]
+)
+def test_saved_malformed_reducer_candidates_preserve_valid_parent(
+    tmp_path: Path, workbench_api, unresolved: object
+) -> None:
+    scan_id = "malformed-reducer-candidates"
+    scan_dir, manifest, finding, _ = saved_parent(tmp_path, scan_id)
+    output = scan_dir / "reducer"
+    output.mkdir()
+    result_path = output / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "scanId": scan_id,
+                "complete": False,
+                "findings": [],
+                "coverage": {"completeness": "complete", "surfaces": [], "deferred": []},
+                "unresolvedCandidates": unresolved,
+            }
+        )
+    )
+    checkpoint = json.loads(result_path.read_text())
+    checkpoint.pop("unresolvedCandidates")
+    write_checkpoint(output / "checkpoints", checkpoint)
+    warnings: list[str] = []
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    result = workbench_api["saved_results"].merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        [
+            {
+                "id": "reducer-one",
+                "kind": "dedup",
+                "status": "failed",
+                "artifact_dir": str(output),
+                "result_manifest_path": str(result_path),
+                "attempt": 1,
+            }
+        ],
+        warnings,
+        stopped=True,
+        reason="Stopped after review.",
+    )
+    assert result is not None
+    assert finding in result[1]["findings"]
+    assert bool(warnings) is (unresolved == 1)
+    assert any(row.get("id") == "pending-reducer" for row in result[2]["deferred"]) is (
+        isinstance(unresolved, list) and bool(unresolved)
+    )

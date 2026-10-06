@@ -1465,3 +1465,38 @@ def test_stopped_diff_recovers_nullable_authored_finding_history(
         if attempt == 0:
             run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert saved.read_bytes() == original
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_stopped_diff_dismissal_resolves_unique_cross_owner_linked_surface(
+    tmp_path: Path, shared: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    candidate = json.loads(ledger.read_text())
+    linked = {
+        "id": "cross-owner-proof",
+        "sourceWorkerId": "surface-worker",
+        "label": "Linked proof",
+        "disposition": "needs_follow_up",
+        "notes": "Review the saved proof.",
+        "receiptRefs": [],
+    }
+    coverage["surfaces"].append(linked)
+    coverage["deferred"][0]["surfaceIds"] = [linked["id"]]
+    if shared:
+        coverage["deferred"][1]["surfaceIds"] = [linked["id"]]
+    coverage_path.write_text(json.dumps(coverage))
+    candidate["validation"] = {"disposition": "suppressed"}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    run_workbench(
+        state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped after review."
+    )
+    saved = json.loads(coverage_path.read_text())
+    assert (
+        any(row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"])
+        is False
+    )
+    assert any(row.get("id") == linked["id"] for row in saved["surfaces"]) is shared
+    assert (scan_dir / "report.md").is_file()

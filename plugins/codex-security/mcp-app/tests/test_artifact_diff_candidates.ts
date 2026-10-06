@@ -2781,3 +2781,34 @@ for (const validation of ["suppressed", "not_applicable"]) {
     });
   }
 }
+
+for (const owner of [undefined, "other-worker"]) {
+  test(`post-final Diff checkpoint preserves ${owner ?? "local"} candidate ownership`, async (t) => {
+    const pending = candidate("post-final-shared-candidate");
+    const context = await fixture(t, [pending]);
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const next = { ...draft(), complete: false };
+    next.coverage.completeness = "partial";
+    next.coverage.deferred.push({
+      candidateId: pending.candidate_id,
+      sourceWorkerId: owner,
+      reason: "Imported review remains pending.",
+      analystNote: "Keep independent ownership.",
+    });
+    await recordCodexSecurityScanDraft(context, next);
+    const saved = await readCoverage(context);
+    assert.deepEqual(
+      saved.deferred
+        .map((row: FixtureObject) => row.sourceWorkerId ?? null)
+        .sort(),
+      owner === undefined ? [null] : [null, owner].sort(),
+    );
+    if (owner !== undefined)
+      assert.equal(
+        saved.deferred.find(
+          (row: FixtureObject) => row.sourceWorkerId === owner,
+        ).analystNote,
+        "Keep independent ownership.",
+      );
+  });
+}

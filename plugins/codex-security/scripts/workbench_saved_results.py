@@ -26,6 +26,7 @@ from candidate_identity import (
     coverage_candidate_key,
     diff_candidate_disposition,
     finding_candidate_key,
+    resolved_candidate_surface_keys,
     surface_reference_key,
     unresolved_candidates,
 )
@@ -1544,6 +1545,8 @@ def merge_saved_results(
             # Project it only after hashing the immutable original result.
             projected = {"coverage": {}, **draft}
             if relative in reducer_paths and draft.get("unresolvedCandidates"):
+                if not isinstance(draft["unresolvedCandidates"], list):
+                    raise ContractError("Saved reducer unresolvedCandidates must be an array.")
                 projected["coverage"] = copy.deepcopy(projected["coverage"])
                 projected["coverage"].setdefault("deferred", []).extend(
                     copy.deepcopy(draft["unresolvedCandidates"])
@@ -1665,19 +1668,9 @@ def merge_saved_results(
         for item in draft["coverage"][field]
         if item.get("disposition") in {"rejected", "not_applicable"}
     }
-    resolved_surface_keys = {
-        (key[0], surface_id)
-        for _, draft, worker_id in ([("parent", parent, None)] if parent else []) + sources
-        for items in [draft["coverage"].get("deferred", [])]
-        if isinstance(items, list)
-        for item in items
-        if isinstance(item, dict)
-        and (key := coverage_candidate_key(item, worker_id)) in diff_resolved
-        for surface_ids in [item.get("surfaceIds", [])]
-        if isinstance(surface_ids, list)
-        for surface_id in surface_ids
-        if isinstance(surface_id, str)
-    }
+    resolved_surface_keys = resolved_candidate_surface_keys(
+        ([("parent", parent, None)] if parent else []) + sources, diff_resolved
+    )
     if decision_drafts:
         parent, sources = _reconcile_stopped_diff_sources(parent, sources, decision_drafts)
 
@@ -2068,7 +2061,13 @@ def merge_saved_results(
         ):
             inactive_outcomes.add((relative, key))
             continue
-        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
+        previous = ordered_outcomes.get(key)
+        newer = previous is None or (
+            (order[1], order[0]) > (previous[0][1], previous[0][0])
+            if relative == "parent" or previous[1] == "parent"
+            else order > previous[0]
+        )
+        if newer:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
     # Only the current parent may claim that another worker finding was absorbed.
@@ -2127,7 +2126,7 @@ def merge_saved_results(
                 item
                 for item in coverage[field]
                 if not isinstance(item, dict)
-                or item.get("disposition") not in {"rejected", "not_applicable"}
+                or item.get("disposition") not in ("rejected", "not_applicable")
                 or ("parent", coverage_candidate_key(item)) not in inactive_outcomes
             ]
 
@@ -2518,7 +2517,7 @@ def merge_saved_results(
                 if (
                     field in {"surfaces", "explicitExclusions"}
                     and isinstance(item, dict)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
+                    and item.get("disposition") in ("rejected", "not_applicable")
                     and (relative, coverage_candidate_key(item, worker_id)) in inactive_outcomes
                 ):
                     continue
@@ -2649,11 +2648,14 @@ def merge_saved_results(
             if not isinstance(item, dict)
             or item.get("disposition") != "needs_follow_up"
             or (
-                coverage_candidate_key(item) not in diff_resolved
-                and candidate_key(item.get("id"), item.get("sourceWorkerId"))
-                not in resolved_surface_keys
+                (key := coverage_candidate_key(item)) not in diff_resolved
+                and (
+                    key is not None
+                    or candidate_key(item.get("id"), item.get("sourceWorkerId"))
+                    not in resolved_surface_keys
+                )
             )
-            or coverage_candidate_key(item) in pending_candidate_keys
+            or key in pending_candidate_keys
             or candidate_key(item.get("id"), item.get("sourceWorkerId")) in pending_surface_keys
         ]
 

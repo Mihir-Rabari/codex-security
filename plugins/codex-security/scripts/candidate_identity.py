@@ -151,3 +151,29 @@ def diff_candidate_disposition(candidate: dict[str, Any]) -> str | None:
     if disposition == "suppressed" or decision == "ignore":
         return "rejected"
     return None
+
+
+def resolved_candidate_surface_keys(
+    sources: list[tuple[str, dict[str, Any], str | None]], candidates: set[CandidateKey]
+) -> set[CandidateKey | None]:
+    """Resolve each dismissed candidate's references in its saved surface context."""
+    return {
+        surface_reference_key(
+            surface_id,
+            item,
+            [
+                surface
+                for surface in draft["coverage"].get("surfaces", [])
+                if isinstance(surface, dict)
+            ],
+        )
+        for _, draft, worker_id in sources
+        for items in [draft["coverage"].get("deferred", [])]
+        if isinstance(items, list)
+        for item in items
+        if isinstance(item, dict) and coverage_candidate_key(item, worker_id) in candidates
+        for surface_ids in [item.get("surfaceIds", [])]
+        if isinstance(surface_ids, list)
+        for surface_id in surface_ids
+        if isinstance(surface_id, str)
+    }

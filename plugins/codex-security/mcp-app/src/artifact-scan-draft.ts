@@ -1804,10 +1804,8 @@ function deferredEntryPresent(
         isObject(previous) &&
         !ambiguousGenericEntry(current, ambiguousIds) &&
         !ambiguousGenericEntry(previous, ambiguousIds) &&
-        [previous.id, previous.candidateId].some(
-          (id) =>
-            typeof id === "string" &&
-            (current.id === id || current.candidateId === id),
+        coverageEntryIdentities(previous).some((identity) =>
+          coverageEntryIdentities(current).includes(identity),
         )),
   );
 }
