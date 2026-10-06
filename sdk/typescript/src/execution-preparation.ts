@@ -1,5 +1,5 @@
 import { mkdir, readFile, realpath, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import {
   accountStatus,
@@ -7,6 +7,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import { resolveConfigPath } from "./config-path.js";
 import { isRecord } from "./record.js";
 import {
   Codex,
@@ -569,11 +570,16 @@ export async function nativeScanConfiguration(
   subagents: number,
 ): Promise<JsonObject> {
   const ambient = await readCodexHomeConfig(environment);
-  const selected = environment["CODEX_SECURITY_CONFIG_PATH"]
-    ? parseToml(
-        await readFile(environment["CODEX_SECURITY_CONFIG_PATH"], "utf8"),
-      )
+  preserveCatalogFileOrigin(ambient, configuredCodexHome(environment));
+  const selectedPath = environment["CODEX_SECURITY_CONFIG_PATH"];
+  const selected = selectedPath
+    ? parseToml(await readFile(selectedPath, "utf8"))
     : {};
+  if (selectedPath)
+    preserveCatalogFileOrigin(
+      selected as JsonObject,
+      dirname(resolveConfigPath(".", selectedPath)),
+    );
   const config = scanCompositionOverrides(
     deepMerge(
       resolveCodexProfile(deepMerge(ambient, selected as JsonObject)),
@@ -587,6 +593,22 @@ export async function nativeScanConfiguration(
       config["model_reasoning_effort"] = input.reasoningEffort;
   }
   return config;
+}
+
+function preserveCatalogFileOrigin(
+  config: JsonObject,
+  directory: string,
+): void {
+  for (const layer of [
+    config,
+    ...(isRecord(config["profiles"]) ? Object.values(config["profiles"]) : []),
+  ]) {
+    if (isRecord(layer) && typeof layer["model_catalog_json"] === "string")
+      layer["model_catalog_json"] = resolveConfigPath(
+        directory,
+        layer["model_catalog_json"],
+      );
+  }
 }
 
 function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {
