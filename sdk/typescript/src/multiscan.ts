@@ -284,10 +284,9 @@ async function runCampaign(
     try {
       // Configured historical archives may contain schemas without helper scripts.
       const [python, helperRoot] = await (reportRuntime ??= (async () => {
-        const repositories = [
-          process.cwd(),
-          ...tasks.map((task) => task.repository).filter(isAbsolute),
-        ];
+        const repositories = tasks
+          .map((task) => task.repository)
+          .filter(isAbsolute);
         const repositoryRoots = await Promise.all(
           [...new Set(repositories)].map(async (repository) => {
             const canonical = await realpath(repository).catch(() =>
@@ -307,6 +306,7 @@ async function runCampaign(
           resolvePluginPythonCommand({
             configuredPath: options.config.pythonPath,
             environment: pluginHelperEnvironment(process.env),
+            protectedRoot: output,
             additionalProtectedRoots: [output, ...repositoryRoots],
             signal: options.signal,
           }),
@@ -432,7 +432,7 @@ async function runCampaign(
         if (!resumed.reportSealed) {
           await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
         }
-        await rm(checkout, {
+        await rm(resumed.checkout, {
           recursive: true,
           force: true,
         }).catch(() => undefined);
@@ -620,10 +620,16 @@ async function runCampaign(
           }
           threatModelPath = result.threatModelPath;
           cost = result.cost;
-          if (task.scope !== undefined)
-            resolvedScope ??=
-              result.manifest?.scan.scope.includePaths[0] ??
-              receipts.get(task.id.toLowerCase())?.resolvedScope;
+          if (task.scope !== undefined) {
+            resolvedScope ??= result.manifest?.scan.scope.includePaths[0];
+            if (resolvedScope === undefined) {
+              const saved = await loadContract(scanDir, {
+                pluginRoot: await resolveResumePluginRoot(),
+                signal: options.signal,
+              });
+              resolvedScope = saved.manifest.scan.scope.includePaths[0];
+            }
+          }
           targetId = result.manifest?.scan.target.targetId;
           snapshotDigest = result.manifest?.scan.target.snapshotDigest;
           const failureSeverity = scanSettings?.failureSeverity;
@@ -1173,176 +1179,180 @@ async function loadResumableScan(
   | {
       completeness: CoverageDocument["completeness"];
       reportSealed: boolean;
+      checkout: string;
     }
   | undefined
 > {
-  try {
-    const { manifest, findings, coverage } = await loadContract(path, {
-      pluginRoot,
-      signal,
-    });
-    const { target, scope, producer } = manifest.scan;
-    const campaignRoot = dirname(dirname(dirname(path)));
-    const targetRoots = [
-      checkout,
-      join(
-        campaignRoot,
-        "recovery-checkouts",
-        receipt.id,
-        `attempt-${receipt.attempt}`,
-      ),
-    ];
-    const matchedRoot = targetRoots.find(
-      (root) =>
-        target.targetId ===
-        `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`,
-    );
-    const requestedTarget =
-      receipt.scope === undefined
-        ? (configuredTarget ?? "repository")
-        : [receipt.scope];
-    const requestedPaths = Array.isArray(requestedTarget)
-      ? requestedTarget
-      : undefined;
-    const expectedMode =
-      requestedPaths !== undefined
-        ? "scoped_path"
-        : receipt.mode === "deep"
-          ? "deep_repository"
-          : "repository";
-    if (
-      manifest.scan.status !== "completed" ||
-      producer.name !== "codex-security-plugin" ||
-      matchedRoot === undefined ||
-      (receipt.targetId !== undefined &&
-        receipt.targetId !== target.targetId) ||
-      target.kind !== "git_revision" ||
-      target.snapshotDigest !== undefined ||
-      receipt.snapshotDigest !== undefined ||
-      target.displayName !== basename(matchedRoot) ||
-      target.revision !== receipt.revision ||
-      coverage.mode !== expectedMode ||
-      scope.excludePaths.length !== 0
-    )
-      return undefined;
-    let expectedPaths = ["."];
-    if (requestedPaths !== undefined) {
-      const scopeCheckout = await mkdtemp(
-        join(campaignRoot, "scope-validation-"),
-      );
-      try {
-        await checkoutRevision(receipt, scopeCheckout, signal, githubHost);
-        expectedPaths = [
-          ...(await normalizeTarget(scopeCheckout, requestedPaths, signal))
-            .paths,
-        ];
-      } finally {
-        await rm(scopeCheckout, { recursive: true, force: true });
-      }
-      if (
-        receipt.scope !== undefined &&
-        expectedPaths[0] !==
-          posix.normalize(receipt.scope).replace(/\/+$/, "") &&
-        receipt.resolvedScope === undefined
-      )
-        return undefined;
-    }
-    if (
-      scope.includePaths.length !== expectedPaths.length ||
-      scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
-      (receipt.resolvedScope !== undefined &&
-        (expectedPaths.length !== 1 ||
-          receipt.resolvedScope !== expectedPaths[0]))
-    )
-      return undefined;
-    const sealedArtifacts = new Set(
-      manifest.scan.artifacts.map((artifact) => artifact.path),
-    );
-    if (
-      !sealedArtifacts.has("findings.json") ||
-      !sealedArtifacts.has("coverage.json")
-    ) {
-      return undefined;
-    }
-    const completeness = coverage.completeness;
-    if (
-      completeness === "complete" &&
-      (coverage.deferred.length !== 0 ||
-        coverage.surfaces.some(
-          (surface) => surface.disposition === "needs_follow_up",
-        ))
-    ) {
-      return undefined;
-    }
-    const surfaceIds = new Set<string>();
-    for (const surface of coverage.surfaces) {
-      if (surfaceIds.has(surface.id)) return undefined;
-      surfaceIds.add(surface.id);
-    }
-    const findingIds = new Set<string>();
-    const occurrenceIds = new Set<string>();
-    for (const finding of findings.findings) {
-      if (
-        findingIds.has(finding.findingId) ||
-        occurrenceIds.has(finding.occurrenceId)
-      ) {
-        return undefined;
-      }
-      findingIds.add(finding.findingId);
-      occurrenceIds.add(finding.occurrenceId);
-      if (
-        finding.locations.some(
-          (location) =>
-            location.endLine !== undefined &&
-            location.endLine < location.startLine,
-        )
-      ) {
-        return undefined;
-      }
-      const evidenceIds = new Set<string>();
-      for (const evidence of finding.codeEvidence ?? []) {
-        if (evidenceIds.has(evidence.id)) return undefined;
-        evidenceIds.add(evidence.id);
-      }
-      for (const evidence of finding.code_evidence ?? []) {
-        evidenceIds.add(evidence.id);
-      }
-      for (const section of [
-        finding.rootCause,
-        finding.validation,
-        finding.attackPath,
-      ]) {
-        if (!isReceiptRecord(section)) continue;
-        const references = section["evidenceRefs"];
-        if (
-          references !== undefined &&
-          (!Array.isArray(references) ||
-            references.some(
-              (reference) =>
-                typeof reference !== "string" || !evidenceIds.has(reference),
-            ))
-        ) {
-          return undefined;
-        }
-      }
-    }
-    const matchesOutcome =
-      completeness === "complete"
-        ? receipt.status === "completed"
-        : (receipt.status === "completed_with_incomplete_coverage" &&
-            (receipt.coverage ?? completeness) === completeness) ||
-          (receipt.status === "failed" &&
-            receipt.error === "Multiscan repository coverage is incomplete.");
-    return matchesOutcome
-      ? {
-          completeness,
-          reportSealed: await hasSealedReport(path, manifest, signal),
-        }
-      : undefined;
-  } catch {
+  const saved = await loadContract(path, { pluginRoot, signal }).catch(() => {
     if (signal?.aborted === true) signal.throwIfAborted();
     return undefined;
+  });
+  if (saved === undefined) return undefined;
+  const { manifest, findings, coverage } = saved;
+  const { target, scope, producer } = manifest.scan;
+  const campaignRoot = dirname(dirname(dirname(path)));
+  const targetRoots = [
+    checkout,
+    join(
+      campaignRoot,
+      "recovery-checkouts",
+      receipt.id,
+      `attempt-${receipt.attempt}`,
+    ),
+  ];
+  const matchedRoot = targetRoots.find(
+    (root) =>
+      target.targetId ===
+      `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`,
+  );
+  const requestedTarget =
+    receipt.scope === undefined
+      ? (configuredTarget ?? "repository")
+      : [receipt.scope];
+  const requestedPaths = Array.isArray(requestedTarget)
+    ? requestedTarget
+    : undefined;
+  const expectedMode =
+    requestedPaths !== undefined
+      ? "scoped_path"
+      : receipt.mode === "deep"
+        ? "deep_repository"
+        : "repository";
+  if (
+    manifest.scan.status !== "completed" ||
+    producer.name !== "codex-security-plugin" ||
+    matchedRoot === undefined ||
+    (receipt.targetId !== undefined && receipt.targetId !== target.targetId) ||
+    target.kind !== "git_revision" ||
+    target.snapshotDigest !== undefined ||
+    receipt.snapshotDigest !== undefined ||
+    target.displayName !== basename(matchedRoot) ||
+    target.revision !== receipt.revision ||
+    coverage.mode !== expectedMode ||
+    scope.excludePaths.length !== 0
+  )
+    return undefined;
+  let expectedPaths = ["."];
+  if (requestedPaths !== undefined) {
+    const scopeCheckout = await mkdtemp(
+      join(campaignRoot, "scope-validation-"),
+    );
+    try {
+      await checkoutRevision(receipt, scopeCheckout, signal, githubHost);
+      expectedPaths = [
+        ...(
+          await normalizeTarget(
+            scopeCheckout,
+            requestedPaths.map((path) =>
+              isAbsolute(path) ? relative(matchedRoot, path) || "." : path,
+            ),
+            signal,
+          )
+        ).paths,
+      ];
+    } finally {
+      await rm(scopeCheckout, { recursive: true, force: true });
+    }
+    if (
+      receipt.scope !== undefined &&
+      expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/, "") &&
+      receipt.resolvedScope === undefined
+    )
+      return undefined;
   }
+  if (
+    scope.includePaths.length !== expectedPaths.length ||
+    scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
+    (receipt.resolvedScope !== undefined &&
+      (expectedPaths.length !== 1 ||
+        receipt.resolvedScope !== expectedPaths[0]))
+  )
+    return undefined;
+  const sealedArtifacts = new Set(
+    manifest.scan.artifacts.map((artifact) => artifact.path),
+  );
+  if (
+    !sealedArtifacts.has("findings.json") ||
+    !sealedArtifacts.has("coverage.json")
+  ) {
+    return undefined;
+  }
+  const completeness = coverage.completeness;
+  if (
+    completeness === "complete" &&
+    (coverage.deferred.length !== 0 ||
+      coverage.surfaces.some(
+        (surface) => surface.disposition === "needs_follow_up",
+      ))
+  ) {
+    return undefined;
+  }
+  const surfaceIds = new Set<string>();
+  for (const surface of coverage.surfaces) {
+    if (surfaceIds.has(surface.id)) return undefined;
+    surfaceIds.add(surface.id);
+  }
+  const findingIds = new Set<string>();
+  const occurrenceIds = new Set<string>();
+  for (const finding of findings.findings) {
+    if (
+      findingIds.has(finding.findingId) ||
+      occurrenceIds.has(finding.occurrenceId)
+    ) {
+      return undefined;
+    }
+    findingIds.add(finding.findingId);
+    occurrenceIds.add(finding.occurrenceId);
+    if (
+      finding.locations.some(
+        (location) =>
+          location.endLine !== undefined &&
+          location.endLine < location.startLine,
+      )
+    ) {
+      return undefined;
+    }
+    const evidenceIds = new Set<string>();
+    for (const evidence of finding.codeEvidence ?? []) {
+      if (evidenceIds.has(evidence.id)) return undefined;
+      evidenceIds.add(evidence.id);
+    }
+    for (const evidence of finding.code_evidence ?? []) {
+      evidenceIds.add(evidence.id);
+    }
+    for (const section of [
+      finding.rootCause,
+      finding.validation,
+      finding.attackPath,
+    ]) {
+      if (!isReceiptRecord(section)) continue;
+      const references = section["evidenceRefs"];
+      if (
+        references !== undefined &&
+        (!Array.isArray(references) ||
+          references.some(
+            (reference) =>
+              typeof reference !== "string" || !evidenceIds.has(reference),
+          ))
+      ) {
+        return undefined;
+      }
+    }
+  }
+  const matchesOutcome =
+    completeness === "complete"
+      ? receipt.status === "completed"
+      : (receipt.status === "completed_with_incomplete_coverage" &&
+          (receipt.coverage ?? completeness) === completeness) ||
+        (receipt.status === "failed" &&
+          receipt.error === "Multiscan repository coverage is incomplete.");
+  return matchesOutcome
+    ? {
+        completeness,
+        checkout: matchedRoot,
+        reportSealed: await hasSealedReport(path, manifest, signal),
+      }
+    : undefined;
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {

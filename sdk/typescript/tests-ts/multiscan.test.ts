@@ -35,7 +35,7 @@ import { PYTHON } from "./support/security-policy.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
-import { gitMarkerRoot } from "../src/targets.js";
+import { normalizeTarget } from "../src/targets.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { DiffTarget } from "../src/targets.js";
 import { prepareOutputDir } from "../src/runtime.js";
@@ -2769,14 +2769,10 @@ describe("multiscan", () => {
       );
       expect(resolvePython).toHaveBeenCalledWith(
         expect.objectContaining({
+          protectedRoot: paths.output,
           additionalProtectedRoots: expect.arrayContaining([
             paths.output,
             source.path,
-            await gitMarkerRoot(
-              await realpath(process.cwd()),
-              undefined,
-              "outermost",
-            ),
           ]),
           environment: runtime.pluginHelperEnvironment(process.env),
         }),
@@ -3399,6 +3395,9 @@ test("qualified campaign reuses a completed recovery checkout", async () => {
   await runMultiscan(
     options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
   );
+  const originalCheckout = join(paths.output, "checkouts", "repo");
+  git(paths.root, "clone", "--quiet", source.path, originalCheckout);
+  const originalIdentity = await lstat(originalCheckout);
   const runs = mock(
     async (
       checkout: string,
@@ -3417,6 +3416,11 @@ test("qualified campaign reuses a completed recovery checkout", async () => {
     skipped: 1,
   });
   expect(runs).toHaveBeenCalledTimes(1);
+  const retainedIdentity = await lstat(originalCheckout);
+  expect([retainedIdentity.dev, retainedIdentity.ino]).toEqual([
+    originalIdentity.dev,
+    originalIdentity.ino,
+  ]);
 });
 
 for (const count of [1, 2]) {
@@ -3505,67 +3509,72 @@ for (const target of [["src"], ["src", "src/app.ts"]]) {
   });
 }
 
-testPosix(
-  "qualified campaign retains resolved scope after in-place recovery",
-  async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "resolved-source");
-    await symlink("src", join(source.path, "alias"), "dir");
-    git(source.path, "add", "alias");
-    git(
-      source.path,
-      "-c",
-      "user.name=Multiscan Test",
-      "-c",
-      "user.email=multiscan@example.test",
-      "commit",
-      "-qm",
-      "Add directory alias",
-    );
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeFile(
-      paths.input,
-      `id,repository,revision,scope\nRepo,${source.path},${revision},alias\n`,
-    );
-    const interrupted = client(async (checkout: string, settings = {}) => {
-      await completedScan(settings.outputDir!, "partial", checkout);
-      throw new Error("Interrupted after saved progress");
-    });
-    await runMultiscan(options(paths, interrupted, { maxAttempts: 1 }));
-    const recoverScan = mock(async (dir: string) => {
-      const result = await completedScan(dir);
-      result.manifest.scan.scope.includePaths = ["src"];
-      await writeFile(
-        join(dir, "scan-manifest.json"),
-        JSON.stringify(result.manifest),
+for (const orphaned of [false, true]) {
+  testPosix(
+    `qualified campaign retains resolved scope after ${orphaned ? "orphaned" : "recorded"} recovery`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "resolved-source");
+      await symlink("src", join(source.path, "alias"), "dir");
+      git(source.path, "add", "alias");
+      git(
+        source.path,
+        "-c",
+        "user.name=Multiscan Test",
+        "-c",
+        "user.email=multiscan@example.test",
+        "commit",
+        "-qm",
+        "Add directory alias",
       );
-      const coveragePath = join(dir, "coverage.json");
-      const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-      coverage.includePaths = ["src"];
-      await writeFile(coveragePath, JSON.stringify(coverage));
-      await reseal(dir);
-      return {
-        coverage: result.coverage,
-        cost: null,
-        findings: (await loadContract(dir, { pluginRoot: PLUGIN_ROOT }))
-          .findings,
-      };
-    });
-    const runs = mock(completeRun);
-    const recovered = await runMultiscan(
-      options(paths, client(runs), { recoverScan }),
-    );
-    expect((await results(recovered.resultsPath)).at(-1)).toMatchObject({
-      status: "completed",
-      resolvedScope: "src",
-    });
-    expect(await runMultiscan(options(paths, client(runs)))).toMatchObject({
-      completed: 1,
-      skipped: 1,
-    });
-    expect(runs).toHaveBeenCalledTimes(0);
-  },
-);
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nRepo,${source.path},${revision},alias\n`,
+      );
+      const interrupted = client(async (checkout: string, settings = {}) => {
+        await completedScan(settings.outputDir!, "partial", checkout);
+        throw new Error("Interrupted after saved progress");
+      });
+      const initial = await runMultiscan(
+        options(paths, interrupted, { maxAttempts: 1 }),
+      );
+      if (orphaned) await writeFile(initial.resultsPath, "");
+      const recoverScan = mock(async (dir: string) => {
+        const result = await completedScan(dir);
+        result.manifest.scan.scope.includePaths = ["src"];
+        await writeFile(
+          join(dir, "scan-manifest.json"),
+          JSON.stringify(result.manifest),
+        );
+        const coveragePath = join(dir, "coverage.json");
+        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+        coverage.includePaths = ["src"];
+        await writeFile(coveragePath, JSON.stringify(coverage));
+        await reseal(dir);
+        return {
+          coverage: result.coverage,
+          cost: null,
+          findings: (await loadContract(dir, { pluginRoot: PLUGIN_ROOT }))
+            .findings,
+        };
+      });
+      const runs = mock(completeRun);
+      const recovered = await runMultiscan(
+        options(paths, client(runs), { recoverScan }),
+      );
+      expect((await results(recovered.resultsPath)).at(-1)).toMatchObject({
+        status: "completed",
+        resolvedScope: "src",
+      });
+      expect(await runMultiscan(options(paths, client(runs)))).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(runs).toHaveBeenCalledTimes(0);
+    },
+  );
+}
 
 test("qualified campaign keeps a recorded checkout while rejecting a failed sealed attempt", async () => {
   const paths = await fixture();
@@ -3647,4 +3656,103 @@ test("qualified campaign replays warnings only from accepted saved attempts", as
   expect(fresh).not.toHaveProperty("warnings");
   expect(freshProgress).toEqual([]);
   expect(attempts).toBe(2);
+});
+
+test("qualified campaign preserves a completed receipt when scope checkout fails", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "unavailable-scoped-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs), { maxAttempts: 1 });
+  const initial = await runMultiscan(campaign);
+  const ledger = await readFile(initial.resultsPath, "utf8");
+  await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
+  await expect(runMultiscan(campaign)).rejects.toThrow();
+  expect(await readFile(initial.resultsPath, "utf8")).toBe(ledger);
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+test("qualified campaign resumes an absolute configured scope inside its checkout", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "absolute-scope-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+  );
+  const requested = join(paths.output, "checkouts", "repo", "src");
+  const runs = mock(
+    async (
+      checkout: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => {
+      expect((await normalizeTarget(checkout, settings.target!)).paths).toEqual(
+        ["src"],
+      );
+      const result = await completedScan(
+        settings.outputDir!,
+        "complete",
+        checkout,
+      );
+      const manifestPath = join(settings.outputDir!, "scan-manifest.json");
+      result.manifest.scan.scope.includePaths = ["src"];
+      await writeFile(manifestPath, JSON.stringify(result.manifest));
+      const coveragePath = join(settings.outputDir!, "coverage.json");
+      const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+      coverage.mode = "scoped_path";
+      coverage.includePaths = ["src"];
+      coverage.inventoryStrategy = "scoped_path";
+      await writeFile(coveragePath, JSON.stringify(coverage));
+      await reseal(settings.outputDir!);
+      return result;
+    },
+  );
+  const campaign = options(paths, client(runs), {
+    scanOptionsByMode: { standard: { target: [requested] } },
+  });
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+test("qualified campaign recovers its report from an unrelated Python invocation directory", async () => {
+  if (
+    await runTestInSubprocess(
+      fileURLToPath(import.meta.url),
+      "qualified campaign recovers its report from an unrelated Python invocation directory",
+    )
+  )
+    return;
+  const paths = await fixture();
+  const source = await repository(paths.root, "python-invocation-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs), {
+    config: { pythonPath: PYTHON },
+  });
+  const initial = await runMultiscan(campaign);
+  const ledger = await readFile(initial.resultsPath, "utf8");
+  const originalDirectory = process.cwd();
+  try {
+    process.chdir(dirname(await realpath(PYTHON)));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+  } finally {
+    process.chdir(originalDirectory);
+  }
+  expect(await readFile(initial.resultsPath, "utf8")).toBe(ledger);
+  expect(runs).toHaveBeenCalledTimes(1);
 });
