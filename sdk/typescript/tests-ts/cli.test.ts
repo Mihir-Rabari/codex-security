@@ -3103,7 +3103,7 @@ describe("CLI", () => {
         join(home, "review.config.toml"),
         `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
       );
-      for (const explicit of [undefined, "http://127.0.0.1:2/v1"]) {
+      for (const explicit of [undefined, 4321]) {
         let selected: CodexSecurityConfig | undefined;
         const stderr = capture();
         const args = [
@@ -3118,7 +3118,7 @@ describe("CLI", () => {
             ? []
             : [
                 "--codex",
-                `model_providers.${provider}.base_url=${JSON.stringify(explicit)}`,
+                `model_providers.${provider}.auth.refresh_interval_ms=${explicit}`,
               ]),
         ];
         expect(
@@ -3140,8 +3140,13 @@ describe("CLI", () => {
           [provider]: {
             name: "Synthetic",
             wire_api: "responses",
-            base_url: explicit ?? "http://127.0.0.1:1/v1",
-            auth: { command: "synthetic-auth" },
+            base_url: "http://127.0.0.1:1/v1",
+            auth: {
+              command: "synthetic-auth",
+              ...(explicit === undefined
+                ? {}
+                : { refresh_interval_ms: explicit }),
+            },
           },
         });
         expect(selected!.codexOverrides?.["model_provider"]).toBe(provider);
