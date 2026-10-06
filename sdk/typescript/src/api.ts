@@ -4971,7 +4971,7 @@ function sqliteHomeEnvironment(
   const sqliteHome =
     typeof configured === "string"
       ? configured
-      : environmentValue(environment, "CODEX_SQLITE_HOME");
+      : environmentValue(environment, "CODEX_SQLITE_HOME")?.trim();
   return sqliteHome === undefined
     ? {}
     : {

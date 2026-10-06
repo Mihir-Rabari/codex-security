@@ -7434,7 +7434,14 @@ test.each([
   },
 );
 
-test.each(["absolute", "relative", "tilde", "inherited-relative", "default"])(
+test.each([
+  "absolute",
+  "relative",
+  "tilde",
+  "inherited-relative",
+  "inherited-padded",
+  "default",
+])(
   "verifies budget ownership at the effective %s SQLite location",
   async (location) => {
     const root = await temporaryDirectory();
@@ -7463,7 +7470,9 @@ test.each(["absolute", "relative", "tilde", "inherited-relative", "default"])(
     let ownershipChecks = 0;
     let selectedEnvironment: Record<string, string> | undefined;
     const config =
-      location === "default" || location === "inherited-relative"
+      location === "default" ||
+      location === "inherited-relative" ||
+      location === "inherited-padded"
         ? {}
         : {
             codexOverrides: {
@@ -7488,7 +7497,9 @@ test.each(["absolute", "relative", "tilde", "inherited-relative", "default"])(
               CODEX_SQLITE_HOME:
                 location === "inherited-relative"
                   ? "selected-state"
-                  : join(root, "ambient-unselected-state"),
+                  : location === "inherited-padded"
+                    ? ` ${sqliteHome} `
+                    : join(root, "ambient-unselected-state"),
             }),
       },
       prepareRuntime: async () => ({
@@ -7505,7 +7516,9 @@ test.each(["absolute", "relative", "tilde", "inherited-relative", "default"])(
                 CODEX_SQLITE_HOME:
                   location === "inherited-relative"
                     ? "selected-state"
-                    : join(root, "ambient-unselected-state"),
+                    : location === "inherited-padded"
+                      ? ` ${sqliteHome} `
+                      : join(root, "ambient-unselected-state"),
               }),
         },
       }),

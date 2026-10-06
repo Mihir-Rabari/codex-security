@@ -1227,7 +1227,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         {},
       ];
       const sqliteHomes = settings.map((_, index) =>
-        path.join(fixture.root, `scan-state-${index}`),
+        index === 0
+          ? ""
+          : index === 1
+            ? ` ${path.join(fixture.root, `scan-state-${index}`)} `
+            : path.join(fixture.root, `scan-state-${index}`),
       );
       const providerKeys = settings.map((_, index) =>
         index < 2 ? `synthetic-gateway-key-${index}` : undefined,
@@ -1333,8 +1337,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
-              sqlite_home: sqliteHomes[index],
             });
+            assert.equal(
+              invocation.argv.some((arg: string) =>
+                arg.startsWith("sqlite_home="),
+              ),
+              false,
+            );
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>
                 arg.startsWith("model_reasoning_effort="),
