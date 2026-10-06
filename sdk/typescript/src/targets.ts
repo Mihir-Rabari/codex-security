@@ -154,9 +154,10 @@ function requirePortableWindowsRepositoryPath(path: string): void {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean } = {},
+  options: { requireIfPresent?: boolean; protectedRoot?: string } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
+  const protectedRoot = options.protectedRoot ?? repository;
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -165,9 +166,11 @@ export async function enclosingGitWorktreeRoot(
     if (strict) {
       if (
         (await gitOutput(
-          repository,
+          protectedRoot,
           ["rev-parse", "--is-inside-git-dir"],
           signal,
+          {},
+          repository,
         )) === "true"
       ) {
         throw new InvalidTargetError(
@@ -177,9 +180,11 @@ export async function enclosingGitWorktreeRoot(
       if (markerRoot === null) return null;
     }
     const root = await gitOutput(
-      repository,
+      protectedRoot,
       ["rev-parse", "--show-toplevel"],
       signal,
+      {},
+      repository,
     );
     canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
@@ -205,7 +210,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal);
+    await requireGitWorktreeBinding(canonicalRoot, signal, protectedRoot);
   return canonicalRoot;
 }
 
@@ -299,11 +304,23 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean } = {},
+  options: { includeLocalObjects?: boolean; protectedRoot?: string } = {},
 ): Promise<[string, string, ...string[]]> {
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    gitOutput(
+      options.protectedRoot ?? repository,
+      ["rev-parse", "--absolute-git-dir"],
+      signal,
+      {},
+      repository,
+    ),
+    gitOutput(
+      options.protectedRoot ?? repository,
+      ["rev-parse", "--git-common-dir"],
+      signal,
+      {},
+      repository,
+    ),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -413,12 +430,14 @@ export async function gitObjectDirectories(
 async function requireGitWorktreeBinding(
   repository: string,
   signal?: AbortSignal,
+  protectedRoot = repository,
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
+      { protectedRoot },
     );
     if (
       [directory, commonDirectory].every(
@@ -430,9 +449,11 @@ async function requireGitWorktreeBinding(
       // The toplevel check already verified the configured worktree path.
       if (
         await gitOutput(
-          repository,
+          protectedRoot,
           ["config", "--get", "core.worktree"],
           signal,
+          {},
+          repository,
         )
       )
         return;
