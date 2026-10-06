@@ -8,6 +8,7 @@ import { hash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -4088,6 +4089,9 @@ describe("patch publication integrity", () => {
     "nested",
     "nested environment",
     "nested objects",
+    "nested shared primary objects",
+    "nested relative primary objects",
+    "nested quoted primary objects",
     "nested alternate objects",
     "nested common",
     "nested relative alternates",
@@ -4109,6 +4113,9 @@ describe("patch publication integrity", () => {
     await writeFile(join(directory, "app.ts"), "unsafe\n");
     let path = "app.ts";
     let alternateObjects: string | undefined;
+    let primaryObjects: string | undefined;
+    let parentIndex: Buffer | undefined;
+    let nestedIndex: Buffer | undefined;
     if (kind.startsWith("nested")) {
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
@@ -4144,6 +4151,29 @@ describe("patch publication integrity", () => {
         if (kind.includes("quoted"))
           alternateObjects = JSON.stringify(alternateObjects);
       }
+      if (kind.includes("primary objects")) {
+        const pool = await fixtures.create(
+          kind.includes("quoted")
+            ? `patch-shared${delimiter}primary-`
+            : "patch-shared-primary-",
+        );
+        primaryObjects = join(pool, "objects");
+        const gitDirectory = inner("rev-parse", "--absolute-git-dir");
+        await rename(join(gitDirectory, "objects"), primaryObjects);
+        await mkdir(join(gitDirectory, "objects"));
+        await cp(join(directory, ".git", "objects"), primaryObjects, {
+          recursive: true,
+          force: false,
+        });
+        await rm(join(directory, ".git", "objects"), { recursive: true });
+        await mkdir(join(directory, ".git", "objects"));
+        expect(() => git("rev-parse", "HEAD^{tree}")).toThrow();
+        expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
+        parentIndex = await readFile(join(directory, ".git", "index"));
+        nestedIndex = await readFile(join(gitDirectory, "index"));
+        if (kind.includes("relative"))
+          primaryObjects = relative(directory, primaryObjects);
+      }
       if (kind.startsWith("nested replacement")) {
         const original = inner("rev-parse", "HEAD^{tree}");
         await writeFile(join(nested, "app.ts"), "fixed\n");
@@ -4159,28 +4189,47 @@ describe("patch publication integrity", () => {
         ? { GIT_DIR: ".git", GIT_WORK_TREE: directory }
         : kind === "nested objects"
           ? { GIT_OBJECT_DIRECTORY: join(directory, ".git", "objects") }
-          : kind === "nested common"
-            ? { GIT_COMMON_DIR: join(directory, ".git") }
-            : kind.includes("alternates") || kind === "nested alternate objects"
-              ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }
-              : kind === "nested replacements"
-                ? { GIT_NO_REPLACE_OBJECTS: "1" }
-                : kind === "nested replacement namespace"
-                  ? { GIT_REPLACE_REF_BASE: "refs/synthetic-replacements/" }
-                  : {};
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selectedDirectory,
-      onRepositoryCommand: (command, args, cwd, options) =>
-        runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...gitEnvironment, ...options?.environment },
-        }),
-      onCodex: async (_args, output) => {
-        await writeFile(join(selectedDirectory, path), "fixed\n");
-        output?.stdout.write("Fixed and checked.");
-        return 0;
+          : kind.includes("primary objects")
+            ? { GIT_OBJECT_DIRECTORY: primaryObjects }
+            : kind === "nested common"
+              ? { GIT_COMMON_DIR: join(directory, ".git") }
+              : kind.includes("alternates") ||
+                  kind === "nested alternate objects"
+                ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }
+                : kind === "nested replacements"
+                  ? { GIT_NO_REPLACE_OBJECTS: "1" }
+                  : kind === "nested replacement namespace"
+                    ? { GIT_REPLACE_REF_BASE: "refs/synthetic-replacements/" }
+                    : {};
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--json"],
+      {
+        currentDirectory: selectedDirectory,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...gitEnvironment, ...options?.environment },
+          }),
+        onCodex: async (_args, output) => {
+          await writeFile(join(selectedDirectory, path), "fixed\n");
+          output?.stdout.write("Fixed and checked.");
+          return 0;
+        },
       },
-    });
+      {
+        configure: (current) => {
+          current.environment = { ...current.environment, ...gitEnvironment };
+        },
+      },
+    );
+    if (primaryObjects !== undefined) {
+      expect(await readFile(join(directory, ".git", "index"))).toEqual(
+        parentIndex,
+      );
+      expect(
+        await readFile(join(selectedDirectory, "nested", ".git", "index")),
+      ).toEqual(nestedIndex);
+    }
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       applied: true,

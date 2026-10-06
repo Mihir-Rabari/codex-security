@@ -31,6 +31,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -7377,6 +7378,40 @@ async function nestedPatchGitDependencies(
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
   // Keep relative alternate-object paths in the selected repository's Git context.
   const directory = await patchRepositoryRoot(repository, dependencies);
+  const objectDirectory =
+    environmentValue(dependencies.environment, "GIT_OBJECT_DIRECTORY") ===
+    undefined
+      ? undefined
+      : (
+          await dependencies.runRepositoryCommand(
+            "git",
+            ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+            repository,
+            { trim: false },
+          )
+        ).replace(/\n$/u, "");
+  const alternateObjects =
+    objectDirectory === undefined
+      ? undefined
+      : [
+          // Git's alternate list accepts C-quoted paths, including its delimiter.
+          `"${objectDirectory.replace(
+            /[\\"\u0000-\u001f\u007f]/gu,
+            (character) =>
+              `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
+          )}"`,
+          ...(environmentValue(
+            dependencies.environment,
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+          ) === undefined
+            ? []
+            : [
+                environmentValue(
+                  dependencies.environment,
+                  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                )!,
+              ]),
+        ].join(delimiter);
   return {
     ...dependencies,
     runRepositoryCommand: (command, args, checkout, options) =>
@@ -7405,6 +7440,9 @@ async function nestedPatchGitDependencies(
                 )
                 .map((name) => [name, undefined]),
             ),
+            ...(alternateObjects === undefined
+              ? {}
+              : { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }),
             ...options?.environment,
           },
         },
