@@ -66,6 +66,12 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 class _CheckpointSnapshotError(ContractError):
     """A verified head could not be persisted for publication replay."""
 
+    def __init__(self, message: str, captured: dict[str, tuple[str, int]]) -> None:
+        super().__init__(message)
+        self.captured = captured
+        self.paths: dict[str, str | None] = {}
+        self.heads: dict[str, str | None] = {}
+
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
     scan_dir = Path(scan["scan_dir"])
@@ -248,20 +254,23 @@ def _capture_saved_source(
             pass
         else:
             checkpoint_heads[directory.as_posix()] = None
-    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
+    head, head_digest, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
     _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
+    if checkpoint_heads is not None and directory != Path("."):
+        checkpoint_heads[directory.as_posix()] = selected
     if write and not (scan_dir / snapshot).exists():
         try:
             write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
         except (ContractError, OSError) as exc:
-            raise _CheckpointSnapshotError(str(exc)) from exc
-    if checkpoint_heads is not None and directory != Path("."):
-        checkpoint_heads[directory.as_posix()] = selected
+            raise _CheckpointSnapshotError(
+                str(exc),
+                {relative: (head_digest, observed), selected: (selected_digest, selected_time)},
+            ) from exc
     return {
         snapshot: (digest, int(observation["observedAtNs"])),
         selected: (selected_digest, selected_time),
@@ -1184,7 +1193,11 @@ def merge_saved_results(
                     scan_dir, relative, scan_id, checkpoint_heads=checkpoint_heads
                 )
                 paths.update({path: worker_id for path in captured})
-            except _CheckpointSnapshotError:
+            except _CheckpointSnapshotError as exc:
+                exc.paths = {
+                    path: "dedup" if path in reducer_paths else None for path in {*paths, relative}
+                }
+                exc.heads = dict(checkpoint_heads)
                 raise
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
@@ -1690,6 +1703,7 @@ def merge_saved_results(
             or order > previous[0]
             or (
                 order == previous[0]
+                and previous[1] != relative
                 and previous[1] in current_results
                 and relative in checkpoint_heads.values()
             )
@@ -2413,35 +2427,64 @@ def preserve_scan_results_locked(
     }
     if recovery_source_digests is not None:
         model_source.clear()
-    documents = merge_saved_results(
-        scan_dir,
-        scan_id,
-        binding,
-        connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-            (scan_id,),
-        ).fetchall(),
-        warnings,
-        stopped=True,
-        reason=(
-            f"Scan {outcome}; saved findings and pending review were preserved. "
-            f"{scan['failure_message'] or ''}"
-        ).strip(),
-        frozen_source_digests=frozen_source_digests,
-        checkpoint_heads=checkpoint_heads,
-        frozen_model_source=model_source[0] if model_source else None,
-        selected_model_source=model_source,
-        allow_frozen_legacy_parent=(
-            include_parent_with_recovery
-            or (
-                recovery_source_digests is None
-                and frozen_source_digests == {}
-                and isinstance(existing_scan, dict)
-                and existing_scan.get("sealedAt") is not None
-                and "preservedSources" not in existing_scan
-            )
-        ),
-    )
+    try:
+        documents = merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                (scan_id,),
+            ).fetchall(),
+            warnings,
+            stopped=True,
+            reason=(
+                f"Scan {outcome}; saved findings and pending review were preserved. "
+                f"{scan['failure_message'] or ''}"
+            ).strip(),
+            frozen_source_digests=frozen_source_digests,
+            checkpoint_heads=checkpoint_heads,
+            frozen_model_source=model_source[0] if model_source else None,
+            selected_model_source=model_source,
+            allow_frozen_legacy_parent=(
+                include_parent_with_recovery
+                or (
+                    recovery_source_digests is None
+                    and frozen_source_digests == {}
+                    and isinstance(existing_scan, dict)
+                    and existing_scan.get("sealedAt") is not None
+                    and "preservedSources" not in existing_scan
+                )
+            ),
+        )
+    except _CheckpointSnapshotError as exc:
+        if scan["canceled_at"] is not None and frozen_source_digests is None:
+            # Cancellation has already committed. Pin the observed source set even
+            # when its immutable head copy cannot be written; changed raw heads
+            # remain rejected on retry rather than admitting later worker output.
+            captured = dict(exc.captured)
+            for relative, kind in exc.paths.items():
+                if relative in captured:
+                    continue
+                try:
+                    captured.update(
+                        _capture_saved_source(
+                            scan_dir, relative, scan_id, kind=kind, snapshot_head=False
+                        )
+                    )
+                except (ContractError, OSError, ValueError):
+                    continue
+            retained_sources = {path: value[0] for path, value in captured.items()}
+            source_times = {path: value[1] for path, value in captured.items()}
+            _freeze_source_times(scan_dir, scan_id, retained_sources, source_times)
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET retained_source_digests_json = ?, "
+                    "retained_checkpoint_heads_json = ? "
+                    "WHERE id = ? AND retained_source_digests_json IS NULL",
+                    (json.dumps(retained_sources, sort_keys=True), json.dumps(exc.heads), scan_id),
+                )
+        raise
     if documents is None:
         unpublished_warnings = list(dict.fromkeys([*warnings, *publication_follow_up_warnings]))
         if unpublished_warnings != stored_warnings:

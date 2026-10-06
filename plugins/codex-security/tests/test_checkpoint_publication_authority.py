@@ -1248,6 +1248,98 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
+@pytest.mark.parametrize("rejection", [False, True], ids=["finding", "finding-and-rejection"])
+def test_checkpoint_registered_as_result_keeps_its_own_finding(
+    workbench_api, workbench_db, publication_scan, rejection
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    draft = save_disposition(scan, result.parent, "reported")
+    if rejection:
+        draft["coverage"]["surfaces"][0]["disposition"] = "rejected"
+    checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+    head = result.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+            (str(checkpoint), result.parent.name),
+        )
+    original = checkpoint.read_bytes()
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    assert checkpoint.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory write permission fixture")
+@pytest.mark.parametrize("writable", [False, True], ids=["blocked-snapshot", "writable-snapshot"])
+@pytest.mark.parametrize("replace_head", [False, True], ids=["late-file", "late-selection"])
+def test_cancellation_snapshot_failure_keeps_the_original_source_boundary(
+    workbench_api, workbench_db, publication_scan, writable, replace_head
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="running")
+    draft = save_disposition(scan, result.parent, "reported")
+    result.write_text(json.dumps(draft))
+    head = result.parent / "checkpoint-head.json"
+    original_head = head.read_bytes()
+    original_head_time = head.stat().st_mtime_ns
+    snapshots = result.parent / "checkpoint-heads"
+    snapshots.mkdir()
+    try:
+        if not writable:
+            snapshots.chmod(0o500)
+            assert not os.access(snapshots, os.W_OK)
+        workbench_api["saved_results"].cancel_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, thread_id=None),
+        )
+    finally:
+        snapshots.chmod(0o700)
+    late = copy.deepcopy(draft)
+    late["findings"][0]["identity"]["anchor"] = "written-after-cancellation"
+    late["findings"][0]["extensions"]["candidateId"] = "post-cancellation-candidate"
+    late["coverage"]["surfaces"][0]["candidateId"] = "post-cancellation-candidate"
+    checkpoint = write_checkpoint(result.parent / "checkpoints", late)
+    if replace_head:
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    saved = workbench_api["saved_results"]
+
+    def replay():
+        return saved.preserve_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id,
+                claim_token=None,
+                thread_id=None,
+                coordinator_generation=None,
+            ),
+        )["scan"]
+
+    if not writable and replace_head:
+        with pytest.raises(
+            saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
+        ):
+            replay()
+        head.write_bytes(original_head)
+        os.utime(head, ns=(original_head_time, original_head_time))
+    retained = replay()
+    assert retained["findingCount"] == 1
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert all(item["identity"]["anchor"] != "written-after-cancellation" for item in findings)
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert (
+        checkpoint.relative_to(scan.scan_dir).as_posix() not in manifest["scan"]["preservedSources"]
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory write permission fixture")
 @pytest.mark.parametrize("writable", [False, True], ids=["blocked-snapshot", "writable-snapshot"])
 @pytest.mark.parametrize("disposition", ["reported", "rejected"])
