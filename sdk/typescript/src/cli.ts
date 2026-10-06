@@ -7500,7 +7500,7 @@ async function snapshotGitPatchState(
       const path = entry.slice(entry.indexOf("\t") + 1);
       const child = directory ? `${directory}/${path}` : path;
       if (existsSync(join(checkout, path, ".git"))) await visit(child);
-      else trees.set(child, entry.slice(0, entry.indexOf("\t")).split(" ")[2]!);
+      else trees.set(child, "HEAD");
     }
   };
   await visit("");

@@ -4555,6 +4555,8 @@ describe("patch publication integrity", () => {
     "initialized without edits",
     "left uninitialized",
     "already initialized with local edits",
+    "shallow initialized without edits",
+    "shallow initialized with edits",
   ])("tracks patch changes when a registered child is %s", async (state) => {
     const root = await fixtures.create("patch-submodule-initialization-");
     const repository = join(root, "repository");
@@ -4572,24 +4574,37 @@ describe("patch publication integrity", () => {
     await writeFile(join(source, "app.ts"), "unsafe\noriginal\n");
     sourceGit("add", ".");
     sourceGit("commit", "-m", "Synthetic child baseline");
+    const originalChildHead = sourceGit("rev-parse", "HEAD");
     git(
       "-c",
       "protocol.file.allow=always",
       "submodule",
       "add",
-      source,
+      pathToFileURL(source).href,
       "dependency",
     );
     git("add", ".");
     git("commit", "-m", "Synthetic parent baseline");
     const retained = state === "already initialized with local edits";
-    const changed = retained || state === "initialized during patching";
+    const shallow = state.startsWith("shallow initialized");
+    const changed =
+      retained ||
+      state === "initialized during patching" ||
+      state === "shallow initialized with edits";
     if (retained)
       await writeFile(
         join(child, "app.ts"),
         (await readFile(join(child, "app.ts"), "utf8")) + "local edit\n",
       );
     else git("submodule", "deinit", "-f", "--", "dependency");
+    if (shallow) {
+      await rm(join(repository, ".git", "modules", "dependency"), {
+        recursive: true,
+      });
+      await writeFile(join(source, "upstream.ts"), "new upstream file\n");
+      sourceGit("add", ".");
+      sourceGit("commit", "-m", "Synthetic upstream change");
+    }
     const originalIndex = git("write-tree");
     const originalGitlink = git("ls-tree", "HEAD", "dependency");
     let modelCalls = 0;
@@ -4609,9 +4624,20 @@ describe("patch publication integrity", () => {
             "submodule",
             "update",
             "--init",
+            ...(shallow ? ["--remote", "--depth=1"] : []),
             "--",
             "dependency",
           );
+        if (shallow) {
+          const childGit = repositoryGit(child);
+          expect(childGit("rev-parse", "--is-shallow-repository")).toBe("true");
+          expect(childGit("rev-parse", "HEAD")).toBe(
+            sourceGit("rev-parse", "HEAD"),
+          );
+          expect(() =>
+            childGit("cat-file", "-e", `${originalChildHead}^{commit}`),
+          ).toThrow();
+        }
         if (state !== "left uninitialized") {
           expectedContents = await readFile(join(child, "app.ts"), "utf8");
           if (changed) {
@@ -4624,11 +4650,15 @@ describe("patch publication integrity", () => {
       },
     });
     expect(modelCalls).toBe(1);
-    expect(outcome.exitCode, outcome.stderr).toBe(changed ? 0 : 2);
+    const applied = changed || shallow;
+    expect(outcome.exitCode, outcome.stderr).toBe(applied ? 0 : 2);
     expect(JSON.parse(outcome.stdout)).toMatchObject({
-      applied: changed,
-      files: changed ? ["dependency/app.ts"] : [],
-      ...(changed ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
+      applied,
+      files: [
+        ...(shallow ? ["dependency"] : []),
+        ...(changed ? ["dependency/app.ts"] : []),
+      ],
+      ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
     });
     expect(git("write-tree")).toBe(originalIndex);
     expect(git("ls-tree", "HEAD", "dependency")).toBe(originalGitlink);
