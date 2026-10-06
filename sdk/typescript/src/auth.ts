@@ -65,8 +65,11 @@ export function codexSecurityPrivatePaths(
   return [
     codexSecurityCredentialHome(environment),
     join(homedir(), ".ssh"),
+    join(expandHome("~", environment), ".ssh"),
     environmentEntry(environment, "GH_CONFIG_DIR") ||
       join(homedir(), ".config", "gh"),
+    environmentEntry(environment, "GH_CONFIG_DIR") ||
+      join(expandHome("~", environment), ".config", "gh"),
     stateDatabase,
     `${stateDatabase}-wal`,
     `${stateDatabase}-shm`,

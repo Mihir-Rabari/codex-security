@@ -190,6 +190,8 @@ async function fixture(
     wrappedCodex?: boolean;
     ambientOutput?: boolean;
     advisoryDetails?: string;
+    homeVariable?: "HOME" | "USERPROFILE";
+    configuredGitHubHome?: boolean;
   } = {},
 ) {
   const root = await temporaryDirectory("codex-security-sca-");
@@ -261,7 +263,14 @@ process.exit(child.status ?? 1);
   }[] = [];
   const sourceCalls: WorkbenchCommandOptions[] = [];
   const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
+  const selectedUserHome = join(root, "selected-user-home");
   const environment = {
+    ...(options.homeVariable
+      ? { [options.homeVariable]: selectedUserHome }
+      : {}),
+    ...(options.configuredGitHubHome
+      ? { GH_CONFIG_DIR: join(root, "selected-gh-home") }
+      : {}),
     PATH: process.env["PATH"] ?? "",
     ...Object.fromEntries(
       ["SystemRoot", "TEMP", "TMP"].flatMap((name) =>
@@ -488,6 +497,7 @@ process.exit(child.status ?? 1);
     environment,
     codexHome,
     ambientHome,
+    selectedUserHome,
   };
 }
 
@@ -656,10 +666,19 @@ process.exit(0);
   },
 );
 
-(process.platform === "win32" ? test.skip : test)(
-  "dependency triage runs a delegated native tool with read-only evidence and private credentials",
-  async () => {
-    const f = await fixture({ wrappedCodex: true, ambientOutput: true });
+(process.platform === "win32" ? test.skip : test).each([
+  ["HOME", false],
+  ["USERPROFILE", false],
+  ["HOME", true],
+] as const)(
+  "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %s",
+  async (homeVariable, configuredGitHubHome) => {
+    const f = await fixture({
+      wrappedCodex: true,
+      ambientOutput: true,
+      homeVariable,
+      configuredGitHubHome,
+    });
     await using security = f.client;
     const result = await security.scanDependencies({
       repositoryPath: f.repository,
@@ -672,7 +691,15 @@ process.exit(0);
     expect(options.codexPathOverride).toBe(launcher);
     expect(options.env!["CODEX_CLI_PATH"]).toBe(launcher);
     expect(dirname(native)).not.toBe(dirname(launcher));
+    const selectedSsh = join(f.selectedUserHome, ".ssh", "id_synthetic");
+    const selectedGitHub = join(
+      f.environment["GH_CONFIG_DIR"] ??
+        join(f.selectedUserHome, ".config", "gh"),
+      "hosts.yml",
+    );
     const privateFiles = [
+      selectedSsh,
+      selectedGitHub,
       join(f.ambientHome, "auth.json"),
       join(f.ambientHome, ".credentials.json"),
       join(f.ambientHome, "config.toml"),
@@ -704,6 +731,11 @@ process.exit(0);
     expect(permissions["codex_security_dependencies"]!["network"]).toEqual({
       enabled: false,
     });
+    const filesystem = permissions["codex_security_dependencies"]![
+      "filesystem"
+    ] as JsonObject;
+    expect(filesystem[dirname(selectedSsh)]).toEqual({ ".": "deny" });
+    expect(filesystem[dirname(selectedGitHub)]).toEqual({ ".": "deny" });
     const source = join(f.repository, "usage.txt");
     const configArgs = [
       ...options.configOverrides!.flatMap((value) => ["--config", value]),

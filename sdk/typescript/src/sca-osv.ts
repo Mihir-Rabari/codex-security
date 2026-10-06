@@ -1215,6 +1215,7 @@ export async function runOsvScan(
       const emptyInput =
         output.exitCode === 128 && output.stderr.includes(emptyInputReceipt);
       if (emptyInput) {
+        reconciledSources.add(input.path);
         emptyOutputPaths.add(invocation.rawOutputPath);
         input.reason = "OSV extracted no packages from this lockfile.";
       }
