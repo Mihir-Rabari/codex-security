@@ -8,6 +8,7 @@
 - clarify READMEs and separate SDK reference guides ([#1307](https://github.com/openai/codex-security/pull/1307))
 - preserve bounded source and finding details ([#1275](https://github.com/openai/codex-security/pull/1275))
 - share common tool annotations ([#1258](https://github.com/openai/codex-security/pull/1258))
+- preserve trailing whitespace in Git paths ([#1135](https://github.com/openai/codex-security/pull/1135))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
