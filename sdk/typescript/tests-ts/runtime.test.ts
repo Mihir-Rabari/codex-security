@@ -329,6 +329,8 @@ describe("plugin runtime preparation", () => {
       "candidateOwner",
       "candidateKey",
       "surfaceReferenceKey",
+      "isRecord",
+      "normalizeLegacyCandidateEntry",
       "normalizeCoverageEntries",
       "buildCoverage",
     ]

@@ -1392,6 +1392,95 @@ describe("custom validation", () => {
 
 const unexpectedValidation = rejecting("unexpected validation");
 
+for (const prior of ["rejected", "not_applicable"] as const) {
+  for (const disposition of [
+    "reportable",
+    "deferred",
+    "suppressed",
+    "not_applicable",
+  ] as const) {
+    for (const gap of ["generic", "other-worker", "none"] as const) {
+      test(`unmapped terminal surface retains referenced evidence: ${prior}/${disposition}/${gap}`, async () => {
+        const f = await fixture();
+        const finding = f.findings.findings[0]!;
+        finding.provenance["candidateId"] = "validated-candidate";
+        finding.provenance["sourceWorkerId"] = "worker-current";
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        const previous = {
+          id: "saved-terminal-review",
+          candidateId: "validated-candidate",
+          sourceWorkerId: "worker-current",
+          label: "Saved terminal review",
+          disposition: prior,
+          notes: "Saved independent evidence.",
+          receiptRefs: [],
+          annotation: "Retain this authored annotation.",
+        };
+        coverage.surfaces.push(previous);
+        coverage.completeness = "partial";
+        const independent = {
+          id: "independent-review",
+          ...(gap === "other-worker"
+            ? {
+                candidateId: "validated-candidate",
+                sourceWorkerId: "worker-other",
+              }
+            : {}),
+          reason: "Independent work still uses the saved evidence.",
+          surfaceIds: [previous.id],
+        };
+        coverage.deferred = gap === "none" ? [] : [independent];
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        if (gap === "none") {
+          expect(saved.coverage.surfaces).not.toContainEqual(previous);
+        } else {
+          expect(saved.coverage.surfaces).toContainEqual(previous);
+          expect(saved.coverage.deferred).toContainEqual(independent);
+        }
+      });
+    }
+    for (const owner of [
+      { worker: "synthetic-worker" },
+      ["synthetic-worker"],
+    ]) {
+      test(`structured exclusion owner remains independent: ${prior}/${disposition}/${Array.isArray(owner) ? "array" : "object"}`, async () => {
+        const f = await fixture();
+        f.findings.findings[0]!.provenance["candidateId"] =
+          "validated-candidate";
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        const previous = {
+          id: "independent-exclusion",
+          candidateId: "validated-candidate",
+          sourceWorkerId: owner,
+          pattern: "src/synthetic.ts",
+          reason: "Independent authored exclusion.",
+          disposition: prior,
+          annotation: "Retain this authored annotation.",
+        };
+        coverage.explicitExclusions.push(previous);
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        expect(saved.coverage.explicitExclusions).toContainEqual(previous);
+      });
+    }
+  }
+}
+
 for (const disposition of [
   "reportable",
   "deferred",

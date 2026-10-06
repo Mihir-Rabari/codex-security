@@ -416,10 +416,15 @@ export async function runCustomValidation(options: {
     previousDeferred.set(key, rows);
     return false;
   });
+  const retainedSurfaceIds = new Set(
+    coverage.deferred.flatMap((item) => item.surfaceIds ?? []),
+  );
   const previousDecisions = new Map<string, Record<string, unknown>[]>();
   const retainDecision = (item: Record<string, unknown>, mapped: boolean) => {
     if (
       typeof item["candidateId"] !== "string" ||
+      (item["sourceWorkerId"] != null &&
+        typeof item["sourceWorkerId"] !== "string") ||
       (item["disposition"] !== "rejected" &&
         item["disposition"] !== "not_applicable")
     )
@@ -432,7 +437,10 @@ export async function runCustomValidation(options: {
     return mapped;
   };
   coverage.surfaces = coverage.surfaces.filter((item) =>
-    retainDecision(item, mappedSurfaces.has(item.id)),
+    retainDecision(
+      item,
+      mappedSurfaces.has(item.id) || retainedSurfaceIds.has(item.id),
+    ),
   );
   coverage.explicitExclusions = coverage.explicitExclusions.filter((item) =>
     retainDecision(item, false),

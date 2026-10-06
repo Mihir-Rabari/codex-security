@@ -1154,9 +1154,12 @@ def test_stopped_diff_keeps_decision_evidence_when_parent_supersedes_checkpoints
     assert {item["disposition"] for item in coverage["surfaces"]} == {"rejected"}
 
 
-@pytest.mark.parametrize("invalid", ["phase", "summary", "json"])
+@pytest.mark.parametrize(
+    "invalid", ["phase", "summary", "json", "NaN", "Infinity", "-Infinity", "1e400", "1e300"]
+)
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
 def test_stopped_diff_preserves_pending_evidence_when_ledger_is_unusable(
-    tmp_path: Path, invalid: str
+    tmp_path: Path, invalid: str, termination: str
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -1165,13 +1168,32 @@ def test_stopped_diff_preserves_pending_evidence_when_ledger_is_unusable(
         candidate["validation"] = "incomplete phase output"
     elif invalid == "summary":
         del candidate["summary"]
-    ledger.write_text("{incomplete" if invalid == "json" else json.dumps(candidate) + "\n")
-    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+    payload = json.dumps(candidate)
+    if invalid in {"NaN", "Infinity", "-Infinity", "1e400", "1e300"}:
+        payload = payload[:-1] + ', "metadata": {"estimate": ' + invalid + "}}"
+    ledger.write_text("{incomplete" if invalid == "json" else payload + "\n")
+    arguments = ["--message", "Stopped."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert scan["progress"]["candidates"]["unresolved"] == 1
     assert any(
         "Could not reconcile the saved Diff candidates" in warning for warning in scan["warnings"]
     )
+    assert (scan_dir / "report.md").is_file()
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+def test_stopped_diff_keeps_finite_ledger_metadata(tmp_path: Path, termination: str) -> None:
+    state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": "suppressed"}
+    candidate["metadata"] = {"estimate": 1.25}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    arguments = ["--message", "Stopped."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["candidates"]["unresolved"] == 0
+    assert not any("Diff candidates" in warning for warning in scan["warnings"])
     assert (scan_dir / "report.md").is_file()
 
 
