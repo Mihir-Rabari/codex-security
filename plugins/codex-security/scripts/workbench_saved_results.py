@@ -1348,6 +1348,21 @@ def merge_saved_results(
         previous_owner = previous.get("provenance", {}).get("workerId") or previous_owner
         current_owner = current_owner if isinstance(current_owner, str) else None
         previous_owner = previous_owner if isinstance(previous_owner, str) else None
+        if (
+            not current_candidate
+            and not previous_candidate
+            and isinstance(finding.get("identity"), dict)
+            and isinstance(previous.get("identity"), dict)
+            and id(finding) not in inferred_identities
+            and id(previous) not in inferred_identities
+            and (current := recovered_finding(finding))
+            and (prior := recovered_finding(previous))
+            and any(
+                current["identity"].get(field) != prior["identity"].get(field)
+                for field in ("anchor", "instance")
+            )
+        ):
+            return True
         key = _finding_key(recovered_finding(finding) or finding)
         if bool(current_candidate) != bool(previous_candidate):
             if current_owner and previous_owner and current_owner != previous_owner:
@@ -1390,7 +1405,12 @@ def merge_saved_results(
             if len(matches) == 1:
                 return matches[0]
             return _digest(
-                [key, finding.get("provenance", {}).get("workerId"), finding_candidate_id(finding)]
+                [
+                    key,
+                    finding.get("provenance", {}).get("workerId"),
+                    finding_candidate_id(finding),
+                    explicit_finding_key(finding) if not finding_candidate_id(finding) else None,
+                ]
             )
         return key
 

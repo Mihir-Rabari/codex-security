@@ -2071,3 +2071,45 @@ def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
     assert saved["findingCount"] == 1
     assert {row["provenance"]["candidateId"] for row in saved["findings"]} == {"same-candidate"}
     assert "instance" not in saved["findings"][0]["identity"]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("current_identity", ["anchor", "instance", "same"])
+@pytest.mark.parametrize("changed_alias_note", [False, True])
+def test_saved_alias_metadata_preserves_explicit_worker_siblings(
+    tmp_path, retry, current_identity, changed_alias_note
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    first = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    first["identity"] = {"anchor": "current-observation"}
+    first["provenance"].pop("candidateId", None)
+    first["provenance"]["preservedIdentity"] = {
+        "anchor": "historical-observation",
+        "note": "Initial metadata.",
+    }
+    second = copy.deepcopy(first)
+    if current_identity == "anchor":
+        second["identity"]["anchor"] = "independent-observation"
+    elif current_identity == "instance":
+        second["identity"]["instance"] = "independent"
+    if changed_alias_note:
+        second["provenance"]["preservedIdentity"]["note"] = "Later metadata."
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    _, path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    document = json.loads(path.read_text())
+    document["findings"] = [first, second]
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    expected = 1 if current_identity == "same" else 2
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == expected
+    assert {json.dumps(row["identity"], sort_keys=True) for row in scan["findings"]} == {
+        json.dumps(row["identity"], sort_keys=True) for row in (first, second)
+    }
+    assert len({row["findingId"] for row in scan["findings"]}) == expected
+    findings = scan["findings"]
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings
