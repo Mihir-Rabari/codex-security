@@ -298,7 +298,7 @@ console.log(JSON.stringify(await matchScanFindings(input, { codex })));
       await writeFile(
         script,
         `
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 await new Promise(resolve => { process.stdin.resume(); process.stdin.on("end", resolve); });
 console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-comparison" }));
@@ -431,7 +431,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: {
     await writeFile(
       preload,
       `
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify(process.argv.slice(1)) + "\\n");
 await new Promise((resolve) => { process.stdin.resume(); process.stdin.on("end", resolve); });
 console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-comparison" }));
@@ -618,6 +618,16 @@ process.exit(0);
       ambient: false,
       selection: "home-definition" as const,
     })),
+    ...["amazon-bedrock", "amazon-bedrock-runtime"].flatMap((name) =>
+      [false, true].map((ambient) => ({
+        name,
+        provider: {
+          aws: { region: "us-east-1" },
+          http_headers: { Authorization: "synthetic-private-bedrock-header" },
+        },
+        ambient,
+      })),
+    ),
     {
       name: "custom",
       provider: { name: "Synthetic", env_key: "OPENAI_API_KEY" },
@@ -745,11 +755,12 @@ process.exit(0);
       await writeFile(
         preload,
         `
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
   openai: process.env.OPENAI_API_KEY ?? null,
   codex: process.env.CODEX_API_KEY ?? null,
   providerKey: process.env.SYNTHETIC_PROVIDER_KEY ?? null,
+  configContents: readFileSync(process.env.CODEX_HOME + "/config.toml", "utf8"),
   argv: process.argv.slice(1),
   internal: Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("CODEX_SECURITY_INTERNAL_"))),
 }) + "\\n");
@@ -849,10 +860,21 @@ process.exit(0);
             expect(JSON.stringify(launch.argv)).not.toContain(
               "synthetic-private-",
             );
-            const configured = (
-              argvConfig(launch.argv)["model_providers"] as JsonObject
-            )[name] as JsonObject;
-            if (provider["experimental_bearer_token"] !== undefined) {
+            const configured =
+              ((
+                argvConfig(launch.argv)["model_providers"] as
+                  JsonObject | undefined
+              )?.[name] as JsonObject | undefined) ?? {};
+            if (["amazon-bedrock", "amazon-bedrock-runtime"].includes(name)) {
+              expect(configured["http_headers"]).toBeUndefined();
+              expect(configured["env_http_headers"]).toBeUndefined();
+              for (const capture of [native, ordinary]) {
+                const fileConfig = parse(capture.configContents) as JsonObject;
+                expect(
+                  (fileConfig["model_providers"] as JsonObject)[name],
+                ).toMatchObject(provider);
+              }
+            } else if (provider["experimental_bearer_token"] !== undefined) {
               expect(configured).not.toHaveProperty(
                 "experimental_bearer_token",
               );

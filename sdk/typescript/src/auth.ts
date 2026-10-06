@@ -1,12 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { parse } from "smol-toml";
 import { inlineToml, type JsonObject } from "./config.js";
 import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
 import {
   executablePathForSpawn,
+  readCodexHomeConfiguration,
   runCodexCommand,
   type CodexCommand,
   type ProcessEnvironment,
@@ -37,10 +36,10 @@ export async function readCodexHomeConfig(
 ): Promise<JsonObject> {
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
-        encoding: "utf8",
+      await readCodexHomeConfiguration(
+        configuredCodexHome(environment),
         signal,
-      }),
+      ),
     ) as JsonObject;
   } catch (error) {
     signal?.throwIfAborted();

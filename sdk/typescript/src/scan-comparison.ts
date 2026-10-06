@@ -23,6 +23,7 @@ import {
   codexConfigOverrides,
   providerProcessConfiguration,
   mcpProcessConfiguration,
+  bedrockProcessConfiguration,
   hasCommandAuth,
   mergedCodexConfig,
   resolveCodexProfile,
@@ -33,7 +34,10 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { prepareReadOnlyExecution } from "./execution-preparation.js";
+import {
+  lockExecutionConfiguration,
+  prepareReadOnlyExecution,
+} from "./execution-preparation.js";
 import { definedEnvironment } from "./execution-auth.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
@@ -664,16 +668,38 @@ async function startReadOnlyCodexThread(
         (config ?? {}) as JsonObject,
         settings.env ?? {},
       );
-      return new Codex({
+      const provider = bedrockProcessConfiguration(
+        mcpProcessConfiguration(launch.config).config,
+      );
+      const codex = new Codex({
         ...settings,
         env: definedEnvironment(launch.environment),
         configOverrides: [
-          ...codexConfigOverrides(
-            mcpProcessConfiguration(launch.config).config,
-          ),
+          ...codexConfigOverrides(provider.config),
           ...(configOverrides ?? []),
         ],
       });
+      if (!provider.requiresConfigFile) return codex;
+      return {
+        startThread(threadOptions: ThreadOptions) {
+          const thread = codex.startThread(threadOptions);
+          return {
+            async run(input: string, options: TurnOptions) {
+              const release = await lockExecutionConfiguration(
+                configuredCodexHome(launch.environment),
+                launch.config,
+                options.signal,
+                true,
+              );
+              try {
+                return await thread.run(input, options);
+              } finally {
+                await release();
+              }
+            },
+          };
+        },
+      };
     });
   const codex = await createCodex({
     ...(command === undefined
@@ -780,7 +806,11 @@ export async function disabledMcpServers(
       "-C",
       workingDirectory,
       ...[
-        ...codexConfigOverrides(mcpProcessConfiguration(launch.config).config),
+        ...codexConfigOverrides(
+          bedrockProcessConfiguration(
+            mcpProcessConfiguration(launch.config).config,
+          ).config,
+        ),
         ...configOverrides,
       ].flatMap((value) => ["--config", value]),
       "-c",

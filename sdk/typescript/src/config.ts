@@ -587,6 +587,30 @@ export function mcpProcessConfiguration(config: JsonObject): {
   return { config: result, requiresConfigFile };
 }
 
+/** @internal Bedrock headers remain file-backed; Codex rejects env_http_headers. */
+export function bedrockProcessConfiguration(config: JsonObject): {
+  config: JsonObject;
+  requiresConfigFile: boolean;
+} {
+  const result = structuredClone(config);
+  let requiresConfigFile = false;
+  const removeHeaders = (source: JsonObject) => {
+    if (!isRecord(source["model_providers"])) return;
+    for (const name of ["amazon-bedrock", "amazon-bedrock-runtime"]) {
+      const provider = source["model_providers"][name];
+      if (!isRecord(provider) || !Object.hasOwn(provider, "http_headers"))
+        continue;
+      delete provider["http_headers"];
+      requiresConfigFile = true;
+    }
+  };
+  removeHeaders(result);
+  if (isRecord(result["profiles"]))
+    for (const profile of Object.values(result["profiles"]))
+      if (isRecord(profile)) removeHeaders(profile as JsonObject);
+  return { config: result, requiresConfigFile };
+}
+
 /** Serialize full tables so dotted names and filesystem paths remain literal keys. */
 export function codexConfigOverrides(config: JsonObject): string[] {
   return Object.entries(config).map(

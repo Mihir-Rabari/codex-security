@@ -1,4 +1,5 @@
-import { mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, realpath, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
@@ -15,9 +16,9 @@ import {
   deepMerge,
   providerProcessConfiguration,
   mcpProcessConfiguration,
+  bedrockProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
-  writeCodexConfigContents,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
@@ -40,6 +41,8 @@ import {
 import {
   codexSecurityStateDirectory,
   acquireCodexSecurityCredentialHomeLock,
+  acquireCodexHomeConfigurationLock,
+  readCodexHomeConfiguration,
   environmentWithGit,
   executablePathForSpawn,
   pluginExecutionEnvironment,
@@ -186,11 +189,25 @@ export async function lockExecutionConfiguration(
   signal?: AbortSignal,
   preserveExistingConfiguration = false,
 ): Promise<() => Promise<void>> {
-  const release = await acquireCodexSecurityCredentialHomeLock(
-    codexHome,
-    signal,
-  );
+  const release = await (
+    preserveExistingConfiguration
+      ? acquireCodexHomeConfigurationLock
+      : acquireCodexSecurityCredentialHomeLock
+  )(codexHome, signal);
   const path = join(codexHome, "config.toml");
+  const originalEntry = join(
+    codexHome,
+    `.${randomUUID()}.original-config.toml`,
+  );
+  let savedEntry = false;
+  const restore = async () => {
+    if (savedEntry) {
+      await rename(originalEntry, path);
+      savedEntry = false;
+    } else {
+      await rm(path, { force: true });
+    }
+  };
   try {
     const previous = await readFile(path).catch(
       (error: NodeJS.ErrnoException) => {
@@ -198,18 +215,29 @@ export async function lockExecutionConfiguration(
         throw error;
       },
     );
-    await writeCodexConfig(
-      path,
-      preserveExistingConfiguration && previous !== null
-        ? deepMerge(parseToml(previous.toString("utf8")) as JsonObject, config)
-        : config,
-    );
+    if (previous !== null) {
+      await rename(path, originalEntry);
+      savedEntry = true;
+    }
+    try {
+      await writeCodexConfig(
+        path,
+        preserveExistingConfiguration && previous !== null
+          ? deepMerge(
+              parseToml(previous.toString("utf8")) as JsonObject,
+              config,
+            )
+          : config,
+      );
+    } catch (error) {
+      await restore();
+      throw error;
+    }
     let restoration: Promise<void> | undefined;
     return () =>
       (restoration ??= (async () => {
         try {
-          if (previous === null) await rm(path, { force: true });
-          else await writeCodexConfigContents(path, previous);
+          await restore();
         } finally {
           await release();
         }
@@ -271,9 +299,14 @@ export function createExecutionCodex(
   const mcpLaunch = runtime.preserveCodexHomeConfig
     ? mcpProcessConfiguration(sdkCodexConfig)
     : { config: sdkCodexConfig, requiresConfigFile: false };
-  const processConfig = { ...mcpLaunch.config };
+  const providerLaunch = runtime.preserveCodexHomeConfig
+    ? bedrockProcessConfiguration(mcpLaunch.config)
+    : { config: mcpLaunch.config, requiresConfigFile: false };
+  const processConfig = { ...providerLaunch.config };
   const requiresConfigFile =
-    session.runtimeConfig !== undefined || mcpLaunch.requiresConfigFile;
+    session.runtimeConfig !== undefined ||
+    mcpLaunch.requiresConfigFile ||
+    providerLaunch.requiresConfigFile;
   // Native launches read project trust from config.toml, not a large argv override.
   if (client.createCodex === undefined) delete processConfig["projects"];
   const checkPermissions =
@@ -553,15 +586,8 @@ export async function nativeScanConfiguration(
   },
   subagents: number,
 ): Promise<JsonObject> {
-  const ambientPath = join(
+  const ambient = await readCodexHomeConfiguration(
     environment["CODEX_HOME"] || configuredCodexHome(environment),
-    "config.toml",
-  );
-  const ambient = await readFile(ambientPath, "utf8").catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    },
   );
   const selected = environment["CODEX_SECURITY_CONFIG_PATH"]
     ? parseToml(
