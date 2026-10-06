@@ -1,3 +1,7 @@
+import {
+  readingAnnotations,
+  writingAnnotations,
+} from "./src/server/tool-annotations.js";
 import type { JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
 import { execFile } from "node:child_process";
@@ -633,12 +637,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
       inputSchema: z.object({}).strict(),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: {
         ...modelActionMeta,
         "openai/requestedEntitlements": ["cyber_trusted_access"],
@@ -710,12 +709,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Headless and CLI only. Start or rejoin a Standard security scan. Do not use for desktop scans, Review changes, Deep Scan, or an existing SDK-owned scan. Use the returned authoritative scanId, scanDir, and handoffClaimToken throughout preflight, reporting, and completion.",
       inputSchema: startHeadlessStandardScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ targetPath, scope, targetSummary, userContext }, extra) => {
@@ -790,12 +784,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Start or rejoin a Standard or diff Codex Security scan from its owning conversation. Use the returned authoritative scanId and scanDir. Standard and diff scans save progress checkpoints before their final semantic draft; the workbench writes the unsealed canonical artifacts. Complete the same scan once. Deep Scan uses start_codex_security_deep_scan instead.",
       inputSchema: startPromptOnlyScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -954,12 +943,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Validate a local target directory and derive its display and Git metadata without saving setup.",
       inputSchema: targetInspectionSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ targetPath }) => {
@@ -987,12 +971,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Resolve and validate the complete local target, scope, mode, and exact Git change set without saving setup.",
       inputSchema: setupInspectionSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ targetPath, scope, mode, diffTarget }) => {
@@ -1025,12 +1004,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Validate and save bounded target, scope, mode, and optional context selections.",
       inputSchema: submissionSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({
@@ -1100,12 +1074,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate draft is ready, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the canonical parent scan-manifest.json. Call complete_codex_security_scan once.",
       inputSchema: startDeepScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -1432,12 +1401,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read plugin-owned scan state for native Security monitoring without claiming a pending Codex handoff.",
       inputSchema: scanReadSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, occurrenceId }) =>
@@ -1459,12 +1423,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read persisted plugin-owned scan summaries for native Security navigation.",
       inputSchema: scanListSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, mode, offset, query, status, targetId }) =>
@@ -1489,12 +1448,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read the latest plugin-owned finding occurrence for each stable repository target and finding identity.",
       inputSchema: globalFindingsPageSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, severity, status, targetId }) =>
@@ -1519,12 +1473,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Read plugin-owned repository summaries and their latest scan state.",
       inputSchema: repositoryListSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: readingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, status, targetId }) =>
@@ -1548,12 +1497,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
       inputSchema: scanContextSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, occurrenceId, handoffClaimToken }, extra) => {
@@ -1635,12 +1579,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Replace the context for a running scan. The next phase uses the new value; workers in the current phase keep their original context.",
       inputSchema: scanContextUpdateSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, userContext, handoffClaimToken }, extra) => {
@@ -1666,12 +1605,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Replace the context for the running scan attached to this workspace.",
       inputSchema: appScanContextUpdateSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, userContext }) => {
@@ -1699,12 +1633,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Record a meaningful live scan phase or coverage milestone in the Codex Security workbench.",
       inputSchema: progressSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async (
@@ -1819,12 +1748,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "Finalization only: validate and seal already-authored scan-manifest.json, findings.json, and coverage.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
     async ({ scanId, handoffClaimToken }) => {
@@ -1883,12 +1807,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Persist a completed finding's local open or closed triage status. Closed findings require one bounded close reason; reopening clears it.",
       inputSchema: findingTriageSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, status, closeReason, note }) =>
@@ -1913,12 +1832,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Queue a completed finding for Codex remediation before sending the host a generate or regenerate request.",
       inputSchema: findingRemediationRequestSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, actionToken }) =>
@@ -1943,12 +1857,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Durably claim an apply or verify handoff before asking Codex to perform the local working-tree operation.",
       inputSchema: findingRemediationActionRequestSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
@@ -1977,12 +1886,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Atomically take ownership of an unowned or stale remediation host request before resending it.",
       inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, actionToken }) =>
@@ -2007,12 +1911,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Release a locally owned remediation host request after message delivery fails.",
       inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, actionToken }) =>
@@ -2067,12 +1966,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Seal host-message delivery ownership before Codex starts a remediation worker.",
       inputSchema: findingRemediationClaimSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ occurrenceId, requestId, actionToken }) =>
@@ -2146,12 +2040,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Export retained local findings as JSON, SARIF, or CSV, or the saved threat model as Markdown without running another analysis. Findings require completed or preserved stopped results; threat models may be provisional. Defaults to findings in CSV, or Markdown when artifact is threat-model. Exported copies remain in the scan's exports directory, except canonical findings JSON.",
       inputSchema: findingsExportSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ scanId, artifact, format }) =>
@@ -2177,12 +2066,7 @@ export function createCodexSecurityServer(): McpServer {
       description:
         "App-only. Load one bounded page of indexed findings for a completed local scan, migrating validated legacy finding details when needed.",
       inputSchema: findingsPageSchema,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
+      annotations: writingAnnotations,
       _meta: appMeta,
     },
     async ({ limit, offset, query, scanId, severity, status }) =>

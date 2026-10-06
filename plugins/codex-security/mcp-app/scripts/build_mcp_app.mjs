@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { build } from "esbuild";
+import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const maxChunkBytes = 140_000;
@@ -14,6 +15,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
     throw new Error("Native packaging must be universal or host.");
   }
+  await buildNativeWrappers();
   const mcpDir = resolve(output);
   const nativeRoot = join(
     root,
