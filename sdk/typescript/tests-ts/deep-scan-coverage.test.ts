@@ -7,6 +7,7 @@ import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
 import { ScanResult } from "../src/result.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { pythonExecutable } from "./support/python.js";
 
 const fixtureUrl = new URL(
   "../../../plugins/codex-security/mcp-app/tests/deep_scan_coverage_fixture.mjs",
@@ -35,7 +36,11 @@ test.each([
           String(resume),
           String(continueAfterResume),
         ],
-        { stdout: "pipe", stderr: "pipe" },
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, PYTHON: pythonExecutable() ?? undefined },
+        },
       );
       const [output, errors, exitCode] = await Promise.all([
         new Response(child.stdout).text(),

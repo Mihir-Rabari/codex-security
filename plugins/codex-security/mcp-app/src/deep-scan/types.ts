@@ -30,6 +30,7 @@ export interface DeepScanCanonicalArtifacts {
 
 export interface DeepScanRunState {
   scanId: string;
+  workflowVersion?: string;
   status: DeepScanRunStatus;
   phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;

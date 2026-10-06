@@ -34,6 +34,8 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
         "retained_parent_null_row",
         "retained_parent_idless",
         "retained_parent_bad_id",
+        "parent_attempt_list",
+        "parent_attempt_object",
     ],
 )
 def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
@@ -110,7 +112,9 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
     if case.startswith("retained_"):
         parent["deferred"] = [retained]
     target = parent if "parent" in case or case.startswith("retained_links") else raw["coverage"]
-    if "links" in case or "receipts" in case:
+    if "attempt" in case:
+        target["surfaces"][0]["provenance"]["attempt"] = [] if case.endswith("list") else {}
+    elif "links" in case or "receipts" in case:
         values = {
             "null": None,
             "null_row": [None],

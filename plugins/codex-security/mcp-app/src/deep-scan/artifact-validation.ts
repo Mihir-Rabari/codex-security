@@ -1,6 +1,6 @@
+import { isRecord } from "../record.js";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isRecord } from "../record.js";
 import {
   parsePersistedScanDraft,
   parseScanDraft,
@@ -24,7 +24,6 @@ export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
 export interface DeepReductionSources {
   discoveries: {
     workerId: string;
-    attempt?: number;
     coverage?: ScanDraftInput["coverage"];
     result: DeepReductionInput;
   }[];
@@ -311,64 +310,48 @@ export function projectDiscoveryCoverage(
   coverage: ScanDraftInput["coverage"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
-  archived: { coverage: ScanDraftInput["coverage"]; attempt?: string }[] = [],
+  archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
+  originalCoverage: ScanDraftInput["coverage"] = coverage,
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
-  const current = {
+  const provenance = {
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
-  const reviews = [{ ...current, completeness: coverage.completeness }];
-  const origin = (field: string, item: unknown) => {
-    const saved = archived.findLast((saved) =>
-      ((saved.coverage[field] as unknown[] | undefined) ?? []).some((row) => {
-        if (!isRecord(row) || !isRecord(item))
-          return isDeepStrictEqual(row, item);
-        const original = { ...row };
-        const normalized = { ...item };
-        if (
-          (field === "surfaces" || field === "deferred") &&
-          row.id === undefined
-        )
-          delete normalized.id;
-        if (field === "surfaces") {
+  const reviews = [{ ...provenance, completeness: coverage.completeness }];
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
+  );
+  const surfaces = coverage.surfaces as Record<string, unknown>[];
+  const prefix = (item: Record<string, unknown>) =>
+    `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
+  const project = (
+    field: string,
+    item: Record<string, unknown>,
+    source: Record<string, unknown> = item,
+  ) => {
+    const original = history.find((source) =>
+      ((source.coverage[field] as unknown[] | undefined) ?? []).some((saved) => {
+        const original = typeof saved === "string" ? { question: saved } : structuredClone(saved);
+        const normalized = structuredClone(item);
+        if (field === "surfaces" && isRecord(original)) {
           original.receiptRefs ??= [];
           normalized.receiptRefs ??= [];
-          const prefix = `${archivePrefix}${saved.attempt}/`;
+          const prefix = `${archivePrefix}attempt-${String(source.attempt).padStart(2, "0")}/`;
           for (const row of [original, normalized])
-            row.receiptRefs = (row.receiptRefs as string[]).map((ref) =>
-              ref.startsWith(prefix) ? ref.slice(prefix.length) : ref,
-            );
+            row.receiptRefs = (row.receiptRefs as string[]).map((ref) => ref.startsWith(prefix) ? ref.slice(prefix.length) : ref);
         }
         return isDeepStrictEqual(original, normalized);
       }),
     );
-    const attempt = saved?.attempt?.match(/^attempt-(\d+)$/)?.[1];
-    if (attempt === undefined) return current;
-    const provenance = { workerId: worker.id, attempt: Number(attempt) };
-    if (!reviews.some((review) => review.attempt === provenance.attempt))
-      reviews.push({
-        ...provenance,
-        completeness: saved!.coverage.completeness,
-      });
-    return provenance;
-  };
-  const prefix = (provenance: typeof current) =>
-    `${worker.id}-attempt-${provenance.attempt ?? "unknown"}`;
-  const surfaces = coverage.surfaces as Record<string, unknown>[];
-  const surfaceIds = new Map<unknown, string>();
-  for (const [index, surface] of surfaces.entries()) {
-    if (!surfaceIds.has(surface.id))
-      surfaceIds.set(
-        surface.id,
-        `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
-      );
-  }
-  const project = (
-    item: Record<string, unknown>,
-    field: string,
-    source: unknown = item,
-  ) => {
+    const origin = original
+      ? { workerId: worker.id, attempt: original.attempt }
+      : provenance;
+    if (
+      original &&
+      !reviews.some((review) => review.attempt === original.attempt)
+    )
+      reviews.push({ ...origin, completeness: original.coverage.completeness });
     const result = structuredClone(item);
     const descriptions = result.provenance;
     const projected =
@@ -381,45 +364,63 @@ export function projectDiscoveryCoverage(
       delete projected[key];
     result.provenance = {
       ...projected,
-      ...origin(field, source),
-      ...(item.id === undefined ? {} : { sourceId: item.id }),
+      ...origin,
+      // Normalized IDs help compare history; provenance describes the saved source.
+      ...(source.id === undefined ? {} : { sourceId: source.id }),
       ...(item.candidateId === undefined
         ? {}
         : { candidateId: item.candidateId }),
     };
     return result;
   };
-  return {
-    completeness: coverage.completeness,
-    reviews,
-    surfaces: surfaces.map((surface, index) => ({
-      ...project(surface, "surfaces"),
-      id: `${prefix(origin("surfaces", surface))}-surface-${index + 1}`,
+  const projectedSurfaces = surfaces.map((surface, index) => {
+    const item = project(
+      "surfaces",
+      surface,
+      (originalCoverage.surfaces as Record<string, unknown>[])[index],
+    );
+    return {
+      ...item,
+      id: `${prefix(item)}-surface-${index + 1}`,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (ref) =>
           ref.startsWith(archivePrefix) ? ref : `${artifactPrefix}/${ref}`,
       ),
-    })),
+    };
+  });
+  const surfaceIds = new Map();
+  for (const [index, surface] of surfaces.entries()) {
+    if (!surfaceIds.has(surface.id)) surfaceIds.set(surface.id, projectedSurfaces[index]!.id);
+  }
+  return {
+    completeness: coverage.completeness,
+    reviews,
+    surfaces: projectedSurfaces,
     explicitExclusions: (
       coverage.explicitExclusions as Record<string, unknown>[]
-    ).map((item) => project(item, "explicitExclusions")),
+    ).map((item) => project("explicitExclusions", item)),
     deferred: (coverage.deferred as Record<string, unknown>[]).map(
-      (item, index) => ({
-        ...project(item, "deferred"),
-        id: `${prefix(origin("deferred", item))}-deferred-${index + 1}`,
-        ...(item.candidateId === undefined
-          ? {}
-          : {
-              candidateId: `${prefix(origin("deferred", item))}-candidate-${index + 1}`,
-            }),
-        ...(item.surfaceIds === undefined
-          ? {}
-          : {
-              surfaceIds: (item.surfaceIds as string[]).map(
-                (id) => surfaceIds.get(id) ?? id,
-              ),
-            }),
-      }),
+      (item, index) => {
+        const projected = project(
+          "deferred",
+          item,
+          (originalCoverage.deferred as Record<string, unknown>[])[index],
+        );
+        return {
+          ...projected,
+          id: `${prefix(projected)}-deferred-${index + 1}`,
+          ...(item.candidateId === undefined
+            ? {}
+            : { candidateId: `${prefix(projected)}-candidate-${index + 1}` }),
+          ...(item.surfaceIds === undefined
+            ? {}
+            : {
+                surfaceIds: (item.surfaceIds as string[]).map(
+                  (id) => surfaceIds.get(id) ?? id,
+                ),
+              }),
+        };
+      },
     ),
     ...(coverage.openQuestions === undefined
       ? {}
@@ -428,9 +429,8 @@ export function projectDiscoveryCoverage(
             coverage.openQuestions as (string | Record<string, unknown>)[]
           ).map((question) =>
             project(
-              typeof question === "string" ? { question } : question,
               "openQuestions",
-              question,
+              typeof question === "string" ? { question } : question,
             ),
           ),
         }),

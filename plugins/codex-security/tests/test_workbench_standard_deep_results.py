@@ -2637,7 +2637,17 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
     for worker_id in ("worker-one", "worker-two"):
         output = scan_dir / "workers" / worker_id
         output.mkdir(parents=True)
-        workers.append(saved_discovery_worker(output, worker_id))
+        workers.append(
+            {
+                "id": worker_id,
+                "kind": "discovery",
+                "status": "running",
+                "attempt": 1,
+                "merge_state": "none",
+                "artifact_dir": str(output),
+                "result_manifest_path": None,
+            }
+        )
         draft = saved_draft(
             scan_id, deferred=[{"id": "shared-review", "reason": f"Pending in {worker_id}."}]
         )

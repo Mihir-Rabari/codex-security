@@ -9,6 +9,7 @@ import type {
 } from "./artifact-context.js";
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
+  normalizeSavedScanCoverage,
   parsePersistedScanDraft,
   readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
@@ -107,24 +108,37 @@ export async function readDeepReductionSources(
             sourceFindingIds: [`${worker.id}:${index}`],
           },
         }));
-        const { coverage, ...reduction } = result;
+        // Accepted direct-file results may follow an unreadable failed checkpoint.
         const archived = await readArchivedWorkerCheckpoints(
-          { ...context, root: dirname(worker.resultPath), layout: "worker" },
-          false,
-        );
+          {
+            ...context,
+            root: dirname(worker.resultPath),
+            layout: "worker",
+            scanId: result.scanId,
+          },
+          true,
+        ).catch(() => []);
+        const originalCoverage = structuredClone(result.coverage);
+        normalizeSavedScanCoverage([
+          result,
+          ...archived.map(({ input }) => input),
+        ]);
+        const { coverage, ...reduction } = result;
         return {
           workerId: worker.id,
-          ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
             relative(bound.artifacts.scanDir, dirname(worker.resultPath))
               .split(sep)
               .join("/"),
-            archived.map((saved) => ({
-              coverage: saved.input.coverage,
-              attempt: saved.attempt,
-            })),
+            archived.flatMap(({ input, attempt }) => {
+              const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+              return number === undefined
+                ? []
+                : [{ attempt: Number(number), coverage: input.coverage }];
+            }),
+            originalCoverage,
           ),
           result: reduction,
         };

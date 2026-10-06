@@ -357,6 +357,72 @@ export async function saveScanDraftCheckpoint(
   }
 }
 
+export function normalizeSavedScanCoverage(sources: ScanDraftInput[]): void {
+  // Older checkpoints can omit IDs already assigned in their published output.
+  const savedDeferred = sources.flatMap(
+    (source) => source.coverage.deferred as JsonObject[],
+  );
+  const savedSurfaces = sources.flatMap(
+    (source) => source.coverage.surfaces as JsonObject[],
+  );
+  for (const source of sources) {
+    const reservedSurfaceIds = new Set(
+      (source.coverage.surfaces as JsonObject[]).flatMap((row) =>
+        typeof row.id === "string" ? [row.id] : [],
+      ),
+    );
+    const surfaces = (source.coverage.surfaces as JsonObject[]).map((row) => {
+      if (typeof row.id === "string") return row;
+      const matching = savedSurfaces.find(
+        ({ id, ...content }) =>
+          typeof id === "string" &&
+          !reservedSurfaceIds.has(id) &&
+          isDeepStrictEqual(
+            { ...content, receiptRefs: content.receiptRefs ?? [] },
+            { ...row, receiptRefs: row.receiptRefs ?? [] },
+          ),
+      );
+      if (matching === undefined) return row;
+      const id = matching.id as string;
+      reservedSurfaceIds.add(id);
+      return { ...row, id };
+    });
+    const normalizedSurfaces = normalizeSurfaces(surfaces);
+    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
+    source.coverage.surfaces = surfaces.map((row, index) =>
+      typeof row.id === "string"
+        ? { ...row, receiptRefs: row.receiptRefs ?? [] }
+        : normalizedSurfaces[index]!,
+    );
+    const reservedIds = new Set(
+      (source.coverage.deferred as JsonObject[]).flatMap((row) =>
+        typeof row.id === "string" ? [row.id] : [],
+      ),
+    );
+    source.coverage.deferred = normalizeDeferred(
+      (source.coverage.deferred as JsonObject[]).map((row) => {
+        if (
+          typeof row.id === "string" ||
+          "candidateId" in row ||
+          "candidate" in row ||
+          "finding" in row
+        )
+          return row;
+        const matching = savedDeferred.find(
+          ({ id, ...content }) =>
+            typeof id === "string" &&
+            !reservedIds.has(id) &&
+            isDeepStrictEqual(content, row),
+        );
+        if (matching === undefined) return row;
+        const id = matching.id as string;
+        reservedIds.add(id);
+        return { ...row, id };
+      }),
+    );
+  }
+}
+
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
@@ -392,67 +458,7 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
-  // Older checkpoints can omit IDs already assigned in their published output.
-  const savedDeferred = sources.flatMap(
-    (source) => source.coverage.deferred as JsonObject[],
-  );
-  const savedSurfaces = sources.flatMap(
-    (source) => source.coverage.surfaces as JsonObject[],
-  );
-  for (const source of sources) {
-    const reservedSurfaceIds = new Set(
-      (source.coverage.surfaces as JsonObject[]).flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    const surfaces = (source.coverage.surfaces as JsonObject[]).map((row) => {
-      if (typeof row.id === "string") return row;
-      const matching = savedSurfaces.find(
-        ({ id, ...content }) =>
-          typeof id === "string" &&
-          !reservedSurfaceIds.has(id) &&
-          isDeepStrictEqual(
-            { ...content, receiptRefs: content.receiptRefs ?? [] },
-            { ...row, receiptRefs: row.receiptRefs ?? [] },
-          ),
-      );
-      if (matching === undefined) return row;
-      const id = matching.id as string;
-      reservedSurfaceIds.add(id);
-      return { ...row, id };
-    });
-    const normalizedSurfaces = normalizeSurfaces(surfaces);
-    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
-    source.coverage.surfaces = surfaces.map((row, index) =>
-      typeof row.id === "string" ? row : normalizedSurfaces[index]!,
-    );
-    const reservedIds = new Set(
-      (source.coverage.deferred as JsonObject[]).flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    source.coverage.deferred = normalizeDeferred(
-      (source.coverage.deferred as JsonObject[]).map((row) => {
-        if (
-          typeof row.id === "string" ||
-          "candidateId" in row ||
-          "candidate" in row ||
-          "finding" in row
-        )
-          return row;
-        const matching = savedDeferred.find(
-          ({ id, ...content }) =>
-            typeof id === "string" &&
-            !reservedIds.has(id) &&
-            isDeepStrictEqual(content, row),
-        );
-        if (matching === undefined) return row;
-        const id = matching.id as string;
-        reservedIds.add(id);
-        return { ...row, id };
-      }),
-    );
-  }
+  normalizeSavedScanCoverage(sources);
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
@@ -1107,20 +1113,12 @@ async function readCheckpointHead(
     ["checkpoint-head.json"],
     label,
   );
-  let head: JsonObject;
-  try {
-    head = parseJsonObject(saved.contents, label);
-  } catch (error) {
-    if (kind === "archived") return;
-    throw error;
-  }
+  const head = parseJsonObject(saved.contents, label);
   if (
     typeof head.checkpoint !== "string" ||
     !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-  ) {
-    if (kind === "archived") return;
+  )
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
-  }
   // Reselecting an immutable checkpoint updates only the head file.
   return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
 }
@@ -1129,6 +1127,7 @@ async function readSavedCheckpoints(
   context: ArtifactContext,
   kind: "current" | "archived",
   excludedCheckpoint?: string,
+  skipInvalid = false,
 ): Promise<Array<SavedScanDraft & { name: string }>> {
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
@@ -1179,7 +1178,17 @@ async function readSavedCheckpoints(
       context,
       ["checkpoints", entry.name],
       label,
-    );
+    ).catch((error) => {
+      if (
+        skipInvalid &&
+        error instanceof Error &&
+        (error.message === `${label}: the requested artifact is unavailable.` ||
+          error.message === `${label}: the requested artifact cannot be read.`)
+      )
+        return undefined;
+      throw error;
+    });
+    if (contents === undefined) continue;
     let input: ScanDraftInput;
     try {
       const draft = parseJsonObject(contents, label);
@@ -1187,12 +1196,12 @@ async function readSavedCheckpoints(
         kind === "current"
           ? parsePersistedCheckpoint(draft)
           : parsePersistedScanDraft(draft);
+      if (kind === "archived") requireMatchingScan(context, input);
     } catch (error) {
-      if (kind === "archived") continue;
+      if (skipInvalid) continue;
       throw error;
     }
-    if (kind === "archived") requireMatchingScan(context, input);
-    else if (input.scanId !== context.scanId) {
+    if (kind === "current" && input.scanId !== context.scanId) {
       throw new Error(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
@@ -1333,7 +1342,7 @@ async function preserveDeepThreatModel(
 
 export async function readArchivedWorkerCheckpoints(
   context: ArtifactContext,
-  relocateReceipts = true,
+  skipInvalid = false,
 ): Promise<SavedScanDraft[]> {
   const workerRoot = dirname(context.root);
   const attemptsRoot = join(workerRoot, "attempts");
@@ -1378,25 +1387,23 @@ export async function readArchivedWorkerCheckpoints(
     const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
       [];
     const attemptContext = { ...context, root: attemptRoot };
-    const head = await readCheckpointHead(attemptContext, "archived");
+    // Origin matching needs readable snapshots, not checkpoint selection order.
+    const head = skipInvalid
+      ? undefined
+      : await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
-      const saved = await readOptionalArtifactTextWithMetadata(
-        attemptContext,
-        ["checkpoints", head.checkpoint],
-        "archived scan checkpoint head",
+      checkpointHead = parsePersistedScanDraft(
+        parseJsonObject(
+          await readArtifactText(
+            attemptContext,
+            ["checkpoints", head.checkpoint],
+            "archived scan checkpoint head",
+          ),
+          "archived scan checkpoint head",
+        ),
       );
-      if (saved !== undefined) {
-        try {
-          checkpointHead = parsePersistedScanDraft(
-            parseJsonObject(saved.contents, "archived scan checkpoint head"),
-          );
-        } catch {
-          // Failed attempts can retain malformed checkpoints beside valid current output.
-        }
-      }
-      if (checkpointHead !== undefined)
-        requireMatchingScan(context, checkpointHead);
+      requireMatchingScan(context, checkpointHead);
     }
     const resultMetadata = await lstatIfExists(
       join(attemptRoot, "result.json"),
@@ -1419,18 +1426,27 @@ export async function readArchivedWorkerCheckpoints(
         // A failed attempt may leave an invalid replaceable result after valid checkpoints.
       }
       if (result !== undefined) {
-        requireMatchingScan(context, result);
-        drafts.push({
-          input: result,
-          modifiedMs: saved.modifiedMs,
-          result: true,
-          name: "result.json",
-        });
+        try {
+          requireMatchingScan(context, result);
+          drafts.push({
+            input: result,
+            modifiedMs: saved.modifiedMs,
+            result: true,
+            name: "result.json",
+          });
+        } catch (error) {
+          if (!skipInvalid) throw error;
+        }
       }
     }
     drafts.push(
       ...(
-        await readSavedCheckpoints(attemptContext, "archived", head?.checkpoint)
+        await readSavedCheckpoints(
+          attemptContext,
+          "archived",
+          head?.checkpoint,
+          skipInvalid,
+        )
       ).map((draft) => ({ ...draft, result: false })),
     );
     if (checkpointHead !== undefined) {
@@ -1453,7 +1469,7 @@ export async function readArchivedWorkerCheckpoints(
       // The archive moved the receipts with this attempt. Rebase only the
       // retained projection; the original checkpoint bytes remain unchanged.
       for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
-        if (!relocateReceipts || !Array.isArray(surface.receiptRefs)) continue;
+        if (!Array.isArray(surface.receiptRefs)) continue;
         surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) =>
           ref.startsWith(archivePrefix)
             ? ref
@@ -1480,14 +1496,18 @@ async function lstatIfExists(
 async function readOptionalArtifactTextWithMetadata(
   context: ArtifactContext,
   components: readonly string[],
-  label = "previous scan draft",
 ): Promise<{ contents: string; modifiedMs: number } | undefined> {
   try {
-    return await readArtifactTextWithMetadata(context, components, label);
+    return await readArtifactTextWithMetadata(
+      context,
+      components,
+      "previous scan draft",
+    );
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message === `${label}: the requested artifact is unavailable.`
+      error.message ===
+        "previous scan draft: the requested artifact is unavailable."
     ) {
       return undefined;
     }

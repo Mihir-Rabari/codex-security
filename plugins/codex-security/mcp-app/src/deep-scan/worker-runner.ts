@@ -291,7 +291,6 @@ export class DeepScanWorkerRunner {
     });
 
     const persistSourceCoverage =
-      "workflowVersion" in run &&
       run.workflowVersion === "deep-security-scan/v2";
     const artifactContext = {
       root: artifactDir,

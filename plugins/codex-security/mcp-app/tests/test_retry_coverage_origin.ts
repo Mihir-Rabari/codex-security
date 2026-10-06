@@ -15,6 +15,7 @@ const {
   recordCodexSecurityWorkerScanDraft,
   recordCodexSecurityScanDraft,
   parsePersistedScanDraft,
+  readArchivedWorkerCheckpoints,
 } = await importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
@@ -142,10 +143,22 @@ for (const unsafe of ["wrong-scan", "linked-checkpoints"]) {
         JSON.stringify(workerDraft([], { complete: true })),
       );
       await assert.rejects(
-        readDeepReductionSources(f.context),
+        readArchivedWorkerCheckpoints({
+          root: f.output,
+          repoRoot: f.root,
+          scanId,
+          layout: "worker",
+        }),
         unsafe === "wrong-scan"
           ? /scanId does not match|different scan/
           : /safe directory/,
+      );
+      const accepted = await readDeepReductionSources(f.context);
+      assert.equal(accepted.discoveries.length, 1);
+      assert.deepEqual(accepted.discoveries[0].result.findings, []);
+      assert.deepEqual(
+        JSON.parse(await readFile(f.resultPath, "utf8")),
+        workerDraft([], { complete: true }),
       );
     } finally {
       await rm(f.root, { recursive: true, force: true });

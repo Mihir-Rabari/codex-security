@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { promises as fsPromises } from "node:fs";
 import { execFile } from "node:child_process";
+import { promises as fsPromises } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { build } from "esbuild";
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -39,6 +46,21 @@ export async function publishCoverageFixture(
     streamRetry = false,
     closeGeneric = false,
     failClosedResult = false,
+    workflowVersion,
+    directFile = false,
+    omitCoverageIds = false,
+    competingIds = false,
+    namedRetry = false,
+    linkedRetry = false,
+    missingProjection = false,
+    changedRetry = false,
+    sameAttemptChange = false,
+    duplicateRows = false,
+    interruptReducer,
+    checkpointOnly = false,
+    parentTiming,
+    descriptiveVariants = false,
+    provenanceKind = "descriptive",
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -57,8 +79,9 @@ export async function publishCoverageFixture(
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
   const threadId = "coverage-fixture-owner";
-  const statuses =
-    completeness === "partial"
+  const statuses = interruptReducer
+    ? ["partial", "partial", "partial"]
+    : completeness === "partial"
       ? ["partial", "complete", "unknown"]
       : completeness === "unknown"
         ? ["unknown", "complete"]
@@ -72,6 +95,11 @@ export async function publishCoverageFixture(
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
   const runWorkbench = async (args) => {
+    if (workflowVersion && args[0] === "begin-deep-scan") {
+      // Exercise the existing persisted-version boundary without changing launch defaults.
+      args = [...args];
+      args[args.indexOf("--workflow-version") + 1] = workflowVersion;
+    }
     const { stdout } = await exec(
       process.env.PYTHON || "python3",
       [path.join(pluginRoot, "scripts", "workbench_db.py"), ...args],
@@ -87,6 +115,7 @@ export async function publishCoverageFixture(
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let run = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
+  if (workflowVersion) assert.equal(run.workflowVersion, workflowVersion);
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
@@ -124,7 +153,7 @@ export async function publishCoverageFixture(
       },
     );
   };
-  const writeDiscovery = async (artifactDir, index) => {
+  const writeDiscovery = async (artifactDir, index, archived = false) => {
     const status = statuses[index];
     const pending = completeness === "partial" && status !== "complete";
     const coverage = {
@@ -169,13 +198,52 @@ export async function publishCoverageFixture(
         },
       ];
     }
+    if (interruptReducer) {
+      coverage.surfaces[0].id = `surface-${index}`;
+      coverage.surfaces[0].label = `Archive route ${index}`;
+      for (const deferred of coverage.deferred) {
+        deferred.id = `follow-up-${index}`;
+        deferred.surfaceIds = [`surface-${index}`];
+        delete deferred.candidateId;
+      }
+    }
+    if (namedRetry) {
+      coverage.surfaces[0].receiptRefs = [];
+      for (const deferred of coverage.deferred) {
+        delete deferred.candidateId;
+        if (!linkedRetry) delete deferred.surfaceIds;
+      }
+    }
+    if (omitCoverageIds && !archived && (!interruptReducer || index === 0)) {
+      for (const surface of coverage.surfaces) delete surface.id;
+      for (const deferred of coverage.deferred) {
+        delete deferred.id;
+        delete deferred.candidateId;
+        if (!linkedRetry) delete deferred.surfaceIds;
+      }
+    }
+    if (archived && changedRetry) {
+      coverage.surfaces[0].label = "Earlier independent route";
+      for (const deferred of coverage.deferred)
+        deferred.reason = "An earlier independent observation.";
+    }
+    if (duplicateRows)
+      coverage.surfaces.push(structuredClone(coverage.surfaces[0]));
+    if (competingIds) {
+      coverage.surfaces.push({ ...coverage.surfaces[0], id: "owned-surface" });
+      if (coverage.deferred.length)
+        coverage.deferred.push({
+          ...coverage.deferred[0],
+          id: "owned-deferred",
+        });
+    }
     for (const field of [
       "surfaces",
       "explicitExclusions",
       "deferred",
       "openQuestions",
     ]) {
-      for (const item of coverage[field])
+      for (const item of coverage[field]) {
         item.provenance = {
           description: `Original ${field} context.`,
           details: { evidence: ["source review"] },
@@ -184,6 +252,20 @@ export async function publishCoverageFixture(
           sourceId: "untrusted-source",
           candidateId: "untrusted-candidate",
         };
+        if (provenanceKind === "owner-only") {
+          delete item.provenance.description;
+          delete item.provenance.details;
+        } else if (provenanceKind === "absent") delete item.provenance;
+      }
+      if (descriptiveVariants && coverage[field].length) {
+        const second = structuredClone(coverage[field][0]);
+        if (typeof second.id === "string") second.id += "-independent";
+        if (typeof second.candidateId === "string")
+          second.candidateId += "-independent";
+        second.provenance.description = `Independent ${field} context.`;
+        second.provenance.details = { evidence: ["independent source review"] };
+        coverage[field].push(second);
+      }
     }
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(
@@ -193,7 +275,7 @@ export async function publishCoverageFixture(
     const resultPath = path.join(artifactDir, "result.json");
     const bytes = JSON.stringify({
       scanId: run.scanId,
-      complete: true,
+      complete: !archived,
       findings: [],
       coverage,
     });
@@ -224,6 +306,8 @@ export async function publishCoverageFixture(
           },
         },
       );
+    } else if (directFile && !archived) {
+      await writeFile(resultPath, bytes);
     } else {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -298,12 +382,29 @@ export async function publishCoverageFixture(
           "no_issue_found",
         );
       }
-      for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
+      for (const name of archived
+        ? []
+        : await readdir(path.join(artifactDir, "checkpoints"))) {
         const checkpointPath = path.join(artifactDir, "checkpoints", name);
         rawSources.set(checkpointPath, await readFile(checkpointPath, "utf8"));
       }
     }
-    rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+    if (!archived) {
+      rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+      if (namedRetry && index === 0) {
+        const archive = path.join(
+          path.dirname(artifactDir),
+          "attempts",
+          "attempt-01",
+        );
+        for (const name of await readdir(archive, { recursive: true })) {
+          if (name.endsWith(".json") || name.endsWith(".md")) {
+            const file = path.join(archive, name);
+            rawSources.set(file, await readFile(file, "utf8"));
+          }
+        }
+      }
+    }
   };
   if (resume) {
     const workers = [];
@@ -325,8 +426,9 @@ export async function publishCoverageFixture(
         artifactDir,
         attempt: index === 0 ? 2 : 1,
       };
-      if (receiptRetry) {
-        await writeReceiptAttempt(artifactDir);
+      if (receiptRetry || (namedRetry && index === 0)) {
+        if (receiptRetry) await writeReceiptAttempt(artifactDir);
+        else await writeDiscovery(artifactDir, index, true);
         await archiveDirectory(
           artifactDir,
           path.join(workerRoot, "attempts", "attempt-01"),
@@ -360,11 +462,204 @@ export async function publishCoverageFixture(
     await store.claimDedup({
       id,
       scanId: run.scanId,
-      workerIds: workers.map((worker) => worker.id),
+      workerIds: (interruptReducer ? workers.slice(0, 2) : workers).map(
+        (worker) => worker.id,
+      ),
       artifactDir,
       promptPath,
     });
     const resultManifestPath = path.join(artifactDir, "result.json");
+    if (interruptReducer) {
+      const reducer = {
+        id,
+        scanId: run.scanId,
+        kind: "dedup",
+        promptPath,
+        artifactDir,
+        attempt: 1,
+      };
+      await store.updateWorker({ ...reducer, status: "running" });
+      const publishParent = async () => {
+        await recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          {
+            scanId: run.scanId,
+            complete: true,
+            findings: [],
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [],
+              reviews: [],
+            },
+          },
+          runWorkbench,
+        );
+        for (const name of [
+          "coverage.json",
+          "findings.json",
+          "scan-manifest.json",
+          "checkpoint-head.json",
+          ...(await readdir(path.join(run.scanDir, "checkpoints"))).map(
+            (name) => `checkpoints/${name}`,
+          ),
+        ])
+          await utimes(path.join(run.scanDir, name), 1, 1);
+      };
+      if (parentTiming === "older") await publishParent();
+      if (checkpointOnly) await mkdir(resultManifestPath);
+      const writing = recordCodexSecurityDeepReduction(
+        {
+          root: artifactDir,
+          layout: "reducer",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+          deepReducer: {
+            scanRoot: run.scanDir,
+            persistSourceCoverage: true,
+            claimedWorkers: workers.slice(0, 2).map((worker) => ({
+              id: worker.id,
+              resultPath: path.join(worker.artifactDir, "result.json"),
+              attempt: worker.attempt,
+            })),
+          },
+        },
+        { scanId: run.scanId, findings: [] },
+      );
+      if (checkpointOnly) {
+        await assert.rejects(writing, /(?:EISDIR|EPERM|EACCES|ENOTEMPTY)/);
+        await rm(resultManifestPath, { recursive: true });
+        await assert.rejects(readFile(resultManifestPath), { code: "ENOENT" });
+      } else await writing;
+      const checkpoints = await readdir(path.join(artifactDir, "checkpoints"));
+      assert.equal(checkpoints.length, 1);
+      const selected = path.join(artifactDir, "checkpoints", checkpoints[0]);
+      const result = JSON.parse(await readFile(selected, "utf8"));
+      if (!checkpointOnly)
+        assert.deepEqual(
+          JSON.parse(await readFile(resultManifestPath, "utf8")),
+          result,
+        );
+      if (parentTiming === "newer") {
+        await utimes(selected, 0, 0);
+        await publishParent();
+      }
+      for (const file of checkpointOnly
+        ? [selected]
+        : [resultManifestPath, selected])
+        rawSources.set(file, await readFile(file, "utf8"));
+      for (const worker of workers) {
+        const receipt = path.join(worker.artifactDir, "artifacts", "review.md");
+        rawSources.set(receipt, await readFile(receipt, "utf8"));
+      }
+      const represented = result.sourceCoverage;
+      for (const worker of workers.slice(0, 2)) {
+        const surfaces = represented.surfaces.filter(
+          (row) => row.provenance.workerId === worker.id,
+        );
+        const deferred = represented.deferred.filter(
+          (row) => row.provenance.workerId === worker.id,
+        );
+        assert.ok(surfaces.length > 0);
+        assert.ok(deferred.length > 0);
+        for (const surface of surfaces)
+          assert.match(surface.id, /-attempt-\d+-surface-\d+$/);
+        for (const row of deferred)
+          assert.ok(
+            row.surfaceIds.every((id) =>
+              surfaces.some((surface) => surface.id === id),
+            ),
+          );
+      }
+      if (interruptReducer === "buffered")
+        await store.updateWorker({
+          ...reducer,
+          status: "failed",
+          error: "Synthetic interruption before commit.",
+        });
+      const stopped = await store.get(run.scanId, threadId);
+      for (const worker of workers.slice(0, 2))
+        assert.equal(
+          stopped.persistedWorkers.find((row) => row.id === worker.id)
+            .mergeState,
+          interruptReducer,
+        );
+      assert.equal(
+        stopped.persistedWorkers.find((row) => row.id === workers[2].id)
+          .mergeState,
+        "buffered",
+      );
+      assert.equal(
+        stopped.persistedWorkers.find((row) => row.id === id)
+          .resultManifestPath,
+        undefined,
+      );
+      await runWorkbench([
+        "fail-scan",
+        "--scan-id",
+        run.scanId,
+        "--message",
+        "Synthetic interruption before commit.",
+      ]);
+      const coveragePath = path.join(run.scanDir, "coverage.json");
+      const recovered = JSON.parse(await readFile(coveragePath, "utf8"));
+      for (const field of ["surfaces", "deferred"]) {
+        const rows = recovered[field].filter(
+          (row) => row.id !== "scan-stopped",
+        );
+        const keptProjection =
+          parentTiming === "newer" ? [] : represented[field];
+        assert.equal(
+          rows.length,
+          keptProjection.length +
+            (parentTiming === "newer" ? workers.length : 1),
+        );
+        for (const projected of keptProjection)
+          assert.ok(rows.some((row) => isDeepStrictEqual(row, projected)));
+        if (parentTiming === "newer") {
+          for (const worker of workers.slice(0, 2)) {
+            const source = JSON.parse(
+              await readFile(
+                path.join(worker.artifactDir, "result.json"),
+                "utf8",
+              ),
+            ).coverage[field][0];
+            const retained = rows.find((row) => row.id === source.id);
+            assert.ok(
+              retained,
+              "superseded projection must not hide a raw record",
+            );
+            assert.deepEqual(retained.provenance, source.provenance);
+          }
+        }
+        const unrepresented = JSON.parse(
+          await readFile(
+            path.join(workers[2].artifactDir, "result.json"),
+            "utf8",
+          ),
+        ).coverage[field][0];
+        const retained = rows.find((row) => row.id === unrepresented.id);
+        assert.ok(
+          retained,
+          "unrepresented buffered work keeps its saved identity",
+        );
+        assert.deepEqual(retained.provenance, unrepresented.provenance);
+        if (field === "deferred")
+          assert.deepEqual(retained.surfaceIds, unrepresented.surfaceIds);
+      }
+      const frozen = await readFile(coveragePath, "utf8");
+      const replay = await runWorkbench([
+        "recover-scan-results",
+        "--scan-id",
+        run.scanId,
+      ]);
+      assert.equal(replay.scan.resultsRecoveryNeeded, false);
+      assert.equal(await readFile(coveragePath, "utf8"), frozen);
+      for (const [file, bytes] of rawSources)
+        assert.equal(await readFile(file, "utf8"), bytes);
+      return { scanDir: run.scanDir, threadId };
+    }
     // Legacy accepted reducers omitted coverage entirely.
     await writeFile(
       resultManifestPath,
@@ -381,6 +676,17 @@ export async function publishCoverageFixture(
       resultManifestPath,
     });
     run = await store.get(run.scanId, threadId);
+  }
+  if (workflowVersion) {
+    run = await store.get(run.scanId, threadId);
+    assert.equal(run.workflowVersion, workflowVersion);
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    assert.equal(claim.acquired, true);
+    run = claim.run;
+    assert.equal(run.workflowVersion, workflowVersion);
   }
   let discoveryCalls = 0;
   let interruptedDiscovery;
@@ -405,6 +711,8 @@ export async function publishCoverageFixture(
         if (index === 0 && discoveryCalls === 1) {
           if (receiptRetry) {
             await writeReceiptAttempt(request.artifactContext.root);
+          } else if (namedRetry) {
+            await writeDiscovery(request.artifactContext.root, index, true);
           }
           if (streamRetry) {
             await writeDiscovery(request.artifactContext.root, index);
@@ -450,6 +758,7 @@ export async function publishCoverageFixture(
       return { threadId: thread, finalResponse: "Audit finished." };
     },
   };
+  let expectedCoverage;
   const coordinator = new DeepScanCoordinator({
     run,
     store,
@@ -457,6 +766,23 @@ export async function publishCoverageFixture(
     pluginRoot,
     retryDelaysMs: [1],
     onComplete: async (draft, signal) => {
+      if (missingProjection || descriptiveVariants) {
+        expectedCoverage = structuredClone(draft.coverage);
+        draft = structuredClone(draft);
+        if (descriptiveVariants) {
+          for (const field of [
+            "surfaces",
+            "deferred",
+            "explicitExclusions",
+            "openQuestions",
+          ])
+            draft.coverage[field].splice(1, 1);
+        } else {
+          if (missingProjection !== "deferred")
+            draft.coverage.surfaces.splice(0, duplicateRows ? 2 : 1);
+          if (missingProjection !== "surfaces") draft.coverage.deferred.shift();
+        }
+      }
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
@@ -484,12 +810,13 @@ export async function publishCoverageFixture(
     const result = JSON.parse(
       await readFile(worker.resultManifestPath, "utf8"),
     );
-    assert.equal(
-      Object.hasOwn(result, "sourceCoverage"),
-      false,
-      "v1 reducers remain readable by earlier binaries",
-    );
+    const persisted =
+      workflowVersion === "deep-security-scan/v2" &&
+      !rawSources.has(worker.resultManifestPath);
+    assert.equal(Object.hasOwn(result, "sourceCoverage"), persisted);
+    if (persisted) assert.ok(result.sourceCoverage.reviews.length > 0);
     if (!rawSources.has(worker.resultManifestPath)) {
+      const checkpoints = [];
       for (const name of await readdir(
         path.join(worker.artifactDir, "checkpoints"),
       )) {
@@ -499,13 +826,57 @@ export async function publishCoverageFixture(
             "utf8",
           ),
         );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          false,
-          "v1 checkpoints remain readable by earlier binaries",
+        assert.equal(Object.hasOwn(checkpoint, "sourceCoverage"), persisted);
+        checkpoints.push(checkpoint);
+      }
+      if (persisted) {
+        assert.ok(
+          checkpoints.some((checkpoint) =>
+            isDeepStrictEqual(checkpoint.sourceCoverage, result.sourceCoverage),
+          ),
+          "final coverage must have an immutable checkpoint",
         );
       }
     }
+  }
+  const parentCoverage = JSON.parse(
+    await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+  );
+  if (sameAttemptChange) {
+    const worker = accepted.persistedWorkers.find(
+      (worker) => worker.kind === "discovery",
+    );
+    const resultPath = worker.resultManifestPath;
+    const updated = JSON.parse(await readFile(resultPath, "utf8"));
+    updated.coverage.surfaces[0].label = "Updated source review";
+    updated.coverage.surfaces[0].provenance.description =
+      "Updated surface context.";
+    updated.coverage.deferred[0].reason = "Updated source review remains.";
+    if (directFile) await writeFile(resultPath, JSON.stringify(updated));
+    else {
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: worker.artifactDir,
+          repoRoot: targetPath,
+          layout: "worker",
+          scanId: run.scanId,
+        },
+        updated,
+      );
+      for (const name of await readdir(
+        path.join(worker.artifactDir, "checkpoints"),
+      )) {
+        const file = path.join(worker.artifactDir, "checkpoints", name);
+        if (!rawSources.has(file))
+          rawSources.set(file, await readFile(file, "utf8"));
+      }
+    }
+    rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+    const after = await store.get(run.scanId, threadId);
+    assert.equal(
+      after.persistedWorkers.find((row) => row.id === worker.id).attempt,
+      worker.attempt,
+    );
   }
   if (stopAfterDraft) {
     await runWorkbench([
@@ -533,6 +904,103 @@ export async function publishCoverageFixture(
         await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
       ),
     );
+  }
+  const finalCoverage = JSON.parse(
+    await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+  );
+  if (descriptiveVariants) {
+    for (const field of [
+      "surfaces",
+      "deferred",
+      "explicitExclusions",
+      "openQuestions",
+    ]) {
+      const rows = finalCoverage[field].filter(
+        (row) => row.id !== "scan-stopped",
+      );
+      const expected = expectedCoverage[field];
+      assert.equal(rows.length, expected.length, field);
+      for (const row of expected) {
+        const actual = rows.find((actual) => {
+          if (field !== "explicitExclusions" || row.id !== undefined)
+            return isDeepStrictEqual(actual, row);
+          const { id, ...content } = actual;
+          return (
+            isDeepStrictEqual(content, row) &&
+            (id === undefined || /^saved-/.test(id))
+          );
+        });
+        assert.ok(actual, field);
+      }
+    }
+  }
+  if (
+    (directFile || omitCoverageIds) &&
+    !descriptiveVariants &&
+    !sameAttemptChange
+  ) {
+    const expected = expectedCoverage ?? parentCoverage;
+    const rows = (items) =>
+      missingProjection
+        ? [...items].sort((left, right) => left.id.localeCompare(right.id))
+        : items;
+    assert.deepEqual(rows(finalCoverage.surfaces), rows(expected.surfaces));
+    assert.deepEqual(
+      rows(finalCoverage.deferred.filter((row) => row.id !== "scan-stopped")),
+      rows(expected.deferred),
+    );
+  }
+  if (sameAttemptChange) {
+    for (const surface of parentCoverage.surfaces)
+      assert.ok(
+        finalCoverage.surfaces.some((row) => isDeepStrictEqual(row, surface)),
+      );
+    for (const deferred of parentCoverage.deferred)
+      assert.ok(
+        finalCoverage.deferred.some((row) => isDeepStrictEqual(row, deferred)),
+      );
+    const changed = finalCoverage.surfaces.filter(
+      (row) => row.label === "Updated source review",
+    );
+    assert.equal(changed.length, 1);
+    assert.notEqual(changed[0].id, parentCoverage.surfaces[0].id);
+    assert.equal(
+      changed[0].provenance.attempt,
+      parentCoverage.surfaces[0].provenance.attempt,
+    );
+    assert.equal(changed[0].provenance.description, "Updated surface context.");
+    const pending = finalCoverage.deferred.filter(
+      (row) => row.reason === "Updated source review remains.",
+    );
+    assert.equal(pending.length, 1);
+    assert.deepEqual(pending[0].surfaceIds, [changed[0].id]);
+  }
+  if (changedRetry) {
+    for (const field of ["surfaces", "deferred"])
+      assert.equal(parentCoverage[field][0].provenance.attempt, 2);
+  }
+  if (omitCoverageIds) {
+    for (const field of ["surfaces", "deferred"]) {
+      const ids = parentCoverage[field].flatMap((row) =>
+        typeof row.provenance.sourceId === "string"
+          ? [row.provenance.sourceId]
+          : [],
+      );
+      assert.equal(
+        ids.length,
+        directFile
+          ? competingIds
+            ? parentCoverage[field].length / 2
+            : 0
+          : parentCoverage[field].length,
+        "sourceId must describe an identity persisted in the worker source",
+      );
+      if (directFile && competingIds)
+        assert.deepEqual(
+          new Set(ids),
+          new Set([field === "surfaces" ? "owned-surface" : "owned-deferred"]),
+        );
+    }
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);
@@ -612,14 +1080,10 @@ export async function publishCoverageFixture(
     );
     assert.equal(prior.length, 1);
     assert.equal(prior[0].disposition, "no_issue_found");
-    assert.equal(prior[0].provenance.workerId, current[0].provenance.workerId);
     assert.equal(prior[0].provenance.attempt, 1);
     assert.equal(current[0].provenance.attempt, 2);
     assert.deepEqual(
-      coverage.reviews
-        .filter((review) => review.workerId === prior[0].provenance.workerId)
-        .map((review) => review.attempt)
-        .sort(),
+      coverage.reviews.map((review) => review.attempt).sort(),
       [1, 2],
     );
     assert.match(
