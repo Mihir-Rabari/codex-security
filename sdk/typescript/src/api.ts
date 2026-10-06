@@ -740,7 +740,16 @@ export class CodexSecurity {
         };
         const reviewKey = workflowDigest(binding);
         const saved = await workflow.getReview(reviewKey);
-        if (saved !== null) return validationResultSchema.parse(saved);
+        if (saved !== null) {
+          await checkTarget();
+          const current = await workflow.sourceSnapshot(inputs.repository);
+          if (workflowDigest(current) !== workflowDigest(source)) {
+            throw new CodexSecurityError(
+              "Repository changed during validation.",
+            );
+          }
+          return validationResultSchema.parse(saved);
+        }
         checkpoint = { workflow, binding, key: reviewKey };
       }
       const outputRoot =

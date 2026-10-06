@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -780,6 +781,96 @@ describe("CodexSecurity finding validation", () => {
     );
     expect(modelCalls).toBe(6);
   });
+
+  test.each([
+    "unchanged",
+    "source contents",
+    "recorded contents",
+    "recorded checkout",
+  ] as const)(
+    "rechecks %s after reading a saved validation assessment",
+    async (change) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      const repository = fixture.options.repositoryPath;
+      const source = join(repository, "source.ts");
+      await writeFile(source, "export const value = 'original';\n");
+      const environment = {
+        CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
+      };
+      const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
+      const scanDir = join(fixture.root, "scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const registration = await runWorkbench(workbenchOptions, [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          repository,
+          mode: "standard",
+          target: { kind: "repository", paths: [] },
+          config: {},
+        }),
+      ]);
+      const workflowId = "cached-validation-recheck";
+      await new FindingWorkflow(
+        workflowId,
+        environment,
+        runWorkbench,
+        python,
+      ).bind({ repositoryPath: repository });
+      let readSavedAssessment = false;
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        const response = await runWorkbench(options, args, input);
+        if (
+          args[0] === "finding-workflow" &&
+          JSON.parse(input!)["action"] === "get-review" &&
+          response["review"] !== null
+        ) {
+          readSavedAssessment = true;
+          if (change === "recorded checkout") {
+            await rename(repository, join(fixture.root, "original-repository"));
+            await mkdir(repository);
+            await writeFile(source, "export const value = 'original';\n");
+          } else if (change !== "unchanged") {
+            await writeFile(source, "export const value = 'changed';\n");
+          }
+        }
+        return response;
+      });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId,
+        ...(change === "source contents"
+          ? {}
+          : { scanId: registration["scanId"] as string }),
+      };
+      const first = await client.validate(request);
+      if (change === "unchanged") {
+        expect(await client.validate(request)).toEqual(first);
+      } else {
+        await expect(client.validate(request)).rejects.toThrow(
+          change === "source contents"
+            ? "Repository changed during validation"
+            : change === "recorded contents"
+              ? "Scan target contents changed"
+              : "checkout path was replaced",
+        );
+      }
+      expect(readSavedAssessment).toBe(true);
+      expect(modelCalls).toBe(1);
+    },
+  );
 
   test("rejects invalid inputs, unsafe output, and cancellation before preparing credentials", async () => {
     const repositoryPath = await temporaryDirectory();
