@@ -2531,6 +2531,11 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
+        deep_run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+        if deep_run is not None:
+            db.deep_scan.require_supported_deep_scan(deep_run)
         recovery_source_digests, include_parent, checkpoint_heads = _recovery_source_digests(
             db, connection, scan
         )

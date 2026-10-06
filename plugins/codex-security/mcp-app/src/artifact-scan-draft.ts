@@ -21,8 +21,8 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import type { ScanDraftInput } from "../../../../sdk/typescript/src/accepted-audit.js";
-export type { ScanDraftInput } from "../../../../sdk/typescript/src/accepted-audit.js";
+import type { ScanDraftInput } from "./accepted-audit.js";
+export type { ScanDraftInput } from "./accepted-audit.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 
 export interface CompletedScanInput {

@@ -1153,7 +1153,7 @@ export function createCodexSecurityServer(): McpServer {
                           run,
                           parentSandbox,
                           process.env,
-                          { threadId, startedAt: run.createdAt },
+                          { threadId, startedAt: run.createdAt, created: true },
                         )
                       : await loadDeepScanExecutionSettings(
                           run.scanDir,

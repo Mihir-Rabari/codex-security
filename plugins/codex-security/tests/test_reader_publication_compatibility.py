@@ -224,7 +224,9 @@ def test_reader_budget_validates_publication_before_changing_the_projection(
     selection_before = json.loads(run_before.pop("finalization_input_json"))
     selection_after = json.loads(run_after.pop("finalization_input_json"))
     assert run_after == run_before
-    assert selection_after.pop("publicationSha256") != selection_before.pop("publicationSha256")
+    after_publication_sha256 = selection_after.pop("publicationSha256")
+    before_publication_sha256 = selection_before.pop("publicationSha256")
+    assert after_publication_sha256 != before_publication_sha256
     assert selection_after == selection_before
     coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
     assert coverage["completeness"] == "partial"

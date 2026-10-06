@@ -149,7 +149,9 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (run["scanId"],)).fetchone()
-        timestamp = datetime.fromisoformat(scan["started_at"]) + timedelta(microseconds=1)
+        timestamp = datetime.fromisoformat(scan["started_at"].replace("Z", "+00:00")) + timedelta(
+            microseconds=1
+        )
         context = _event(
             timestamp, "turn_context", {"turn_id": "fixture-turn", "model": "gpt-5.6-sol"}
         )

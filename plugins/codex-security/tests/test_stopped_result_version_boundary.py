@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from argparse import Namespace
 
 import pytest
@@ -21,10 +22,11 @@ def snapshot(connection, scan_dir):
     }
 
 
+@pytest.mark.parametrize("captured", [False, True], ids=["uncaptured", "frozen"])
 @pytest.mark.parametrize("operation", ["preserve", "recover"])
 @pytest.mark.parametrize("protocol", ["supported", "future-workflow", "future-selection"])
 def test_stopped_result_publication_requires_supported_protocol(
-    workbench_api, workbench_db, publication_scan, monkeypatch, operation, protocol
+    workbench_api, workbench_db, publication_scan, monkeypatch, operation, protocol, captured
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
@@ -55,6 +57,16 @@ def test_stopped_result_publication_requires_supported_protocol(
     assert row["retained_source_digests_json"]
     assert row["seal_manifest_digest"] is None
 
+    if not captured:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE scans SET retained_source_digests_json = NULL, "
+                "retained_checkpoint_heads_json = NULL WHERE id = ?",
+                (scan.scan_id,),
+            )
+        for name in ("checkpoint-heads", "source-order"):
+            for directory in scan.scan_dir.rglob(name):
+                shutil.rmtree(directory)
     with workbench_db:
         if protocol == "future-workflow":
             workbench_db.execute(

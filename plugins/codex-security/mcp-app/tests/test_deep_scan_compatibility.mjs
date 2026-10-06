@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { build } from "esbuild";
+import { fileURLToPath } from "node:url";
 
 const bundle = await build({
   bundle: true,
   entryPoints: [
-    new URL("../src/deep-scan/registry.ts", import.meta.url).pathname,
+    fileURLToPath(new URL("../src/deep-scan/registry.ts", import.meta.url)),
   ],
   format: "esm",
   loader: { ".md": "text" },

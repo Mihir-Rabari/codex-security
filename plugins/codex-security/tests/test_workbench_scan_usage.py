@@ -662,6 +662,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     "worker_home",
     [
         "recorded",
+        "recorded-committed",
+        "recorded-tampered",
         "current",
         "inherited-sqlite",
         "current-prefix",
@@ -747,16 +749,23 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 "SELECT usage_owner_json FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
             ).fetchone() == (None,)
             connection.execute(
-                "UPDATE deep_scan_runs SET usage_owner_json = ? WHERE scan_id = ?",
-                (owner_json, scan_id),
+                "UPDATE deep_scan_runs SET usage_owner_json = ?, execution_settings_json = ? "
+                "WHERE scan_id = ?",
+                (owner_json, snapshot.read_text(), scan_id),
             )
-        original_bytes = snapshot.read_bytes()
+        if worker_home == "recorded-committed":
+            snapshot.unlink()
+        elif worker_home == "recorded-tampered":
+            snapshot.write_text(
+                json.dumps({"version": 1, "settings": {"codexHome": str(current_home)}})
+            )
+        original_bytes = snapshot.read_bytes() if snapshot.exists() else None
         fixture = ScanFixture(
             root / "state",
             target,
             scan_id,
             scan_dir,
-            datetime.fromisoformat(deep["createdAt"]),
+            datetime.fromisoformat(deep["createdAt"].replace("Z", "+00:00")),
             environment,
             "deep",
         )
@@ -842,13 +851,15 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 )
         elif worker_home in {
             "recorded",
+            "recorded-committed",
+            "recorded-tampered",
             "current-prefix",
             "recorded-prefix",
             "current-unreadable",
             "current-mismatched",
         }:
             recorded_threads = dict(worker_threads)
-            if worker_home != "recorded":
+            if worker_home not in {"recorded", "recorded-committed", "recorded-tampered"}:
                 thread_id = f"discovery-{index}"
                 full = worker_threads[thread_id]
                 copied = full.with_name(f"copied-{thread_id}.jsonl")
@@ -907,7 +918,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                     )
                     worker_threads[child_id].unlink()
         result = _complete_scan(fixture)["scan"]["usage"]
-        assert snapshot.read_bytes() == original_bytes
+        assert (snapshot.read_bytes() if snapshot.exists() else None) == original_bytes
         with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
             assert connection.execute(
                 "SELECT usage_owner_json FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -1302,3 +1313,39 @@ def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workb
     assert total == _counts(110, 0, 0)
     assert warnings == set()
     assert models == {"gpt-5.6-sol": _counts(110, 0, 0)}
+
+
+@pytest.mark.parametrize("receipt", [None, "other-turn", "after-completion"])
+def test_rejected_receipt_preserves_priced_legacy_usage(tmp_path: Path, workbench_api, receipt):
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-09-01T00:00:00+00:00")
+    at = start + timedelta(seconds=1)
+    events = [
+        _event(at, "turn_context", {"turn_id": "owned-turn", "model": "gpt-5.6-sol"}),
+        _token_event(at, 1000, 0),
+    ]
+    if receipt is not None:
+        events.append(
+            _event(
+                at if receipt == "other-turn" else start + timedelta(seconds=11),
+                "token_usage_record",
+                {
+                    "thread_id": "owner",
+                    "turn_id": "other-turn" if receipt == "other-turn" else "owned-turn",
+                    "response_id": "foreign-response",
+                    "model": "synthetic-unpriced-model",
+                    "usage": {"input_tokens": 9000, "output_tokens": 0, "total_tokens": 9000},
+                },
+            )
+        )
+    models = {}
+    total, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("owner", None, _rollout(tmp_path, "owner", events)),
+        started_at=start,
+        completed_at=start + timedelta(seconds=10),
+        owner_turn_id="owned-turn",
+        model_usage=models,
+    )
+    assert total == _counts(1000, 0, 0)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(1000, 0, 0)}

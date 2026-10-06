@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, readdir, readFile, realpath } from "node:fs/promises";
+import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
 import {
@@ -152,6 +152,7 @@ export class ScanCostTracker {
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
   #attribution: ScanExecutionAttribution | null = null;
+  #workerCodexHome: string | undefined;
   #readAttribution:
     (() => Promise<ScanExecutionAttribution | null | undefined>) | undefined;
 
@@ -253,6 +254,7 @@ export class ScanCostTracker {
     if (this.#readAttribution) {
       const record = await this.#readAttribution();
       if (record === null) return;
+      this.#workerCodexHome = record?.codexHome;
       const attribution = record === undefined || record.legacy ? null : record;
       if (
         attribution &&
@@ -265,31 +267,7 @@ export class ScanCostTracker {
     }
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     const homes = new Set([this.#options.codexHome]);
-    if (this.#options.scanDirectory !== undefined) {
-      try {
-        const saved: unknown = JSON.parse(
-          await readFile(
-            join(
-              this.#options.scanDirectory,
-              "artifacts",
-              "deep_discovery",
-              "execution-settings.json",
-            ),
-            "utf8",
-          ),
-        );
-        if (
-          isRecord(saved) &&
-          saved["version"] === 1 &&
-          isRecord(saved["settings"])
-        ) {
-          const home = saved["settings"]["codexHome"];
-          if (typeof home === "string" && home !== "") homes.add(home);
-        }
-      } catch (error) {
-        if (!isMissingFile(error)) throw error;
-      }
-    }
+    if (this.#workerCodexHome) homes.add(this.#workerCodexHome);
     // Recovery restores workers to their recorded home; the SDK parent can
     // continue in the current home. Apply the same scan membership to both.
     const directories = new Set<string>();
@@ -467,6 +445,8 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
       if (!usages.has(threadId)) usages.set(threadId, null);
+    }
+    for (const [threadId, session] of usageSessions) {
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
         session.expectedResponseTokens > session.responseTokens
@@ -779,6 +759,20 @@ function readSessionEvent(
       session.responseIds.has(responseId)
     )
       return;
+    const turnId =
+      typeof payload["turn_id"] === "string"
+        ? payload["turn_id"]
+        : session.currentTurnId;
+    if (
+      attribution &&
+      !isAttributedScanEvent(
+        attribution,
+        session.threadId!,
+        turnId,
+        event["timestamp"],
+      )
+    )
+      return;
     session.responseIds.add(responseId);
     const cumulative = tokenUsage(payload["thread_token_usage"]);
     if (cumulative)
@@ -794,20 +788,6 @@ function readSessionEvent(
       session.modelUsage.clear();
     }
     session.responseTokens += usage.total_tokens;
-    const turnId =
-      typeof payload["turn_id"] === "string"
-        ? payload["turn_id"]
-        : session.currentTurnId;
-    if (
-      attribution &&
-      !isAttributedScanEvent(
-        attribution,
-        session.threadId!,
-        turnId,
-        event["timestamp"],
-      )
-    )
-      return;
     const model =
       typeof payload["model"] === "string" ? payload["model"] : session.model;
     session.usage = addTokenUsage(session.usage, usage);

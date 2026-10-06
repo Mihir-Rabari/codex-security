@@ -98,8 +98,11 @@ try {
   testCodeModeFrameDiagnosticBoundaries();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
+  await testNullUsageCompletion();
+  await testWorkerProviderSelection();
   await testWorkerCyberAccessSettings();
   if (process.platform !== "win32") {
+    await testIsolatedReconstructedWorkers();
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
@@ -2233,7 +2236,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2448,8 +2451,6 @@ async function testIsolatedReconstructedWorkers() {
       ...structuredClone(deniedWorkerPermissionProfile),
       filesystem: {
         ":root": "read",
-        ":minimal": "read",
-        ":cwd": "write",
         "/repo/.env": "deny",
         "/repo/**/*.pem": "deny",
         "/repo/**/.secret": "deny",
@@ -2467,6 +2468,11 @@ async function testIsolatedReconstructedWorkers() {
       model_reasoning_summary: "concise",
       service_tier: name === "first" ? "default" : "fast",
     };
+    const accessProgram = "daybreak_blue";
+    const apiFeatures = {
+      api_key_cyber_access_programs: name === "first",
+      api_key_model_discovery: name !== "first",
+    };
     await writeFile(
       configPath,
       Object.entries(config)
@@ -2483,7 +2489,8 @@ async function testIsolatedReconstructedWorkers() {
         .join("") +
         (name === "second"
           ? '[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
-          : ""),
+          : "") +
+        `\n[codex_security]\ncyber_access_program = "${accessProgram}"\n[features]\napi_key_cyber_access_programs = ${apiFeatures.api_key_cyber_access_programs}\napi_key_model_discovery = ${apiFeatures.api_key_model_discovery}\n`,
     );
     const providerKeys =
       name === "first"
@@ -2738,6 +2745,8 @@ async function testIsolatedReconstructedWorkers() {
       snapshot,
       providerKeys,
       expectedProvider,
+      accessProgram,
+      apiFeatures,
       executor: new CodexSdkWorkerExecutor(restored),
     };
   }
@@ -2770,9 +2779,8 @@ async function testIsolatedReconstructedWorkers() {
       if (phase.startsWith("reconstructed") || phase === "incomplete") {
         for (const scan of scans) {
           scan.run = await scan.readRun();
-          // The caller restores recorded selections. Its old config file need
-          // not exist; current credentials still come from the selected home/env.
-          if (phase === "reconstructed-fresh") await rm(scan.configPath);
+          // Resume supplies current configuration while restoring recorded
+          // launch selections; credentials remain in the selected home/env.
           if (phase.startsWith("reconstructed")) {
             // The managed parent can edit its output files. Neither a substituted
             // executable/home nor other settings in that file are launch authority.
@@ -2889,6 +2897,18 @@ async function testIsolatedReconstructedWorkers() {
               ),
             );
             assertFlagPair(child.argv, "--model", scan.settings.model);
+            assertFlagPair(
+              child.argv,
+              "--cyber-access-program",
+              scan.accessProgram,
+            );
+            for (const [feature, value] of Object.entries(scan.apiFeatures)) {
+              assert.equal(
+                child.argv.includes(`features.${feature}=${value}`),
+                true,
+                `recorded ${feature}=${value}`,
+              );
+            }
             for (const key of [
               "model_provider",
               "model_reasoning_summary",
@@ -2926,7 +2946,10 @@ async function testIsolatedReconstructedWorkers() {
               const providers = parseToml(provider.join("\n"))
                 .model_providers as Record<string, Record<string, unknown>>;
               if (scan.expectedProvider)
-                assert.deepEqual(providers, scan.expectedProvider);
+                assert.deepEqual(
+                  JSON.parse(JSON.stringify(providers)),
+                  scan.expectedProvider,
+                );
               else
                 assert.deepEqual(Object.keys(providers.openrouter).sort(), [
                   "base_url",
@@ -2975,7 +2998,7 @@ async function testIsolatedReconstructedWorkers() {
         for (const scan of scans) {
           await writeFile(
             scan.configPath,
-            'model_provider = "changed-provider"\nmodel_reasoning_summary = "detailed"\n',
+            'model_provider = "changed-provider"\nmodel_reasoning_summary = "detailed"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
           );
         }
       }

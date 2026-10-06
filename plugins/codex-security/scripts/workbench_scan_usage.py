@@ -113,16 +113,14 @@ def collect_scan_usage(
     current_database = _codex_state_database()
     worker_codex_home = None
     if scan["mode"] == "deep":
-        # Deep orchestration imports the owner-capture helper from this module;
-        # its settings reader is available once completion starts.
-        from deep_scan_workbench import read_deep_scan_execution_settings
+        from deep_scan_workbench import recorded_deep_scan_codex_home
 
-        try:
-            settings = read_deep_scan_execution_settings(Path(scan["scan_dir"]))
-            worker_codex_home = Path(settings["codexHome"])
-        except SystemExit:
-            # Legacy scans may have no recorded home. Keep usage best effort.
-            pass
+        run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+        home = recorded_deep_scan_codex_home(run) if run is not None else None
+        if home is not None:
+            worker_codex_home = Path(home)
     groups = [(current_database, roots)]
     worker_roots: set[str] = set()
     if worker_codex_home is not None:
@@ -771,19 +769,6 @@ def _read_rollout_usage(
                     or response_id in response_ids
                 ):
                     continue
-                response_ids.add(response_id)
-                cumulative = _token_snapshot(
-                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
-                )
-                if cumulative is not None:
-                    expected_response_tokens = max(
-                        expected_response_tokens, cumulative["totalTokens"]
-                    )
-                if not response_usage_observed:
-                    response_usage_observed = True
-                    total = _empty_token_usage()
-                    local_models = {}
-                response_tokens += usage["totalTokens"]
                 timestamp = _timestamp(event.get("timestamp"))
                 if timestamp is None:
                     warnings.add("token_record_invalid")
@@ -797,6 +782,19 @@ def _read_rollout_usage(
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
+                response_ids.add(response_id)
+                cumulative = _token_snapshot(
+                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
+                )
+                if cumulative is not None:
+                    expected_response_tokens = max(
+                        expected_response_tokens, cumulative["totalTokens"]
+                    )
+                if not response_usage_observed:
+                    response_usage_observed = True
+                    total = _empty_token_usage()
+                    local_models = {}
+                response_tokens += usage["totalTokens"]
                 usage_observed = True
                 model = payload.get("model", current_model)
                 if not isinstance(model, str):

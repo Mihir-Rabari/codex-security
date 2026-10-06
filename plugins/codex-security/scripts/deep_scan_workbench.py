@@ -605,10 +605,27 @@ def recorded_deep_scan_execution_settings(run: sqlite3.Row) -> dict[str, Any] | 
     return json.loads(saved) if saved else None
 
 
+def recorded_deep_scan_codex_home(run: sqlite3.Row) -> str | None:
+    saved = recorded_deep_scan_execution_settings(run)
+    if saved is None:
+        return None
+    try:
+        return validate_deep_scan_execution_settings(saved)["codexHome"]
+    except SystemExit:
+        # Unsupported historical settings do not establish a worker log home.
+        return None
+
+
 def include_execution_settings(connection: sqlite3.Connection, result: dict[str, Any]) -> None:
     if "deepScan" in result:
         run = require_deep_scan_run(connection, result["deepScan"]["scanId"])
         result["deepScan"]["executionSettings"] = recorded_deep_scan_execution_settings(run)
+    scan = result.get("scan")
+    if isinstance(scan, dict) and isinstance(scan.get("executionAttribution"), dict):
+        run = require_deep_scan_run(connection, scan["scanId"])
+        home = recorded_deep_scan_codex_home(run)
+        if home is not None:
+            scan["executionAttribution"]["codexHome"] = home
 
 
 def read_deep_scan_execution_settings(scan_dir: Path) -> dict[str, Any]:

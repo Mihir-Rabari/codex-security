@@ -1795,7 +1795,11 @@ export class CodexSecurity {
       if (mode === "deep") {
         tracker.setAttributionReader(async () => {
           const context = await workbench(
-            { ...workbenchOptions, signal: undefined },
+            {
+              ...workbenchOptions,
+              signal: undefined,
+              withExecutionSettings: true,
+            },
             ["get-scan", "--scan-id", scanId],
           );
           const scan = context["scan"];

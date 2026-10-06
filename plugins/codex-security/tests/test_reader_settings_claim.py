@@ -117,10 +117,11 @@ def test_reader_checks_recorded_settings_before_adoption(
     } == files
 
 
+@pytest.mark.parametrize("command", ["get-deep-scan", "get-scan"])
 @pytest.mark.parametrize("workflow", ["deep-security-scan/v1", "deep-security-scan/v2"])
 @pytest.mark.parametrize("bound", [False, True])
 def test_reader_private_settings_projection_preserves_public_output(
-    tmp_path: Path, workflow: str, bound: bool
+    tmp_path: Path, workflow: str, bound: bool, command: str
 ) -> None:
     import os
     import subprocess
@@ -153,9 +154,17 @@ def test_reader_private_settings_projection_preserves_public_output(
             (workflow, json.dumps(settings) if bound else None),
         )
     before = database_snapshot(state)
-    args = ["get-deep-scan", "--scan-id", run["scanId"], "--thread-id", "reader-owner"]
+    args = [
+        command,
+        "--scan-id",
+        run["scanId"],
+        *(["--thread-id", "reader-owner"] if command == "get-deep-scan" else []),
+    ]
     public = run_workbench(state, *args)
-    assert "executionSettings" not in public["deepScan"]
+    key = "deepScan" if command == "get-deep-scan" else "scan"
+    assert "executionSettings" not in public[key]
+    if command == "get-scan":
+        assert "codexHome" not in public["scan"]["executionAttribution"]
     result = subprocess.run(
         [
             sys.executable,
@@ -174,7 +183,13 @@ def test_reader_private_settings_projection_preserves_public_output(
     )
     assert result.returncode == 0, result.stderr
     private = json.loads(result.stdout)
-    assert private["deepScan"].pop("executionSettings") == (settings if bound else None)
+    if command == "get-deep-scan":
+        execution_settings = private["deepScan"].pop("executionSettings")
+        assert execution_settings == (settings if bound else None)
+    elif bound:
+        for scan in (private["scan"], private["workspace"]["results"]):
+            codex_home = scan["executionAttribution"].pop("codexHome")
+            assert codex_home == "/fixture/original-home"
     assert private == public
     assert database_snapshot(state) == before
     assert not (Path(run["scanDir"]) / "artifacts/deep_discovery/execution-settings.json").exists()

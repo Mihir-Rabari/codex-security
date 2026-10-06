@@ -1,14 +1,15 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, win32 } from "node:path";
-import type { CodexOptions } from "@openai/codex-sdk";
+import type { CodexOptions, CyberAccessProgram } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
-import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
 import {
-  resolveCodexProfile,
-  type JsonObject,
-} from "../../../../../sdk/typescript/src/config.js";
-import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
+  projectWorkerSettings,
+  resolveWorkerProfile,
+} from "./worker-settings.js";
+import type { JsonObject } from "../types.js";
+import { isRecord } from "../record.js";
+import { readOriginalParentEvents } from "./parent-history.js";
 import { resolveCodexPath } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type { DeepScanRunState } from "./types.js";
@@ -22,6 +23,11 @@ export interface DeepScanExecutionSettings {
   reasoningEffort?: string;
   reasoningSummary?: string;
   serviceTier?: string;
+  cyberAccessProgram?: CyberAccessProgram;
+  apiFeatures?: {
+    api_key_cyber_access_programs?: boolean;
+    api_key_model_discovery?: boolean;
+  };
   /** The native snapshot recorded no request tier; serviceTier preserves its wire behavior. */
   nativeServiceTierAbsent?: true;
   providerConfig?: JsonObject;
@@ -42,7 +48,7 @@ export async function captureDeepScanExecutionSettings(
   original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,
   environment: NodeJS.ProcessEnv = process.env,
-  parent?: { threadId: string; startedAt?: string },
+  parent?: { threadId: string; startedAt?: string; created?: true },
 ): Promise<DeepScanExecutionSettings> {
   const codexHome = environment.CODEX_HOME || join(homedir(), ".codex");
   const configPath =
@@ -58,12 +64,15 @@ export async function captureDeepScanExecutionSettings(
       throw error;
     config = {};
   }
-  // Reuse the SDK projection: custom provider credentials belong in the native home.
-  const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
+  // Custom provider credentials belong in the native home.
+  const resolved = resolveWorkerProfile(config);
+  const selected = projectWorkerSettings(resolved);
   // A recovered scan can have a different continuation. Only its recorded owner
   // establishes original history; null means that historical binding is missing.
   const owner =
-    original.usageOwner === undefined ? parent : original.usageOwner;
+    original.usageOwner === undefined || parent?.created
+      ? parent
+      : original.usageOwner;
   const native = !owner?.threadId
     ? {}
     : await originalParentSettings(codexHome, {
@@ -100,6 +109,8 @@ export async function captureDeepScanExecutionSettings(
     ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
       ? { nativeServiceTierAbsent: true as const }
       : {}),
+    cyberAccessProgram: cyberAccessProgram(resolved),
+    apiFeatures: apiFeatures(selected.features),
     providerConfig: selected.model_providers as JsonObject | undefined,
     parentSandbox,
   });
@@ -113,20 +124,13 @@ async function originalParentSettings(
   // selections from the original parent; some native records omit the summary.
   // History can be disabled or unavailable; configured selections still work.
   try {
-    const log = await readScanLogs({
-      scanId: parent.threadId,
-      threadId: parent.threadId,
-      executionThreadIds: [],
-      codexHome,
-      allowMissingRoot: true,
-    });
+    const events = await readOriginalParentEvents(codexHome, parent.threadId);
     const settings: Partial<DeepScanExecutionSettings> = {};
     let applied: Partial<DeepScanExecutionSettings> | undefined;
     let summaryIsCompatibilityOnly = false;
     const cutoff =
       parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
-    for (const entry of log.events) {
-      const event = entry.event as Record<string, unknown>;
+    for (const event of events) {
       const timestamp =
         typeof event.timestamp === "string"
           ? Date.parse(event.timestamp)
@@ -245,8 +249,8 @@ export async function loadDeepScanExecutionSettings(
       // can recover selections, but cannot establish an original executable or
       // home. Leave those unknown and retain the existing native launch behavior.
       const context = await readLegacyContext?.();
-      const selected = scanPreflightCodexConfig(
-        resolveCodexProfile(context?.config ?? {}),
+      const selected = projectWorkerSettings(
+        resolveWorkerProfile(context?.config ?? {}),
       );
       const owner = original.usageOwner ?? context?.usageOwner;
       const home = environment.CODEX_HOME || join(homedir(), ".codex");
@@ -278,6 +282,10 @@ export async function loadDeepScanExecutionSettings(
         native.nativeServiceTierAbsent
           ? { nativeServiceTierAbsent: true as const }
           : {}),
+        cyberAccessProgram: cyberAccessProgram(
+          resolveWorkerProfile(context?.config ?? {}),
+        ),
+        apiFeatures: apiFeatures(selected.features),
         providerConfig:
           selected.model_provider === "amazon-bedrock"
             ? (selected.model_providers as JsonObject | undefined)
@@ -333,6 +341,7 @@ export function restoredDeepScanWorkerSettings(
   codexOptions: CodexOptions;
   model?: string;
   reasoningEffort?: string;
+  cyberAccessProgram?: CyberAccessProgram;
   parentSandbox: DeepWorkerParentSandbox;
 } {
   const originalSandbox = settings.parentSandbox;
@@ -352,6 +361,7 @@ export function restoredDeepScanWorkerSettings(
   return {
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
+    cyberAccessProgram: settings.cyberAccessProgram,
     parentSandbox: {
       filesystemDenies: [
         ...new Set([
@@ -382,7 +392,7 @@ export function restoredDeepScanWorkerSettings(
           ),
         );
       },
-      config: scanPreflightCodexConfig({
+      config: projectWorkerSettings({
         ...(settings.model === undefined ? {} : { model: settings.model }),
         ...(settings.reasoningEffort === undefined
           ? {}
@@ -396,6 +406,9 @@ export function restoredDeepScanWorkerSettings(
         ...(settings.serviceTier === undefined
           ? {}
           : { service_tier: settings.serviceTier }),
+        ...(settings.apiFeatures === undefined
+          ? {}
+          : { features: settings.apiFeatures }),
         ...(settings.providerConfig === undefined
           ? {}
           : { model_providers: settings.providerConfig }),
@@ -411,7 +424,7 @@ function executionSettings(
   // projection. Only Bedrock's per-scan AWS selectors need persistence.
   const provider =
     value.modelProvider === "amazon-bedrock"
-      ? (scanPreflightCodexConfig({
+      ? (projectWorkerSettings({
           ...(value.modelProvider === undefined
             ? {}
             : { model_provider: value.modelProvider }),
@@ -428,6 +441,12 @@ function executionSettings(
     reasoningEffort: value.reasoningEffort,
     reasoningSummary: value.reasoningSummary,
     serviceTier: value.serviceTier,
+    ...(value.cyberAccessProgram === undefined
+      ? {}
+      : { cyberAccessProgram: value.cyberAccessProgram }),
+    ...(value.apiFeatures === undefined
+      ? {}
+      : { apiFeatures: apiFeatures(value.apiFeatures) }),
     ...(value.nativeServiceTierAbsent === true
       ? { nativeServiceTierAbsent: true }
       : {}),
@@ -454,4 +473,26 @@ function executionSettings(
     );
   }
   return settings;
+}
+
+function apiFeatures(value: unknown): DeepScanExecutionSettings["apiFeatures"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const features = value as Record<string, unknown>;
+  const result: NonNullable<DeepScanExecutionSettings["apiFeatures"]> = {};
+  for (const key of [
+    "api_key_cyber_access_programs",
+    "api_key_model_discovery",
+  ] as const) {
+    if (typeof features[key] === "boolean") result[key] = features[key];
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function cyberAccessProgram(
+  config: JsonObject,
+): CyberAccessProgram | undefined {
+  const security = config.codex_security;
+  return isRecord(security) && typeof security.cyber_access_program === "string"
+    ? (security.cyber_access_program as CyberAccessProgram)
+    : undefined;
 }

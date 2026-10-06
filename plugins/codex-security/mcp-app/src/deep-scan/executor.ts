@@ -15,10 +15,7 @@ import {
   resolve,
   win32,
 } from "node:path";
-import {
-  createCodexClient,
-  readCodexSessionTurn,
-} from "../../../../../sdk/typescript/src/codex-session.js";
+import { createCodexClient, readCodexSessionTurn } from "../codex-session.js";
 import type { CodexOptions } from "@openai/codex-sdk";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
@@ -45,6 +42,7 @@ export interface CodexSdkWorkerModelSettings {
   codexOptions?: CodexOptions;
   model?: string;
   reasoningEffort?: string;
+  cyberAccessProgram?: CyberAccessProgram;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
 }
@@ -210,7 +208,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
-          cyberAccessProgram: runtimeSettings.cyberAccessProgram,
+          cyberAccessProgram:
+            this.modelSettings.cyberAccessProgram ??
+            runtimeSettings.cyberAccessProgram,
         });
         const diagnostics: CodexWorkerDiagnostic[] = [];
         const turn = await readCodexSessionTurn({

@@ -4,6 +4,8 @@ import { isRecord } from "./record.js";
 export interface ScanExecutionAttribution {
   formatVersion: 1;
   legacy?: true;
+  /** Committed worker home supplied only by the private workbench projection. */
+  codexHome?: string;
   executionThreadIds: string[];
   owner: { threadId: string | null; turnId: string | null; startedAt: string };
   startedAt: string;

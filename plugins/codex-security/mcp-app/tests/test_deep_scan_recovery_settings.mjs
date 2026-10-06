@@ -17,7 +17,9 @@ const bundle = await build({
     ),
   },
   entryPoints: [
-    new URL("../src/deep-scan/recovery-settings.ts", import.meta.url).pathname,
+    fileURLToPath(
+      new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
+    ),
   ],
   format: "esm",
   platform: "node",
@@ -480,6 +482,20 @@ access_key_id = "synthetic-secret"
     "unrecorded legacy ownership cannot recover caller selections",
   );
   assert.equal(unboundLegacy.reasoningSummary, undefined);
+  const freshOwner = await captureSettings(
+    { usageOwner: null },
+    { filesystemDenies: [] },
+    parentEnvironment,
+    { ...originalOwner, startedAt: "2026-01-01T00:01:00Z", created: true },
+  );
+  assert.equal(
+    freshOwner.modelProvider,
+    "openai",
+    "a newly created run belongs to the known current parent",
+  );
+  assert.equal(freshOwner.model, "parent-model");
+  assert.equal(freshOwner.reasoningSummary, "none");
+
   await writeFile(
     join(sessionDirectory, "legacy-auto.jsonl"),
     [

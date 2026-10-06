@@ -182,6 +182,8 @@ export interface WorkbenchCommandOptions {
   environment: ProcessEnvironment;
   signal?: AbortSignal;
   failureMessage?: string;
+  /** Read committed Deep settings through the existing private workbench channel. */
+  withExecutionSettings?: boolean;
 }
 
 export interface ScanArtifactRestorer {
@@ -1565,7 +1567,20 @@ export async function runWorkbench(
   ): Promise<string> => {
     const result = await runCodexCommand(
       { command: options.python },
-      ["-I", "-X", "utf8", "-B", script, ...arguments_],
+      [
+        "-I",
+        "-X",
+        "utf8",
+        "-B",
+        ...(options.withExecutionSettings
+          ? [
+              "-c",
+              "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))",
+            ]
+          : []),
+        script,
+        ...arguments_,
+      ],
       pluginHelperEnvironment(options.environment),
       input,
       options.signal,
