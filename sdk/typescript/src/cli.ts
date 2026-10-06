@@ -6867,6 +6867,7 @@ async function patchPublicationDestination(
     const names = (await run("git", ["remote"])).split("\n");
     let lookup = "codex-security-push";
     while (names.some((name) => name.startsWith(lookup))) lookup += "-";
+    let lookupError: unknown;
     for (const pushRemote of remotes) {
       const config = await run("git", [
         "rev-parse",
@@ -6898,14 +6899,22 @@ async function patchPublicationDestination(
       ) {
         continue;
       }
-      const headRepository = JSON.parse(
-        await dependencies.runRepositoryCommand(
+      let repositoryJson: string;
+      try {
+        repositoryJson = await dependencies.runRepositoryCommand(
           "gh",
           ["repo", "view", "--json", "id,url", "--jq", "tojson"],
           repository,
           options,
-        ),
-      ) as { id: string; url: string };
+        );
+      } catch (error) {
+        lookupError ??= error;
+        continue;
+      }
+      const headRepository = JSON.parse(repositoryJson) as {
+        id: string;
+        url: string;
+      };
       for (;;) {
         found = candidates.find(
           (candidate) =>
@@ -6921,6 +6930,7 @@ async function patchPublicationDestination(
       }
       if (found) break;
     }
+    if (!found && lookupError !== undefined) throw lookupError;
   }
   return {
     remote,
