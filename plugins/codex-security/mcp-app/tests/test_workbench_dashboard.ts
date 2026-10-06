@@ -24,9 +24,14 @@ function database(t: TestContext, path = ":memory:") {
   return db;
 }
 
-function insert(db: DatabaseSync, id: string, repository: string) {
+function insert(
+  db: DatabaseSync,
+  id: string,
+  repository: string,
+  title = `Évaluation ${id}`,
+) {
   const document = {
-    title: `Évaluation ${id}`,
+    title,
     severity: { level: "high" },
     extensions: { opaqueId: 9007199254740993n },
   };
@@ -88,6 +93,67 @@ test("dashboard selects details independently of filters and pagination", (t) =>
   assert.equal(groups.items[0].memberCount, 2);
   assert.deepEqual(groups.detail?.group, result.detail?.groups?.[0]);
   assert.deepEqual(db.prepare("SELECT total_changes() AS count").get(), before);
+});
+
+test("dashboard preserves NUL text through display, filters, search, and sorting", (t) => {
+  const db = database(t);
+  const first = "first\0id";
+  const second = "second\0id";
+  const selected = insert(db, first, "repository\0Zulu", "Title\0Zulu");
+  insert(db, second, "repository\0Alpha", "Title\0Alpha");
+  const query = {
+    view: "findings",
+    sort: "title",
+    direction: "asc",
+    limit: 50,
+    offset: 0,
+  } as const;
+  const result = dashboard(db, { ...query, id: first });
+  assert.deepEqual(
+    result.items.map((item) => item.id),
+    [second, first],
+  );
+  assert.deepEqual(
+    result.items.map((item) => item.title),
+    ["Title\0Alpha", "Title\0Zulu"],
+  );
+  assert.deepEqual(result.repositories, [
+    { id: "repository\0Alpha", label: "repository\0Alpha" },
+    { id: "repository\0Zulu", label: "repository\0Zulu" },
+  ]);
+  assert.equal(result.detail?.item.id, first);
+  assert.deepEqual(result.detail?.finding, selected);
+  assert.deepEqual(
+    dashboard(db, {
+      ...query,
+      repository: result.repositories[0].id,
+    }).items.map((item) => item.id),
+    [second],
+  );
+  assert.deepEqual(
+    dashboard(db, { ...query, query: "\0ALPHA" }).items.map((item) => item.id),
+    [second],
+  );
+  assert.deepEqual(
+    dashboard(db, { ...query, sort: "repository" }).items.map(
+      (item) => item.id,
+    ),
+    [second, first],
+  );
+  db.exec("INSERT INTO finding_dedupe_groups VALUES ('group', 'created')");
+  const member = db.prepare(
+    "INSERT INTO finding_dedupe_group_members VALUES ('group', ?)",
+  );
+  member.run(first);
+  member.run(second);
+  const groups = dashboard(db, {
+    ...query,
+    view: "groups",
+    query: "ALPHA",
+    id: "group",
+  });
+  assert.equal(groups.total, 1);
+  assert.deepEqual(groups.detail?.group?.findingIds, [first, second]);
 });
 
 test("dashboard reads its counts and rows from one WAL snapshot", async (t) => {
