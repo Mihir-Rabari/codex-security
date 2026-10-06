@@ -1092,7 +1092,7 @@ def _reconcile_stopped_diff_sources(
                     or coverage_candidate_key(item, owner) not in states
                     or (
                         field != "deferred"
-                        and item.get("disposition") not in {"rejected", "not_applicable"}
+                        and item.get("disposition") not in ("rejected", "not_applicable")
                     )
                 ]
         return result

@@ -1578,3 +1578,48 @@ def test_stopped_diff_retains_opaque_embedded_finding_provenance(
         if attempt == 0:
             run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
     assert saved.read_bytes() == original_checkpoint
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("same_candidate", [False, True])
+@pytest.mark.parametrize(
+    "disposition", [{"status": "synthetic-review"}, ["synthetic-review"], "unreviewed"]
+)
+def test_stopped_diff_retains_historical_exclusion_extensions(
+    tmp_path: Path, termination: str, same_candidate: bool, disposition: object
+) -> None:
+    state_dir, scan_dir, scan_id, _, checkpoint = saved_diff_candidate(tmp_path)
+    exclusion = {
+        "id": "historical-exclusion",
+        "pattern": "vendor/**",
+        "reason": "Earlier imported scope exclusion.",
+        "candidateId": "candidate-synthetic" if same_candidate else "independent-candidate",
+        "disposition": disposition,
+        "annotation": "Keep the authored historical extension unchanged.",
+    }
+    historical = copy.deepcopy(checkpoint)
+    historical["coverage"].update(surfaces=[], deferred=[], explicitExclusions=[exclusion])
+    saved = write_checkpoint(scan_dir / "checkpoints", historical)
+    original = saved.read_bytes()
+    coverage_path = scan_dir / "coverage.json"
+    current = coverage_path.read_bytes()
+    coverage_path.write_bytes(current)
+    observed = coverage_path.stat().st_mtime_ns
+    os.utime(saved, ns=(observed - 1_000_000_000, observed - 1_000_000_000))
+    arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_retained() -> None:
+        stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert stopped["progress"]["status"] == (
+            "failed" if termination == "fail-scan" else "canceled"
+        )
+        assert stopped["progress"]["candidates"]["unresolved"] == 1
+        assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+        assert (scan_dir / "report.md").is_file()
+        assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
+        assert saved.read_bytes() == original
+
+    assert_retained()
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_retained()
