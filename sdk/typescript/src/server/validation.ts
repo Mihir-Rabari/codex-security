@@ -38,7 +38,7 @@ export async function findingsRequestValidator(): Promise<
     required: ["findings"],
     properties: {
       findings: schema.properties.findings,
-      repositoryId: { type: "string", minLength: 1 },
+      repositoryId: { type: "string", minLength: 1, pattern: "^[^\\u0000]*$" },
     },
   });
 }

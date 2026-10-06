@@ -1208,12 +1208,30 @@ test("malformed request targets return invalid_request at the HTTP handler", asy
   expect(JSON.parse(body!).error).toBe("invalid_request");
 });
 
-test("NUL repository parameters return invalid_request", async () => {
+test("NUL repository IDs are rejected before ingestion and lookup", async () => {
   const { store } = await fixture();
-  const base = await start(store);
-  const response = await fetch(
-    `${base}/v1/finding/${finding().findingId}/potential-duplicates?repositoryId=%00`,
-  );
-  expect(response.status).toBe(400);
-  expect(await response.json()).toMatchObject({ error: "invalid_request" });
+  const embed = mock(embedder.embed);
+  const base = await start(store, { embed });
+  for (const repositoryId of ["\0", "repository\0suffix"]) {
+    const response = await insert(base, [finding()], repositoryId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(400);
+    expect(await lookup.json()).toMatchObject({ error: "invalid_request" });
+  }
+  expect(embed).toHaveBeenCalledTimes(0);
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([]);
+
+  for (const repositoryId of ["repository-a", "\\^@"]) {
+    expect((await insert(base, [finding()], repositoryId)).status).toBe(201);
+    const lookup = await fetch(
+      `${base}/v1/finding/${finding().findingId}/potential-duplicates?${new URLSearchParams({ repositoryId })}`,
+    );
+    expect(lookup.status).toBe(200);
+    expect(await lookup.json()).toMatchObject({ finding: finding() });
+  }
+  expect(embed).toHaveBeenCalledTimes(2);
 });
