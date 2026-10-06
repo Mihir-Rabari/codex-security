@@ -167,8 +167,8 @@ def generate_diff_in_scope_files(
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
     from generate_rank_input import git_changed_paths, path_is_diff_excluded
     from rank_preview import (
-        DEFAULT_PREVIEW_READ_BYTES,
         TEXT_CODE_EXTENSIONS,
+        is_binary_file,
         is_binary_sample,
     )
 
@@ -207,15 +207,8 @@ def generate_diff_in_scope_files(
                         )
                     if is_binary_sample(contents):
                         continue
-                elif path.is_symlink() or not path.is_file():
+                elif path.is_symlink() or not path.is_file() or is_binary_file(path):
                     continue
-                else:
-                    try:
-                        with path.open("rb") as source:
-                            if is_binary_sample(source.read(DEFAULT_PREVIEW_READ_BYTES)):
-                                continue
-                    except OSError:
-                        continue
             relative_path = relative.as_posix()
             if "\n" in relative_path or "\r" in relative_path:
                 raise InventoryError(

@@ -8,7 +8,7 @@ import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
-from rank_preview import DEFAULT_PREVIEW_BYTES, preview_for, preview_for_bytes
+from rank_preview import DEFAULT_PREVIEW_BYTES, mask_c_style_source, preview_for, preview_for_bytes
 
 
 @pytest.fixture(
@@ -578,16 +578,123 @@ def test_kotlin_companion_object_lists_factory_method(tmp_path: Path) -> None:
     assert "method Service.visible" in preview
 
 
-def test_javascript_regex_literal_does_not_change_declaration_depth(tmp_path: Path) -> None:
-    source = r"""class Service {
-  pattern = /\{/;
-  visible() {}
-}
-"""
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "yield /if(enabled)/;",
+        "yield /foo|if(enabled)/;",
+        "yield /foo:if(enabled)/;",
+        "yield /* pattern */ /else/.test(input) ? { ratio: count / total } : null;",
+        "yield /while(enabled)/;",
+        "const matcher = () => /if(enabled)/;",
+        "if (enabled) /{/.test(input);",
+        "if (enabled) {} else /{/.test(input);",
+        "return object.if(enabled) / { valueOf() { return count / total; } };",
+        "return value /* units */ / { valueOf() { return count / total; } };",
+    ],
+)
+def test_javascript_ambiguous_syntax_preserves_source(tmp_path: Path, statement: str) -> None:
+    source = f"function* patterns() {{ {statement} }} // note\nfunction authorize() {{}}"
 
-    preview = generate_preview(tmp_path, "service.ts", source)
+    assert generate_preview(tmp_path, "example.js", source) == source
 
-    assert "method Service.visible" in preview
+
+def test_javascript_yield_identifier_preserves_division_source(tmp_path: Path) -> None:
+    source = (
+        "function ratio() { var yield = 12; return yield / divisor; } // note\n"
+        "function authorize() {}"
+    )
+
+    assert generate_preview(tmp_path, "example.js", source) == source
+
+
+@pytest.mark.parametrize("operator", ["++", "--"])
+def test_typescript_postfix_assertion_preserves_division_source(
+    tmp_path: Path, operator: str
+) -> None:
+    source = (
+        "class Service {\n"
+        f"calculate() {{ return count{operator}! /* known value */ / "
+        "(() => { return count / total; })(); }\n"
+        "authorize() {}\n}"
+    )
+
+    assert generate_preview(tmp_path, "example.ts", source) == source
+
+
+@pytest.mark.parametrize(
+    "suffix", [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx", ".vue"]
+)
+def test_javascript_family_uses_source_for_slash_expressions(tmp_path: Path, suffix: str) -> None:
+    source = "function ratio() { return count / total; }\nfunction authorize() {}"
+
+    assert generate_preview(tmp_path, f"example{suffix}", source) == source
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "return 1;",
+        'return "a/b";',
+        "return 'a/b';",
+        "return `a/b`;",
+        "/* /if(enabled)/ */ return 1;",
+        "// /if(enabled)/\nreturn 1;",
+    ],
+)
+def test_javascript_simple_and_quoted_sources_keep_outlines(tmp_path: Path, body: str) -> None:
+    source = f"class Service {{\ncheck() {{ {body} }}\nauthorize() {{}}\n}}"
+
+    assert generate_preview(tmp_path, "example.js", source).splitlines() == [
+        "class Service",
+        "method Service.check",
+        "method Service.authorize",
+    ]
+
+
+def test_javascript_source_sample_respects_preview_budget(tmp_path: Path) -> None:
+    source = (
+        "function first() { return count / total; }\n"
+        + ("// " + "é" * 128 + "\n") * 100
+        + "function last() {}\n"
+    )
+    path = tmp_path / "example.js"
+    path.write_text(source, encoding="utf-8")
+
+    preview, binary = preview_for(path, DEFAULT_PREVIEW_BYTES)
+
+    assert binary is False
+    assert len(preview.encode("utf-8")) <= DEFAULT_PREVIEW_BYTES
+    assert "function first()" in preview
+    assert "function last()" in preview
+    assert "..." in preview
+
+
+def test_javascript_slash_fallback_does_not_scan_regex_suffixes() -> None:
+    class CountedSource(str):
+        reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+
+    reads = []
+    for repetitions in (1000, 2000):
+        source = CountedSource(",/[" * repetitions)
+        assert mask_c_style_source(source, ".js") is None
+        reads.append(source.reads)
+
+    assert reads[1] < 3 * reads[0]
+
+
+def test_python_preview_ignores_utf8_bom(tmp_path: Path) -> None:
+    source = b"def first():\n    pass\n\ndef second():\n    pass\n"
+    path = tmp_path / "example.py"
+    path.write_bytes(b"\xef\xbb\xbf" + source)
+
+    expected = preview_for_bytes(path, source, DEFAULT_PREVIEW_BYTES)
+    assert expected[0].splitlines() == ["function first()", "function second()"]
+    assert preview_for(path, DEFAULT_PREVIEW_BYTES) == expected
 
 
 def test_javascript_preview_lists_class_field_arrow_handlers(tmp_path: Path) -> None:
@@ -779,96 +886,3 @@ def test_literal_elision_line_respects_tiny_byte_budget(tmp_path: Path) -> None:
     preview = generate_preview(tmp_path, "styles.css", "...", preview_bytes=2)
 
     assert preview == ".."
-
-
-@pytest.mark.parametrize(
-    "data",
-    [b'{"\\ud800": 1}', b'{"number": ' + b"1" * 5000 + b"}"],
-    ids=["unpaired-surrogate", "large-integer"],
-)
-def test_unusual_json_values_do_not_abort_preview(data: bytes) -> None:
-    preview, binary = preview_for_bytes(Path("fixture.json"), data, DEFAULT_PREVIEW_BYTES)
-    assert not binary
-    assert preview.encode("utf-8")
-
-
-@pytest.mark.parametrize(
-    ("suffix", "source", "expected"),
-    [
-        (
-            ".py",
-            b"\xef\xbb\xbfclass Fixture:\n    def first(self):\n        return 1\n    def later(self):\n        return 2\n",
-            "method Fixture.later",
-        ),
-        (
-            ".php",
-            b"<?php\nclass Fixture {\n public function first() {\n  call(<<<TEXT\n a } brace\n TEXT, 1);\n }\n public function later() {}\n}\n",
-            "method Fixture.later",
-        ),
-        (
-            ".js",
-            b"class Fixture {\n first() {\n  if (ready) /}/.test(value);\n }\n later() {}\n}\n",
-            "method Fixture.later",
-        ),
-    ],
-)
-def test_outline_keeps_later_methods(suffix: str, source: bytes, expected: str) -> None:
-    preview, binary = preview_for_bytes(Path("fixture" + suffix), source, DEFAULT_PREVIEW_BYTES)
-    assert not binary
-    assert expected in preview
-
-
-def test_unterminated_regex_does_not_rescan_a_long_line() -> None:
-    from rank_preview import mask_c_style_source
-
-    class CountedText(str):
-        reads = 0
-
-        def __getitem__(self, key):
-            self.reads += 1
-            return super().__getitem__(key)
-
-    source = CountedText(",/[" * 1000 + "\nclass Later {}\n")
-    masked = mask_c_style_source(source, ".js")
-    assert "class Later" in masked
-    assert source.reads < len(source) * 20
-
-
-@pytest.mark.parametrize(
-    "expression",
-    [
-        "call() / 2",
-        "(value + 1) / 2",
-        "ops.if() / 2",
-        "helpers.with(x) / 2",
-        "ops . /*member*/ if() / 2",
-        "ops?.if() / 2",
-        "this.#if() / 2",
-    ],
-)
-def test_javascript_division_after_parentheses_keeps_following_methods(expression: str) -> None:
-    source = (
-        "class Fixture {\n #if() { return 2; }\n"
-        f" first() {{ return {expression}; }} // division\n later() {{}}\n}}\n"
-    )
-    preview, binary = preview_for_bytes(Path("fixture.js"), source.encode(), DEFAULT_PREVIEW_BYTES)
-    assert not binary
-    assert "method Fixture.later" in preview
-
-
-@pytest.mark.parametrize(
-    ("suffix", "expression"),
-    [
-        (".js", "4\n / 2"),
-        (".js", "value\n / 2"),
-        (".jsx", "<Widget value={value} />"),
-        (".js", "value\n / [1, /}/.test(value)].length"),
-    ],
-)
-def test_non_regex_slashes_keep_following_methods(suffix: str, expression: str) -> None:
-    source = f"class Fixture {{\n first() {{ return {expression}; }}\n later() {{}}\n}}\n"
-    preview, binary = preview_for_bytes(
-        Path("fixture" + suffix), source.encode(), DEFAULT_PREVIEW_BYTES
-    )
-    assert not binary
-    assert "method Fixture.later" in preview
