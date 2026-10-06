@@ -476,12 +476,14 @@ For this alias, the API selects `daybreak_blue` when `access_programs.cyber` is
 omitted and rejects requests without the required access. The alias follows
 updates to its underlying model.
 
-Explicit program selection on a specific mainline model remains a separate
-[upstream limitation](https://github.com/openai/codex/issues/47834): Codex
-0.157.0 drops the app-server's `cyberAccessProgram` selection with API-key auth.
-Its exec/SDK path does not expose a program selector.
-`access_programs.cyber` is a Responses API field, not a supported `--codex`
-configuration key. Tracking: [#1024](https://github.com/openai/codex-security/issues/1024).
+To retain a specific mainline model, use `--cyber-access-program daybreak_blue`
+alongside `--auth api-key --model <model>`. In the SDK, set
+`cyberAccessProgram: "daybreak_blue"` in the scan options alongside your selected
+model. This selection also reaches Deep Scan discovery and reducer workers,
+including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+for configuration precedence and the API-key feature setting.
+`access_programs.cyber` is a Responses API field; use the supported selector
+instead of passing it as a `--codex` configuration key.
 
 ## Generate a security policy
 
