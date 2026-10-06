@@ -6,6 +6,7 @@
 - update vulnerable dependencies after cooldown ([#1318](https://github.com/openai/codex-security/pull/1318))
 - add Codex Security GitHub Action ([#1015](https://github.com/openai/codex-security/pull/1015))
 - clarify READMEs and separate SDK reference guides ([#1307](https://github.com/openai/codex-security/pull/1307))
+- preserve bounded source and finding details ([#1275](https://github.com/openai/codex-security/pull/1275))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
