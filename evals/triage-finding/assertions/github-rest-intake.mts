@@ -151,6 +151,11 @@ const checks = {
     } catch (error) {
       return [(error as Error).message];
     }
+    if (
+      JSON.stringify(decision).includes('"schema_version":"triage-finding/v0"')
+    ) {
+      return ["must not emit triage-finding/v0 in a transport decision"];
+    }
     const expected = {
       transport: "github_connector",
       access: "read_only",

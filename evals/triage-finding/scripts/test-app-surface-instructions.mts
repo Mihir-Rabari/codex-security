@@ -121,6 +121,14 @@ for (const wrongDecision of [
 assert.equal(githubIntake("{invalid JSON}", connectorContext).pass, false);
 
 for (const answer of [
+  JSON.stringify({
+    ...connectorDecision,
+    triage_result: { schema_version: "triage-finding/v0", findings: [] },
+  }),
+  JSON.stringify({
+    ...connectorDecision,
+    extra: [{ result: { schema_version: "triage-finding/v0", findings: [] } }],
+  }),
   JSON.stringify([connectorDecision]),
   `\`\`\`json\n${JSON.stringify([connectorDecision])}\n\`\`\``,
   `${JSON.stringify(connectorDecision)}\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}`,
