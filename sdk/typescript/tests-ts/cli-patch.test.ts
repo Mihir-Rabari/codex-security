@@ -4539,6 +4539,8 @@ describe("patch change tracking", () => {
       "ssh-enterprise",
       "scp",
       "scp-userless",
+      "scp-ipv6",
+      "scp-ipv6-userless",
       "scp-mixed",
       "scp-absolute",
       "scp-absolute-command",
@@ -4592,9 +4594,11 @@ describe("patch change tracking", () => {
         environment["GIT_SSH_COMMAND"] ??
         coreCommand ??
         (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
-      const alias = transport.endsWith("-mixed")
-        ? "GitHub-Work"
-        : "github-work";
+      const alias = transport.includes("ipv6")
+        ? "[2001:db8::1]"
+        : transport.endsWith("-mixed")
+          ? "GitHub-Work"
+          : "github-work";
       const localFirst = [
         "local-first",
         "file-first",
@@ -4642,8 +4646,8 @@ describe("patch change tracking", () => {
                       ? `${hostingUrl}/push-owner/repository.git`
                       : transport === "local" || localOnly
                         ? remote
-                        : transport === "scp-userless"
-                          ? "github.com:example/repository.git"
+                        : transport.endsWith("userless")
+                          ? `${transport === "scp-userless" ? "github.com" : alias}:example/repository.git`
                           : transport === "ssh-api" ||
                               transport === "ssh-api-port"
                             ? `git@${hostingHost}:push-owner/repository.git`
@@ -4688,9 +4692,11 @@ describe("patch change tracking", () => {
                     : `${hostingHost}${apiPort}/example/repository`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
-        transport === "scp-userless"
-          ? "github.com"
-          : `git@${aliasLookup ? alias : "ssh.github.com"}`,
+        transport.includes("ipv6")
+          ? `${transport.endsWith("userless") ? "" : "git@"}2001:db8::1`
+          : transport === "scp-userless"
+            ? "github.com"
+            : `git@${aliasLookup ? alias : "ssh.github.com"}`,
       ];
       if (transport !== "local") {
         git("remote", "set-url", "origin", fetchRemote);

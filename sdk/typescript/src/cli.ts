@@ -6876,7 +6876,9 @@ async function patchPublicationDestination(
     let hosted = false;
     for (const remote of remotes.filter(isNetwork)) {
       const url = new URL(
-        remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
+        remote.includes("://")
+          ? remote
+          : `ssh://${remote.replace(/^((?:[^@/]+@)?(?:\[[^\]]+\]|[^:/]+)):/u, "$1/")}`,
       );
       const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
       if (url.hostname.toLowerCase() === "ssh.github.com")
@@ -6885,11 +6887,12 @@ async function patchPublicationDestination(
         url.hostname.toLowerCase().replace(/^www\./u, "") !== apiHost &&
         ssh
       ) {
+        const sshHost = url.hostname.replace(/^\[|\]$/gu, "");
         const sshArguments = [
           ...(url.port ? ["-p", url.port] : []),
           url.username
-            ? `${decodeURIComponent(url.username)}@${url.hostname}`
-            : url.hostname,
+            ? `${decodeURIComponent(url.username)}@${sshHost}`
+            : sshHost,
         ];
         const sshCommand =
           dependencies.environment["GIT_SSH_COMMAND"] ??
@@ -7187,7 +7190,7 @@ async function publishPatchBranch(
 
 function patchRemoteHost(remote: string): string | undefined {
   if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
-  return /^(?:[^@/]+@)?([^:/]+):/u.exec(remote)?.[1]?.toLowerCase();
+  return /^(?:[^@/]+@)?(\[[^\]]+\]|[^:/]+):/u.exec(remote)?.[1]?.toLowerCase();
 }
 
 async function resumePatchPullRequest(
