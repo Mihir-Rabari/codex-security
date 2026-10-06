@@ -20,7 +20,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { pathToFileURL } from "node:url";
 import { Writable } from "node:stream";
 import { promisify, stripVTControlCharacters } from "node:util";
@@ -212,15 +220,20 @@ describe("scan and patch workflow", () => {
   });
 
   test.each([
-    ["gh", "bin"],
-    ["glab", "node_modules/.bin"],
+    ["gh", "bin", "component"],
+    ["glab", "node_modules/.bin", "component"],
+    ["gh", "bin", "external explicit worktree"],
+    ["glab", "node_modules/.bin", "external configured worktree"],
   ])(
-    "keeps the full worktree outside the trusted %s PATH",
-    async (provider, path) => {
+    "keeps the invocation and selected worktree outside the trusted %s PATH: %s %s",
+    async (provider, path, kind) => {
       const root = await temporaryDirectory("codex-security-provider-path-");
       const repository = join(root, "repository");
-      const component = join(repository, "component");
-      const repositoryTools = join(repository, path!);
+      const external = kind!.startsWith("external");
+      const component = external
+        ? join(root, "invocation")
+        : join(repository, "component");
+      const repositoryTools = join(external ? component : repository, path!);
       const trustedTools = join(root, "trusted");
       const marker = join(root, "provider.json");
       const preload = join(root, "provider.mjs");
@@ -230,6 +243,7 @@ describe("scan and patch workflow", () => {
       const executable = `${provider}${process.platform === "win32" ? ".exe" : ""}`;
       try {
         await mkdir(component, { recursive: true });
+        await mkdir(repository, { recursive: true });
         await mkdir(repositoryTools, { recursive: true });
         await mkdir(trustedTools);
         for (const directory of [repositoryTools, trustedTools])
@@ -246,6 +260,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
 `,
         );
         await writeFile(join(component, "app.ts"), "original\n");
+        if (external) await writeFile(join(repository, "app.ts"), "original\n");
         await writeFile(
           join(repository, ".gitignore"),
           "bin/\nnode_modules/\n",
@@ -256,6 +271,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         git("config", "user.email", "synthetic@example.test");
         git("add", ".");
         git("commit", "-m", "Initial synthetic checkout");
+        if (kind === "external configured worktree")
+          git("config", "core.worktree", repository);
         git(
           "remote",
           "add",
@@ -281,6 +298,10 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
               CODEX_SECURITY_STATE_DIR: join(root, "state"),
               NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
               GH_TOKEN: "synthetic-token",
+              ...(external ? { GIT_DIR: join(repository, ".git") } : {}),
+              ...(kind === "external explicit worktree"
+                ? { GIT_WORK_TREE: repository }
+                : {}),
               CI: "1",
             },
             stdout: "pipe",
@@ -2072,6 +2093,113 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             argument.includes('"env_key"="FIREWORKS_API_KEY"'),
         ),
       ).toBe(true);
+    }
+  });
+
+  test.each(["ordinary", "relative Git environment"])(
+    "publishes saved component findings with the selected Git cwd: %s",
+    async (kind) => {
+      const directory = await temporaryDirectory("patch-saved-component-cwd-");
+      const repository = join(directory, "repository");
+      const component = join(repository, "component");
+      const remote = join(directory, "remote.git");
+      const git = repositoryGit(repository);
+      const gitEnvironment =
+        kind === "relative Git environment"
+          ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
+          : {};
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations = [
+        { path: "app.ts", startLine: 1 },
+      ];
+      try {
+        await mkdir(component, { recursive: true });
+        await writeFile(join(component, "app.ts"), "original\n");
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("add", ".");
+        git("commit", "-m", "Synthetic initial checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        const outcome = await runWorkflow(
+          ["patch", "--scan", "scan", "--create-pr", "--json"],
+          {
+            currentDirectory: component,
+            result,
+            environment: { ...process.env, ...gitEnvironment },
+            onWorkbench: () => savedScan(result, "scan", component),
+            onCodex: async (args, output) => {
+              await writeFile(join(component, "app.ts"), "fixed\n");
+              completePatches(args, output);
+              return 0;
+            },
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, {
+                    ...options,
+                    environment: { ...gitEnvironment, ...options?.environment },
+                  })
+                : Promise.resolve(
+                    args[1] === "create"
+                      ? "https://github.example.test/example/repository/pull/17"
+                      : "",
+                  ),
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(git("show", "HEAD:component/app.ts")).toBe("fixed");
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("keeps a staged edit when a supplied patch overlaps a component file", async () => {
+    const directory = await temporaryDirectory(
+      "patch-staged-component-overlap-",
+    );
+    const repository = join(directory, "repository");
+    const component = join(repository, "component");
+    const remote = join(directory, "remote.git");
+    const git = repositoryGit(repository);
+    try {
+      await mkdir(component, { recursive: true });
+      await writeFile(join(component, "app.ts"), "original\n");
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("add", ".");
+      git("commit", "-m", "Synthetic initial checkout");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      await writeFile(join(component, "app.ts"), "staged edit\n");
+      git("add", "component/app.ts");
+      await writeFile(join(component, "app.ts"), "original\n");
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: component,
+          onCodex: async (_args, output) => {
+            await writeFile(join(component, "app.ts"), "fixed\n");
+            output?.stdout.write("Patch complete.");
+            return 0;
+          },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : Promise.resolve(""),
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "Cannot publish files with uncommitted changes before patching",
+      );
+      expect(git("show", ":component/app.ts")).toBe("staged edit");
+      expect(git("branch", "--show-current")).toBe("main");
+      expect(await readFile(join(component, "app.ts"), "utf8")).toBe("fixed\n");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -4371,7 +4499,6 @@ describe("patch publication integrity", () => {
       expect(outcome.stderr).toMatch(/worktree|metadata/u);
     },
   );
-
 });
 
 function repositoryGit(repository: string) {

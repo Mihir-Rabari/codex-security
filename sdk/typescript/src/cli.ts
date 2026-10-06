@@ -1212,6 +1212,7 @@ interface CliDependencies {
     repository: string,
     options?: {
       directory?: string;
+      protectedRoots?: readonly string[];
       trim?: boolean;
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
@@ -1299,6 +1300,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       command,
       process.env,
       repository,
+      options?.protectedRoots,
     );
     if (executable === null) {
       throw new CodexSecurityError(
@@ -5295,6 +5297,10 @@ export async function main(
                       gitRepository,
                       {
                         ...options,
+                        protectedRoots: [
+                          repository,
+                          ...(options?.protectedRoots ?? []),
+                        ],
                         directory: commandDirectory,
                         environment: {
                           ...commandEnvironment,
@@ -6982,7 +6988,7 @@ async function preparePatchPublication(
       tree,
       "--",
     ],
-    root,
+    repository,
     { trim: false, maxBuffer: Infinity },
   );
   const paths = status.split("\0");
@@ -6990,14 +6996,23 @@ async function preparePatchPublication(
     worktreeChanges
       .split("\0")
       .filter(Boolean)
-      .map((path) => relative(directory, resolve(root, path))),
+      .map((path) =>
+        relative(directory, resolve(root, path)).replaceAll(sep, "/"),
+      ),
   );
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
-    dirtyFiles.add(relative(directory, resolve(root, entry.slice(3))));
+    dirtyFiles.add(
+      relative(directory, resolve(root, entry.slice(3))).replaceAll(sep, "/"),
+    );
     if (/[RC]/u.test(entry.slice(0, 2)))
-      dirtyFiles.add(relative(directory, resolve(root, paths[++index]!)));
+      dirtyFiles.add(
+        relative(directory, resolve(root, paths[++index]!)).replaceAll(
+          sep,
+          "/",
+        ),
+      );
   }
   return { branch, directory, dirtyFiles };
 }
@@ -7161,7 +7176,9 @@ async function createPatchPullRequest(
   }
 
   const { branch, directory, dirtyFiles } = publication;
-  const dirty = files.filter((file) => dirtyFiles.has(file));
+  const dirty = files.filter((file) =>
+    dirtyFiles.has(file.replaceAll(sep, "/")),
+  );
   if (dirty.length > 0) {
     throw new CodexSecurityError(
       `Cannot publish files with uncommitted changes before patching: ${dirty.join(", ")}. Local edits and patches were kept; review and publish them separately.`,
