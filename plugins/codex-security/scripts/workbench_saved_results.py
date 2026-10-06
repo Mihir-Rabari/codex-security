@@ -247,13 +247,6 @@ def _capture_saved_source(
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return {relative: (digest, observed)}
     directory = Path(relative).parent
-    if checkpoint_heads is not None and directory != Path("."):
-        try:
-            (scan_dir / relative).lstat()
-        except FileNotFoundError:
-            pass
-        else:
-            checkpoint_heads[directory.as_posix()] = None
     head, head_digest, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
@@ -425,7 +418,12 @@ def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -
 def _frozen_checkpoint_heads(
     scan_dir: Path, scan_id: str, sources: dict[str, str], *, skip_unreadable: bool = False
 ) -> dict[str, str]:
-    times = _frozen_source_times(scan_dir, scan_id, sources)
+    try:
+        times = _frozen_source_times(scan_dir, scan_id, sources)
+    except (ContractError, OSError, ValueError):
+        if not skip_unreadable:
+            raise
+        times = {}
     heads: dict[str, tuple[int, str]] = {}
     ambiguous: set[str] = set()
     for relative, expected_digest in sources.items():
@@ -1936,16 +1934,32 @@ def merge_saved_results(
                     checkpoint_dir /= "checkpoints"
                 selected_models = [
                     path
-                    for path in selected_observations
-                    if Path(path).parent == checkpoint_dir
+                    for path in drafts_by_path
+                    if (
+                        path in selected_observations
+                        or (
+                            path in current_results
+                            and drafts_by_path[path].get("complete") is not False
+                        )
+                    )
+                    and (
+                        Path(path).parent == checkpoint_dir
+                        or (
+                            path in current_results
+                            and Path(path).parent / "checkpoints" == checkpoint_dir
+                        )
+                    )
                     and isinstance(drafts_by_path[path].get("threatModel"), dict)
                 ]
                 if selected_models:
                     authoritative_models = [
-                        path for path in selected_models if path in authoritative_heads
+                        path
+                        for path in selected_models
+                        if path in authoritative_heads or path in current_results
                     ]
                     head_path = max(
-                        authoritative_models or selected_models, key=source_order.__getitem__
+                        authoritative_models or selected_models,
+                        key=lambda path: (source_order[path], path in authoritative_heads),
                     )
                     current = drafts_by_path[head_path]
                     # A terminal checkpoint is committed before result.json is replaced.

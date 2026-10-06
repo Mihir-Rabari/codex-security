@@ -1154,9 +1154,13 @@ def test_registered_checkpoint_result_keeps_newer_accepted_outcome(
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan)
-    reported = save_disposition(scan, result.parent, "reported")
+    reported = {
+        **save_disposition(scan, result.parent, "reported"),
+        "threatModel": {"summary": "Newer accepted model."},
+    }
     head = result.parent / "checkpoint-head.json"
-    accepted = result.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    accepted = write_checkpoint(result.parent / "checkpoints", reported)
+    head.write_text(json.dumps({"checkpoint": accepted.name}))
     os.utime(accepted, ns=(300, 300))
     os.utime(head, ns=(300, 300))
     workbench_api["saved_results"]._capture_saved_source(
@@ -1171,7 +1175,13 @@ def test_registered_checkpoint_result_keeps_newer_accepted_outcome(
     else:
         result.write_text(json.dumps(reported))
         os.utime(result, ns=(300, 300))
-    save_disposition(scan, result.parent, "rejected")
+    rejected = {
+        **save_disposition(scan, result.parent, "rejected"),
+        "threatModel": {"summary": "Older selected model."},
+    }
+    older = write_checkpoint(result.parent / "checkpoints", rejected)
+    os.utime(older, ns=(200, 200))
+    head.write_text(json.dumps({"checkpoint": older.name}))
     os.utime(head, ns=(200, 200))
     stopped = workbench_api["fail_scan"](
         workbench_db,
@@ -1179,6 +1189,27 @@ def test_registered_checkpoint_result_keeps_newer_accepted_outcome(
     )["scan"]
     assert stopped["findingCount"] == 1
     assert stopped["resultsRecoveryNeeded"] is False
+
+    assert (
+        json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"][
+            "summary"
+        ]
+        == "Newer accepted model."
+    )
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == 1
+    assert (
+        json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"][
+            "summary"
+        ]
+        == "Newer accepted model."
+    )
 
 
 @pytest.mark.parametrize("valid_rejection", [False, True], ids=["malformed", "valid"])
@@ -1561,3 +1592,94 @@ def test_legacy_unreadable_head_does_not_hide_another_workers_new_evidence(
         is True
     )
     assert all((scan.scan_dir / name).read_bytes() == content for name, content in before.items())
+
+
+@pytest.mark.parametrize("head_state", ["malformed", "missing-checkpoint", "missing-head", "valid"])
+def test_first_stop_keeps_registered_result_when_head_is_unreadable(
+    workbench_api, workbench_db, publication_scan, head_state
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    head = result.parent / "checkpoint-head.json"
+    if head_state == "missing-head":
+        head.unlink()
+    elif head_state != "valid":
+        head.write_text(
+            "{" if head_state == "malformed" else json.dumps({"checkpoint": "a" * 64 + ".json"})
+        )
+    original = result.read_bytes()
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    assert not stopped["resultsRecoveryNeeded"]
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == 1
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("ordering", ["missing", "malformed", "valid"])
+def test_legacy_ordering_failure_does_not_hide_new_worker_evidence(
+    workbench_api, workbench_db, publication_scan, monkeypatch, ordering
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    saved = workbench_api["saved_results"]
+    prepare = saved._prepare_scan_finalization
+
+    def legacy_publication(*args, **kwargs):
+        kwargs["draft_documents"][0]["scan"].pop("preservedCheckpointHeads")
+        return prepare(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_prepare_scan_finalization", legacy_publication)
+        workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET retained_checkpoint_heads_json = NULL WHERE id = ?", (scan.scan_id,)
+        )
+    assert not workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    ordering_path = next((scan.scan_dir / "source-order").glob("*.json"))
+    if ordering == "missing":
+        ordering_path.unlink()
+    elif ordering == "malformed":
+        ordering_path.write_text("{")
+    original = {
+        name: (scan.scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    scan.findings[0]["identity"]["anchor"] = "independent-new-worker"
+    other = add_worker(workbench_db, scan, status="canceled")
+    save_disposition(scan, other.parent, "reported")
+    assert workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    assert all(
+        (scan.scan_dir / name).read_bytes() == contents for name, contents in original.items()
+    )
+    if ordering != "valid":
+        with pytest.raises(saved.ContractError):
+            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    else:
+        assert (
+            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))[
+                "scan"
+            ]["findingCount"]
+            == 2
+        )
