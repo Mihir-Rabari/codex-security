@@ -42,11 +42,34 @@ export function extractJson(
       : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
   if (requireSingle) {
     candidates.length = 0;
+    const references = new Set(
+      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*\S+/gm)].map(
+        (match) => match[1],
+      ),
+    );
+    const fences = [...text.matchAll(/```(?:json)?\s*[\s\S]*?```/gi)];
+    let citationEnd = 0;
     let depth = 0;
     let start = 0;
     for (const match of text.matchAll(
       /"(?:\\.|[^"\\])*"|\[\d+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\]|:[ \t]*\S+)|[{}\[\]]/gs,
     )) {
+      if (match.index < citationEnd) continue;
+      if (depth === 0 && match[0] === "[") {
+        const shortcut = /^\[(\d+)\]/u.exec(text.slice(match.index));
+        if (
+          shortcut &&
+          references.has(shortcut[1]) &&
+          !fences.some(
+            (fence) =>
+              match.index >= fence.index &&
+              match.index < fence.index + fence[0].length,
+          )
+        ) {
+          citationEnd = match.index + shortcut[0].length;
+          continue;
+        }
+      }
       if (depth === 0 && match[0].startsWith("[") && match[0].length > 1)
         continue;
       if (match[0] === "{" || match[0] === "[") {

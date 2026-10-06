@@ -106,6 +106,7 @@ for (const answer of [
   `Use the connector [1][1].\n${JSON.stringify(connectorDecision)}`,
   `Use the connector [1][].\n${JSON.stringify(connectorDecision)}`,
   `Use the connector.\n[1]: references/github-rest-intake.md\n${JSON.stringify(connectorDecision)}`,
+  `Use the connector [1].\n[1]: references/github-rest-intake.md\n${JSON.stringify(connectorDecision)}`,
 ]) {
   const result = githubIntake(answer, connectorContext);
   assert.equal(result.pass, true, result.reason);
@@ -139,6 +140,7 @@ for (const answer of [
   `\`\`\`json\n${JSON.stringify([connectorDecision])}\n\`\`\``,
   `${JSON.stringify(connectorDecision)}\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}`,
   `${JSON.stringify(connectorDecision)}\n[1]`,
+  `Use the connector [1].\n[1]: references/github-rest-intake.md\n${JSON.stringify(connectorDecision)}\n\`\`\`json\n[1]\n\`\`\``,
   `\`\`\`json\n${JSON.stringify(connectorDecision)}\n\`\`\`\n\`\`\`json\n${JSON.stringify({ schema_version: "triage-finding/v0", findings: [] })}\n\`\`\``,
 ]) {
   assert.equal(githubIntake(answer, connectorContext).pass, false, answer);
