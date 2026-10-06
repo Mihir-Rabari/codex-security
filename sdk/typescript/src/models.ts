@@ -36,15 +36,34 @@ export interface ScanManifest {
       limitations?: string[];
       [k: string]: unknown;
     };
-    threatModel?: {
-      summary: string;
-      assets?: string[];
-      trustBoundaries?: string[];
-      attackerCapabilities?: string[];
-      securityObjectives?: string[];
-      assumptions?: string[];
-      [k: string]: unknown;
-    };
+    /**
+     * Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.
+     */
+    threatModel?:
+      | {
+          summary: string;
+          assets?: string[];
+          trustBoundaries?: string[];
+          attackerCapabilities?: string[];
+          securityObjectives?: string[];
+          assumptions?: string[];
+          [k: string]: unknown;
+        }
+      | {
+          format: "markdown";
+          content: string;
+          /**
+           * The modeled source scope, which may differ from the scan scope. Omit when unknown.
+           */
+          scope?: {
+            includePaths: string[];
+            excludePaths?: string[];
+            summary?: string;
+            [k: string]: unknown;
+          };
+          origin?: "generated" | "provided" | "reconciled" | "recovered";
+          [k: string]: unknown;
+        };
     hardening?: {
       portfolioPath: "hardening/hardening.md";
       [k: string]: unknown;
@@ -286,11 +305,7 @@ export interface CoverageDocument {
    */
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
-    | "repository"
-    | "scoped_path"
-    | "diff"
-    | "directory"
-    | "custom";
+    "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
   surfaces: {
@@ -327,6 +342,13 @@ export interface CoverageDocument {
     paths?: string[];
     surfaceIds?: string[];
     [k: string]: unknown;
+  }[];
+  /**
+   * Completed generic review tasks, with their saved IDs and completion reasons.
+   */
+  resolvedDeferred?: {
+    id: string;
+    reason: string;
   }[];
   /**
    * Optional additional assurance or later investigations that do not block completion of the requested review. Preserve essential unresolved in-scope proof gaps in deferred instead.

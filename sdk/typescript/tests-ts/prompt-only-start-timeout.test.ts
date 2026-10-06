@@ -29,7 +29,7 @@ async function loadExecuteWorkbench(
     execFileHelper!,
     "workbenchScriptPath",
     "PLUGIN_ROOT",
-    "isJsonObject2",
+    "isRecord",
     `${source}\nreturn executeWorkbench;`,
   )(
     executor,
