@@ -39,8 +39,8 @@ from finalize_scan_contract import (
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
-    _require_safe_json_value,
     _remove_scan_local_file_if_exists,
+    _require_safe_json_value,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -1089,9 +1089,7 @@ def _reconcile_stopped_diff_sources(
                     retained.append(finding)
             elif state[0] == "deferred":
                 retained_finding = state[1].setdefault("finding", finding)
-                if not any(
-                    retained == finding for retained in _retained_findings(retained_finding)
-                ):
+                if finding not in _retained_findings(retained_finding):
                     provenance = retained_finding.setdefault("provenance", {})
                     if not isinstance(provenance.get("previousFindings"), list):
                         provenance["previousFindings"] = []
