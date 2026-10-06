@@ -5889,7 +5889,7 @@ describe("patch change tracking", () => {
     return { directory, git, remote };
   }
 
-  test.each(["free", "occupied", "race", "option"] as const)(
+  test.each(["free", "occupied", "race", "option", "uploadpack"] as const)(
     "preserves all push destinations: second destination=%s",
     async (destination) => {
       const occupied = destination === "occupied" || destination === "race";
@@ -5925,6 +5925,33 @@ describe("patch change tracking", () => {
           ? `--upload-pack=${commandPath(process.execPath)} ${commandPath(script)} ${commandPath(marker)}`
           : secondary,
       );
+      const uploadTrace = join(directory, ".git", "transport-trace");
+      if (destination === "uploadpack") {
+        const transportDirectory = await fixtures.create("patch-transport-");
+        const transport = join(transportDirectory, "transport.cjs");
+        await writeFile(
+          transport,
+          `
+const { spawnSync } = require("node:child_process");
+const { appendFileSync } = require("node:fs");
+if (process.argv[2] === "upload-pack") appendFileSync(${JSON.stringify(uploadTrace)}, process.argv[3] + "\\n");
+const result = spawnSync(${JSON.stringify(Bun.which("git")!)}, [process.argv[2], process.argv[3].replace(/\\.logical$/, "")], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+        );
+        for (const operation of ["upload", "receive"])
+          git(
+            "config",
+            `remote.origin.${operation}pack`,
+            `${commandPath(process.execPath)} ${commandPath(transport)} ${operation}-pack`,
+          );
+        git("config", "--unset-all", "remote.origin.pushurl");
+        git("config", "--add", "remote.origin.pushurl", `${remote}.logical`);
+        git("config", "--add", "remote.origin.pushurl", `${secondary}.logical`);
+        git("push", "origin", "HEAD:refs/heads/native-control");
+        git("ls-remote", "origin");
+        await writeFile(uploadTrace, "");
+      }
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
@@ -5955,6 +5982,10 @@ describe("patch change tracking", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
+      if (destination === "uploadpack")
+        expect(
+          (await readFile(uploadTrace, "utf8")).trim().split("\n"),
+        ).toEqual([`${remote}.logical`, `${secondary}.logical`]);
       expect(onCodex).toHaveBeenCalledTimes(
         destination === "occupied" || option ? 0 : 1,
       );
@@ -7168,6 +7199,7 @@ describe("patch change tracking", () => {
   for (const mode of ["saved", "supplied"]) {
     test.each([
       "file",
+      "literal-pathspecs",
       "directory",
       "info",
       "global",
@@ -7211,6 +7243,8 @@ describe("patch change tracking", () => {
           await mkdir(dirname(join(root, file)), { recursive: true });
           await writeFile(join(root, file), "synthetic local data\n");
         }
+        const gitEnvironment: NodeJS.ProcessEnv =
+          kind === "literal-pathspecs" ? { GIT_LITERAL_PATHSPECS: "1" } : {};
         const head = git("rev-parse", "HEAD");
         let expectedIndex = git("write-tree");
         const result = resultWithFindings(["high"]);
@@ -7229,10 +7263,14 @@ describe("patch change tracking", () => {
           ],
           {
             currentDirectory: root,
+            environment: gitEnvironment,
             onWorkbench: () => savedScan(result, "scan-1", root),
             onRepositoryCommand: (command, args, cwd, options) =>
               command === "git"
-                ? runGitRepositoryCommand(command, args, cwd, options)
+                ? runGitRepositoryCommand(command, args, cwd, {
+                    ...options,
+                    environment: { ...gitEnvironment, ...options?.environment },
+                  })
                 : args[1] === "list"
                   ? "[]"
                   : "https://github.example.test/example/repository/pull/1",

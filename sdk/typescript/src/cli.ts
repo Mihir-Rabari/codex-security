@@ -6843,18 +6843,28 @@ async function patchPublicationDestination(
   const entries = (
     await run(
       "git",
-      ["config", "--null", "--get-regexp", "^remote\\.origin\\.(pushurl|url)$"],
+      [
+        "config",
+        "--null",
+        "--get-regexp",
+        "^remote\\.origin\\.(pushurl|url|uploadpack)$",
+      ],
       { trim: false },
     )
   )
     .split("\0")
     .filter(Boolean);
-  const push = entries.filter((entry) =>
+  const uploadPackKey = "remote.origin.uploadpack\n";
+  const uploadPack = entries
+    .findLast((entry) => entry.startsWith(uploadPackKey))
+    ?.slice(uploadPackKey.length);
+  const urls = entries.filter((entry) => !entry.startsWith(uploadPackKey));
+  const push = urls.filter((entry) =>
     entry.startsWith("remote.origin.pushurl\n"),
   );
   const remotes: string[] = [];
   // Appending an existing value lets Git delimit its expansion without splitting URL newlines.
-  for (const entry of push.length ? push : entries) {
+  for (const entry of push.length ? push : urls) {
     const appended = (
       await run("git", ["-c", entry.replace("\n", "="), ...getPushUrls], {
         trim: false,
@@ -7073,6 +7083,7 @@ async function patchPublicationDestination(
   return {
     remote,
     remotes,
+    uploadPack,
     gitlab,
     command,
     existing: found,
@@ -7219,6 +7230,9 @@ async function preparePatchPublication(
               "git",
               [
                 "ls-remote",
+                ...(destination.uploadPack !== undefined
+                  ? ["--upload-pack", destination.uploadPack]
+                  : []),
                 "--heads",
                 "--",
                 token,
@@ -7491,7 +7505,7 @@ async function createPatchPullRequest(
         "--exclude-standard",
         "-z",
         "--",
-        ":/",
+        root,
       ],
       root,
       { trim: false, maxBuffer: Infinity },
