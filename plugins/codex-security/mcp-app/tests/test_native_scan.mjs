@@ -119,7 +119,9 @@ function syntheticPermissionAppServer() {
   const capture = (value) => {
     if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   };
+  const selectedProvider = config.model_providers?.[config.model_provider];
   capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
+    providerToken: selectedProvider && process.env[selectedProvider.env_key],
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
@@ -218,8 +220,14 @@ const fs = require("node:fs");
 ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) servePermissionProfiles();
 else {
+  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
+  const argv = process.argv.slice(2);
+  const effective = Object.assign({}, ...argv.flatMap((arg, index) =>
+    ["--config", "-c"].includes(arg) ? [parse(argv[index + 1])] : []));
+  const selectedProvider = effective.model_providers?.[effective.model_provider];
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
-    kind: process.argv.includes("login") ? "login" : "exec", argv: process.argv.slice(2),
+    kind: process.argv.includes("login") ? "login" : "exec", argv,
+    providerToken: selectedProvider && process.env[selectedProvider.env_key],
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
   }) + "\\n");
   if (process.argv.includes("login")) { console.error("Logged in using ChatGPT"); process.exit(0); }
@@ -374,11 +382,15 @@ else {
                 );
                 assert.equal(provider.env_key, "OPENAI_API_KEY");
               } else if (scenario.endsWith("-bearer")) {
+                assert.equal(provider.experimental_bearer_token, undefined);
+                assert.equal(typeof provider.env_key, "string");
+                assert.equal(row.providerToken, "synthetic-provider-token");
                 assert.equal(
-                  provider.experimental_bearer_token,
-                  "synthetic-provider-token",
+                  row.argv.some((argument) =>
+                    argument.includes("synthetic-provider-token"),
+                  ),
+                  false,
                 );
-                assert.equal(provider.env_key, undefined);
               } else {
                 assert.equal(provider.auth.command, "synthetic-auth");
                 assert.deepEqual(provider.auth.args, ["synthetic-account"]);
