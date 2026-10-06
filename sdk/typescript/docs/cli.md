@@ -293,6 +293,12 @@ results and a coverage warning. Runtime failures with JSON or JSONL output produ
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+A scan that returns partial or unknown coverage uses that failure envelope and
+keeps its available results under `data`. This also applies to `scans rerun` and
+`scans resume`. If the scan target also changed, the error explains that the
+results no longer represent the current checkout. On saved-scan commands,
+`--filter-output` applies to `data`; selecting an unavailable field can return
+`null` or omit `data`.
 Diagnostics stay on stderr. `scan --schema --format json` describes the output.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
