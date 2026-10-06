@@ -43,6 +43,8 @@ const failureReasons: Record<string, string> = {
   "credential-error": "Authentication failed: Bearer synthetic-review-key",
   "invalid-json": "Codex returned malformed JSON",
   "invalid-submission": "Review validation failed: Invalid decision",
+  "required-source-error-policy-file":
+    "Required review check could not be completed: Connection refused while fetching content-policy.ts",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -522,6 +524,7 @@ test.each([
   "Required source revision could not be read.",
   "I cannot complete the review because the source is unavailable.",
   "Connection refused",
+  "Connection refused while fetching content-policy.ts",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
   "Here is the review JSON.",
 ])("does not turn other failures into refused reviews: %s", (message) => {

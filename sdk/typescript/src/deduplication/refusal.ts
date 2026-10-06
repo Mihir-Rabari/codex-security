@@ -13,9 +13,8 @@ export function isReviewRefusal(
     /\bflagged for potentially high-risk cyber activity\b/iu,
     /\bcyber[_\s-]?policy\b/iu,
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
-    /\b(?:refusal|refused|blocked)\s+(?:under|by|due to)\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
-    /\brefus(?:al|ed)\b[^\r\n.!?]*\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
-    /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\b[^\r\n.!?]*\brefus(?:al|ed)\b/iu,
+    /\b(?:refusal|refused|blocked)\s+(?:under|by|due to|because of|for violating)\s+(?:(?:the|a)\s+)?(?:cybersecurity|cyber|content|safety)[ _-]*policy\b/iu,
+    /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\s+requires\s+(?:a\s+)?refusal\b/iu,
     /^(?:I(?:['’]m| am) sorry[,.:]?\s*(?:but\s+)?|Sorry[,.:]?\s*)?I(?:\s+(?:cannot|can['’]t|won['’]t|am (?:unable|not able) to)|['’]m (?:unable|not able) to)\s+(?:help|assist|comply)\b/iu,
   ].some((pattern) => pattern.test(message.trim()));
 }
