@@ -50,6 +50,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
+from workbench_budget_candidates import preserve_budget_candidates as preserve_budget_candidates
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -794,208 +795,6 @@ def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
         )
         if isinstance(value, str) and value.strip()
     )
-
-
-def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
-    candidate = item.get("candidate")
-    return (
-        isinstance(candidate, dict)
-        and item.get("candidateId") == candidate.get("candidate_id")
-        and item.get("disposition") == (diff_candidate_disposition(candidate) or "needs_follow_up")
-        and item.get("label") == candidate.get("summary")
-        and item.get("notes") == candidate.get("evidence")
-    )
-
-
-def _budget_candidate_deferred(candidate: dict[str, Any], surface_ids: list[str]) -> dict[str, Any]:
-    return {
-        "candidate": candidate,
-        "reason": (
-            "Validation was deferred because the scan reached its cost limit: "
-            f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-        ),
-        "paths": list(dict.fromkeys(location["path"] for location in candidate["locations"])),
-        "surfaceIds": surface_ids,
-    }
-
-
-def preserve_budget_candidates(
-    coverage: dict[str, Any], findings: list[dict[str, Any]], candidates: list[dict[str, Any]]
-) -> None:
-    """Reconcile ledger candidates with the saved cost-limit draft's decisions."""
-    findings_by_candidate = {
-        key
-        for finding in findings
-        if isinstance(finding, dict) and (key := finding_candidate_key(finding)) is not None
-    }
-
-    terminal_decisions = {
-        coverage_candidate_key(item): item["disposition"]
-        for field in ("surfaces", "explicitExclusions")
-        for item in coverage[field]
-        if isinstance(item, dict)
-        and item.get("disposition") in ("rejected", "not_applicable")
-        and (field != "surfaces" or not _generated_budget_candidate_surface(item))
-    }
-    dispositions = {
-        (None, candidate["candidate_id"]): (
-            "reported"
-            if (None, candidate["candidate_id"]) in findings_by_candidate
-            else terminal_decisions.get((None, candidate["candidate_id"]))
-            or diff_candidate_disposition(candidate)
-            or "needs_follow_up"
-        )
-        for candidate in candidates
-    }
-    deferred_by_candidate = {}
-    surfaces_by_candidate = {}
-    surfaces_by_id = {}
-    for field, index in (
-        ("deferred", deferred_by_candidate),
-        ("surfaces", surfaces_by_candidate),
-    ):
-        for item in coverage[field]:
-            if isinstance(item, dict) and (key := coverage_candidate_key(item)) is not None:
-                index.setdefault(key, []).append(item)
-    for surface in coverage["surfaces"]:
-        if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-            surfaces_by_id.setdefault(surface["id"], []).append(surface)
-    coverage["deferred"] = [
-        item
-        for item in coverage["deferred"]
-        if not isinstance(item, dict)
-        or dispositions.get(coverage_candidate_key(item), "needs_follow_up") == "needs_follow_up"
-    ]
-    # Only surviving references protect shared surfaces. Index by ID while retaining
-    # owner-specific rows, so each reference need not scan every saved surface.
-    referenced = {
-        surface_reference_key(surface_id, item, surfaces_by_id.get(surface_id, []))
-        for item in coverage["deferred"]
-        if isinstance(item, dict)
-        for surface_ids in [item.get("surfaceIds", [])]
-        if isinstance(surface_ids, list)
-        for surface_id in surface_ids
-        if isinstance(surface_id, str)
-    }
-    used_ids = {
-        field: {
-            item["id"]
-            for item in coverage[field]
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
-        }
-        for field in ("surfaces", "deferred")
-    }
-
-    def available_id(prefix: str, field: str) -> str:
-        existing = used_ids[field]
-        result, suffix = prefix, 1
-        while result in existing:
-            suffix += 1
-            result = f"{prefix}-{suffix}"
-        existing.add(result)
-        return result
-
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        key = (None, candidate_id)
-        deferred = deferred_by_candidate.get(key, [])
-        disposition = dispositions[key]
-        # An interrupted budget completion can leave generated candidate rows.
-        # Refresh them before retaining pending work, including shared surfaces.
-        generated_surfaces = [
-            surface
-            for surface in surfaces_by_candidate.get(key, [])
-            if _generated_budget_candidate_surface(surface)
-        ]
-        previous_candidates = [surface["candidate"] for surface in generated_surfaces]
-        generated_surface_ids = [
-            surface["id"] for surface in generated_surfaces if isinstance(surface.get("id"), str)
-        ]
-        for surface in generated_surfaces:
-            surface.update(
-                label=candidate["summary"],
-                disposition=disposition,
-                notes=candidate["evidence"],
-                candidate={
-                    **{
-                        k: v
-                        for k, v in surface["candidate"].items()
-                        if k not in {"validation", "attack_path"}
-                    },
-                    **candidate,
-                },
-            )
-        if disposition == "needs_follow_up" and deferred:
-            for item in deferred:
-                previous = item.get("candidate")
-                if isinstance(previous, dict) and previous in previous_candidates:
-                    generated = _budget_candidate_deferred(previous, generated_surface_ids)
-                    if all(item.get(field) == value for field, value in generated.items()):
-                        refreshed = {
-                            **{
-                                field: value
-                                for field, value in previous.items()
-                                if field not in {"validation", "attack_path"}
-                            },
-                            **candidate,
-                        }
-                        item.update(_budget_candidate_deferred(refreshed, generated_surface_ids))
-                else:
-                    item.setdefault("candidate", candidate)
-            continue
-        # A surface may also carry evidence for unfinished work from another
-        # candidate or owner. Preserve those shared rows and add a dedicated decision.
-        surfaces = [
-            item
-            for item in surfaces_by_candidate.get(key, [])
-            if isinstance(item.get("id"), str)
-            and item["id"].strip()
-            and (item.get("disposition") != "reported" or disposition == "reported")
-            and candidate_key(item["id"], item.get("sourceWorkerId")) not in referenced
-        ]
-        if not surfaces:
-            surface = {
-                "id": available_id(f"candidate-{candidate_id}", "surfaces"),
-                "candidateId": candidate_id,
-                "label": candidate["summary"],
-                "disposition": disposition,
-                "notes": candidate["evidence"],
-                "receiptRefs": [],
-            }
-            coverage["surfaces"].append(surface)
-            surfaces = [surface]
-        retained_candidate = {}
-        for item in [*deferred, *surfaces]:
-            previous = item.get("candidate")
-            if isinstance(previous, dict):
-                retained_candidate.update(
-                    {k: v for k, v in previous.items() if k not in {"validation", "attack_path"}}
-                )
-        previous_findings = [
-            item["finding"] for item in deferred if isinstance(item.get("finding"), dict)
-        ]
-        for surface in surfaces:
-            if disposition == "reported" or surface.get("disposition") not in (
-                "rejected",
-                "not_applicable",
-            ):
-                surface["disposition"] = disposition
-            surface["candidate"] = {**retained_candidate, **candidate}
-            if previous_findings:
-                if not isinstance(surface.get("previousFindings"), list):
-                    surface["previousFindings"] = []
-                for finding in previous_findings:
-                    if finding not in surface["previousFindings"]:
-                        surface["previousFindings"].append(finding)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": available_id(candidate_id, "deferred"),
-                "candidateId": candidate_id,
-                **_budget_candidate_deferred(candidate, [surface["id"] for surface in surfaces]),
-            }
-        )
 
 
 def _stopped_diff_candidate_decisions(
@@ -1810,6 +1609,7 @@ def merge_saved_results(
             order = (attempt, observed)
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
     source_order.update(selected_observations)
+
     worker_ids = {worker["id"] for worker in workers if worker["kind"] == "discovery"}
     if worker_ids:
         if parent is not None:
@@ -2059,6 +1859,7 @@ def merge_saved_results(
     )
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
+    coverage.pop("legacyUnscopedParentCandidates", None)
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
@@ -2089,7 +1890,6 @@ def merge_saved_results(
         for field in ("surfaces", "explicitExclusions", "deferred")
     }
 
-    all_sources = ([("parent", parent, None)] if parent else []) + sources
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
         relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
@@ -2115,15 +1915,14 @@ def merge_saved_results(
             if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
                 ambiguous_deferred.add((owner, identity))
             by_id[identity] = row
-    current_drafts = (
-        [(relative, draft, None) for relative, draft, owner in sources if draft in decision_drafts]
-        + ([("parent", parent, None)] if parent else [])
-        + [
-            source
-            for source in sources
-            if source[0] in current_results | selected_observations.keys()
+    current_drafts = ([("parent", parent, None)] if parent else []) + [
+        source for source in sources if source[0] in current_results | selected_observations.keys()
+    ]
+    if parent and stopped_parent_seal and not parent_preserved_sources:
+        # A legacy stopped parent predates newly recovered worker decisions.
+        current_drafts = [source for source in current_drafts if source[0] != "parent"] + [
+            ("parent", parent, None)
         ]
-    )
     # Generic closures belong to one logical scan or worker, just like candidates.
     # Keep them when recovering a terminal checkpoint without its canonical write.
     closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
@@ -2215,7 +2014,14 @@ def merge_saved_results(
                 or not isinstance(row.get("id"), str)
                 or (None, row["id"]) not in closed_deferred
             ]
-    resolved: dict[tuple[str | None, str], str] = {}
+    resolved: dict[tuple[str | None, str], str] = {
+        key: item["disposition"]
+        for draft in decision_drafts
+        for field in ("surfaces", "explicitExclusions")
+        for item in draft["coverage"][field]
+        if item.get("disposition") in {"rejected", "not_applicable"}
+        and (key := coverage_candidate_key(item)) is not None
+    }
 
     ordered_candidates = {
         (owner, identity)
@@ -2239,14 +2045,10 @@ def merge_saved_results(
             for item in items if isinstance(items, list) else []:
                 if (
                     isinstance(item, dict)
-                    and item.get("disposition") in {"rejected", "not_applicable"}
                     and (key := coverage_candidate_key(item, owner)) is not None
+                    and item.get("disposition") in {"rejected", "not_applicable"}
                 ):
                     outcomes.append((relative, key[0], key[1], item["disposition"]))
-    draft_is_decision = {
-        relative: draft["coverage"].get("stoppedDiffCandidateDecisions") is True
-        for relative, draft, _ in sources
-    }
     ordered_candidates.update(
         (owner, candidate_id)
         for relative, owner, candidate_id, _ in outcomes
@@ -2256,11 +2058,7 @@ def merge_saved_results(
     for relative, owner, candidate_id, disposition in outcomes:
         key = (owner, candidate_id)
         if key not in ordered_candidates:
-            if (
-                relative == "parent"
-                or relative in current_results
-                or draft_is_decision.get(relative, False)
-            ):
+            if relative == "parent" or relative in current_results:
                 resolved.setdefault(key, disposition)
             continue
         order = source_order[relative]
@@ -2365,8 +2163,11 @@ def merge_saved_results(
         ) in resolved:
             continue
         pending = coverage.setdefault("deferred", [])
-        if isinstance(pending, list) and item not in pending:
-            pending.append(copy.deepcopy(item))
+        retained = copy.deepcopy(item)
+        if owner is not None and isinstance(retained.get("candidateId"), str):
+            retained["sourceWorkerId"] = owner
+        if isinstance(pending, list) and retained not in pending:
+            pending.append(retained)
     ambiguous_surface_ids = {
         (owner, identity)
         for owner, row in reopened_rows
@@ -2548,7 +2349,10 @@ def merge_saved_results(
             finding = copy.deepcopy(value)
             candidate_id = finding_candidate_id(finding)
             candidate = finding_candidate_key(finding, worker_id)
-            if relative != "parent" and resolved.get(candidate) in {"rejected", "not_applicable"}:
+            if (
+                relative != "parent"
+                or (stopped_parent_seal and candidate is not None and candidate[0] is not None)
+            ) and resolved.get(candidate) in {"rejected", "not_applicable"}:
                 rejected_history.setdefault(candidate, []).append(copy.deepcopy(finding))
                 surfaces = coverage.get("surfaces")
                 for item in surfaces if isinstance(surfaces, list) else []:
@@ -2758,16 +2562,16 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (
-                        coverage_candidate_key(item, worker_id)
-                        or (
-                            worker_id,
-                            _deferred_candidate_id(item, worker_id, ambiguous_deferred)
-                            if field == "deferred"
-                            else None,
-                        )
+                    and isinstance(
+                        identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+                        if field == "deferred"
+                        else item.get("candidateId"),
+                        str,
                     )
-                    in pending_resolved
+                    and (
+                        coverage_candidate_key(item, worker_id) in pending_resolved
+                        or (worker_id, identity) in resolved
+                    )
                     and (
                         field == "deferred"
                         or (

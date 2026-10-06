@@ -815,10 +815,7 @@
                 "$ref": "#/$defs/text"
               }
             },
-            "required": [
-              "id",
-              "reason"
-            ],
+            "required": ["id", "reason"],
             "additionalProperties": false
           }
         },

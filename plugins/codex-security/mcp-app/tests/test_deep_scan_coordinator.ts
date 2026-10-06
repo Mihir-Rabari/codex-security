@@ -2847,8 +2847,9 @@ async function testResumedManifestPreservesCompletedReducer(
   const publishedDrafts: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, new FakeExecutor(), {
     run: store.run,
-    onComplete: async (draft) =>
-      void publishedDrafts.push(structuredClone(draft)),
+    onComplete: async (draft) => {
+      publishedDrafts.push(structuredClone(draft));
+    },
   });
   assert.equal(terminal?.status, "succeeded");
   const manifest = await readJson(terminal.manifestPath);

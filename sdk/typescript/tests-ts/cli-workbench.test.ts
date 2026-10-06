@@ -35,16 +35,8 @@ describe("CLI workbench", () => {
       },
       { id: "review", reason: "Remaining review work." },
     ];
-    const stderr = capture();
-    const stdout = capture();
-    expect(
-      await main(
-        ["scan", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({ result }),
-      ),
-    ).toBe(2);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(2);
     expect(stderr.text()).toContain("FINDINGS  1 (1 high) + 1 candidate\n");
     expect(stderr.text()).not.toContain("CANDIDATES");
     expect(JSON.parse(stdout.text())).toMatchObject({
@@ -86,15 +78,8 @@ describe("CLI workbench", () => {
           reason: "Evidence is incomplete.",
         }),
       );
-      const stderr = capture();
-      expect(
-        await main(
-          ["scan"],
-          capture().stream,
-          stderr.stream,
-          dependencies({ result }),
-        ),
-      ).toBe(2);
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(["scan"], dependencies({ result }))).toBe(2);
       expect(stderr.text()).toContain(
         `  FINDINGS  ${summary}\n  COVERAGE  partial\n`,
       );

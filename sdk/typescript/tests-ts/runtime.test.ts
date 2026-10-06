@@ -319,7 +319,12 @@ describe("plugin runtime preparation", () => {
   });
 
   test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const runtime = await loadBundledRuntime();
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
     const source = [
       "candidateOwner",
       "candidateKey",

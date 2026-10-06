@@ -118,24 +118,22 @@ export async function recordCodexSecurityScanDraft(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
     );
   }
-  if (finalDeepDraft && !publishDraft)
-    await saveScanDraftCheckpoint(context, parsed);
-
   for (;;) {
     const candidates = await readDiffCandidates(context);
     const checkpoint = preserveUnresolvedDiffCandidates(
       preserveDiffCandidateDecisions(parsed, candidates),
       candidates,
     );
-    if (!publishDraft) await saveScanDraftCheckpoint(context, checkpoint);
+    if (!publishDraft && resolvedDeferred(checkpoint.coverage).length === 0)
+      await saveScanDraftCheckpoint(context, checkpoint, false);
     signal?.throwIfAborted();
-    // Terminal Deep results retain an omitted model without old review work.
+    // Deep results replace findings and coverage while retaining an omitted model.
     const preserved = finalDeepDraft
-      ? await preserveDeepThreatModel(context, parsed)
+      ? await preserveDeepThreatModel(context, checkpoint)
       : await preserveScanDraft(
           context,
           { ...parsed, findings: checkpoint.findings },
-          !publishDraft,
+          !publishDraft && resolvedDeferred(parsed.coverage).length > 0,
           scanDraftCheckpointName(checkpoint),
           candidates,
         );
@@ -143,8 +141,7 @@ export async function recordCodexSecurityScanDraft(
       preserved.input,
       candidates,
     );
-    if (finalDeepDraft && !publishDraft && reconciled !== parsed)
-      await saveScanDraftCheckpoint(context, reconciled);
+    if (!publishDraft) await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(
       context.targetContract,
       "scan draft: authoritative target contract",
@@ -431,14 +428,13 @@ async function preserveScanDraft(
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
   );
-  const savedInputs = refreshDiffCandidateHistory(
-    [...current, ...archived].map(({ input }) => input),
+  const savedSources = [...current, ...archived];
+  const refreshed = refreshDiffCandidateHistory(
+    savedSources.map(({ input }) => input),
     diffCandidates,
   );
-  const savedSources = [...current, ...archived].map((source, index) => ({
-    ...source,
-    input: savedInputs[index]!,
-  }));
+  for (const [index, source] of savedSources.entries())
+    source.input = refreshed[index]!;
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
@@ -508,35 +504,7 @@ async function preserveScanDraft(
     input.complete === false
       ? savedSources.find(({ input }) => input.complete !== false)
       : undefined;
-  if (retainedFinal) {
-    result = structuredClone(retainedFinal.input);
-    if (diffCandidates !== undefined) {
-      sources.unshift(input);
-      const currentDecisionKeys = collectResolvedCandidateKeys(
-        { ...input, findings: [] },
-        owner,
-      );
-      for (const section of ["surfaces", "explicitExclusions"]) {
-        result.coverage[section] = [
-          ...(input.coverage[section] as JsonObject[]).filter(
-            isTerminalCandidateDecision,
-          ),
-          ...(result.coverage[section] as JsonObject[]).filter(
-            (item) =>
-              !isTerminalCandidateDecision(item) ||
-              !currentDecisionKeys.has(coverageKey(item)!),
-          ),
-        ];
-      }
-      if (
-        input.coverage.completeness === "partial" &&
-        input.coverage.completenessBeforeCandidates === undefined
-      ) {
-        result.coverage.completeness = "partial";
-        delete result.coverage.completenessBeforeCandidates;
-      }
-    }
-  }
+  if (retainedFinal) result = structuredClone(retainedFinal.input);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -575,7 +543,19 @@ async function preserveScanDraft(
       .map(({ input }) => input)
       .reverse();
     progressSources.push(input);
-    let acceptProgress = coverageHasOutstandingWork(result.coverage);
+    const progressCoverage =
+      diffCandidates === undefined
+        ? result.coverage
+        : {
+            ...result.coverage,
+            deferred: (result.coverage.deferred as JsonObject[]).filter(
+              genericDeferred,
+            ),
+            surfaces: (result.coverage.surfaces as JsonObject[]).filter(
+              (surface) => coverageKey(surface) === undefined,
+            ),
+          };
+    let acceptProgress = coverageHasOutstandingWork(progressCoverage);
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
       const reopenedIds = new Set(
@@ -617,6 +597,46 @@ async function preserveScanDraft(
         ambiguousDeferredIds,
       );
       sources.unshift(progress);
+    }
+  }
+  const resolvedCandidateIds = completedCandidateIds(result, sources);
+  const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
+    result,
+    resolvedDeferred(input.coverage),
+    sources,
+    savedSources,
+    resolvedCandidateIds,
+    ambiguousDeferredIds,
+    retainedFinal?.input,
+  );
+  for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
+  if (saveCheckpoint && requiresClosureValidation)
+    await saveScanDraftCheckpoint(context, input, false);
+
+  if (retainedFinal && diffCandidates !== undefined) {
+    sources.unshift(input);
+    const currentDecisionKeys = collectResolvedCandidateKeys(
+      { ...input, findings: [] },
+      owner,
+    );
+    for (const section of ["surfaces", "explicitExclusions"]) {
+      result.coverage[section] = [
+        ...(input.coverage[section] as JsonObject[]).filter(
+          isTerminalCandidateDecision,
+        ),
+        ...(result.coverage[section] as JsonObject[]).filter(
+          (item) =>
+            !isTerminalCandidateDecision(item) ||
+            !currentDecisionKeys.has(coverageKey(item)!),
+        ),
+      ];
+    }
+    if (
+      input.coverage.completeness === "partial" &&
+      input.coverage.completenessBeforeCandidates === undefined
+    ) {
+      result.coverage.completeness = "partial";
+      delete result.coverage.completenessBeforeCandidates;
     }
   }
   // Ledger decisions clear candidate-linked work, not unlinked legacy follow-ups.
@@ -667,20 +687,6 @@ async function preserveScanDraft(
       }
     }
   }
-  const resolvedCandidateIds = completedCandidateIds(result, sources);
-  const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
-    result,
-    resolvedDeferred(input.coverage),
-    sources,
-    savedSources,
-    resolvedCandidateIds,
-    ambiguousDeferredIds,
-    retainedFinal?.input,
-  );
-  for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (saveCheckpoint && requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
-
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.coverage.deferred as JsonObject[];
     if (
@@ -2008,6 +2014,7 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
     throw new Error(
       "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
     );
+  parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
   parsed.coverage.deferred = normalizeDeferred(
     parsed.coverage.deferred as JsonObject[],
   );

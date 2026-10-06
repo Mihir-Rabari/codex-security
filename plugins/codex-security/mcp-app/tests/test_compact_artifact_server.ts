@@ -21,7 +21,7 @@ type CompletedResult = {
   };
   coverage: Record<string, unknown> & {
     surfaces: { candidateId?: string; disposition: string }[];
-    deferred: { candidateId: string; candidate: { evidence: string } }[];
+    deferred: { candidateId?: string; candidate: { evidence?: string } }[];
   };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
@@ -223,7 +223,7 @@ async function testCompactDiffScanCompletion(
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
     );
     const candidates = requireSuccessfulTool<{
-      rows: { candidate_id: string; instance?: string; evidence: string }[];
+      rows: { candidate_id: string; instance?: string; evidence?: string }[];
     }>(
       await call("list_codex_security_candidates", { scanId }),
       `${runtimeLabel}: read compact diff candidates`,

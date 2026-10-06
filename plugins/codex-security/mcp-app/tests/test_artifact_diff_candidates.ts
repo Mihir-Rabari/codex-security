@@ -10,20 +10,19 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
 
-async function loadModule(file) {
-  const bundle = await build({
-    bundle: true,
-    entryPoints: [new URL(`../src/${file}`, import.meta.url).pathname],
-    format: "esm",
-    platform: "node",
-    write: false,
-  });
-  return import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-  );
-}
+import { importSource } from "./import-module.ts";
+import type { TestContext } from "node:test";
+import type { ArtifactContext } from "../src/artifact-context.js";
+type FixtureObject = Record<string, any>;
+type FixtureDraft = {
+  scanId: string;
+  complete?: boolean;
+  findings: FixtureObject[];
+  coverage: FixtureObject;
+};
+const loadModule = (file: string) =>
+  importSource(new URL(`../src/${file}`, import.meta.url).pathname);
 
 const {
   preserveDiffCandidateDecisions,
@@ -39,7 +38,10 @@ const { recordCodexSecurityCandidateValidations } = await loadModule(
   "artifact-validation-phase.ts",
 );
 
-async function reconcileDiffCandidates(context, input) {
+async function reconcileDiffCandidates(
+  context: ArtifactContext,
+  input: FixtureDraft,
+) {
   const candidates = await readDiffCandidates(context);
   return preserveUnresolvedDiffCandidates(
     preserveDiffCandidateDecisions(input, candidates),
@@ -47,7 +49,10 @@ async function reconcileDiffCandidates(context, input) {
   );
 }
 
-async function writeLedger(context, candidates) {
+async function writeLedger(
+  context: { root: string },
+  candidates: FixtureObject[],
+) {
   const directory = path.join(context.root, "artifacts", "02_discovery");
   await mkdir(directory, { recursive: true });
   await writeFile(
@@ -56,13 +61,13 @@ async function writeLedger(context, candidates) {
   );
 }
 
-async function readCoverage(context) {
+async function readCoverage(context: { root: string }) {
   return JSON.parse(
     await readFile(path.join(context.root, "coverage.json"), "utf8"),
   );
 }
 
-function finding(candidateId) {
+function finding(candidateId: string): FixtureObject {
   return {
     ruleId: "synthetic-review",
     title: "Synthetic reviewed finding",
@@ -76,7 +81,11 @@ function finding(candidateId) {
   };
 }
 
-function candidate(candidateId, validation, attackPath) {
+function candidate(
+  candidateId: string,
+  validation?: unknown,
+  attackPath?: unknown,
+): FixtureObject {
   return {
     candidate_id: candidateId,
     cwe_ids: [],
@@ -90,7 +99,7 @@ function candidate(candidateId, validation, attackPath) {
   };
 }
 
-function draft(deferred = []) {
+function draft(deferred: FixtureObject[] = []): FixtureDraft {
   return {
     scanId: "11111111-1111-4111-8111-111111111111",
     findings: [],
@@ -103,7 +112,10 @@ function draft(deferred = []) {
   };
 }
 
-async function fixture(t, candidates) {
+async function fixture(
+  t: TestContext,
+  candidates?: FixtureObject[],
+): Promise<ArtifactContext> {
   const root = await mkdtemp(path.join(tmpdir(), "diff-candidates-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   if (candidates !== undefined) await writeLedger({ root }, candidates);
@@ -131,6 +143,59 @@ async function fixture(t, candidates) {
   };
 }
 
+test("Diff candidate recovery preserves generic review closeout", async (t) => {
+  const pending = candidate("pending-review");
+  const context = await fixture(t, [pending]);
+  const first = draft([
+    {
+      id: "ordinary-review",
+      reason: "Review the caller.",
+      surfaceIds: ["caller"],
+    },
+  ]);
+  first.complete = false;
+  first.coverage.completeness = "partial";
+  first.coverage.surfaces = [
+    {
+      id: "caller",
+      label: "Caller",
+      disposition: "needs_follow_up",
+      receiptRefs: ["artifacts/review/caller.json"],
+    },
+  ];
+  await recordCodexSecurityScanDraft(context, first);
+  const closed = draft();
+  closed.coverage.resolvedDeferred = [
+    { id: "ordinary-review", reason: "Caller review is complete." },
+  ];
+  closed.coverage.surfaces = [
+    {
+      id: "caller",
+      label: "Caller",
+      disposition: "no_issue_found",
+      receiptRefs: [],
+    },
+  ];
+  await recordCodexSecurityScanDraft(context, closed);
+  for (const complete of [false, true]) {
+    const saved = await readCoverage(context);
+    assert.deepEqual(
+      saved.deferred.map((item: FixtureObject) => item.candidateId),
+      [pending.candidate_id],
+    );
+    assert.deepEqual(saved.resolvedDeferred, closed.coverage.resolvedDeferred);
+    const caller = saved.surfaces.find(
+      (surface: FixtureObject) => surface.id === "caller",
+    );
+    assert.equal(caller.disposition, "no_issue_found");
+    assert.deepEqual(
+      caller.receiptRefs,
+      first.coverage.surfaces[0].receiptRefs,
+    );
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+  }
+});
+
 test("diff outcomes retain unresolved candidates and exclude terminal dismissals", async (t) => {
   const outcomes = [
     [undefined, undefined, true],
@@ -154,31 +219,31 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
   const result = await reconcileDiffCandidates(context, input);
   const expected = candidates.filter((_, index) => outcomes[index][2]);
   assert.deepEqual(
-    result.coverage.deferred.map((item) => item.candidateId),
-    expected.map((item) => item.candidate_id),
+    result.coverage.deferred.map((item: FixtureObject) => item.candidateId),
+    expected.map((item: FixtureObject) => item.candidate_id),
   );
   assert.deepEqual(
-    result.coverage.deferred.map((item) => item.candidate),
+    result.coverage.deferred.map((item: FixtureObject) => item.candidate),
     expected,
   );
   assert.equal(result.coverage.completeness, "partial");
   assert.deepEqual(
     result.coverage.surfaces.filter(
-      (item) => item.disposition === "needs_follow_up",
+      (item: FixtureObject) => item.disposition === "needs_follow_up",
     ),
-    expected.map((item) => ({
+    expected.map((item: FixtureObject) => ({
       candidateId: item.candidate_id,
       label: item.summary,
       disposition: "needs_follow_up",
       notes: result.coverage.deferred.find(
-        (pending) => pending.candidateId === item.candidate_id,
+        (pending: FixtureObject) => pending.candidateId === item.candidate_id,
       ).reason,
     })),
   );
   assert.deepEqual(
     result.coverage.surfaces
-      .filter((item) => item.disposition !== "needs_follow_up")
-      .map((item) => [item.candidateId, item.disposition]),
+      .filter((item: FixtureObject) => item.disposition !== "needs_follow_up")
+      .map((item: FixtureObject) => [item.candidateId, item.disposition]),
     [
       ["candidate-9", "rejected"],
       ["candidate-10", "rejected"],
@@ -253,20 +318,20 @@ for (const resolution of ["finding", "ledger rejection"]) {
     await recordCodexSecurityScanDraft(context, initial);
     const projected = await readCoverage(context);
     assert.deepEqual(
-      projected.deferred.find((item) => item.id === general.id),
+      projected.deferred.find((item: FixtureObject) => item.id === general.id),
       general,
     );
     assert.equal(projected.deferred.length, 2);
     assert.equal(
       projected.surfaces.filter(
-        (item) =>
+        (item: FixtureObject) =>
           item.candidateId === pending.candidate_id &&
           item.disposition === "needs_follow_up",
       ).length,
       1,
     );
     assert.deepEqual(
-      projected.surfaces.find((item) => item.id === surface.id),
+      projected.surfaces.find((item: FixtureObject) => item.id === surface.id),
       surface,
     );
 
@@ -282,7 +347,7 @@ for (const resolution of ["finding", "ledger rejection"]) {
       const saved = await readCoverage(context);
       assert.deepEqual(saved.deferred, [general]);
       assert.deepEqual(
-        saved.surfaces.find((item) => item.id === surface.id),
+        saved.surfaces.find((item: FixtureObject) => item.id === surface.id),
         surface,
       );
       assert.equal(saved.completeness, "partial");
@@ -364,7 +429,10 @@ for (const fallback of ["workerId", "extensions"]) {
     });
     assert.deepEqual(
       (await readCoverage(context)).deferred.map(
-        ({ candidateId, sourceWorkerId }) => ({ candidateId, sourceWorkerId }),
+        ({ candidateId, sourceWorkerId }: FixtureObject) => ({
+          candidateId,
+          sourceWorkerId,
+        }),
       ),
       [{ candidateId: "pending", sourceWorkerId: "other-worker" }],
     );
@@ -539,12 +607,12 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
     assert.equal(savedCheckpoint.completeness, "partial");
     assert.ok(
       savedCheckpoint.deferred.some(
-        (item) => item.candidateId === pending.candidate_id,
+        (item: FixtureObject) => item.candidateId === pending.candidate_id,
       ),
     );
     assert.ok(
       savedCheckpoint.surfaces.some(
-        (item) =>
+        (item: FixtureObject) =>
           item.candidateId === pending.candidate_id &&
           item.disposition === "needs_follow_up",
       ),
@@ -563,12 +631,14 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
       remaining === "none" ? "complete" : "partial",
     );
     assert.equal(
-      saved.deferred.some((item) => item.candidateId === pending.candidate_id),
+      saved.deferred.some(
+        (item: FixtureObject) => item.candidateId === pending.candidate_id,
+      ),
       false,
     );
     assert.equal(
       saved.surfaces.some(
-        (item) =>
+        (item: FixtureObject) =>
           item.candidateId === pending.candidate_id &&
           item.disposition === "rejected",
       ),
@@ -683,14 +753,17 @@ for (const remaining of [
       );
       assert.equal(
         saved.deferred.some(
-          (item) => item.candidateId === pending.candidate_id,
+          (item: FixtureObject) => item.candidateId === pending.candidate_id,
         ),
         false,
       );
       assert.deepEqual(
         saved.surfaces
-          .filter((surface) => surface.disposition === "needs_follow_up")
-          .map((surface) => surface.id),
+          .filter(
+            (surface: FixtureObject) =>
+              surface.disposition === "needs_follow_up",
+          )
+          .map((surface: FixtureObject) => surface.id),
         remaining === "generic gap"
           ? ["generic-boundary"]
           : shared || remaining === "current follow-up"
@@ -699,7 +772,7 @@ for (const remaining of [
       );
       if (shared) {
         const retainedSurface = saved.surfaces.find(
-          (surface) => surface.id === linkedSurface.id,
+          (surface: FixtureObject) => surface.id === linkedSurface.id,
         );
         assert.equal(retainedSurface.notes, linkedSurface.notes);
         assert.deepEqual(
@@ -707,15 +780,16 @@ for (const remaining of [
           linkedSurface.receiptRefs,
         );
         assert.deepEqual(
-          saved.deferred.map((item) => item.candidateId),
+          saved.deferred.map((item: FixtureObject) => item.candidateId),
           [other.candidate_id],
         );
       }
       if (remaining === "generic gap") assert.equal(saved.deferred.length, 1);
       if (remaining === "current follow-up") {
         assert.equal(
-          saved.surfaces.find((surface) => surface.id === linkedSurface.id)
-            .notes,
+          saved.surfaces.find(
+            (surface: FixtureObject) => surface.id === linkedSurface.id,
+          ).notes,
           finalDraft.coverage.surfaces[0].notes,
         );
       }
@@ -771,7 +845,10 @@ for (const resolution of ["finding", "exclusion"]) {
       assert.equal(saved.completeness, "complete");
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(
-        saved.surfaces.map((item) => [item.candidateId, item.disposition]),
+        saved.surfaces.map((item: FixtureObject) => [
+          item.candidateId,
+          item.disposition,
+        ]),
         [[automatic.candidate_id, "rejected"]],
       );
       if (resolution === "exclusion") {
@@ -932,7 +1009,7 @@ for (const mapping of ["surfaceIds", "candidateId"]) {
         assert.equal(saved.completeness, "partial");
         assert.deepEqual(
           saved.deferred,
-          finalDraft.coverage.deferred.map((item) => ({
+          finalDraft.coverage.deferred.map((item: FixtureObject) => ({
             ...item,
             id: item.candidateId,
           })),
@@ -1001,7 +1078,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.ok(
       history.some(([, content]) =>
         JSON.parse(content).coverage.explicitExclusions.some(
-          (item) => item.reason === earlierExclusion.reason,
+          (item: FixtureObject) => item.reason === earlierExclusion.reason,
         ),
       ),
     );
@@ -1026,7 +1103,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
       await recordCodexSecurityScanDraft(context, followup);
       const saved = await readCoverage(context);
       assert.deepEqual(
-        saved.deferred.map((item) => item.candidateId),
+        saved.deferred.map((item: FixtureObject) => item.candidateId),
         [pending.candidate_id],
       );
       assert.equal(
@@ -1111,7 +1188,7 @@ for (const complete of [false, true]) {
         ["deferred", "deferred", undefined, "needs_follow_up"],
         ["reportable", "reportable", "reportable", "needs_follow_up"],
       ]) {
-        const reviewed = {
+        const reviewed: FixtureObject = {
           ...candidate(candidateId, validation, attackPath),
           summary: `Current ${stage} candidate summary.`,
           evidence: `Current ${stage} candidate evidence.`,
@@ -1268,7 +1345,7 @@ for (const complete of [false, true]) {
     assert.deepEqual(saved.deferred, []);
     assert.ok(
       saved.surfaces.every(
-        (surface) => surface.disposition !== "needs_follow_up",
+        (surface: FixtureObject) => surface.disposition !== "needs_follow_up",
       ),
     );
     for (const repeatComplete of [false, true, false]) {
@@ -1281,7 +1358,7 @@ for (const complete of [false, true]) {
       assert.deepEqual(repeated.deferred, []);
       assert.ok(
         repeated.surfaces.every(
-          (surface) => surface.disposition !== "needs_follow_up",
+          (surface: FixtureObject) => surface.disposition !== "needs_follow_up",
         ),
       );
     }
@@ -1323,7 +1400,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
       await recordCodexSecurityScanDraft(context, initial);
       const current = { ...draft(), complete: false };
       const reason = "Current source evidence resolves this candidate.";
-      const decision = {
+      const decision: FixtureObject = {
         candidateId: pending.candidate_id,
         disposition,
         ...(section === "surfaces"
@@ -1403,7 +1480,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
         const saved = await readCoverage(context);
         assert.equal(saved.completeness, "partial");
         assert.deepEqual(
-          saved.surfaces.find((item) => item.id === evidence.id),
+          saved.surfaces.find((item: FixtureObject) => item.id === evidence.id),
           evidence,
         );
         assert.equal(saved.deferred.length, shared ? 1 : 0);
@@ -1412,7 +1489,9 @@ for (const section of ["surfaces", "explicitExclusions"]) {
           assert.deepEqual(saved.deferred[0].surfaceIds, [evidence.id]);
         }
         assert.ok(
-          saved[section].some((item) => item.disposition === "rejected"),
+          saved[section].some(
+            (item: FixtureObject) => item.disposition === "rejected",
+          ),
         );
         await recordCodexSecurityScanDraft(context, {
           ...draft(),
@@ -1447,7 +1526,7 @@ for (const authored of [false, true]) {
       });
     }
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const validation = {
+    const validation: FixtureObject = {
       ...pending,
       summary: "Updated candidate summary after validation.",
       evidence: "Updated source evidence after validation.",
@@ -1457,7 +1536,7 @@ for (const authored of [false, true]) {
           "A synthetic validation input is missing.",
       },
     };
-    const attackPath = {
+    const attackPath: FixtureObject = {
       ...validation,
       summary: "Updated candidate summary after attack-path review.",
       evidence: "Updated source evidence after attack-path review.",
@@ -1466,7 +1545,7 @@ for (const authored of [false, true]) {
         proof_gap: "A synthetic deployment adapter is missing.",
       },
     };
-    const rediscovered = {
+    const rediscovered: FixtureObject = {
       ...pending,
       summary: "Rediscovered candidate without phase records.",
       evidence: "New discovery evidence before phase review.",
@@ -1511,7 +1590,7 @@ for (const uncertainty of ["  A runtime check is still required.\n", " \t "]) {
   test(`blank phase reasons preserve readable diff checkpoints: ${uncertainty.trim() ? "recorded uncertainty" : "fallback"}`, async (t) => {
     const pending = candidate("blank-reason");
     const context = await fixture(t, [pending]);
-    const validation = {
+    const validation: FixtureObject = {
       disposition: "deferred",
       method: "source review",
       confidence: "low",
@@ -1588,7 +1667,7 @@ for (const complete of [false, true]) {
       assert.ok(
         checkpoints.some((checkpoint) =>
           checkpoint.findings.some(
-            (item) =>
+            (item: FixtureObject) =>
               item.provenance.diffCandidateDecision?.validation
                 ?.counterevidence_or_proof_gap ===
               "Earlier synthetic decision.",
@@ -1610,13 +1689,14 @@ for (const complete of [false, true]) {
         });
         assert.equal(
           (await savedFindings()).filter(
-            (item) => item.provenance.candidateId === reviewed.candidate_id,
+            (item: FixtureObject) =>
+              item.provenance.candidateId === reviewed.candidate_id,
           ).length,
           1,
         );
         assert.equal(
           (await readCoverage(context)).surfaces.some(
-            (surface) =>
+            (surface: FixtureObject) =>
               surface.candidateId === reviewed.candidate_id &&
               surface.disposition === "rejected",
           ),
@@ -1634,12 +1714,14 @@ for (const complete of [false, true]) {
       await recordCodexSecurityScanDraft(context, { ...draft(), complete });
       assert.equal(
         (await savedFindings()).some(
-          (item) => item.provenance.candidateId === reviewed.candidate_id,
+          (item: FixtureObject) =>
+            item.provenance.candidateId === reviewed.candidate_id,
         ),
         false,
       );
       const terminal = (await readCoverage(context)).surfaces.find(
-        (surface) => surface.candidateId === reviewed.candidate_id,
+        (surface: FixtureObject) =>
+          surface.candidateId === reviewed.candidate_id,
       );
       assert.equal(terminal.disposition, "rejected");
       assert.equal(
@@ -1654,7 +1736,8 @@ for (const complete of [false, true]) {
       await recordCodexSecurityScanDraft(context, { ...draft(), complete });
       assert.equal(
         (await savedFindings()).some(
-          (item) => item.provenance.candidateId === reviewed.candidate_id,
+          (item: FixtureObject) =>
+            item.provenance.candidateId === reviewed.candidate_id,
         ),
         false,
       );
@@ -1677,13 +1760,14 @@ for (const complete of [false, true]) {
       });
       assert.equal(
         (await savedFindings()).some(
-          (item) => item.provenance.candidateId === reviewed.candidate_id,
+          (item: FixtureObject) =>
+            item.provenance.candidateId === reviewed.candidate_id,
         ),
         false,
       );
       assert.equal(
         (await readCoverage(context)).surfaces.find(
-          (item) => item.candidateId === reviewed.candidate_id,
+          (item: FixtureObject) => item.candidateId === reviewed.candidate_id,
         ).notes,
         authored.coverage.surfaces[0].notes,
       );
@@ -1780,13 +1864,13 @@ for (const remaining of [
       assert.equal(saved.completenessBeforeCandidates, undefined);
       assert.equal(
         saved.deferred.some(
-          (item) => item.candidateId === pending.candidate_id,
+          (item: FixtureObject) => item.candidateId === pending.candidate_id,
         ),
         false,
       );
       assert.equal(
         saved.surfaces.filter(
-          (item) =>
+          (item: FixtureObject) =>
             item.candidateId === pending.candidate_id &&
             item.disposition === "rejected",
         ).length,
@@ -1795,7 +1879,7 @@ for (const remaining of [
       if (remaining === "none") assert.equal(saved.surfaces.length, 1);
       if (remaining === "authored" || remaining === "shared") {
         const surface = saved.surfaces.find(
-          (item) => item.id === "review-surface",
+          (item: FixtureObject) => item.id === "review-surface",
         );
         assert.equal(surface.disposition, "needs_follow_up");
         assert.deepEqual(
@@ -1814,7 +1898,7 @@ for (const resolution of ["surface", "exclusion", "finding"]) {
     const context = await fixture(t, [pending]);
     const initial = { ...draft(), complete: true };
     initial.coverage.completeness = "partial";
-    const decision = {
+    const decision: FixtureObject = {
       candidateId: pending.candidate_id,
       sourceWorkerId: "other-worker",
       label: "Imported review",
@@ -1842,12 +1926,15 @@ for (const resolution of ["surface", "exclusion", "finding"]) {
     await recordCodexSecurityScanDraft(context, initial);
     let saved = await readCoverage(context);
     assert.deepEqual(
-      saved.deferred.map((item) => item.sourceWorkerId ?? null).sort(),
+      saved.deferred
+        .map((item: FixtureObject) => item.sourceWorkerId ?? null)
+        .sort(),
       [null, "pending-worker"].sort(),
     );
     assert.deepEqual(
-      saved.deferred.find((item) => item.sourceWorkerId === undefined)
-        .candidate,
+      saved.deferred.find(
+        (item: FixtureObject) => item.sourceWorkerId === undefined,
+      ).candidate,
       pending,
     );
     await writeLedger(context, [
@@ -1965,15 +2052,18 @@ test("owned surface references survive canonical ID collisions and local resolut
   await recordCodexSecurityScanDraft(context, initial);
   const first = await readCoverage(context);
   const importedSurface = first.surfaces.find(
-    (item) => item.sourceWorkerId === "other-worker",
+    (item: FixtureObject) => item.sourceWorkerId === "other-worker",
   );
   assert.notEqual(
     importedSurface.id,
-    first.surfaces.find((item) => item.sourceWorkerId === undefined).id,
+    first.surfaces.find(
+      (item: FixtureObject) => item.sourceWorkerId === undefined,
+    ).id,
   );
   assert.deepEqual(
-    first.deferred.find((item) => item.sourceWorkerId === "other-worker")
-      .surfaceIds,
+    first.deferred.find(
+      (item: FixtureObject) => item.sourceWorkerId === "other-worker",
+    ).surfaceIds,
     [importedSurface.id, "shared-evidence"],
   );
   await writeLedger(context, [
@@ -1983,11 +2073,12 @@ test("owned surface references survive canonical ID collisions and local resolut
     await recordCodexSecurityScanDraft(context, { ...draft(), complete });
     const saved = await readCoverage(context);
     const imported = saved.surfaces.find(
-      (item) => item.sourceWorkerId === "other-worker",
+      (item: FixtureObject) => item.sourceWorkerId === "other-worker",
     );
     assert.equal(
-      saved.surfaces.filter((item) => item.sourceWorkerId === "other-worker")
-        .length,
+      saved.surfaces.filter(
+        (item: FixtureObject) => item.sourceWorkerId === "other-worker",
+      ).length,
       1,
     );
     assert.equal(saved.deferred.length, 1);
@@ -1997,8 +2088,12 @@ test("owned surface references survive canonical ID collisions and local resolut
       "shared-evidence",
     ]);
     assert.deepEqual(
-      saved.surfaces.find((item) => item.id === "shared-evidence"),
-      first.surfaces.find((item) => item.id === "shared-evidence"),
+      saved.surfaces.find(
+        (item: FixtureObject) => item.id === "shared-evidence",
+      ),
+      first.surfaces.find(
+        (item: FixtureObject) => item.id === "shared-evidence",
+      ),
     );
     assert.equal(saved.deferred[0].sourceWorkerId, "other-worker");
   }
@@ -2014,7 +2109,7 @@ for (const complete of [false, true]) {
       notes: "The administrative boundary still needs evidence.",
       receiptRefs: ["artifacts/review/administrative.json"],
     };
-    const reviewed = {
+    const reviewed: FixtureObject = {
       label: unfinished.label,
       riskArea: "public-api",
       disposition: "no_issue_found",
@@ -2032,12 +2127,13 @@ for (const complete of [false, true]) {
     assert.equal(expected.completeness, "partial");
     assert.equal(expected.surfaces.length, 2);
     assert.equal(
-      new Set(expected.surfaces.map((surface) => surface.id)).size,
+      new Set(expected.surfaces.map((surface: FixtureObject) => surface.id))
+        .size,
       2,
     );
     for (const original of [unfinished, reviewed]) {
       const { id: _id, ...saved } = expected.surfaces.find(
-        (surface) => surface.riskArea === original.riskArea,
+        (surface: FixtureObject) => surface.riskArea === original.riskArea,
       );
       assert.deepEqual(saved, original);
     }
@@ -2056,7 +2152,12 @@ for (const complete of [false, true]) {
       );
       assert.ok(
         checkpoint.coverage.surfaces.every(
-          (surface) => surface.id === undefined,
+          (surface: FixtureObject) =>
+            surface.id === undefined ||
+            surface.id ===
+              expected.surfaces.find(
+                (saved: FixtureObject) => saved.riskArea === surface.riskArea,
+              )?.id,
         ),
       );
     }
@@ -2119,7 +2220,7 @@ for (const remaining of [
         remaining === "shared pending" ? 1 : 0,
       );
       const surface = saved.surfaces.find(
-        (item) => item.candidateId === pending.candidate_id,
+        (item: FixtureObject) => item.candidateId === pending.candidate_id,
       );
       assert.equal(
         surface.disposition,

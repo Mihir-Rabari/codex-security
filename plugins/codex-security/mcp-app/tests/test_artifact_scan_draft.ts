@@ -2213,7 +2213,10 @@ try {
       );
       assert.deepEqual(saved.findings[0].provenance[field], metadata);
     }
-    assert.deepEqual(metadataFinding.provenance[field], metadata);
+    assert.deepEqual(
+      (metadataFinding.provenance as Record<string, unknown>)[field],
+      metadata,
+    );
   }
 
   const recorded = await recordCodexSecurityScanDraft(context, input);
