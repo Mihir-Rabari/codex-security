@@ -7444,6 +7444,7 @@ async function changedPatchFiles(
         "-z",
         tree,
         head,
+        "--",
       ],
       join(repository, directory),
       { trim: false },

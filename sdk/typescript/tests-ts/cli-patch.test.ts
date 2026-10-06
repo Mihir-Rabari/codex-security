@@ -4615,6 +4615,7 @@ describe("patch publication integrity", () => {
       run("config", "user.email", "synthetic@example.test");
     }
     await writeFile(join(source, "app.ts"), "unsafe\noriginal\n");
+    await writeFile(join(source, "HEAD"), "ordinary tracked file\n");
     sourceGit("add", ".");
     sourceGit("commit", "-m", "Synthetic child baseline");
     const originalChildHead = sourceGit("rev-parse", "HEAD");
