@@ -4,6 +4,11 @@ import { gitText } from "../scripts/git.mjs";
 import { assertNoError } from "./assertions.ts";
 import { consumeStreamLines, writeMessage } from "./support/streams.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
+import {
+  scanSchema as localUiScanSchema,
+  scansPageSchema,
+  findingsPageSchema,
+} from "../src/ui/model.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { hash, randomUUID } from "node:crypto";
@@ -1044,7 +1049,9 @@ try {
     clientInfo: { name: "codex-security-smoke", version: "0.1.0" },
   });
   assertNoError(initialized);
-  assert.equal(initialized.result.capabilities.resources, undefined);
+  assert.deepEqual(initialized.result.capabilities.resources, {
+    listChanged: true,
+  });
   assert.deepEqual(
     initialized.result.capabilities.experimental["codex/sandbox-state-meta"],
     {},
@@ -1447,8 +1454,23 @@ try {
   for (const tool of toolList.result.tools) {
     assert.equal(tool._meta?.["openai/outputTemplate"], undefined);
     assert.equal(tool._meta?.["ui/resourceUri"], undefined);
-    assert.equal(tool._meta?.ui?.resourceUri, undefined);
+    if (tool.name === "open_codex_security_local") {
+      assert.equal(tool._meta.ui.resourceUri, "ui://codex-security/local.html");
+      assert.deepEqual(tool._meta.ui.visibility, ["app"]);
+      assert.equal(tool._meta.ui.entrypoint, undefined);
+    } else {
+      assert.equal(tool._meta?.ui?.resourceUri, undefined);
+    }
   }
+  const localUiResource = await requestAndWait(20001, "resources/read", {
+    uri: "ui://codex-security/local.html",
+  });
+  assertNoError(localUiResource);
+  assert.equal(
+    localUiResource.result.contents[0].mimeType,
+    "text/html;profile=mcp-app",
+  );
+  assert.ok(localUiResource.result.contents[0].text.includes("Codex Security"));
   await assert.rejects(readFile(path.join(stateDir, "workbench.sqlite3")), {
     code: "ENOENT",
   });
@@ -2862,6 +2884,7 @@ try {
   });
   assertNoError(refreshed);
   const results = refreshed.result.structuredContent.scan;
+  localUiScanSchema.parse(results);
   assert.equal(results.findings.length, 2);
   assert.equal(results.findingCount, 2);
   assert.deepEqual(results.severityCounts, { high: 1, informational: 1 });
@@ -3410,6 +3433,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     arguments: {},
   });
   assertNoError(scanList);
+  scansPageSchema.parse(scanList.result.structuredContent);
   const listedFallback = scanList.result.structuredContent.scans.find(
     (scan: { targetId: string; scanId: string }) =>
       scan.scanId === fallbackScanId,
@@ -3422,6 +3446,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     arguments: { limit: 1 },
   });
   assertNoError(globalFindings);
+  findingsPageSchema.parse(globalFindings.result.structuredContent);
   const indexedFinding = globalFindings.result.structuredContent.findings.find(
     (finding: { occurrenceId: string }) =>
       finding.occurrenceId === occurrenceId,

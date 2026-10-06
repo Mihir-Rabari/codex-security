@@ -20,6 +20,7 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
+import { registerLocalUi } from "./src/server/local-ui.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
@@ -604,6 +605,7 @@ export function createCodexSecurityServer(): McpServer {
       },
     },
   );
+  registerLocalUi(server, __dirname);
   const deepScanCoordinators = new DeepScanCoordinatorRegistry();
   // Serialize start-or-join so a scan creates only one coordinator.
   const deepScanStartLock = new AsyncLock();

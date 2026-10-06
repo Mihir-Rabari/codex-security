@@ -1,8 +1,5 @@
 {
-  "externalOwnedExact": [
-    ".codex-plugin/plugin.json",
-    "OWNERS"
-  ],
+  "externalOwnedExact": [".codex-plugin/plugin.json", "OWNERS"],
   "shippedExact": [
     ".app.json",
     ".mcp.json",
@@ -27,6 +24,8 @@
     "mcp/native/win32-x64/windows.node",
     "mcp/helpers.mjs",
     "mcp/helpers.mjs.br.part-000",
+    "mcp/local.html",
+    "mcp/ui-notices.txt",
     "mcp/server.mjs",
     "mcp/server.mjs.br.part-000",
     "mcp/server.mjs.br.part-001",
