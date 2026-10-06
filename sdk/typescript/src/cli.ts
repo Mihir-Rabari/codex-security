@@ -2068,13 +2068,25 @@ export async function main(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
-            const target =
+            let target =
               repositories.find(
                 (entry) => entry["targetPath"] === repository,
               ) ??
               repositories.find(
                 (entry) => entry["targetPath"] === canonicalRepository,
               );
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (
+                  (await realpath(storedPath).catch(() => storedPath)) ===
+                  canonicalRepository
+                ) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []

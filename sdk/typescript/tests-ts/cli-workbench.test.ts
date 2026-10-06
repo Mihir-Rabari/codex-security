@@ -1,12 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
@@ -32,46 +24,47 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
-  test.each(["canonical", "original"])(
-    "lists saved findings by %s path through a repository directory link",
-    async (savedPath) => {
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-findings-link-")),
+  test("findings list prefers an exact saved repository before directory aliases", async () => {
+    const root = await temporaryDirectory("finding-exact-repository-");
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "previous-checkout");
+      await mkdir(repository);
+      await symlink(
+        repository,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
       );
-      try {
-        const repository = join(root, "repository");
-        const alias = join(root, "repository link");
-        await mkdir(repository);
-        await symlink(
-          repository,
-          alias,
-          process.platform === "win32" ? "junction" : "dir",
-        );
-        for (const args of [[], [alias]]) {
-          const stdout = captureCli(main, "stdout");
+      for (const [requested, first, exact] of [
+        [repository, alias, repository],
+        [alias, repository, alias],
+      ]) {
+        for (const args of [[], [requested!]]) {
           const calls: Array<readonly string[]> = [];
+          const stdout = captureCli(main, "stdout");
           expect(
             await stdout.run(
               ["findings", "list", ...args, "--json"],
               dependencies({
-                currentDirectory: alias,
+                currentDirectory: requested!,
                 onWorkbench: (args): JsonObject => {
                   calls.push(args);
                   return args[0] === "list-repositories"
                     ? {
                         repositories: [
-                          ...(savedPath === "original"
-                            ? [{ targetId: "other", targetPath: repository }]
-                            : []),
-                          {
-                            targetId: "selected",
-                            targetPath:
-                              savedPath === "canonical" ? repository : alias,
-                          },
+                          { targetId: "alias-target", targetPath: first! },
+                          { targetId: "exact-target", targetPath: exact! },
                         ],
                       }
                     : {
-                        findings: [{ title: "Saved finding" }],
+                        findings: [
+                          {
+                            title:
+                              args[2] === "exact-target"
+                                ? "Exact saved finding"
+                                : "Other target finding",
+                          },
+                        ],
                         nextOffset: null,
                       };
                 },
@@ -81,21 +74,73 @@ describe("CLI workbench", () => {
           expect(calls[1]).toEqual([
             "list-global-findings",
             "--target-id",
-            "selected",
+            "exact-target",
             "--status",
             "open",
           ]);
           expect(JSON.parse(stdout.text())).toEqual({
-            repository: alias,
+            repository: requested!,
+            findings: [{ title: "Exact saved finding" }],
+          });
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("findings list resolves a repository directory alias", async () => {
+    const root = await temporaryDirectory("finding-repository-alias-");
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "alias");
+      await mkdir(repository);
+      await symlink(
+        repository,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const canonical = await realpath(repository);
+      for (const [requested, stored] of [
+        [alias, canonical],
+        [canonical, alias],
+        [alias, alias],
+      ]) {
+        for (const args of [[], [requested!]]) {
+          const stdout = captureCli(main, "stdout");
+          expect(
+            await stdout.run(
+              ["findings", "list", ...args, "--json"],
+              dependencies({
+                currentDirectory: requested!,
+                onWorkbench: (args): JsonObject =>
+                  args[0] === "list-repositories"
+                    ? {
+                        repositories: [
+                          {
+                            targetId: "other",
+                            targetPath: join(root, "missing"),
+                          },
+                          { targetId: "selected", targetPath: stored! },
+                        ],
+                      }
+                    : {
+                        findings: [{ title: "Saved finding" }],
+                        nextOffset: null,
+                      },
+              }),
+            ),
+          ).toBe(0);
+          expect(JSON.parse(stdout.text())).toEqual({
+            repository: requested!,
             findings: [{ title: "Saved finding" }],
           });
         }
-      } finally {
-        await rm(root, { recursive: true, force: true });
       }
-    },
-  );
-
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = captureCli(main, "stdout");
