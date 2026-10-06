@@ -3,7 +3,6 @@ import { assertFlagPair } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
-import { parse as parseToml } from "smol-toml";
 import childProcess, {
   spawnSync,
   type SpawnOptions,
@@ -1336,20 +1335,9 @@ refresh_interval_ms = 2000`
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
             if (commandAuth) {
-              assert.deepEqual(
-                parseToml(invocation.codexConfig).model_providers,
-                {
-                  synthetic: {
-                    name: "Synthetic gateway",
-                    base_url: "https://gateway.example.test/v1",
-                    wire_api: "responses",
-                    auth: {
-                      command: "./synthetic-auth",
-                      cwd: path.join(codexHome, "helpers"),
-                      refresh_interval_ms: 2000,
-                    },
-                  },
-                },
+              assert.equal(
+                invocation.codexConfig,
+                await readFile(path.join(codexHome, "config.toml"), "utf8"),
               );
             }
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
