@@ -61,7 +61,6 @@ environment. For a service started outside Docker, export any of these settings:
 | `CODEX_SECURITY_EMBEDDINGS_URL` | Full embeddings endpoint URL, including its path and any query parameters. Defaults to `https://api.openai.com/v1/embeddings` when unset or empty. |
 | `CODEX_SECURITY_STATE_DIR`      | State directory containing `workbench.sqlite3`; Compose uses `/state`.                                                                             |
 | `HOST` / `PORT`                 | Listen address and port; outside Compose, defaults are `127.0.0.1` and `3000`.                                                                     |
-| `PYTHON`                        | Python interpreter used by the storage adapter.                                                                                                    |
 
 Exported values override Compose's `.env` values. The repository excludes `.env`
 from Git and Docker builds. Startup, listing, duplicate-group operations, and
@@ -454,7 +453,7 @@ not support the migrated database.
 
 ## Run without Docker
 
-With the package's supported Node.js and Python versions installed:
+With the package's supported Node.js version installed (22.13 or later in a supported major):
 
 ```bash
 npm install -g @openai/codex-security
@@ -463,8 +462,9 @@ CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve -
 
 `--port` overrides `PORT`. The service does not load `.env`; export the embedding
 key before importing findings. Without a state override, it shares the CLI's
-default state directory. `HOST`, `PORT`, `CODEX_SECURITY_STATE_DIR`, and `PYTHON`
-also work on Windows. Stop with Ctrl-C or SIGTERM.
+default state directory. `HOST`, `PORT`, and `CODEX_SECURITY_STATE_DIR` also
+work on Windows. The findings service uses Node’s built-in SQLite and does not
+require Python. Stop with Ctrl-C or SIGTERM.
 
 For source builds, prepare the
 [universal native payload](https://github.com/openai/codex-security/blob/main/plugins/codex-security/native/README.md#package-inputs),

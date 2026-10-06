@@ -180,6 +180,7 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  stateDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1563,7 +1564,15 @@ export async function runWorkbench(
     arguments_: readonly string[],
     input?: string,
   ): Promise<string> => {
-    const native = arguments_[0] === "database-info";
+    const native = [
+      "database-info",
+      "store-findings",
+      "list-stored-findings",
+      "find-potential-duplicates",
+      "store-dedupe-groups",
+      "list-dedupe-groups",
+      "dashboard",
+    ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
         ? await resolveTrustedExecutable(
@@ -1582,6 +1591,10 @@ export async function runWorkbench(
           environment: options.environment,
           signal: options.signal,
         })));
+    const stateDirectory = native
+      ? (options.stateDirectory ??
+        codexSecurityStateDirectory(options.environment))
+      : undefined;
     const result = await runCodexCommand(
       { command },
       native
@@ -1590,7 +1603,14 @@ export async function runWorkbench(
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
-        ? JSON.stringify(codexSecurityStateDirectory(options.environment))
+        ? JSON.stringify(
+            arguments_[0] === "database-info"
+              ? stateDirectory
+              : {
+                  stateDirectory,
+                  payload: input === undefined ? undefined : JSON.parse(input),
+                },
+          )
         : input,
       options.signal,
     );
@@ -1648,7 +1668,8 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,

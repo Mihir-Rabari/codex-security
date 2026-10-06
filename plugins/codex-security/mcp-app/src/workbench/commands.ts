@@ -11,6 +11,8 @@ import {
   storeDedupeGroups,
 } from "./duplicates";
 
+import { dashboard, type DashboardQuery } from "./dashboard";
+
 export async function findingsCommand(
   command: string,
   input: string,
@@ -88,6 +90,8 @@ export async function findingsCommand(
         selection.findingId,
         selection.scope!.repositoryId,
       );
+    if (command === "dashboard")
+      return dashboard(database, payload as DashboardQuery);
     return listStoredFindings(database, page);
   } finally {
     database.close();

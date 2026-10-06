@@ -1,7 +1,6 @@
 import {
   bundledPluginRoot,
   workbenchEnvironment,
-  resolveWorkbenchRuntime,
   runWorkbench,
   type WorkbenchCommandOptions,
 } from "../runtime.js";
@@ -19,19 +18,12 @@ import type {
 } from "./storage.js";
 
 export class SqliteFindingsStore implements FindingsStore {
-  private options?: Promise<WorkbenchCommandOptions>;
+  private options?: Promise<Omit<WorkbenchCommandOptions, "python">>;
 
   constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
 
   async initialize(): Promise<void> {
-    await runWorkbench(
-      {
-        pluginRoot: await bundledPluginRoot(),
-        environment: this.environment,
-        failureMessage: "Could not access the findings database",
-      },
-      ["database-info"],
-    );
+    await this.run(["database-info"]);
   }
 
   async dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
@@ -121,13 +113,14 @@ export class SqliteFindingsStore implements FindingsStore {
     return await runWorkbench(options, args, input);
   }
 
-  private async resolveOptions(): Promise<WorkbenchCommandOptions> {
+  private async resolveOptions(): Promise<
+    Omit<WorkbenchCommandOptions, "python">
+  > {
     const environment = workbenchEnvironment(this.environment);
-    const [python, pluginRoot] = await resolveWorkbenchRuntime({ environment });
     return {
-      python,
-      pluginRoot,
+      pluginRoot: await bundledPluginRoot(),
       environment,
+      stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
       failureMessage: "Could not access the findings database",
     };
   }
