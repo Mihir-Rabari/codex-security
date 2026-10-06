@@ -6418,6 +6418,71 @@ describe("patch change tracking", () => {
       }
     },
   );
+  test.each([
+    { invocation: "root", file: "sub/local.env", unignore: true },
+    { invocation: "sub", file: "sub/local.env", unignore: true },
+    { invocation: "sub", file: "local.env", unignore: true },
+    { invocation: "sub", file: "sub/local.env", unignore: false },
+  ])(
+    "preserves ignored local data from publication context %j",
+    async ({ invocation, file, unignore }) => {
+      const { directory: root, git } = await publicationRepository();
+      const sub = join(root, "sub");
+      await mkdir(sub);
+      const rule = join(root, ".gitignore");
+      await writeFile(rule, `${file}\n`);
+      git("add", ".gitignore");
+      git("commit", "-m", "Synthetic ignore rule");
+      await writeFile(join(root, file), "synthetic local data\n");
+      const head = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic ignore update", "--create-pr", "--json"],
+        {
+          currentDirectory: invocation === "root" ? root : sub,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            if (unignore) await writeFile(rule, "");
+            else await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: unignore
+                      ? [".gitignore", file]
+                      : ["src/finding-1.ts"],
+                    verification: "Synthetic verification.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(unignore ? 2 : 0);
+      expect(await readFile(join(root, file), "utf8")).toBe(
+        "synthetic local data\n",
+      );
+      expect(
+        git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
+      ).not.toContain(file);
+      if (unignore) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(git("write-tree")).toBe(index);
+        expect(git("ls-remote", "origin")).toBe("");
+      }
+    },
+  );
+
   for (const mode of ["saved", "supplied"]) {
     test.each([
       "file",

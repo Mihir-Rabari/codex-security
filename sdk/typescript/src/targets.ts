@@ -430,8 +430,20 @@ async function requireGitWorktreeBinding(
       signal,
       options,
     );
-    if (options.runGit !== undefined) {
-      // The command context pins --work-tree; verify the repository's own binding too.
+    if (
+      options.runGit !== undefined &&
+      (relative(directory, commonDirectory) === "" ||
+        (await options.runGit([
+          "config",
+          "--default",
+          "false",
+          "--type",
+          "bool",
+          "--get",
+          "extensions.worktreeConfig",
+        ])) === "true")
+    ) {
+      // The command context pins --work-tree; verify the repository's effective binding too.
       const configuredWorktree = await options.runGit([
         "config",
         "--default",

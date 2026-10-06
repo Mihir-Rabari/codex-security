@@ -7340,7 +7340,16 @@ async function createPatchPullRequest(
   if (ignoredFiles.size > 0) {
     const included = await dependencies.runRepositoryCommand(
       "git",
-      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      [
+        "ls-files",
+        "--full-name",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ":/",
+      ],
       root,
       { trim: false, maxBuffer: Infinity },
     );
