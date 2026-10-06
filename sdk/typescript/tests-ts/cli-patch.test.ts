@@ -2,7 +2,7 @@ import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import {
@@ -45,8 +45,22 @@ import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 
-const CURRENT_REPOSITORY = resolve("/current/repository");
-const SAVED_REPOSITORY = resolve("/saved/repository");
+const workflowDirectories = createTemporaryDirectories(true);
+let CURRENT_REPOSITORY: string;
+let SAVED_REPOSITORY: string;
+beforeEach(async () => {
+  const root = await workflowDirectories.create("patch-workflow-");
+  CURRENT_REPOSITORY = join(root, "current", "repository");
+  SAVED_REPOSITORY = join(root, "saved", "repository");
+  await Promise.all(
+    [
+      CURRENT_REPOSITORY,
+      SAVED_REPOSITORY,
+      resolve(CURRENT_REPOSITORY, "../other/repository"),
+    ].map((directory) => mkdir(directory, { recursive: true })),
+  );
+});
+afterEach(workflowDirectories.cleanup);
 const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
 
 function resultWithFindings(severities: readonly SeverityLevel[]) {
@@ -1105,6 +1119,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       const setInterval = mock(() => ({}) as NodeJS.Timeout);
       const clearInterval = mock();
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (_command, args) => {
@@ -1160,6 +1175,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         { isTTY: true },
       );
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: async (_args, output) => {
@@ -1200,6 +1216,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: (args, output) => {
@@ -1241,6 +1258,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       let index = 0;
       const timers = new Map<NodeJS.Timeout, () => void>();
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: (args, output) => {
@@ -6407,9 +6425,7 @@ describe("patch change tracking", () => {
                 },
               ).trim();
               expect(options?.environment?.["GH_REPO"]).toBe("");
-              expect(options?.environment?.["GH_HOST"]).toBe(
-                `${hostingHost}${apiPort}`,
-              );
+              expect(options?.environment?.["GH_HOST"]).toBe(hostingHost);
               const unresolved =
                 selectedRemote === remote ||
                 selectedRemote === "origin" ||
@@ -6417,24 +6433,30 @@ describe("patch change tracking", () => {
                 selectedRemote.startsWith("C:\\") ||
                 selectedRemote.includes("mirror.example.test") ||
                 selectedRemote.toLowerCase().includes("github-work");
+              const first = selectedRemote.includes("/first-owner/repository");
+              const expected = first
+                ? `${hostingHost}${apiPort}/first-owner/repository`
+                : lookupRemote!;
+              const selectedRepository = expected?.slice(
+                expected.indexOf("/") + 1,
+              );
               if (args[1] === "set-default") {
                 expect(args).toEqual(["repo", "set-default", "--view"]);
-                return unresolved ? "" : `${hostingHost}${apiPort}/synthetic`;
+                return unresolved ? "" : selectedRepository;
               }
               expect(unresolved).toBe(false);
               expect(args).toEqual([
                 "repo",
                 "view",
+                ...(apiPort
+                  ? [`${hostingHost}${apiPort}/${selectedRepository}`]
+                  : []),
                 "--json",
                 "id,url",
                 "--jq",
                 "tojson",
               ]);
               repositoryLookups++;
-              const first = selectedRemote.includes("/first-owner/repository");
-              const expected = first
-                ? `${hostingHost}${apiPort}/first-owner/repository`
-                : lookupRemote!;
               expect(selectedRemote).toContain(
                 expected.slice(expected.indexOf("/") + 1),
               );
