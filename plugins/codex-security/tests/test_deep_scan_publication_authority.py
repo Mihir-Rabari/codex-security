@@ -270,12 +270,15 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False)
 @pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
 @pytest.mark.parametrize(
     ("backend_kind", "failure"),
-    [("host", "write"), ("host", "rename")]
+    [("host", failure) for failure in ("write", "rename")]
+    + [("posix", failure) for failure in ("root-stat", "root-resolve", "root-open", "parent-open")]
     + [("windows-emulated", failure) for failure in ("create", "write", "rename")],
 )
 def test_receipt_io_failure_preserves_successful_publication(
     workbench_api, workbench_db, publication_scan, monkeypatch, workflow, backend_kind, failure
 ):
+    if backend_kind == "posix" and os.name == "nt":
+        pytest.skip("POSIX descriptor-relative directory errors")
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     with workbench_db:
@@ -316,13 +319,47 @@ def test_receipt_io_failure_preserves_successful_publication(
             ("scan-manifest.json", draft["manifest"]),
         ):
             assert json.loads((scan.scan_dir / name).read_text()) == document
-        raise OSError(errno.ENOSPC, "Synthetic receipt I/O failure", filename)
+        raise OSError(
+            errno.EIO if backend_kind == "posix" else errno.ENOSPC,
+            "Synthetic receipt I/O failure",
+            filename,
+        )
 
     def write_file(scan_dir, filename, contents):
         if not filename.endswith(".accepted.json"):
             return original_write(scan_dir, filename, contents)
         with monkeypatch.context() as patch:
             finalizer = sys.modules[original_write.__module__]
+            if backend_kind == "posix":
+                original_open = os.open
+                original_stat = Path.lstat
+                original_resolve = Path.resolve
+
+                def open_directory(file, flags, *args, **kwargs):
+                    if (failure == "root-open" and Path(file) == scan_dir) or (
+                        failure == "parent-open" and file == "drafts"
+                    ):
+                        fail_receipt(filename)
+                    return original_open(file, flags, *args, **kwargs)
+
+                def stat_root(path, *args, **kwargs):
+                    if path == scan_dir:
+                        fail_receipt(filename)
+                    return original_stat(path, *args, **kwargs)
+
+                def resolve_root(path, *args, **kwargs):
+                    if path == scan_dir:
+                        fail_receipt(filename)
+                    return original_resolve(path, *args, **kwargs)
+
+                if failure == "root-stat":
+                    patch.setattr(Path, "lstat", stat_root)
+                elif failure == "root-resolve":
+                    patch.setattr(Path, "resolve", resolve_root)
+                else:
+                    patch.setattr(os, "open", open_directory)
+                    patch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, open_directory})
+                return original_write(scan_dir, filename, contents)
             if backend_kind == "windows-emulated":
                 backend = emulate_windows_atomic_write(patch, finalizer)
             elif os.name == "nt":
@@ -405,3 +442,52 @@ def test_receipt_contract_errors_still_reject_publication(
     assert len(attempts) == 1
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
     assert not (scan.scan_dir.parent / "outside.accepted.json").exists()
+
+
+def test_accepted_publication_replay_retains_original_warning_and_bytes(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    saved = workbench_api["saved_results"]
+    args.expected_draft_digest = saved._scan_draft_digest(scan.scan_dir)
+    warnings = iter(["Original projection warning", "Replay must not reproject"])
+    monkeypatch.setattr(
+        saved, "write_threat_model_projection_if_possible", lambda *_: next(warnings)
+    )
+    first = saved.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
+    published = {
+        path: path.read_bytes()
+        for path in scan.scan_dir.rglob("*.json")
+        if "drafts" not in path.parts
+    }
+    assert args.expected_draft_digest != saved._scan_draft_digest(scan.scan_dir)
+    monkeypatch.setattr(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: "2099-01-01T00:00:00Z"
+    )
+
+    assert (
+        saved.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
+        == first
+        == {
+            "scanId": scan.scan_id,
+            "status": "draft_written",
+            "warnings": ["Original projection warning"],
+        }
+    )
+    assert {
+        path: path.read_bytes()
+        for path in scan.scan_dir.rglob("*.json")
+        if "drafts" not in path.parts
+    } == published
+    assert next(warnings) == "Replay must not reproject"

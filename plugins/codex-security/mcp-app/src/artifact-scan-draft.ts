@@ -275,13 +275,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
               "accepted scan draft",
             ).catch(() => undefined);
             if (
+              accepted?.status === "draft_written" &&
               isDeepStrictEqual(
-                accepted,
+                accepted.input,
                 JSON.parse(
-                  JSON.stringify({
-                    status: "draft_written",
-                    input: { ...stagedDraft, checkpoint: snapshot },
-                  }),
+                  JSON.stringify({ ...stagedDraft, checkpoint: snapshot }),
                 ),
               )
             ) {
@@ -301,7 +299,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         await Promise.all([
           fs.rm(checkpointPath, { force: true }),
           fs.rm(draftPath, { force: true }),
-          fs.rm(join(dirname(draftPath), acceptanceName), { force: true }),
+          fs
+            .rm(join(dirname(draftPath), acceptanceName), { force: true })
+            .catch(() => {}),
         ]);
       }
     },

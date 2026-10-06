@@ -601,6 +601,7 @@ async function snapshot(run: DeepScanRunState) {
     "findings.json",
     "coverage.json",
     "report.md",
+    "checkpoint-head.json",
   ]) {
     try {
       files[name] = await readFile(path.join(run.scanDir, name), "utf8");
@@ -765,8 +766,10 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
               { code: "ENOENT" },
             );
           }
-          if (loseResponse && attempt === 1)
+          if (loseResponse && attempt === 1) {
+            f.setTime(10);
             throw new Error("Synthetic accepted publication response loss");
+          }
         },
       });
       let publications = 0;
@@ -834,6 +837,71 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
       assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
     });
   }
+}
+
+test("accepted response recovery preserves an omitted threat model and the accepted bytes", async (t) => {
+  const f = await publicationFixture(t);
+  await f.publish();
+  f.setTime(5);
+  delete f.draft.threatModel;
+  let accepted: Awaited<ReturnType<typeof snapshot>> | undefined;
+  const runner = publicationRunner(f, {
+    async after(attempt) {
+      if (attempt === 1) {
+        accepted = await snapshot(f.run);
+        f.setTime(10);
+        throw new Error("Synthetic accepted publication response loss");
+      }
+    },
+  });
+  assert.equal((await f.publish(runner.run)).status, "draft_written");
+  assert.ok(runner.requests[0].args.includes("--expected-draft-digest"));
+  assert.equal(runner.requests.length, 2);
+  assert.deepEqual(runner.requests[1], runner.requests[0]);
+  assert.deepEqual(await snapshot(f.run), accepted);
+});
+
+test("accepted response recovery cannot replace a later publication from the same coordinator", async (t) => {
+  const f = await publicationFixture(t);
+  let newer: Awaited<ReturnType<typeof snapshot>> | undefined;
+  const runner = publicationRunner(f, {
+    async after(attempt) {
+      assert.equal(attempt, 1, "The superseded replay cannot publish");
+      f.setTime(10);
+      f.draft.threatModel = { summary: "Later accepted model" };
+      await f.publish();
+      newer = await snapshot(f.run);
+      throw new Error("Synthetic accepted publication response loss");
+    },
+  });
+  await assert.rejects(f.publish(runner.run), /canonical scan results changed/);
+  assert.equal(runner.requests.length, 2);
+  assert.deepEqual(await snapshot(f.run), newer);
+});
+
+for (const code of ["EPERM", "EACCES", "EIO"]) {
+  test(`optional receipt cleanup ${code} preserves publication success`, async (t) => {
+    const f = await publicationFixture(t);
+    const filesystem = await import("node:fs");
+    const original = filesystem.promises.rm;
+    t.mock.method(
+      filesystem.promises,
+      "rm",
+      async (...[file, options]: Parameters<typeof original>) => {
+        if (String(file).endsWith(".accepted.json"))
+          throw Object.assign(new Error(`Synthetic receipt cleanup ${code}`), {
+            code,
+          });
+        return original(file, options);
+      },
+    );
+    assert.equal((await f.publish()).status, "draft_written");
+    assert.ok(
+      JSON.parse((await snapshot(f.run)).files["scan-manifest.json"]).scan
+        .completedAt,
+    );
+    t.mock.restoreAll();
+  });
 }
 
 test("receipt I/O failure cannot authorize replay after response loss", async (t) => {
@@ -955,7 +1023,13 @@ test("a failed accepted publication replay has no third attempt", async (t) => {
 test("raw publication repeats the same staged paths without changing their bytes", async (t) => {
   const f = await publicationFixture(t);
   const workers = await f.workers();
+  let calls = 0;
   await f.publish(async (args, input) => {
+    assert.equal(
+      ++calls,
+      1,
+      "Raw replay assertions must not trigger host recovery",
+    );
     const stagedPaths = ["--draft-path", "--checkpoint-path"].map(
       (flag) => args[args.indexOf(flag) + 1],
     );
@@ -966,6 +1040,7 @@ test("raw publication repeats the same staged paths without changing their bytes
       await Promise.all(stagedPaths.map((file) => readFile(file))),
       staged,
     );
+    f.setTime(10);
     assert.deepEqual(await f.runWorkbench(args, input), first);
     assert.deepEqual(
       await Promise.all(stagedPaths.map((file) => readFile(file))),
