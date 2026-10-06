@@ -1985,3 +1985,42 @@ def test_restored_identity_does_not_reserve_another_candidates_alias(
             "Beta",
             "Independent finding",
         }
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("identity_note", [False, True])
+def test_saved_collision_reserves_finalizer_identity_with_optional_metadata(
+    tmp_path: Path, retry: bool, identity_note: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    first = document["findings"][0]
+    first["identity"] = {"anchor": "synthetic-collision"}
+    first["provenance"]["candidateId"] = "candidate-a"
+    first["summary"] = "First independent candidate."
+    second = copy.deepcopy(first)
+    second["provenance"]["candidateId"] = "candidate-b"
+    second["summary"] = "Second independent candidate."
+    reserved = copy.deepcopy(first)
+    reserved["identity"]["instance"] = "saved-2"
+    if identity_note:
+        reserved["identity"]["note"] = "Synthetic identity metadata."
+    reserved["provenance"]["candidateId"] = "candidate-c"
+    reserved["summary"] = "Third independent candidate."
+    document["findings"] = [first, second, reserved]
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not saved["resultsRecoveryNeeded"]
+    assert saved["findingCount"] == 3
+    by_candidate = {row["provenance"]["candidateId"]: row for row in saved["findings"]}
+    assert set(by_candidate) == {"candidate-a", "candidate-b", "candidate-c"}
+    assert by_candidate["candidate-a"]["identity"] == {"anchor": "synthetic-collision"}
+    assert by_candidate["candidate-b"]["identity"] == {
+        "anchor": "synthetic-collision",
+        "instance": "saved-3",
+    }
+    assert by_candidate["candidate-c"]["identity"] == reserved["identity"]
+    assert len({row["findingId"] for row in saved["findings"]}) == 3

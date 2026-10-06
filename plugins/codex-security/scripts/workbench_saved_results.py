@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _finding_strength,
+    _fingerprint,
     _is_sealed_scan,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -2276,7 +2277,7 @@ def merge_saved_results(
 
     identities: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     reserved_identities = {
-        _encoded([recovered["ruleId"], recovered["identity"]]).decode()
+        _fingerprint("", recovered)
         for finding in findings
         if (recovered := recovered_finding(finding))
     }
@@ -2302,7 +2303,7 @@ def merge_saved_results(
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue
-        key = _encoded([recovered["ruleId"], recovered["identity"]]).decode()
+        key = _fingerprint("", recovered)
         variant = _finding_key(recovered)
         assigned = identities.setdefault(key, [])
         matching = next(
@@ -2332,12 +2333,9 @@ def merge_saved_results(
             suffix = 1 if previous_variant != variant else 2
             while True:
                 identity["instance"] = prefix if suffix == 1 else f"{prefix}-{suffix}"
-                instance_key = _encoded(
-                    [
-                        recovered["ruleId"],
-                        {**recovered["identity"], "instance": identity["instance"]},
-                    ]
-                ).decode()
+                instance_key = _fingerprint(
+                    "", {**recovered, "identity": {**recovered["identity"], **identity}}
+                )
                 if instance_key not in reserved_identities:
                     reserved_identities.add(instance_key)
                     break
