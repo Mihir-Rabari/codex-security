@@ -67,3 +67,15 @@ export function tarRecord(
 export function archive(...records: Buffer[]): Buffer {
   return Buffer.concat([...records, Buffer.alloc(blockSize * 2)]);
 }
+
+export function paxRecords(attributes: Record<string, string>): Buffer {
+  return Buffer.concat(
+    Object.entries(attributes).map(([key, value]) => {
+      const record = ` ${key}=${value}\n`;
+      let length = Buffer.byteLength(record) + 1;
+      while (length !== Buffer.byteLength(record) + String(length).length)
+        length = Buffer.byteLength(record) + String(length).length;
+      return Buffer.from(`${length}${record}`);
+    }),
+  );
+}

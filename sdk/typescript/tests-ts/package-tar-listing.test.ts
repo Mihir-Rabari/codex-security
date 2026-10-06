@@ -16,7 +16,12 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
-import { archive, octal, tarRecord } from "./package-tar-fixtures.js";
+import {
+  archive,
+  octal,
+  paxRecords,
+  tarRecord,
+} from "./package-tar-fixtures.js";
 
 const { regularTarListingLines } = (await import(
   new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
@@ -202,6 +207,61 @@ describe("npm package tar listings", () => {
       rmSync(root, { force: true, recursive: true });
     }
   });
+
+  test.each([0x78, 0x67])(
+    "preserves inherited character locale for Unicode pax owners, type=%i",
+    (type) => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-owner-test-"));
+      try {
+        const archivePath = join(root, "unicode owner.tgz");
+        writeFileSync(
+          archivePath,
+          gzipSync(
+            Buffer.concat([
+              tarRecord(
+                paxRecords({
+                  uname: "Synthetic é owner",
+                  gname: "Synthetic é group",
+                }),
+                { name: "OwnerHead", type },
+              ),
+              packageTar(),
+            ]),
+          ),
+        );
+        const contractPath = join(root, "plugin contract.json");
+        writeFileSync(contractPath, JSON.stringify(pluginContract));
+        const environment: NodeJS.ProcessEnv = { ...process.env };
+        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+        if (process.platform !== "win32")
+          environment["LC_ALL"] =
+            process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+        const result = spawnSync(
+          commandPath("node"),
+          [
+            fileURLToPath(
+              new URL("../scripts/check-package.mjs", import.meta.url),
+            ),
+            archivePath,
+            contractPath,
+          ],
+          {
+            cwd: root,
+            env: environment,
+            encoding: "utf8",
+            timeout: 30_000,
+            windowsHide: true,
+          },
+        );
+        expect({ status: result.status, stderr: result.stderr }).toEqual({
+          status: 0,
+          stderr: "",
+        });
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
 
   test("streams each archive without resolving tar from its directory", () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-tar-test-"));

@@ -3,6 +3,7 @@ import {
   archive,
   blockSize,
   octal,
+  paxRecords,
   tarRecord,
 } from "./package-tar-fixtures.js";
 
@@ -21,18 +22,6 @@ const { plainTarEntries } = (await import(
 
 const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
-
-function paxRecords(attributes: Record<string, string>): Buffer {
-  return Buffer.concat(
-    Object.entries(attributes).map(([key, value]) => {
-      const record = ` ${key}=${value}\n`;
-      let length = Buffer.byteLength(record) + 1;
-      while (length !== Buffer.byteLength(record) + String(length).length)
-        length = Buffer.byteLength(record) + String(length).length;
-      return Buffer.from(`${length}${record}`);
-    }),
-  );
-}
 
 describe("plain npm tar entries", () => {
   test.each([" ", " \0", "\0"])(
@@ -185,6 +174,62 @@ describe("plain npm tar entries", () => {
         ]);
     },
   );
+
+  for (const format of [
+    "gnu-01",
+    "gnu-nul",
+    "bsd-comments",
+    "bsd-solaris",
+  ] as const) {
+    test.each([false, true])(
+      `scans all stored sparse bytes for ${format}, marker=%j`,
+      (marker) => {
+        let attributes: Record<string, string>;
+        let contents: Buffer;
+        if (format === "gnu-01") {
+          attributes = {
+            "GNU.sparse.size": "1024",
+            "GNU.sparse.numblocks": "1",
+            "GNU.sparse.map": "512,512",
+          };
+          contents = Buffer.alloc(1024);
+          if (marker) contents.write("go/example", 512);
+        } else if (format === "bsd-solaris") {
+          attributes = { "SUN.holesdata": " 512 1024" };
+          contents = Buffer.alloc(1024);
+          if (marker) contents.write("go/example", 0);
+        } else {
+          attributes = {
+            "GNU.sparse.major": format === "gnu-nul" ? "1\0" : "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.name": "package/README.md",
+            "GNU.sparse.realsize": format === "bsd-comments" ? "1536" : "1024",
+          };
+          contents = Buffer.alloc(format === "bsd-comments" ? 1536 : 1024);
+          if (format === "bsd-comments") {
+            const comments = `${`# ${"x".repeat(60)}\n`.repeat(9)}# ${marker ? "go/example" : "public note"}\n1\n1024\n512\n`;
+            contents.write(comments);
+          } else {
+            contents.write("1\n512\n512\n");
+            if (marker) contents.write("go/example", 32);
+          }
+        }
+        const bytes = archive(
+          tarRecord(paxRecords(attributes), {
+            name: "package/PaxHeaders/README.md",
+            type: 0x78,
+          }),
+          tarRecord(contents, { name: "package/README.md" }),
+        );
+        if (marker)
+          expect(() => plainTarEntries(bytes)).toThrow(internalReferenceError);
+        else
+          expect(plainTarEntries(bytes)).toEqual([
+            { path: "package/README.md", size: contents.length },
+          ]);
+      },
+    );
+  }
 
   test("accepts an empty size field for an empty file", () => {
     expect(

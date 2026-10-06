@@ -103,24 +103,24 @@ export function plainTarEntries(archiveBytes) {
         else destination.set(key, value);
       }
     } else {
-      if (Number(attribute("GNU.sparse.major")) === 1) {
-        // GNU sparse 1.x extraction discards the padded map before the file data.
-        const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
-        let mapEnd = contents.indexOf(0x0a) + 1;
-        const extents = Number(
-          contents.subarray(0, mapEnd - 1).toString("ascii"),
-        );
-        for (let line = 0; line < extents * 2 && mapEnd > 0; line++) {
-          const newline = contents.indexOf(0x0a, mapEnd);
-          if (newline === -1) {
-            mapEnd = contents.byteLength;
-            break;
-          }
-          mapEnd = newline + 1;
-        }
+      if (
+        [
+          "GNU.sparse.major",
+          "GNU.sparse.minor",
+          "GNU.sparse.name",
+          "GNU.sparse.map",
+          "GNU.sparse.numblocks",
+          "GNU.sparse.size",
+          "GNU.sparse.realsize",
+          "GNU.sparse.offset",
+          "GNU.sparse.numbytes",
+          "SUN.holesdata",
+        ].some((key) => attribute(key) !== undefined)
+      ) {
+        // Native sparse extraction may discard map, hole or trailing bytes.
         assertPublicText(
-          contents
-            .subarray(0, Math.ceil(mapEnd / blockSize) * blockSize)
+          archiveBytes
+            .subarray(offset + blockSize, contentsEnd)
             .toString("utf8"),
         );
       }

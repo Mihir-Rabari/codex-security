@@ -51,8 +51,16 @@ const PUBLIC_LOGO_SHA256 =
   "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
+const characterLocale =
+  processEnvironment.LC_ALL || processEnvironment.LC_CTYPE;
+delete processEnvironment.LC_ALL;
 const tarOptions = {
-  env: { ...processEnvironment, LC_ALL: "C" },
+  env: {
+    ...processEnvironment,
+    LC_CTYPE: characterLocale,
+    LC_MESSAGES: "C",
+    LC_NUMERIC: "C",
+  },
   input: compressedArchive,
   maxBuffer: archiveBytes.byteLength + 1024,
 };
