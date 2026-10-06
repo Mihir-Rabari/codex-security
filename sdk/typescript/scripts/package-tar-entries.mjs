@@ -64,20 +64,19 @@ export function plainTarEntries(archiveBytes) {
     // GNU headers use this area for timestamps and sparse-file metadata.
     const prefix =
       signature === "ustar\0" + "00" ? headerText(header, 345, 500) : "";
-    const attributes = new Map(globalAttributes);
-    for (const [key, value] of nextAttributes) {
-      if (value === "") attributes.delete(key);
-      else attributes.set(key, value);
-    }
+    const attribute = (key) =>
+      nextAttributes.has(key)
+        ? nextAttributes.get(key) || undefined
+        : globalAttributes.get(key);
     const path =
-      attributes.get("path") ?? (prefix === "" ? name : `${prefix}/${name}`);
+      attribute("path") ?? (prefix === "" ? name : `${prefix}/${name}`);
     if (!extended && (path === "" || path.endsWith("/") !== directory))
       invalidTarEntry();
     assertPublicText(path);
 
     const sizeField = headerText(header, 124, 136).trim();
     if (!/^[0-7]*$/u.test(sizeField)) invalidTarEntry();
-    const paxSize = extended ? undefined : attributes.get("size");
+    const paxSize = extended ? undefined : attribute("size");
     if (paxSize !== undefined && !/^[0-9]+$/u.test(paxSize)) invalidTarEntry();
     const size =
       paxSize === undefined
@@ -104,6 +103,27 @@ export function plainTarEntries(archiveBytes) {
         else destination.set(key, value);
       }
     } else {
+      if (Number(attribute("GNU.sparse.major")) === 1) {
+        // GNU sparse 1.x extraction discards the padded map before the file data.
+        const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
+        let mapEnd = contents.indexOf(0x0a) + 1;
+        const extents = Number(
+          contents.subarray(0, mapEnd - 1).toString("ascii"),
+        );
+        for (let line = 0; line < extents * 2 && mapEnd > 0; line++) {
+          const newline = contents.indexOf(0x0a, mapEnd);
+          if (newline === -1) {
+            mapEnd = contents.byteLength;
+            break;
+          }
+          mapEnd = newline + 1;
+        }
+        assertPublicText(
+          contents
+            .subarray(0, Math.ceil(mapEnd / blockSize) * blockSize)
+            .toString("utf8"),
+        );
+      }
       entries.push({ path, size });
       nextAttributes.clear();
     }

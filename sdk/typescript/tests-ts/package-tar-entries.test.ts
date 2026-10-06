@@ -157,6 +157,35 @@ describe("plain npm tar entries", () => {
     ).toThrow(internalReferenceError);
   });
 
+  test.each([false, true])(
+    "scans discarded sparse-map padding, marker=%j",
+    (marker) => {
+      const map = Buffer.alloc(blockSize);
+      map.write("1\n512\n512\n");
+      if (marker) map.write("go/example", 32);
+      const bytes = archive(
+        tarRecord(
+          paxRecords({
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.name": "package/README.md",
+            "GNU.sparse.realsize": "1024",
+          }),
+          { name: "package/PaxHeaders/README.md", type: 0x78 },
+        ),
+        tarRecord(Buffer.concat([map, Buffer.alloc(blockSize)]), {
+          name: "package/README.md",
+        }),
+      );
+      if (marker)
+        expect(() => plainTarEntries(bytes)).toThrow(internalReferenceError);
+      else
+        expect(plainTarEntries(bytes)).toEqual([
+          { path: "package/README.md", size: 1024 },
+        ]);
+    },
+  );
+
   test("accepts an empty size field for an empty file", () => {
     expect(
       plainTarEntries(
