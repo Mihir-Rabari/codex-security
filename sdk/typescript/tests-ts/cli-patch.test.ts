@@ -2279,6 +2279,14 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:end -->",
               );
+              expect(output.appServer?.prompt).toContain(
+                "--helper validate-patch-risk-assessment <assessment.json>",
+              );
+              expect(output.appServer?.prompt).toContain(
+                process.platform === "win32"
+                  ? "launch_codex_security_mcp.cmd"
+                  : "launch_codex_security_mcp",
+              );
               const artifact = JSON.parse(
                 output
                   .appServer!.prompt.split("\n")
