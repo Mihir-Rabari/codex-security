@@ -1175,21 +1175,6 @@ def merge_saved_results(
         and relative.startswith("checkpoints/")
         and isinstance(draft["coverage"].get("reviews"), list)
     }
-    projected_coverages = [
-        accepted_coverage,
-        parent["coverage"] if parent else {},
-        *frozen_parent_projections.values(),
-    ]
-    # V1 persists the review projection in the parent, without reducer sourceCoverage.
-    reviewed_attempts = {
-        (review.get("workerId"), review.get("attempt"))
-        for projected in projected_coverages
-        if isinstance(reviews := projected.get("reviews"), list)
-        for review in reviews
-        if isinstance(review, dict)
-        and isinstance(review.get("workerId"), str)
-        and isinstance(review.get("attempt"), int)
-    }
 
     def coverage_receipts(item: dict[str, Any], worker: Any, relative: str) -> Any:
         refs = item.get("receiptRefs", [])
@@ -1380,6 +1365,22 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+
+    projected_coverages = [
+        accepted_coverage,
+        parent["coverage"] if parent else {},
+        *frozen_parent_projections.values(),
+    ]
+    # V1 persists the review projection in the parent, without reducer sourceCoverage.
+    reviewed_attempts = {
+        (review.get("workerId"), review.get("attempt"))
+        for projected in projected_coverages
+        if isinstance(reviews := projected.get("reviews"), list)
+        for review in reviews
+        if isinstance(review, dict)
+        and isinstance(review.get("workerId"), str)
+        and isinstance(review.get("attempt"), int)
+    }
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.

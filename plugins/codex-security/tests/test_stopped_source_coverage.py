@@ -16,8 +16,8 @@ from workbench_test_support import write_checkpoint
 @pytest.mark.parametrize("retry_publication", [False, True], ids=["publish", "retry-publication"])
 @pytest.mark.parametrize(
     "parent_draft",
-    [True, False, "projected"],
-    ids=["parent-draft", "no-parent", "projected-parent"],
+    [True, False, "projected", "interrupted"],
+    ids=["parent-draft", "no-parent", "projected-parent", "interrupted-parent"],
 )
 def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisions(
     workbench_api,
@@ -30,6 +30,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     monkeypatch,
 ):
     scan = publication_scan()
+    projected_parent = parent_draft in ("projected", "interrupted")
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     source_coverage = {
         "completeness": "partial",
@@ -43,7 +44,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     for disposition in ("needs_follow_up", other_outcome):
         result = add_worker(workbench_db, scan)
         worker_id = result.parent.name
-        if parent_draft == "projected":
+        if projected_parent:
             output = scan.scan_dir / "artifacts" / worker_id / "output"
             output.mkdir(parents=True)
             result = output / "result.json"
@@ -60,11 +61,12 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
             "disposition": disposition,
             "receiptRefs": [],
         }
-        if parent_draft == "projected":
+        if projected_parent:
             receipt = result.parent / "artifacts" / "review.txt"
             receipt.parent.mkdir()
             receipt.write_text("Synthetic review evidence.\n")
             surface["receiptRefs"] = ["artifacts/review.txt"]
+            source_files.append(receipt)
         deferred = {"candidateId": "candidate-1", "reason": "Validation remains unresolved."}
         coverage = {
             "completeness": "partial" if disposition == "needs_follow_up" else "complete",
@@ -134,6 +136,57 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     if not parent_draft:
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / filename).unlink()
+    if parent_draft == "interrupted":
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+                ("deep-security-scan/v2" if host_coverage else "deep-scan-mcp/v1", scan.scan_id),
+            )
+        for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+            os.utime(scan.scan_dir / filename, ns=(100, 100))
+        coverage_path = scan.scan_dir / "coverage.json"
+        old_coverage = coverage_path.read_bytes()
+        staged = scan.scan_dir / "drafts" / "00000000-0000-4000-8000-000000000000.json"
+        staged.parent.mkdir()
+        staged.write_text(
+            json.dumps(
+                {
+                    "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
+                    "findings": {"findings": aggregate_findings},
+                    "coverage": {**scan.coverage, **source_coverage},
+                }
+            )
+        )
+        saved_results = workbench_api["saved_results"]
+        write_bytes = saved_results.write_scan_local_bytes
+
+        def interrupt_coverage(root, relative, contents):
+            if relative == "coverage.json":
+                raise OSError("Synthetic parent coverage interruption.")
+            write_bytes(root, relative, contents)
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(saved_results, "write_scan_local_bytes", interrupt_coverage)
+            with pytest.raises(OSError, match="Synthetic parent coverage interruption"):
+                saved_results.write_scan_draft(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"],
+                    workbench_db,
+                    Namespace(
+                        scan_id=scan.scan_id,
+                        claim_token=None,
+                        draft_path=str(staged),
+                        checkpoint_path=None,
+                        expected_draft_digest=None,
+                    ),
+                )
+        head_path = scan.scan_dir / "checkpoint-head.json"
+        checkpoint = scan.scan_dir / "checkpoints" / json.loads(head_path.read_text())["checkpoint"]
+        assert coverage_path.read_bytes() == old_coverage
+        assert head_path.stat().st_mtime_ns > coverage_path.stat().st_mtime_ns
+        assert (
+            json.loads(checkpoint.read_text())["coverage"]["reviews"] == source_coverage["reviews"]
+        )
+        saved_bytes.update({path: path.read_bytes() for path in (head_path, checkpoint)})
 
     with monkeypatch.context() as interrupted:
         if retry_publication:
@@ -176,7 +229,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
     assert len(coverage["surfaces"]) == 2
     assert all(review["workerId"] != "other-worker" for review in coverage.get("reviews", []))
-    if host_coverage or parent_draft == "projected":
+    if host_coverage or projected_parent:
         for field in ("reviews", "surfaces", "deferred"):
             assert (
                 coverage[field][:-1] if field == "deferred" else coverage[field]
