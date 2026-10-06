@@ -437,12 +437,12 @@ describe("read-only publication preflight", () => {
     const client = readClient([]);
     client.team = (() =>
       fail(`Provider response included ${key}`)) as ReadClient["team"];
-    await expect(
-      checkScanPublicationInternal(
-        "scan",
-        { ...OPTIONS, linearApiKey: key },
-        dependencies({ linearClient: () => client }),
-      ),
-    ).rejects.toThrow(`Provider response included ${key}`);
+    const checking = checkScanPublicationInternal(
+      "scan",
+      { ...OPTIONS, linearApiKey: key },
+      dependencies({ linearClient: () => client }),
+    );
+    await expect(checking).rejects.toThrow(`Provider response included ${key}`);
+    await expect(checking).rejects.toThrow(/API key.*publication destination/u);
   });
 });

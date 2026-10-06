@@ -1298,6 +1298,7 @@ process.stdout.write(JSON.stringify({
         "model metadata",
       ],
       ["ENOTFOUND /private/repository", "could not connect"],
+      ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
       ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
     ];
     for (const [detail, expected] of cases) {
