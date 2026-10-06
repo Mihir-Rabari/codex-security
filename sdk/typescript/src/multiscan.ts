@@ -63,10 +63,7 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import {
-  resolveTrustedExecutable,
-  type TrustedExecutable,
-} from "./trusted-executable.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = [
@@ -275,24 +272,22 @@ async function runCampaign(
     options.recoverScan !== undefined,
   );
   const pending: MultiscanTask[] = [];
-  let reportRuntime: Promise<[TrustedExecutable, string]> | undefined;
   const restoreReport = async (
     scanDir: string,
     schemaPluginRoot: string,
+    protectedRoot: string,
   ): Promise<void> => {
     try {
       // Configured historical archives may contain schemas without helper scripts.
-      const [python, helperRoot] = await (reportRuntime ??= (async () => {
-        return await Promise.all([
-          resolvePluginPythonCommand({
-            configuredPath: options.config.pythonPath,
-            environment: pluginHelperEnvironment(process.env),
-            protectedRoot: output,
-            signal: options.signal,
-          }),
-          bundledPluginRoot(),
-        ]);
-      })());
+      const [python, helperRoot] = await Promise.all([
+        resolvePluginPythonCommand({
+          configuredPath: options.config.pythonPath,
+          environment: pluginHelperEnvironment(process.env),
+          protectedRoot,
+          signal: options.signal,
+        }),
+        bundledPluginRoot(),
+      ]);
       await execFile(
         executablePathForSpawn(python.executable),
         [
@@ -410,7 +405,11 @@ async function runCampaign(
           }
         }
         if (!resumed.reportSealed) {
-          await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
+          await restoreReport(
+            canonicalArtifactOutput,
+            schemaPluginRoot,
+            resumed.checkout,
+          );
         }
         if (resumed.checkout === checkout) {
           await rm(checkout, { recursive: true, force: true }).catch(
@@ -1523,10 +1522,10 @@ async function checkoutRevision(
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
-  const git = async (...args: string[]): Promise<string> => {
+  const gitOutput = async (args: string[], input?: string): Promise<string> => {
     // Use the resolved absolute path so Windows PATHEXT cannot prefer a
     // .bat/.cmd shim over the trusted executable selected above.
-    const result = await execFile(
+    const pending = execFile(
       command.executable,
       [
         "-c",
@@ -1538,8 +1537,11 @@ async function checkoutRevision(
       ],
       { env: command.environment, signal },
     );
-    return result.stdout.trim();
+    if (input !== undefined) pending.child.stdin!.end(input);
+    return (await pending).stdout;
   };
+  const git = async (...args: string[]): Promise<string> =>
+    (await gitOutput(args)).trim();
   if (restoreIncomplete) {
     const gitDirectory = join(path, ".git");
     const metadata = await lstat(gitDirectory).catch((error: unknown) => {
@@ -1551,6 +1553,35 @@ async function checkoutRevision(
       const canonicalObjects = await ensureOutputDirectory(
         join(gitDirectory, "objects"),
       );
+      for (const entry of ["config", "FETCH_HEAD"]) {
+        const saved = await lstat(join(gitDirectory, entry)).catch(
+          undefinedIfMissingFile,
+        );
+        if (saved?.isSymbolicLink()) {
+          throw new Error(
+            "The retained campaign checkout has linked Git metadata write destinations.",
+          );
+        }
+      }
+      const head = await lstat(join(gitDirectory, "HEAD")).catch(
+        undefinedIfMissingFile,
+      );
+      if (head === undefined) {
+        const common = await readFile(
+          join(gitDirectory, "commondir"),
+          "utf8",
+        ).catch(undefinedIfMissingFile);
+        if (
+          common !== undefined &&
+          (await realpath(resolve(gitDirectory, common.trim()))) !==
+            canonicalGit
+        ) {
+          throw new Error(
+            "The retained campaign checkout has Git bindings outside its own directory.",
+          );
+        }
+        await git("init", "--quiet");
+      }
       const [common, objects, worktree] = await Promise.all([
         git("rev-parse", "--path-format=absolute", "--git-common-dir"),
         git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
@@ -1577,13 +1608,23 @@ async function checkoutRevision(
     task.repository,
     task.revision,
   );
-  await git(
-    "checkout",
-    "--quiet",
-    ...(restoreIncomplete ? ["--force"] : []),
-    "--detach",
-    "FETCH_HEAD",
-  );
+  await git("checkout", "--quiet", "--detach", "FETCH_HEAD");
+  if (restoreIncomplete) {
+    const deleted = await gitOutput(["ls-files", "--deleted", "-z"]);
+    if (deleted !== "") {
+      await gitOutput(
+        [
+          "--literal-pathspecs",
+          "restore",
+          "--source=FETCH_HEAD",
+          "--worktree",
+          "--pathspec-from-file=-",
+          "--pathspec-file-nul",
+        ],
+        deleted,
+      );
+    }
+  }
   if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }

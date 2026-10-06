@@ -2769,7 +2769,7 @@ describe("multiscan", () => {
       );
       expect(resolvePython).toHaveBeenCalledWith(
         expect.objectContaining({
-          protectedRoot: paths.output,
+          protectedRoot: join(paths.output, "checkouts", "report-recovery"),
 
           environment: runtime.pluginHelperEnvironment(process.env),
         }),
@@ -4383,3 +4383,196 @@ for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
     expect(runs).toHaveBeenCalledTimes(1);
   },
 );
+
+for (const entry of ["config", "FETCH_HEAD"] as const) {
+  test(`metadata recovery refuses external ${entry} write destinations`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "metadata-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const outside = await repository(paths.root, "other-metadata-repository");
+    git(outside.path, "config", "core.filemode", "false");
+    const destination = join(outside.path, ".git", entry);
+    if (entry === "FETCH_HEAD")
+      await writeFile(destination, "Preserve this other owned metadata.\n");
+    const bytes = await readFile(destination);
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    await rm(join(checkout, ".git", entry), { force: true });
+    await symlink(destination, join(checkout, ".git", entry));
+    let failed = false;
+    try {
+      await runMultiscan(campaign);
+    } catch {
+      failed = true;
+    }
+    expect(await readFile(destination)).toEqual(bytes);
+    expect(failed).toBe(true);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+for (const partial of [false, true]) {
+  test(`metadata recovery restores an interrupted repository with absent HEAD=${partial}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "partial-metadata-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    if (partial) await rm(join(checkout, ".git", "HEAD"));
+    await writeFile(
+      join(checkout, "retained.txt"),
+      "Preserve interrupted data.\n",
+    );
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+testPosix(
+  "metadata recovery preserves explicitly configured campaign-local Python",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "campaign-local-python-source");
+    const interpreter = join(paths.output, "tools", "bin", "python");
+    await mkdir(dirname(interpreter), { recursive: true });
+    await writeFile(
+      interpreter,
+      `#!/usr/bin/env node\nconst {spawnSync} = require("node:child_process");\nconst result = spawnSync(${JSON.stringify(PYTHON)}, process.argv.slice(2), {stdio: "inherit"});\nif (result.error) throw result.error;\nprocess.exit(result.status ?? 1);\n`,
+      { mode: 0o700 },
+    );
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: interpreter,
+          protectedRoot: checkout,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(interpreter);
+        return completedScan(settings.outputDir!, "complete", checkout);
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      config: { pythonPath: interpreter },
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+for (const modified of [false, true]) {
+  test(`preserved recovery data retains unrelated tracked modifications=${modified}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "preserved-tracked-source");
+    await writeFile(
+      join(source.path, "README.md"),
+      "Original tracked notes.\n",
+    );
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Tracked notes",
+    );
+    source.revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+    );
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs), {
+      recoverScan: async () => undefined,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(
+      paths.output,
+      "recovery-checkouts",
+      "repo",
+      "attempt-2",
+    );
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    const notes = modified
+      ? "Preserve interrupted tracked notes.\n"
+      : "Original tracked notes.\n";
+    if (modified) await writeFile(join(checkout, "README.md"), notes);
+    await writeFile(
+      join(checkout, "retained.txt"),
+      "Preserve untracked recovery data.\n",
+    );
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(await readFile(join(checkout, "README.md"), "utf8")).toBe(notes);
+    expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
+      "Preserve untracked recovery data.\n",
+    );
+    expect(await readFile(join(checkout, "src", "app.ts"), "utf8")).toBe(
+      await readFile(join(source.path, "src", "app.ts"), "utf8"),
+    );
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
