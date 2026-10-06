@@ -7160,10 +7160,19 @@ async function createPatchPullRequest(
     );
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const pathspec = files.map((file) => resolve(directory, file));
+  const pathspec = files.map((file) =>
+    relative(directory, resolve(directory, file)),
+  );
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...pathspec]);
+  const runFiles = (args: string[]) => run(["-C", directory, ...args]);
+  await runFiles([
+    "--literal-pathspecs",
+    "add",
+    "--dry-run",
+    "--",
+    ...pathspec,
+  ]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
@@ -7174,8 +7183,8 @@ async function createPatchPullRequest(
   try {
     await run(["switch", "-c", branch]);
     switched = true;
-    await run(["--literal-pathspecs", "add", "--", ...pathspec]);
-    await run([
+    await runFiles(["--literal-pathspecs", "add", "--", ...pathspec]);
+    await runFiles([
       "--literal-pathspecs",
       "commit",
       "--only",
@@ -7193,7 +7202,7 @@ async function createPatchPullRequest(
       try {
         committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
         if (!committed) {
-          await run([
+          await runFiles([
             "--literal-pathspecs",
             "restore",
             "--staged",
@@ -7437,11 +7446,21 @@ async function assessPatchRisk(
     args: string[],
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
   ) =>
-    dependencies.runRepositoryCommand("git", args, request.repository, options);
+    dependencies.runRepositoryCommand(
+      "git",
+      ["-C", directory, ...args],
+      request.repository,
+      options,
+    );
   const pathspec =
     request.files === undefined
       ? []
-      : ["--", ...request.files.map((file) => resolve(directory, file))];
+      : [
+          "--",
+          ...request.files.map((file) =>
+            relative(directory, resolve(directory, file)),
+          ),
+        ];
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
   const patchPath = join(root, "patch.diff");
   try {

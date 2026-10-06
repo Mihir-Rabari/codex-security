@@ -296,6 +296,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
 
   test.each([
     "ordinary",
+    "long checkout root",
     "HEAD filename",
     "relative Git environment",
     "configured worktree",
@@ -335,8 +336,17 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           ? "repository "
           : kind === "carriage return"
             ? "repository\r"
-            : "repository",
+            : kind === "long checkout root"
+              ? "r".repeat(Math.max(1, 180 - directory.length - 1))
+              : "repository",
       );
+      const extraFiles =
+        kind === "long checkout root"
+          ? Array.from(
+              { length: 200 },
+              (_, index) => `f${index.toString().padStart(3, "0")}.ts`,
+            )
+          : [];
       const subdirectory = join(repository, "sub");
       const removesComponent = kind.startsWith("removed component");
       const nestedMetadata = kind.startsWith("nested Git metadata");
@@ -349,7 +359,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             "sub/.codex/config.toml",
             "sub/app.ts",
           ]
-        : ["shared.ts", "sub/app.ts"];
+        : [...extraFiles, "shared.ts", "sub/app.ts"];
       const alias = join(directory, "alias");
       const linkedGitRoot = `${kind.includes("relative symlink Git environment") ? relative(subdirectory, alias) : alias}${process.platform === "win32" ? "" : `${sep}..`}`;
       const gitEnvironment =
@@ -428,7 +438,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             );
           await writeFile(join(repository, ".gitignore"), "metadata/\n");
         }
-        for (const file of ["sub/app.ts", "shared.ts"])
+        for (const file of ["sub/app.ts", "shared.ts", ...extraFiles])
           await writeFile(join(repository, file), "original\n");
         if (kind === "staged component changes")
           await writeFile(join(subdirectory, "shared.ts"), "original\n");
@@ -551,12 +561,16 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   }
                 }
                 await writeFile(join(repository, "shared.ts"), "fixed\n");
+                for (const file of extraFiles)
+                  await writeFile(join(repository, file), "fixed\n");
                 output?.stdout.write("Patch complete.");
               }
               return 0;
             },
             onRepositoryCommand: async (command, args, directory, options) => {
               if (command === "git") {
+                if (kind === "long checkout root")
+                  expect(args.join(" ").length).toBeLessThan(32767);
                 if (
                   providerEnvironment.GLAB_CONFIG_DIR !== undefined &&
                   args[0] === "remote"
