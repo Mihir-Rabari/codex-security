@@ -3717,6 +3717,75 @@ describe("patch publication integrity", () => {
     },
   );
 
+  test.each(
+    [false, true].flatMap((component) =>
+      [false, true].flatMap((relativeDiff) =>
+        [false, true].map((dirty) => [component, relativeDiff, dirty] as const),
+      ),
+    ),
+  )(
+    "preserves dirty rename sources with component=%j relative diff=%j dirty=%j",
+    async (component, relativeDiff, dirty) => {
+      const directory = await fixtures.create("patch-relative-renamed-source-");
+      const git = repositoryGit(directory);
+      const scanned = component ? join(directory, "component") : directory;
+      await mkdir(scanned, { recursive: true });
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "diff.relative", String(relativeDiff));
+      const source = join(scanned, "old.ts");
+      await writeFile(source, "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      if (dirty) {
+        await writeFile(source, "staged local edit\n");
+        git("add", ".");
+        await writeFile(source, "original\n");
+      }
+      const head = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const remote = await fixtures.create("patch-relative-renamed-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: scanned,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            modelCalls++;
+            await rename(source, join(scanned, "new.ts"));
+            output?.stdout.write("Synthetic rename complete.");
+            return 0;
+          },
+        },
+      );
+      expect(modelCalls).toBe(1);
+      expect(outcome.exitCode, outcome.stderr).toBe(dirty ? 2 : 0);
+      if (dirty) {
+        expect(outcome.stderr).toContain("uncommitted changes before patching");
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(git("write-tree")).toBe(index);
+        expect(git("ls-remote", "origin")).toBe("");
+      } else {
+        const file = component ? "component/new.ts" : "new.ts";
+        expect(git("show", `HEAD:${file}`)).toBe("original");
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      }
+      expect(await readFile(join(scanned, "new.ts"), "utf8")).toBe(
+        "original\n",
+      );
+      expect(existsSync(source)).toBe(false);
+    },
+  );
+
   test.each([
     "staged",
     "unstaged",

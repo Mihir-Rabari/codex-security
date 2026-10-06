@@ -7336,6 +7336,7 @@ async function createPatchPullRequest(
           [
             "diff",
             "--name-only",
+            "--no-relative",
             "--no-renames",
             "--diff-filter=D",
             "-z",
