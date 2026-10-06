@@ -2644,6 +2644,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
                 "status": "running",
                 "artifact_dir": str(output),
                 "result_manifest_path": None,
+                "attempt": 1,
             }
         )
         draft = saved_draft(
@@ -2908,7 +2909,7 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
         os.utime(output / "result.json", ns=(300, 300))
     workers = [saved_discovery_worker(output, "worker-one", 1 if layout == "current" else 2)]
     if layout == "legacy_attempt_reopens":
-        workers[0].pop("attempt")
+        workers[0]["attempt"] = 0
     binding = saved_binding("deep_repository")
     documents = workbench_saved_results.merge_saved_results(
         scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"

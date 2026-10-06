@@ -1252,11 +1252,15 @@ def merge_saved_results(
         def surface_id(surface: dict[str, Any], offset: int) -> str:
             source_id = surface.get("id")
             if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
-                positions = accepted_surface_positions.get((worker["id"], source_id), [])
+                positions = [
+                    position
+                    for position, accepted in accepted_surfaces.get((worker["id"], source_id), [])
+                    if accepted == surface
+                ]
                 if len(positions) == 1:
                     offset = positions[0]
-                elif not positions:
-                    return f"{prefix}-surface-{offset}-{_digest(source_id)[:16]}"
+                else:
+                    return f"{prefix}-surface-{offset}-{_digest(surface)[:16]}"
             return f"{prefix}-surface-{offset}"
 
         result = copy.deepcopy(item)
@@ -1282,7 +1286,8 @@ def merge_saved_results(
             candidate_digest = hashlib.sha256(item["candidateId"].encode()).hexdigest()
             result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
         if field == "surfaces":
-            result["id"] = surface_id(item, index)
+            original = source_rows[index - 1] if isinstance(source_rows, list) else item
+            result["id"] = surface_id(original, index)
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
@@ -1300,9 +1305,11 @@ def merge_saved_results(
                     ):
                         surface_ids.setdefault(provenance["sourceId"], surface["id"])
                 surfaces = source.get("surfaces", [])
+                source_surface_ids: dict[str, str] = {}
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-                        surface_ids.setdefault(surface["id"], surface_id(surface, offset))
+                        source_surface_ids.setdefault(surface["id"], surface_id(surface, offset))
+                surface_ids.update(source_surface_ids)
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
@@ -1379,14 +1386,16 @@ def merge_saved_results(
     accepted_coverage_sources = {
         id(draft["coverage"]) for relative, draft, _ in sources if relative in accepted_sources
     }
-    accepted_surface_positions: dict[tuple[str, str], list[int]] = {}
+    accepted_surfaces: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
     for relative, draft, worker_id in sources:
         if relative not in accepted_sources:
             continue
         surfaces = draft["coverage"].get("surfaces", [])
         for index, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
             if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-                accepted_surface_positions.setdefault((worker_id, surface["id"]), []).append(index)
+                accepted_surfaces.setdefault((worker_id, surface["id"]), []).append(
+                    (index, surface)
+                )
 
     for _, draft, _ in sources:
         questions = draft["coverage"].get("openQuestions")

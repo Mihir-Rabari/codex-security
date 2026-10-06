@@ -1308,6 +1308,8 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     "change",
     [
         "new linked surface",
+        "revised linked surface",
+        "reopened accepted surface",
         "candidate id fallback",
         "closed sibling candidate",
         "mixed receipts",
@@ -1340,7 +1342,7 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
         surface["candidateId"] = candidate
     elif change == "closed sibling candidate":
         deferred.append({**task, "id": "candidate-task", "candidateId": candidate})
-    elif change == "new linked surface":
+    elif change in {"new linked surface", "reopened accepted surface"}:
         surface["disposition"] = "no_issue_found"
         deferred = []
     elif change == "mixed receipts":
@@ -1414,17 +1416,19 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     checkpoint = None
     if change != "unchanged":
         updated = copy.deepcopy(draft)
-        if change == "new linked surface":
+        if change in {"new linked surface", "revised linked surface", "reopened accepted surface"}:
+            updated_id = "new-surface" if change == "new linked surface" else surface["id"]
+            updated_task = task["id"] if change == "revised linked surface" else "new-task"
             updated["coverage"].update(
                 surfaces=[
                     {
                         **surface,
-                        "id": "new-surface",
+                        "id": updated_id,
                         "label": "New follow-up",
                         "disposition": "needs_follow_up",
                     }
                 ],
-                deferred=[{**task, "id": "new-task", "surfaceIds": ["new-surface"]}],
+                deferred=[{**task, "id": updated_task, "surfaceIds": [updated_id]}],
             )
         elif change == "candidate id fallback":
             updated["coverage"].update(
@@ -1481,12 +1485,22 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     coverage = json.loads(coverage_path.read_text())
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
-    assert len(pending) == int(change in {"new linked surface", "repeated pending", "unchanged"})
-    if change == "new linked surface":
+    assert len(pending) == int(
+        change
+        in {
+            "new linked surface",
+            "revised linked surface",
+            "reopened accepted surface",
+            "repeated pending",
+            "unchanged",
+        }
+    )
+    if change in {"new linked surface", "revised linked surface", "reopened accepted surface"}:
         linked = next(
             row for row in coverage["surfaces"] if row["id"] == pending[0]["surfaceIds"][0]
         )
         assert linked["label"] == "New follow-up"
+        assert len({row["id"] for row in coverage["surfaces"]}) == len(coverage["surfaces"])
     elif change in {"closed sibling candidate", "mixed receipts"}:
         saved_surface = next(
             row for row in coverage["surfaces"] if row.get("label") == surface["label"]
