@@ -19,6 +19,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from candidate_identity import (
+    _deferred_candidate_id,
     candidate_key,
     candidate_owner,
     coverage_candidate_key,
@@ -1189,21 +1190,6 @@ def _merge_tied_parent_observations(
 
 def _saved_coverage_id(item: dict[str, Any]) -> str:
     return item.get("candidateId") or f"saved-{_digest(item)[:16]}"
-
-
-def _deferred_candidate_id(
-    row: dict[str, Any],
-    owner: str | None,
-    ambiguous_deferred: set[tuple[str | None, str]],
-) -> str | None:
-    identity = row.get("candidateId") or row.get("id")
-    if not isinstance(identity, str):
-        return None
-    if (owner, identity) in ambiguous_deferred and not any(
-        key in row for key in ("candidateId", "candidate", "finding")
-    ):
-        return None
-    return identity
 
 
 def _generic_surface_updates(

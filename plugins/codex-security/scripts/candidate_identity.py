@@ -61,6 +61,21 @@ def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> Ca
     return candidate_key(item.get("candidateId"), source_owner)
 
 
+def _deferred_candidate_id(
+    row: dict[str, Any],
+    owner: str | None,
+    ambiguous_deferred: set[tuple[str | None, str]],
+) -> str | None:
+    identity = row.get("candidateId") or row.get("id")
+    if not isinstance(identity, str):
+        return None
+    if (owner, identity) in ambiguous_deferred and not any(
+        key in row for key in ("candidateId", "candidate", "finding")
+    ):
+        return None
+    return identity
+
+
 def surface_reference_key(
     surface_id: Any, source: dict[str, Any], surfaces: list[dict[str, Any]]
 ) -> CandidateKey | None:
