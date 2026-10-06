@@ -152,6 +152,7 @@ function requirePortableWindowsRepositoryPath(path: string): void {
 }
 
 interface GitWorktreeContext {
+  protectedRoot?: string;
   objectDirectory?: string;
   runGit?: (args: readonly string[]) => Promise<string>;
 }
@@ -168,7 +169,13 @@ export async function enclosingGitWorktreeRoot(
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
   const output = (args: readonly string[]) =>
     options.runGit?.(args) ??
-    gitOutput(repository, args, signal, objectEnvironment);
+    gitOutput(
+      options.protectedRoot ?? repository,
+      args,
+      signal,
+      objectEnvironment,
+      repository,
+    );
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -308,7 +315,14 @@ export async function gitMetadataDirectories(
       ? {}
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
   const output = (args: readonly string[]) =>
-    options.runGit?.(args) ?? gitOutput(repository, args, signal, environment);
+    options.runGit?.(args) ??
+    gitOutput(
+      options.protectedRoot ?? repository,
+      args,
+      signal,
+      environment,
+      repository,
+    );
   const [directory, commonDirectory] = await Promise.all([
     output(["rev-parse", "--absolute-git-dir"]),
     output(["rev-parse", "--git-common-dir"]),
@@ -482,12 +496,13 @@ async function requireGitWorktreeBinding(
       if (
         await (options.runGit?.(["config", "--get", "core.worktree"]) ??
           gitOutput(
-            repository,
+            options.protectedRoot ?? repository,
             ["config", "--get", "core.worktree"],
             signal,
             options.objectDirectory === undefined
               ? {}
               : { GIT_OBJECT_DIRECTORY: options.objectDirectory },
+            repository,
           ))
       )
         return;
