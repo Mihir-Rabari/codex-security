@@ -200,11 +200,11 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         "id": "migrated-unfinished",
         "scope": {"allRepositories": True},
         "stages": {
-            "scan": {"status": "failed", "error": "Synthetic interruption"},
-            "publish": {"status": "running", "error": "Synthetic earlier failure"},
+            "scan": {"status": "failed", "error": "Synthetic interruption\0retained tail"},
+            "publish": {"status": "running", "error": "Synthetic earlier failure\0retained tail"},
             "dedupe": {
                 "status": "failed",
-                "error": "Synthetic lost acknowledgement",
+                "error": "Synthetic lost acknowledgement\0retained tail",
                 "result": {"duplicateGroups": [["a", "b"]]},
                 "pendingWrite": {"groups": [["a", "b"]]},
             },
