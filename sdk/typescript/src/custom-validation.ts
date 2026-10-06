@@ -410,8 +410,10 @@ export async function runCustomValidation(options: {
   coverage.deferred = coverage.deferred.filter((item) => {
     if (
       item.candidateId === undefined ||
-      (item["sourceWorkerId"] != null && typeof item["sourceWorkerId"] !== "string")
-    ) return true;
+      (item["sourceWorkerId"] != null &&
+        typeof item["sourceWorkerId"] !== "string")
+    )
+      return true;
     const key = candidateIdentity(item.candidateId, item["sourceWorkerId"]);
     if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDeferred.get(key) ?? [];
