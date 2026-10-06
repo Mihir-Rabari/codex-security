@@ -369,3 +369,40 @@ for (const omitted of ["none", "receipts", "ids-and-receipts"]) {
     }
   });
 }
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const directFile of [false, true]) {
+    for (const omitCoverageIds of [false, true]) {
+      test(`persisted coverage identities survive recovery (${workflowVersion}, direct: ${directFile}, omitted: ${omitCoverageIds})`, async () => {
+        const root = await mkdtemp(path.join(tmpdir(), "coverage-identities-"));
+        try {
+          await publishCoverageFixture(root, "partial", {
+            workflowVersion,
+            directFile,
+            omitCoverageIds,
+            stopAfterDraft: true,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  test(`direct-file coverage retains competing explicit identities (${workflowVersion})`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "coverage-competing-"));
+    try {
+      await publishCoverageFixture(root, "partial", {
+        workflowVersion,
+        directFile: true,
+        omitCoverageIds: true,
+        competingIds: true,
+        stopAfterDraft: true,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

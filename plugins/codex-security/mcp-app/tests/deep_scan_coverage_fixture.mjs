@@ -36,6 +36,9 @@ export async function publishCoverageFixture(
     stopAfterDraft = false,
     receiptRetry = false,
     workflowVersion,
+    directFile = false,
+    omitCoverageIds = false,
+    competingIds = false,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -161,6 +164,22 @@ export async function publishCoverageFixture(
         ? [{ question: `Deployment question ${index + 1}.` }]
         : [],
     };
+    if (omitCoverageIds) {
+      for (const surface of coverage.surfaces) delete surface.id;
+      for (const deferred of coverage.deferred) {
+        delete deferred.id;
+        delete deferred.candidateId;
+        delete deferred.surfaceIds;
+      }
+    }
+    if (competingIds) {
+      coverage.surfaces.push({ ...coverage.surfaces[0], id: "owned-surface" });
+      if (coverage.deferred.length)
+        coverage.deferred.push({
+          ...coverage.deferred[0],
+          id: "owned-deferred",
+        });
+    }
     for (const field of [
       "surfaces",
       "explicitExclusions",
@@ -216,6 +235,8 @@ export async function publishCoverageFixture(
           },
         },
       );
+    } else if (directFile) {
+      await writeFile(resultPath, bytes);
     } else {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -426,6 +447,9 @@ export async function publishCoverageFixture(
       }
     }
   }
+  const parentCoverage = JSON.parse(
+    await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+  );
   if (stopAfterDraft) {
     await runWorkbench([
       "fail-scan",
@@ -452,6 +476,39 @@ export async function publishCoverageFixture(
         await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
       ),
     );
+  }
+  const finalCoverage = JSON.parse(
+    await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
+  );
+  if (directFile || omitCoverageIds) {
+    assert.deepEqual(finalCoverage.surfaces, parentCoverage.surfaces);
+    assert.deepEqual(
+      finalCoverage.deferred.filter((row) => row.id !== "scan-stopped"),
+      parentCoverage.deferred,
+    );
+  }
+  if (omitCoverageIds) {
+    for (const field of ["surfaces", "deferred"]) {
+      const ids = parentCoverage[field].flatMap((row) =>
+        typeof row.provenance.sourceId === "string"
+          ? [row.provenance.sourceId]
+          : [],
+      );
+      assert.equal(
+        ids.length,
+        directFile
+          ? competingIds
+            ? parentCoverage[field].length / 2
+            : 0
+          : parentCoverage[field].length,
+        "sourceId must describe an identity persisted in the worker source",
+      );
+      if (directFile && competingIds)
+        assert.deepEqual(
+          new Set(ids),
+          new Set([field === "surfaces" ? "owned-surface" : "owned-deferred"]),
+        );
+    }
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);

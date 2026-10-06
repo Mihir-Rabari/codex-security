@@ -1363,8 +1363,10 @@ def merge_saved_results(
             elif modified == parent_modified and draft != parent:
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
+    parent_uses_source_coverage = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+        parent_uses_source_coverage = "sourceCoverage" in parent
 
     projected_coverages = [
         accepted_coverage,
@@ -1487,20 +1489,22 @@ def merge_saved_results(
             manifest["scan"]["threatModel"]["origin"] = "recovered"
         if selected_model_source is not None:
             selected_model_source[:] = [frozen_model_source]
-    coverage = {
-        "completeness": "partial",
-        "mode": binding["coverageMode"],
-        "inventoryStrategy": "diff"
-        if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
-        else "scoped_path"
-        if binding["coverageMode"] == "scoped_path"
-        else "repository",
-        **binding["scope"],
-        "surfaces": [],
-        "explicitExclusions": [],
-        "deferred": [],
-        **(copy.deepcopy(parent["coverage"]) if parent else {}),
-    }
+    coverage = copy.deepcopy(parent["coverage"]) if parent else {}
+    if not coverage or parent_uses_source_coverage:
+        coverage = {
+            "completeness": "partial",
+            "mode": binding["coverageMode"],
+            "inventoryStrategy": "diff"
+            if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
+            else "scoped_path"
+            if binding["coverageMode"] == "scoped_path"
+            else "repository",
+            **binding["scope"],
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+            **coverage,
+        }
     if isinstance(coverage.get("openQuestions"), list):
         coverage["openQuestions"] = [
             {"question": item.strip()} if isinstance(item, str) else item

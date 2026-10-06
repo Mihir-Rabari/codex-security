@@ -118,6 +118,7 @@ export async function readDeepReductionSources(
           },
           true,
         ).catch(() => []);
+        const originalCoverage = structuredClone(result.coverage);
         normalizeSavedScanCoverage([
           result,
           ...archived.map(({ input }) => input),
@@ -137,6 +138,7 @@ export async function readDeepReductionSources(
                 ? []
                 : [{ attempt: Number(number), coverage: input.coverage }];
             }),
+            originalCoverage,
           ),
           result: reduction,
         };

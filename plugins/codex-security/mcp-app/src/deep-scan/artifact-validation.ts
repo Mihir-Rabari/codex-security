@@ -310,6 +310,7 @@ export function projectDiscoveryCoverage(
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
+  originalCoverage: ScanDraftInput["coverage"] = coverage,
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
@@ -323,7 +324,11 @@ export function projectDiscoveryCoverage(
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
     `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
-  const project = (field: string, item: Record<string, unknown>) => {
+  const project = (
+    field: string,
+    item: Record<string, unknown>,
+    source: Record<string, unknown> = item,
+  ) => {
     const original = history.find((source) =>
       ((source.coverage[field] as unknown[] | undefined) ?? []).some((saved) =>
         isDeepStrictEqual(
@@ -353,7 +358,8 @@ export function projectDiscoveryCoverage(
     result.provenance = {
       ...projected,
       ...origin,
-      ...(item.id === undefined ? {} : { sourceId: item.id }),
+      // Normalized IDs help compare history; provenance describes the saved source.
+      ...(source.id === undefined ? {} : { sourceId: source.id }),
       ...(item.candidateId === undefined
         ? {}
         : { candidateId: item.candidateId }),
@@ -361,7 +367,11 @@ export function projectDiscoveryCoverage(
     return result;
   };
   const projectedSurfaces = surfaces.map((surface, index) => {
-    const item = project("surfaces", surface);
+    const item = project(
+      "surfaces",
+      surface,
+      (originalCoverage.surfaces as Record<string, unknown>[])[index],
+    );
     return {
       ...item,
       id: `${prefix(item)}-surface-${index + 1}`,
@@ -386,7 +396,11 @@ export function projectDiscoveryCoverage(
     ).map((item) => project("explicitExclusions", item)),
     deferred: (coverage.deferred as Record<string, unknown>[]).map(
       (item, index) => {
-        const projected = project("deferred", item);
+        const projected = project(
+          "deferred",
+          item,
+          (originalCoverage.deferred as Record<string, unknown>[])[index],
+        );
         return {
           ...projected,
           id: `${prefix(projected)}-deferred-${index + 1}`,

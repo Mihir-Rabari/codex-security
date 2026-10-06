@@ -32,6 +32,11 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     monkeypatch,
 ):
     scan = publication_scan(scope=scope)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+            ("deep-security-scan/v2" if host_coverage else "deep-scan-mcp/v1", scan.scan_id),
+        )
     projected_parent = parent_draft in ("projected", "interrupted")
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     source_coverage = {
@@ -134,16 +139,13 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     source_files.append(reducer)
     saved_bytes = {path: path.read_bytes() for path in source_files}
     if parent_draft == "projected":
-        (scan.scan_dir / "coverage.json").write_text(json.dumps(source_coverage))
+        (scan.scan_dir / "coverage.json").write_text(
+            json.dumps({**scan.coverage, **source_coverage})
+        )
     if not parent_draft:
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / filename).unlink()
     if parent_draft == "interrupted":
-        with workbench_db:
-            workbench_db.execute(
-                "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
-                ("deep-security-scan/v2" if host_coverage else "deep-scan-mcp/v1", scan.scan_id),
-            )
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             os.utime(scan.scan_dir / filename, ns=(100, 100))
         coverage_path = scan.scan_dir / "coverage.json"
