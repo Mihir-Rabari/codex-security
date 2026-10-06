@@ -179,9 +179,17 @@ export function refreshDiffCandidateHistory(
     source.findings = source.findings.filter((finding) => {
       const pending = reopened.get(findingCandidateKey(finding) ?? "");
       if (!pending) return true;
-      if (object(pending.finding))
-        preserveFindingDetails(pending.finding as JsonObject, finding);
-      else pending.finding = finding;
+      if (object(pending.finding)) {
+        if (object((pending.finding as JsonObject).provenance))
+          preserveFindingDetails(pending.finding as JsonObject, finding);
+        else {
+          const previous = Array.isArray(pending.previousFindings)
+            ? pending.previousFindings
+            : [];
+          if (!previous.some((item) => isDeepStrictEqual(item, finding)))
+            pending.previousFindings = [...previous, structuredClone(finding)];
+        }
+      } else pending.finding = finding;
       return false;
     });
   }
@@ -199,7 +207,7 @@ function isGeneratedFollowUp(
     candidate !== undefined &&
     surface.disposition === "needs_follow_up" &&
     surface.label === candidate.summary &&
-    surface.notes === candidateReason(candidate) &&
+    surface.notes === (pending?.reason ?? candidateReason(candidate)) &&
     !deferred.some(
       (other) =>
         coverageCandidateKey(other) !== coverageCandidateKey(surface) &&
@@ -365,6 +373,7 @@ export function preserveDiffCandidateDecisions(
 export function preserveUnresolvedDiffCandidates(
   input: ScanDraftInput,
   candidates: DiffCandidates,
+  submitted = input,
 ): ScanDraftInput {
   if (candidates === undefined) return input;
   const resolvedKeys = resolvedCandidateKeys(input);
@@ -414,6 +423,26 @@ export function preserveUnresolvedDiffCandidates(
             : item.reason,
       };
     });
+  const receiptDecisions = new Set(
+    (submitted.coverage.surfaces as JsonObject[])
+      .filter(
+        (surface) =>
+          isTerminalCandidateDecision(surface) &&
+          Array.isArray(surface.receiptRefs) &&
+          surface.receiptRefs.length > 0,
+      )
+      .map((surface) => coverageCandidateKey(surface)),
+  );
+  // Keep submitted proof gaps until the terminal decision's receipts are verified.
+  for (const item of submitted.coverage.deferred as JsonObject[]) {
+    const key = coverageCandidateKey(item);
+    if (
+      resolvedKeys.has(key!) &&
+      receiptDecisions.has(key) &&
+      !deferred.some((row) => isDeepStrictEqual(row, item))
+    )
+      deferred.push(structuredClone(item));
+  }
   const recordedKeys = new Set(
     deferred.map((item) => coverageCandidateKey(item)),
   );

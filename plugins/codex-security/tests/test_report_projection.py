@@ -1162,3 +1162,37 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+
+
+def test_saved_candidate_proof_rows_preserve_order_and_python_equality() -> None:
+    first = {
+        "candidateId": "same-review",
+        "reason": "First proof gap.",
+        "evidence": {"count": 1, "checks": [False, {"done": None}]},
+    }
+    equivalent = {
+        "evidence": {"checks": [0, {"done": None}], "count": 1.0},
+        "reason": "First proof gap.",
+        "candidateId": "same-review",
+    }
+    other = {**first, "reason": "Second proof gap.", "paths": ["src/handler.ts"]}
+    rows = [first, equivalent, other, copy.deepcopy(first)]
+    coverage = {"deferred": rows, "surfaces": [], "explicitExclusions": []}
+    assert CANDIDATES.unresolved_candidate_rows(coverage) == [first, other]
+    assert CANDIDATES.unresolved_candidates(coverage) == [first]
+    coverage["surfaces"] = [{"candidateId": "same-review", "disposition": "rejected"}]
+    assert CANDIDATES.unresolved_candidate_rows(coverage) == []
+
+
+def test_large_saved_candidate_projection_preserves_all_identities_and_proof_gaps() -> None:
+    rows = [
+        {
+            "candidateId": f"review-{index}",
+            "reason": f"Proof gap {index}",
+            "candidate": {"evidence": [index, {"path": "src/handler.ts"}]},
+        }
+        for index in range(2000)
+    ]
+    coverage = {"deferred": rows + copy.deepcopy(rows), "surfaces": [], "explicitExclusions": []}
+    assert CANDIDATES.unresolved_candidate_rows(coverage) == rows
+    assert CANDIDATES.unresolved_candidates(coverage) == rows

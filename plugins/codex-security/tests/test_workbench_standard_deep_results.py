@@ -1708,6 +1708,12 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
 def test_canceled_reducer_checkpoint_supersedes_discovery_result(
     tmp_path: Path, pending_candidate: bool
 ) -> None:
+    _canceled_reducer_checkpoint_case(tmp_path, pending_candidate)
+
+
+def _canceled_reducer_checkpoint_case(
+    tmp_path: Path, pending_candidate: bool, saved_deferred: object = Ellipsis
+) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
     contract_dir = tmp_path / "contract"
@@ -1778,6 +1784,8 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(
                 "reason": "The parser route still needs validation.",
             }
         ]
+    if saved_deferred is not Ellipsis:
+        reduced["coverage"]["deferred"] = saved_deferred
     reducer_result.write_text(json.dumps(reduced))
     checkpoints = reducer_result.parent / "checkpoints"
     checkpoints.mkdir()
@@ -3736,3 +3744,10 @@ def test_interrupted_worker_reopening_preserves_candidate_identity(
     )
     assert replay is not None
     assert all(row in replay[2]["deferred"] for row in expected_pending)
+
+
+@pytest.mark.parametrize("deferred", [None, 1, {"legacy": "annotation"}, []])
+def test_stopped_reducer_projects_candidates_around_nonarray_saved_deferred(
+    tmp_path: Path, deferred: object
+) -> None:
+    _canceled_reducer_checkpoint_case(tmp_path, True, deferred)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 CandidateKey = tuple[str | None, str]
@@ -101,6 +102,25 @@ def surface_reference_key(
     return candidate_key(surface_id, target.get("sourceWorkerId"))
 
 
+def reducer_coverage(coverage: dict[str, Any], candidates: list[Any]) -> dict[str, Any]:
+    result = copy.deepcopy(coverage)
+    deferred = result.get("deferred")
+    result["deferred"] = (deferred if isinstance(deferred, list) else []) + copy.deepcopy(
+        candidates
+    )
+    result["completeness"] = "partial"
+    return result
+
+
+def _saved_row_key(value: Any) -> Any:
+    # Saved rows are JSON values; preserve dict equality and numeric equality.
+    if isinstance(value, dict):
+        return frozenset((key, _saved_row_key(child)) for key, child in value.items())
+    if isinstance(value, list):
+        return tuple(_saved_row_key(child) for child in value)
+    return value
+
+
 def unresolved_candidates(
     coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
@@ -131,10 +151,14 @@ def unresolved_candidate_rows(
             and (key := coverage_candidate_key(item)) is not None
         )
     candidates = []
+    seen = set()
     for item in objects(coverage.get("deferred")):
         key = coverage_candidate_key(item)
-        if key is not None and key not in resolved and item not in candidates:
-            candidates.append(item)
+        if key is not None and key not in resolved:
+            row_key = _saved_row_key(item)
+            if row_key not in seen:
+                seen.add(row_key)
+                candidates.append(item)
     return candidates
 
 

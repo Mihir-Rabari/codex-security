@@ -2605,7 +2605,12 @@ print(json.dumps(started))
                 id: "receipt-proof-gap",
                 candidateId: savedCandidate.candidate_id,
                 reason: "The submitted candidate still has a proof gap.",
-                candidate: savedCandidate,
+                candidate: {
+                  ...savedCandidate,
+                  analystNote: "Authored candidate annotation.",
+                },
+                paths: ["src/handler.ts"],
+                finding: { title: "Authored deferred evidence" },
                 surfaceIds: ["receipt-decision"],
               },
             ],
@@ -2622,6 +2627,12 @@ print(json.dumps(started))
           },
         },
         workbench,
+      );
+      await rm(
+        path.join(
+          context.root,
+          "artifacts/02_discovery/candidate_ledger.jsonl",
+        ),
       );
       await workbench([termination, "--scan-id", context.scanId]);
       const coverage = await readCoverage(context);
@@ -2642,6 +2653,21 @@ print(json.dumps(started))
         receipt === "missing" ? 1 : 0,
       );
       if (receipt === "missing") {
+        const pending = coverage.deferred.find(
+          (row: FixtureObject) => row.id === "receipt-proof-gap",
+        );
+        assert.equal(
+          pending.reason,
+          "The submitted candidate still has a proof gap.",
+        );
+        assert.deepEqual(pending.candidate, {
+          ...savedCandidate,
+          analystNote: "Authored candidate annotation.",
+        });
+        assert.deepEqual(pending.paths, ["src/handler.ts"]);
+        assert.deepEqual(pending.finding, {
+          title: "Authored deferred evidence",
+        });
         assert.ok(
           coverage.deferred.some(
             (row: FixtureObject) =>
@@ -2809,6 +2835,127 @@ for (const owner of [undefined, "other-worker"]) {
           (row: FixtureObject) => row.sourceWorkerId === owner,
         ).analystNote,
         "Keep independent ownership.",
+      );
+  });
+}
+
+for (const provenance of [undefined, null, "Saved annotation", {}]) {
+  for (const disposition of ["suppressed", "not_applicable"] as const) {
+    test(`reopens compact Diff annotation ${JSON.stringify(provenance)}/${disposition}`, async (t) => {
+      const reportable = candidate(
+        "compact-history",
+        "reportable",
+        "reportable",
+      );
+      const context = await fixture(t, [reportable]);
+      const canonical = finding(reportable.candidate_id);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+        findings: [canonical],
+      });
+      const terminal = candidate(reportable.candidate_id, disposition);
+      await writeLedger(context, [terminal]);
+      const compact = {
+        title: "Saved annotation",
+        ...(provenance === undefined ? {} : { provenance }),
+      };
+      const decision = { ...draft(), complete: true };
+      decision.coverage.surfaces = [
+        {
+          candidateId: terminal.candidate_id,
+          candidate: terminal,
+          label: terminal.summary,
+          disposition:
+            disposition === "suppressed" ? "rejected" : "not_applicable",
+          notes: `Candidate review concluded: ${terminal.summary}`,
+          finding: compact,
+        },
+      ];
+      await recordCodexSecurityScanDraft(context, decision);
+      await writeLedger(context, [
+        candidate(terminal.candidate_id, "deferred"),
+      ]);
+      for (const complete of [false, true]) {
+        await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+        const coverage = await readCoverage(context);
+        const pending = coverage.deferred.find(
+          (row: FixtureObject) => row.candidateId === terminal.candidate_id,
+        );
+        assert.ok(pending);
+        assert.equal(pending.finding.title, compact.title);
+        const history =
+          provenance && typeof provenance === "object"
+            ? pending.finding.provenance.previousFindings
+            : pending.previousFindings;
+        if (!(provenance && typeof provenance === "object"))
+          assert.deepEqual(pending.finding, compact);
+        assert.ok(
+          history.some(
+            (item: FixtureObject) =>
+              item.provenance.candidateId === terminal.candidate_id &&
+              item.summary === canonical.summary,
+          ),
+        );
+      }
+    });
+  }
+}
+
+for (const shared of [false, true]) {
+  test(`confirmation closes generated custom proof-gap followup, shared=${shared}`, async (t) => {
+    const current = candidate("authored-gap");
+    const context = await fixture(t, [current]);
+    const initial = draft([
+      {
+        candidateId: current.candidate_id,
+        candidate: current,
+        reason: "An authored runtime proof remains missing.",
+      },
+    ]);
+    initial.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, { ...initial, complete: true });
+    const coverage = await readCoverage(context);
+    const followup = coverage.surfaces.find(
+      (row: FixtureObject) => row.candidateId === current.candidate_id,
+    );
+    assert.equal(followup.notes, "An authored runtime proof remains missing.");
+    if (shared)
+      coverage.deferred.push({
+        id: "independent-review",
+        reason: "Independent unfinished review.",
+        surfaceIds: [followup.id],
+      });
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: true,
+      findings: [finding(current.candidate_id)],
+      coverage: {
+        completeness: coverage.completeness,
+        surfaces: coverage.surfaces,
+        explicitExclusions: coverage.explicitExclusions,
+        deferred: coverage.deferred,
+      },
+    });
+    const saved = await readCoverage(context);
+    assert.equal(
+      saved.deferred.some(
+        (row: FixtureObject) => row.candidateId === current.candidate_id,
+      ),
+      false,
+    );
+    assert.equal(
+      saved.surfaces.some(
+        (row: FixtureObject) =>
+          row.id === followup.id && row.disposition === "needs_follow_up",
+      ),
+      shared,
+    );
+    if (shared)
+      assert.ok(
+        saved.deferred.some(
+          (row: FixtureObject) => row.id === "independent-review",
+        ),
       );
   });
 }

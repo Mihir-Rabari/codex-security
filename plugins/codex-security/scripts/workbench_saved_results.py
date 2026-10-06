@@ -26,6 +26,7 @@ from candidate_identity import (
     coverage_candidate_key,
     diff_candidate_disposition,
     finding_candidate_key,
+    reducer_coverage,
     resolved_candidate_surface_keys,
     surface_reference_key,
     unresolved_candidates,
@@ -57,6 +58,7 @@ from finalize_scan_contract import (
 from workbench_budget_candidates import (
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
+    recover_candidate_receipts,
 )
 from workbench_budget_candidates import (
     preserve_budget_candidates as preserve_budget_candidates,
@@ -1550,11 +1552,9 @@ def merge_saved_results(
             if relative in reducer_paths and draft.get("unresolvedCandidates"):
                 if not isinstance(draft["unresolvedCandidates"], list):
                     raise ContractError("Saved reducer unresolvedCandidates must be an array.")
-                projected["coverage"] = copy.deepcopy(projected["coverage"])
-                projected["coverage"].setdefault("deferred", []).extend(
-                    copy.deepcopy(draft["unresolvedCandidates"])
+                projected["coverage"] = reducer_coverage(
+                    projected["coverage"], draft["unresolvedCandidates"]
                 )
-                projected["coverage"]["completeness"] = "partial"
             sources.append((relative, projected, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
@@ -1626,6 +1626,8 @@ def merge_saved_results(
             elif modified == parent_modified and draft != parent:
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
+
+    parent = recover_candidate_receipts(parent, scan_dir, warnings)
 
     decision_drafts = [
         draft

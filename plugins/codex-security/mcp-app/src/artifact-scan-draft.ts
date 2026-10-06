@@ -146,6 +146,7 @@ export async function recordCodexSecurityScanDraft(
     const reconciled = preserveUnresolvedDiffCandidates(
       preserved.input,
       candidates,
+      parsed,
     );
     if (!publishDraft) await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(

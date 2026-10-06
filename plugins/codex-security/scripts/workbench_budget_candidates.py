@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+from pathlib import Path
 from typing import Any
 
 from candidate_identity import (
@@ -11,6 +13,32 @@ from candidate_identity import (
     finding_candidate_key,
     surface_reference_key,
 )
+from finalize_scan_contract import _recover_unsealed_coverage
+
+
+def recover_candidate_receipts(
+    parent: dict[str, Any] | None, scan_dir: Path, warnings: list[str]
+) -> dict[str, Any] | None:
+    if parent is None:
+        return parent
+    surfaces = parent["coverage"].get("surfaces")
+    if not isinstance(surfaces, list) or not any(
+        isinstance(row, dict)
+        and row.get("disposition") in ("rejected", "not_applicable")
+        and row.get("receiptRefs")
+        for row in surfaces
+    ):
+        return parent
+    # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    parent = copy.deepcopy(parent)
+    _recover_unsealed_coverage(
+        parent["coverage"],
+        Path(__file__).resolve().parent.parent / "schemas",
+        scan_dir,
+        warnings,
+        [],
+    )
+    return parent
 
 
 def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
