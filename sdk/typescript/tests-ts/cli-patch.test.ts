@@ -4461,15 +4461,21 @@ describe("patch change tracking", () => {
       "global",
       "unchanged",
       "unchanged-directory",
+      "removed",
+      "removed-unignored",
+      "force-added",
       "new",
     ])(
       `preserves pre-existing ignored paths during ${mode} publication (%s)`,
       async (kind) => {
         const { directory: root, git, remote } = await publicationRepository();
+        const removed = kind === "removed" || kind === "removed-unignored";
+        const forced = kind === "force-added";
+        const directory = kind === "unchanged-directory" || removed || forced;
         const file =
           kind === "directory"
             ? "cache/nested/local.txt"
-            : kind === "unchanged-directory"
+            : directory
               ? "src/local.pyc"
               : "local.env";
         const pattern = `${kind === "directory" ? "cache/" : file}\n`;
@@ -4494,10 +4500,12 @@ describe("patch change tracking", () => {
           await writeFile(join(root, file), "synthetic local data\n");
         }
         const head = git("rev-parse", "HEAD");
-        const index = git("write-tree");
+        let expectedIndex = git("write-tree");
         const result = resultWithFindings(["high"]);
         result.findings.findings[0]!.locations[0]!.path = file;
-        const blocked = !unchanged && kind !== "new";
+        const blocked = forced
+          ? mode === "saved"
+          : !unchanged && !removed && kind !== "new";
         const outcome = await runWorkflow(
           [
             "patch",
@@ -4517,24 +4525,33 @@ describe("patch change tracking", () => {
                   ? "[]"
                   : "https://github.example.test/example/repository/pull/1",
             onCodex: async (_args, output) => {
-              if (!unchanged) await writeFile(rule, "");
+              if (!unchanged && kind !== "removed" && !forced)
+                await writeFile(rule, "");
               if (kind === "new")
                 await writeFile(join(root, file), "synthetic generated data\n");
-              if (unchanged)
+              if (unchanged || removed || forced)
                 await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
+              if (removed) await rm(join(root, file));
+              if (forced) {
+                git("add", "--force", file);
+                expectedIndex = git("write-tree");
+              }
               output?.stdout.write(
                 JSON.stringify({
                   patches: [
                     {
                       occurrenceId: "occ_1",
                       status: "verified",
-                      files: unchanged
+                      files: directory
                         ? [
-                            kind === "unchanged-directory"
-                              ? "src"
-                              : "src/finding-1.ts",
+                            "src",
+                            ...(kind === "removed-unignored"
+                              ? [".gitignore"]
+                              : []),
                           ]
-                        : [".gitignore", file],
+                        : unchanged
+                          ? ["src/finding-1.ts"]
+                          : [".gitignore", file],
                       verification: "Synthetic verification.",
                     },
                   ],
@@ -4550,9 +4567,9 @@ describe("patch change tracking", () => {
             "uncommitted changes before patching",
           );
           expect(git("rev-parse", "HEAD")).toBe(head);
-          expect(git("write-tree")).toBe(index);
+          expect(git("write-tree")).toBe(expectedIndex);
           expect(git("ls-remote", "origin")).toBe("");
-          expect(await readFile(rule, "utf8")).toBe("");
+          expect(await readFile(rule, "utf8")).toBe(forced ? pattern : "");
         } else {
           expect(git("ls-remote", "origin")).toContain(
             git("rev-parse", "HEAD"),
@@ -4561,15 +4578,24 @@ describe("patch change tracking", () => {
             git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
           ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
         }
-        if (unchanged)
+        if (unchanged || removed || (forced && !blocked))
           expect(
             git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
           ).not.toContain(file);
-        expect(await readFile(join(root, file), "utf8")).toBe(
-          kind === "new"
-            ? "synthetic generated data\n"
-            : "synthetic local data\n",
-        );
+        if (forced && !blocked)
+          expect(git("diff", "--cached", "--name-only").split("\n")).toContain(
+            file,
+          );
+        if (removed)
+          await expect(
+            readFile(join(root, file), "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+        else
+          expect(await readFile(join(root, file), "utf8")).toBe(
+            kind === "new"
+              ? "synthetic generated data\n"
+              : "synthetic local data\n",
+          );
       },
     );
   }
