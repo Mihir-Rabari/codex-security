@@ -656,17 +656,19 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         );
         const result = JSON.parse(outcome.stdout);
         expect(result.repository).toBe(subdirectory);
-        expect(result.applied).toBe(true);
+        expect(result.applied).toBe(!linkedComponent);
+        const reportedFiles = linkedComponent ? [] : changedFiles;
+        expect(result.filesChanged).toBe(reportedFiles.length);
         if (kind === "staged component changes")
           expect(git("show", ":sub/shared.ts")).toBe("staged component");
         expect(result.files).toEqual(
-          changedFiles.map((file) =>
+          reportedFiles.map((file) =>
             relative(subdirectory, join(repository, file)).split(sep).join("/"),
           ),
         );
         expect(
           result.files.map((file: string) => resolve(result.repository, file)),
-        ).toEqual(changedFiles.map((file) => join(repository, file)));
+        ).toEqual(reportedFiles.map((file) => join(repository, file)));
         if (!linkedComponent)
           expect(git("show", "--format=", "--name-only", "HEAD", "--")).toBe(
             changedFiles.join("\n"),
@@ -675,9 +677,15 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           expect(outcome.stderr).toContain("ENOENT");
           expect(outcome.stderr).toContain(providerConfiguration);
         } else if (linkedComponent) {
-          expect(outcome.stderr).toContain("beyond a symbolic link");
+          expect(outcome.stderr).toContain(
+            "Patch directory now resolves outside the selected repository",
+          );
           expect(git("branch", "--show-current")).toBe("main");
           expect(git("diff", "--cached", "--name-only")).toBe("");
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(await readFile(join(repository, "shared.ts"), "utf8")).toBe(
+            "fixed\n",
+          );
         } else
           expect(git("rev-parse", "HEAD")).toBe(
             git("rev-parse", "@{upstream}"),
