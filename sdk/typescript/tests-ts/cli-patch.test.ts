@@ -3080,6 +3080,7 @@ const runGitRepositoryCommand: NonNullable<
 
 describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
   test.each([
     "root",
     "package",
