@@ -420,7 +420,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     first_coverage, recovered = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
-    expected_surface_id = "api" if rejected_here else f"{worker_id}-attempt-1-surface-1"
+    expected_surface_id = f"{worker_id}-attempt-1-surface-1"
     expected_candidate = {
         **candidate,
         "id": f"{worker_id}-attempt-1-deferred-1",
@@ -437,28 +437,28 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         assert len(api_surfaces) == 1
         expected_disposition = "no_issue_found" if rejected_here else "needs_follow_up"
         assert api_surfaces[0]["disposition"] == expected_disposition
-        if not rejected_here:
-            assert api_surfaces[0] == {
-                **pending_surface,
-                "id": expected_surface_id,
-                "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "api"},
-            }
+        assert api_surfaces[0] == {
+            **pending_surface,
+            "id": expected_surface_id,
+            "disposition": expected_disposition,
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "api"},
+        }
         assert not any(row["id"] == generic["id"] for row in coverage["deferred"])
         assert any(row == expected_candidate for row in coverage["deferred"]) is not rejected_here
         if outcome != "unresolved":
-            expected_rejection = rejection
-            if outcome == "other_worker":
-                expected_rejection = {
-                    **rejection,
-                    "id": f"{other_worker_id}-attempt-1-surface-1",
-                    "candidateId": f"{other_worker_id}-attempt-1-candidate-{hashlib.sha256(rejection['candidateId'].encode()).hexdigest()}",
-                    "provenance": {
-                        "workerId": other_worker_id,
-                        "attempt": 1,
-                        "sourceId": rejection["id"],
-                        "candidateId": rejection["candidateId"],
-                    },
-                }
+            owner = other_worker_id if outcome == "other_worker" else worker_id
+            index = 1 if outcome == "other_worker" else 2
+            expected_rejection = {
+                **rejection,
+                "id": f"{owner}-attempt-1-surface-{index}",
+                "candidateId": f"{owner}-attempt-1-candidate-{hashlib.sha256(rejection['candidateId'].encode()).hexdigest()}",
+                "provenance": {
+                    "workerId": owner,
+                    "attempt": 1,
+                    "sourceId": rejection["id"],
+                    "candidateId": rejection["candidateId"],
+                },
+            }
             assert expected_rejection in coverage["surfaces"]
     assert recovered["surfaces"] == first_coverage["surfaces"]
     assert recovered["deferred"] == first_coverage["deferred"]
