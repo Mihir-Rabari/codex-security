@@ -3407,9 +3407,11 @@ describe("patch publication integrity", () => {
     test.skipIf(fileLink && process.platform === "win32")(
       `publishes ${command} patches through an existing directory alias; file symlink=${fileLink}; local edit=${dirty}`,
       async () => {
-        const directory = await fixtures.create("patch-directory-alias-");
+        const fixture = await fixtures.create("patch-directory-alias-");
+        const directory = join(fixture, "repository");
+        await mkdir(directory);
         const git = repositoryGit(directory);
-        const alias = join(directory, "link");
+        const alias = join(fixture, "link");
         const result = resultWithFindings(["high"]);
         await mkdir(join(directory, "src"));
         git("init", "--initial-branch=main");
