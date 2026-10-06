@@ -2099,6 +2099,28 @@ def test_saved_collision_uses_recovered_identity_for_allocation(tmp_path, retry,
 
 
 @pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("repeat", ["first", "second"])
+def test_repeated_collision_observations_keep_their_original_identity(tmp_path, retry, repeat):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    first = document["findings"][0]
+    first["identity"] = {"anchor": "shared-observation"}
+    first["provenance"].pop("candidateId", None)
+    first["locations"][0].update(startLine=1, endLine=1)
+    second = copy.deepcopy(first)
+    second["locations"][0].update(startLine=2, endLine=2)
+    document["findings"] = [first, second, copy.deepcopy(first if repeat == "first" else second)]
+    path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not saved["resultsRecoveryNeeded"]
+    assert saved["findingCount"] == 2
+    assert {row["locations"][0]["startLine"] for row in saved["findings"]} == {1, 2}
+    assert len({row["findingId"] for row in saved["findings"]}) == 2
+
+
+@pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("changed_note", [False, True])
 def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
     tmp_path, retry, changed_note

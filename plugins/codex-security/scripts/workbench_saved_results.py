@@ -2302,7 +2302,8 @@ def merge_saved_results(
                 if item not in output:
                     output.append(copy.deepcopy(item))
 
-    identities: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    identities: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    allocated_identities: list[tuple[dict[str, Any], dict[str, Any]]] = []
     reserved_identities = {
         _fingerprint("", recovered)
         for finding in findings
@@ -2327,32 +2328,26 @@ def merge_saved_results(
         recovered = recovered_finding(finding)
         if recovered is None:
             continue
-        identity = finding.get("identity")
-        if not isinstance(identity, dict):
+        original_identity = finding.get("identity")
+        if not isinstance(original_identity, dict):
             continue
+        identity = copy.deepcopy(original_identity)
         key = _fingerprint("", recovered)
         variant = _finding_key(recovered)
         assigned = identities.setdefault(key, [])
         matching = next(
             (
-                previous
-                for previous_variant, previous in assigned
+                previous_identity
+                for previous_variant, previous, previous_identity in assigned
                 if previous_variant == variant and not distinct_candidates(finding, previous)
             ),
             None,
         )
         if matching is not None:
-            if identity != matching["identity"]:
-                finding.setdefault("provenance", {}).setdefault(
-                    "preservedIdentity", copy.deepcopy(identity)
-                )
-                finding["identity"] = copy.deepcopy(matching["identity"])
+            allocated_identities.append((finding, matching))
             continue
         if assigned:
             previous_variant = assigned[0][0]
-            finding.setdefault("provenance", {}).setdefault(
-                "preservedIdentity", copy.deepcopy(identity)
-            )
             base_instance = recovered["identity"].get("instance", "saved")
             prefix = (
                 f"{base_instance}-{variant[:16]}" if previous_variant != variant else base_instance
@@ -2371,7 +2366,14 @@ def merge_saved_results(
                     reserved_identities.add(instance_key)
                     break
                 suffix += 1
-        assigned.append((variant, finding))
+        assigned.append((variant, finding, identity))
+        allocated_identities.append((finding, identity))
+    for finding, identity in allocated_identities:
+        if finding["identity"] != identity:
+            finding.setdefault("provenance", {}).setdefault(
+                "preservedIdentity", copy.deepcopy(finding["identity"])
+            )
+            finding["identity"] = copy.deepcopy(identity)
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
