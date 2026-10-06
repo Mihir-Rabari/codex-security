@@ -352,7 +352,12 @@ describe("CLI", () => {
   test.each(["directory link", "home-relative"])(
     "uses the same canonical %s repository for scanning and validation",
     async (kind) => {
-      const root = await mkdtemp(join(tmpdir(), "scan-validation-link-"));
+      const root = await mkdtemp(
+        join(
+          kind === "home-relative" ? homedir() : tmpdir(),
+          "scan-validation-link-",
+        ),
+      );
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
       await mkdir(repository);
