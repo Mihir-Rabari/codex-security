@@ -12,8 +12,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import (
-    UnsupportedLocalFileType,
     UnreadableLocalFile,
+    UnsupportedLocalFileType,
     directory_content_digest,
     git_output,
     git_revision,

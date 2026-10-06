@@ -750,6 +750,7 @@ export class CodexSecurity {
       const knowledgeBasePath = knowledgeBase?.path;
       // Codex resolves file-backed instructions in its validation working directory.
       const canCache = async (): Promise<boolean> => {
+        if (this.config.pluginPath !== undefined) return false;
         const configuration = resolveCodexProfile(session.effectiveConfig);
         if (typeof configuration["model_instructions_file"] === "string")
           return false;
@@ -765,6 +766,15 @@ export class CodexSecurity {
             : []),
         ];
         const candidates = [
+          process.platform === "win32"
+            ? join(
+                environmentValue(runtime.environment, "ProgramData") ??
+                  "C:\\ProgramData",
+                "OpenAI",
+                "Codex",
+                "config.toml",
+              )
+            : "/etc/codex/config.toml",
           join(runtime.codexHome, "AGENTS.override.md"),
           join(runtime.codexHome, "AGENTS.md"),
         ];

@@ -27,7 +27,15 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -406,6 +414,28 @@ const unauthenticatedRuntime = (
   }));
 
 describe("CodexSecurity finding validation", () => {
+  const actualLstat = fsPromises.lstat;
+  let systemConfigurationLookup: ReturnType<
+    typeof spyOn<typeof fsPromises, "lstat">
+  >;
+  beforeEach(() => {
+    const nativePath =
+      process.platform === "win32"
+        ? join("C:\\ProgramData", "OpenAI", "Codex", "config.toml")
+        : "/etc/codex/config.toml";
+    systemConfigurationLookup = spyOn(fsPromises, "lstat").mockImplementation(
+      (async (...args: Parameters<typeof actualLstat>) => {
+        if (args[0] === nativePath)
+          throw Object.assign(
+            new Error("Synthetic absent native system configuration"),
+            { code: "ENOENT" },
+          );
+        return await actualLstat(...args);
+      }) as typeof actualLstat,
+    );
+  });
+  afterEach(() => systemConfigurationLookup.mockRestore());
+
   const assessment = {
     disposition: "reportable",
     report: "Static trace reaches the SQL sink; runtime proof is still needed.",
@@ -475,7 +505,7 @@ describe("CodexSecurity finding validation", () => {
     };
     const client = new TestClient(
       {
-        pluginPath: pluginRoot,
+        pluginPath: pluginRoot === PLUGIN_ROOT ? undefined : pluginRoot,
         pythonPath,
         codexOverrides: {
           model: "test-model",
@@ -794,98 +824,137 @@ describe("CodexSecurity finding validation", () => {
   });
 
   test.each([
-    { instruction: null, customSkill: false },
-    { instruction: null, customSkill: true },
-    ...[
-      "skills/validation/SKILL.md",
-      "skills/validation/references/validation-guidance.md",
-      "references/static-finding-assessment.md",
-      "references/artifact-storage.md",
-      "references/scan-artifacts.md",
-    ].map((instruction) => ({ instruction, customSkill: false })),
-  ])(
-    "binds cached validation to same-version selected instructions, %p",
-    async ({ instruction, customSkill }) => {
-      const pluginRoot = join(await temporaryDirectory(), "selected-plugin");
-      await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
-      const skill = join(pluginRoot, "skills", "validation", "SKILL.md");
-      if (customSkill) {
-        await writeFile(skill, "Validate the supplied candidate.\n");
-        await rm(join(pluginRoot, "skills", "validation", "references"), {
-          recursive: true,
-        });
-        await rm(join(pluginRoot, "references"), { recursive: true });
+    { custom: true, changed: true },
+    { custom: true, changed: false },
+    { custom: false, changed: false },
+  ] as const)(
+    "uses current custom validation references: %p",
+    async ({ custom, changed }) => {
+      const pluginRoot = custom
+        ? join(await temporaryDirectory(), "selected-plugin")
+        : PLUGIN_ROOT;
+      const reference = join(
+        await temporaryDirectory(),
+        "additional-guidance.md",
+      );
+      await writeFile(reference, "Original synthetic guidance.");
+      if (custom) {
+        await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+        await writeFile(
+          join(pluginRoot, "skills", "validation", "SKILL.md"),
+          `Read the validation guidance at ${JSON.stringify(reference)}.\n`,
+        );
       }
-      const python = await resolvePluginPython();
       let modelCalls = 0;
-      const reviewKeys: string[] = [];
       async function* events() {
         modelCalls += 1;
         yield* validationEvents(
           JSON.stringify({
             ...assessment,
-            report: `Synthetic assessment ${modelCalls}.`,
+            report: await readFile(reference, "utf8"),
           }),
         );
       }
-      function useWorkbench(
-        fixture: Awaited<ReturnType<typeof validationClient>>,
-      ) {
-        fixture.workbench.mockImplementation(async (options, args, input) => {
-          if (args[0] === "finding-workflow") {
-            const request = JSON.parse(input!);
-            if (request.action === "save-review") reviewKeys.push(request.key);
-          }
-          return await runWorkbench(options, args, input);
-        });
-      }
-      const original = await validationClient(events, pluginRoot, python);
-      useWorkbench(original);
-      await using originalClient = original.client;
+      const python = await resolvePluginPython();
+      const fixture = await validationClient(events, pluginRoot, python);
+      await using client = fixture.client;
+      fixture.workbench.mockImplementation(runWorkbench);
       const workflow = new FindingWorkflow(
-        "selected-validation-instructions",
-        { CODEX_SECURITY_STATE_DIR: original.stateDirectory },
+        "additional-validation-reference",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
         runWorkbench,
         python,
       );
-      await workflow.bind({ repositoryPath: original.options.repositoryPath });
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
       const request = {
-        ...original.options,
+        ...fixture.options,
         outputDir: undefined,
         workflowId: workflow.id,
       };
-      const first = await originalClient.validate(request);
-      expect(modelCalls).toBe(1);
-      expect(await originalClient.validate(request)).toEqual(first);
-      expect(modelCalls).toBe(1);
-      await originalClient.close();
-      if (instruction !== null)
-        await appendFile(
-          join(pluginRoot, instruction),
-          "\nReview the synthetic validation instruction update.\n",
-        );
-      const resumed = await validationClient(
-        events,
-        pluginRoot,
-        python,
-        original.root,
-      );
-      useWorkbench(resumed);
-      await using client = resumed.client;
+      const first = await client.validate(request);
+      if (changed) await writeFile(reference, "Updated synthetic guidance.");
       const second = await client.validate(request);
-      expect(modelCalls).toBe(instruction !== null ? 2 : 1);
       expect(second.report).toBe(
-        instruction !== null ? "Synthetic assessment 2." : first.report,
+        changed ? "Updated synthetic guidance." : first.report,
       );
-      expect(await client.validate(request)).toEqual(second);
-      expect(modelCalls).toBe(instruction !== null ? 2 : 1);
-      expect(reviewKeys).toHaveLength(instruction !== null ? 2 : 1);
-      expect(await workflow.getReview(reviewKeys[0]!)).toEqual(first);
-      expect(resumed.captured.prompt ?? original.captured.prompt).toContain(
-        JSON.stringify(skill),
+      if (!custom) expect(modelCalls).toBe(1);
+      expect(fixture.captured.prompt).toContain(
+        JSON.stringify(join(pluginRoot, "skills", "validation", "SKILL.md")),
       );
     },
   );
+
+  for (const changed of [true, false]) {
+    test(`preserves system-configured validation instructions: changed=${changed}`, async () => {
+      const python = await resolvePluginPython();
+      const root = await temporaryDirectory("native-system-validation-");
+      const instructions = join(root, "instructions.md");
+      const nativeConfig = join(root, "config.toml");
+      await writeFile(instructions, "Original synthetic system guidance.");
+      await writeFile(
+        nativeConfig,
+        `model_instructions_file = ${JSON.stringify(instructions)}\n`,
+      );
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        const configuration = parseToml(await readFile(nativeConfig, "utf8"));
+        yield* validationEvents(
+          JSON.stringify({
+            ...assessment,
+            report: await readFile(
+              configuration["model_instructions_file"] as string,
+              "utf8",
+            ),
+          }),
+        );
+      }
+      const fixture = await validationClient(
+        events,
+        PLUGIN_ROOT,
+        python,
+        undefined,
+        { ProgramData: root },
+      );
+      await using client = fixture.client;
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "system-validation-instructions",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const nativePath =
+        process.platform === "win32"
+          ? join(root, "OpenAI", "Codex", "config.toml")
+          : "/etc/codex/config.toml";
+      const originalLstat = actualLstat;
+      const nativeLookup = spyOn(fsPromises, "lstat").mockImplementation(((
+        ...args: Parameters<typeof originalLstat>
+      ) =>
+        originalLstat(
+          args[0] === nativePath ? nativeConfig : args[0],
+          args[1],
+        )) as typeof originalLstat);
+      try {
+        const request = {
+          ...fixture.options,
+          outputDir: undefined,
+          workflowId: workflow.id,
+        };
+        const first = await client.validate(request);
+        if (changed)
+          await writeFile(instructions, "Updated synthetic system guidance.");
+        const second = await client.validate(request);
+        expect(second.report).toBe(
+          changed ? "Updated synthetic system guidance." : first.report,
+        );
+      } finally {
+        nativeLookup.mockRestore();
+      }
+    });
+  }
 
   test.each([
     { setting: "top-level", changed: true },
@@ -1110,10 +1179,7 @@ describe("CodexSecurity finding validation", () => {
     "preserves native validation guidance: %p",
     async ({ scope, changed }) => {
       const python = await resolvePluginPython();
-      const stateRoot = await temporaryDirectory(
-        "native-validation-guidance-",
-        true,
-      );
+      const stateRoot = await temporaryDirectory("native-validation-guidance-");
       if (scope === "output worktree")
         execFileSync("git", ["init", "-q", stateRoot]);
       let fixture: Awaited<ReturnType<typeof validationClient>>;
