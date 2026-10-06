@@ -410,6 +410,7 @@ def _frozen_checkpoint_heads(
 ) -> dict[str, str]:
     times = _frozen_source_times(scan_dir, scan_id, sources)
     heads: dict[str, tuple[int, str]] = {}
+    ambiguous: set[str] = set()
     for relative, expected_digest in sources.items():
         directory = _checkpoint_head_directory(relative)
         if directory is None or directory == Path("."):
@@ -422,7 +423,15 @@ def _frozen_checkpoint_heads(
         key = directory.as_posix()
         if key not in heads or observation[0] > heads[key][0]:
             heads[key] = observation
-    return {directory: selected for directory, (_, selected) in heads.items()}
+            ambiguous.discard(key)
+        elif observation[0] == heads[key][0] and selected != heads[key][1]:
+            ambiguous.add(key)
+    # A legacy tie retains both observations until recovery selects a head.
+    return {
+        directory: selected
+        for directory, (_, selected) in heads.items()
+        if directory not in ambiguous
+    }
 
 
 def _retained_checkpoint_state(scan: Any) -> tuple[dict[str, str | None] | None, bool]:
@@ -430,11 +439,30 @@ def _retained_checkpoint_state(scan: Any) -> tuple[dict[str, str | None] | None,
     if raw is None:
         return None, False
     saved = json.loads(raw)
-    if "recoveryBaseDigest" not in saved:
+    if not isinstance(saved.get("heads"), dict):
         return saved, False
     if saved["recoveryBaseDigest"] != scan["seal_manifest_digest"]:
         raise ContractError("Stopped scan recovery publication changed after selection.")
     return saved["heads"], True
+
+
+def _restore_checkpoint_head(
+    heads: dict[str, str | None],
+    previous_heads: dict[str, str | None],
+    sources: dict[str, str],
+    relative: str,
+) -> None:
+    path = Path(relative)
+    if path.name != "checkpoint-head.json":
+        return
+    directory = path.parent.as_posix()
+    if directory in previous_heads:
+        heads[directory] = previous_heads[directory]
+        return
+    directories = {path.parent, path.parent / "checkpoints", path.parent / "checkpoint-heads"}
+    if any(Path(source).parent in directories for source in sources):
+        # Legacy evidence can remain accepted without one selected head.
+        heads.pop(directory, None)
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
@@ -484,7 +512,10 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         _, pending_recovery = _retained_checkpoint_state(scan)
         if pending_recovery:
             return True
-        checkpoint_heads: dict[str, str | None] = {}
+        published_heads = manifest_scan.get("preservedCheckpointHeads")
+        if published_heads is None:
+            published_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], published_sources)
+        checkpoint_heads = dict(published_heads)
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
         for path in paths:
@@ -500,10 +531,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                 )
                 current_sources.update({path: value[0] for path, value in captured.items()})
             except (ContractError, OSError, ValueError):
-                continue
-        published_heads = manifest_scan.get("preservedCheckpointHeads")
-        if published_heads is None:
-            published_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], published_sources)
+                _restore_checkpoint_head(checkpoint_heads, published_heads, published_sources, path)
         return current_sources != published_sources or checkpoint_heads != published_heads
     except (ContractError, OSError, SystemExit, ValueError):
         return False
@@ -561,7 +589,7 @@ def _recovery_source_digests(
     previous_heads = checkpoint_heads
     if previous_heads is None:
         previous_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], frozen_sources or {})
-    checkpoint_heads = {}
+    checkpoint_heads = dict(previous_heads)
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
     source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources)
@@ -587,9 +615,9 @@ def _recovery_source_digests(
                 checkpoint_heads=checkpoint_heads,
             )
         except (ContractError, OSError, ValueError):
-            directory = Path(relative).parent.as_posix()
-            if Path(relative).name == "checkpoint-head.json" and directory in previous_heads:
-                checkpoint_heads[directory] = previous_heads[directory]
+            _restore_checkpoint_head(
+                checkpoint_heads, previous_heads, frozen_sources or {}, relative
+            )
             continue
         for path, (digest, observed) in captured.items():
             if path in recovery_sources and recovery_sources[path] != digest:
@@ -1198,7 +1226,11 @@ def merge_saved_results(
 
     if checkpoint_heads is None:
         checkpoint_heads = _frozen_checkpoint_heads(scan_dir, scan_id, source_digests)
-    headed_workers = {worker_attempts[directory][0] for directory in checkpoint_heads}
+    headed_workers = {
+        worker_attempts[_checkpoint_head_directory(head).as_posix()][0]
+        for head in saved_heads
+        if _checkpoint_head_directory(head) != Path(".")
+    }
     for relative, _, worker_id in sources:
         if worker_id not in headed_workers:
             continue
@@ -1607,7 +1639,16 @@ def merge_saved_results(
             for (saved_owner, _), (modified, row, _) in active_deferred.items()
         ):
             continue
-        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
+        previous = ordered_outcomes.get(key)
+        if (
+            previous is None
+            or order > previous[0]
+            or (
+                order == previous[0]
+                and previous[1] in current_results
+                and relative in checkpoint_heads.values()
+            )
+        ):
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
     # Only the current parent may claim that another worker finding was absorbed.

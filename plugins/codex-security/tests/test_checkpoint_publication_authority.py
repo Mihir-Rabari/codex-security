@@ -86,7 +86,10 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
                 },
             }
             head = write_checkpoint(output / "checkpoints", rejected)
-            (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": head.name}))
+            pointer = output / "checkpoint-head.json"
+            pointer.write_text(json.dumps({"checkpoint": head.name}))
+            observed = result.stat().st_mtime_ns
+            os.utime(pointer, ns=(observed, observed))
         workers.append(worker_id)
 
     stopped = run_workbench(
@@ -597,7 +600,7 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
     assert "recoveryBaseDigest" not in retained
 
 
-@pytest.mark.parametrize("bad_head", ["malformed", "missing-checkpoint"])
+@pytest.mark.parametrize("bad_head", ["malformed", "missing-checkpoint", "missing-head"])
 @pytest.mark.parametrize("prior_disposition", ["reported", "rejected"])
 def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
     workbench_api, workbench_db, publication_scan, bad_head, prior_disposition
@@ -617,8 +620,16 @@ def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
-    (bad.parent / "checkpoint-head.json").write_text(
-        "{" if bad_head == "malformed" else json.dumps({"checkpoint": "a" * 64 + ".json"})
+    head = bad.parent / "checkpoint-head.json"
+    if bad_head == "missing-head":
+        head.unlink()
+    else:
+        head.write_text(
+            "{" if bad_head == "malformed" else json.dumps({"checkpoint": "a" * 64 + ".json"})
+        )
+    assert (
+        workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
+        is False
     )
     save_disposition(scan, good.parent, "reported")
     assert (
@@ -629,6 +640,7 @@ def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
         workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == (2 if prior_disposition == "reported" else 1)
+    assert recovered["resultsRecoveryNeeded"] is False
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     directory = bad.parent.relative_to(scan.scan_dir).as_posix()
     assert (
@@ -713,4 +725,162 @@ def test_legacy_recovery_can_reselect_an_already_frozen_head(
         workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["findingCount"] == 1
+    assert recovered["resultsRecoveryNeeded"] is False
+
+
+def test_recovery_keeps_newer_result_with_legacy_frozen_live_head(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    reported = save_disposition(scan, result.parent, "reported")
+    save_disposition(scan, result.parent, "rejected")
+    head = result.parent / "checkpoint-head.json"
+    checkpoint = result.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    os.utime(checkpoint, ns=(100, 100))
+    os.utime(head, ns=(200, 200))
+    result.write_text(json.dumps(reported))
+    os.utime(result, ns=(300, 300))
+    saved = workbench_api["saved_results"]
+    sources = {
+        path.relative_to(scan.scan_dir).as_posix(): saved._read_saved_result(
+            scan.scan_dir, path.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+        )[1]
+        for path in (checkpoint, head, result)
+    }
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, "
+            "retained_source_digests_json = ?, retained_checkpoint_heads_json = NULL "
+            "WHERE id = ?",
+            (scan.timestamp, json.dumps(sources), scan.scan_id),
+        )
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["findingCount"] == 1
+    assert recovered["resultsRecoveryNeeded"] is False
+
+
+@pytest.mark.parametrize("directory_name", ["recoveryBaseDigest", "heads"])
+def test_worker_directory_does_not_collide_with_recovery_metadata(
+    workbench_api, workbench_db, publication_scan, directory_name
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    original = add_worker(workbench_db, scan, status="canceled")
+    directory = scan.scan_dir / directory_name
+    result = directory / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? "
+            "WHERE scan_id = ? AND artifact_dir = ?",
+            (str(directory), str(result), scan.scan_id, str(original.parent)),
+        )
+    result.write_text(json.dumps(save_disposition(scan, directory, "reported")))
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    saved = workbench_api["saved_results"]
+    preserved = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert preserved["findingCount"] == 1
+    save_disposition(scan, directory, "rejected")
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["findingCount"] == 0
+    assert recovered["resultsRecoveryNeeded"] is False
+
+
+@pytest.mark.parametrize("legacy_heads", ["ambiguous", "headless"])
+@pytest.mark.parametrize("reverse_order", [False, True])
+@pytest.mark.parametrize("bad_head", ["malformed", "missing-checkpoint"])
+def test_unreadable_heads_preserve_legacy_accepted_results(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    reverse_order,
+    bad_head,
+    legacy_heads,
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    saved = workbench_api["saved_results"]
+    sources = {}
+    for disposition in ("reported", "rejected"):
+        draft = save_disposition(scan, result.parent, disposition)
+        if disposition == "reported":
+            result.write_text(json.dumps(draft))
+            os.utime(result, ns=(300, 300))
+        head = result.parent / "checkpoint-head.json"
+        os.utime(head, ns=(300, 300))
+        sources.update(
+            {
+                path: digest
+                for path, (digest, _) in saved._capture_saved_source(
+                    scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+                ).items()
+            }
+        )
+    if legacy_heads == "headless":
+        for relative in list(sources):
+            if "/checkpoint-heads/" in relative:
+                (scan.scan_dir / relative).unlink()
+                del sources[relative]
+    head.unlink()
+    # Content-addressed filenames can place either disposition first.
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
+    )
+    relative = result.relative_to(scan.scan_dir).as_posix()
+    sources[relative] = saved._read_saved_result(scan.scan_dir, relative, scan.scan_id)[1]
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, "
+            "retained_source_digests_json = ?, retained_checkpoint_heads_json = NULL "
+            "WHERE id = ?",
+            (scan.timestamp, json.dumps(sources), scan.scan_id),
+        )
+    replayed = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == 1
+    assert replayed["resultsRecoveryNeeded"] is False
+
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET retained_checkpoint_heads_json = NULL WHERE id = ?", (scan.scan_id,)
+        )
+    head.write_text(
+        "{" if bad_head == "malformed" else json.dumps({"checkpoint": "a" * 64 + ".json"})
+    )
+    assert (
+        workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
+        is False
+    )
+    scan.findings[0]["identity"]["anchor"] = "independent-worker"
+    scan.findings[0]["locations"][0]["startLine"] = 20
+    scan.findings[0]["locations"][0]["endLine"] = 21
+    good = add_worker(workbench_db, scan, status="canceled")
+    save_disposition(scan, good.parent, "reported")
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["findingCount"] == 2
     assert recovered["resultsRecoveryNeeded"] is False
