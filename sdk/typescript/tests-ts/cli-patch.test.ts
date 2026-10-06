@@ -8602,9 +8602,11 @@ describe("in-repository directory moves: executable modes", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
   // Git on Windows does not track executable-bit changes from chmod.
-  test.skipIf(process.platform === "win32").each([false, true])(
-    "requires verification for a moved file mode change: reported=%s",
-    async (reported) => {
+  test
+    .skipIf(process.platform === "win32")
+    .each([{ reported: false }, { reported: true }])(
+    "requires verification for a moved file mode change: reported=$reported",
+    async ({ reported }) => {
       const root = await fixtures.create("patch-moved-file-mode-");
       const repository = join(root, "repository"),
         component = join(repository, "component"),
