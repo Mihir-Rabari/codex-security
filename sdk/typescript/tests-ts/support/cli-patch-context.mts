@@ -127,7 +127,9 @@ for (const kind of ["absolute Git alias", "relative Git alias", "gh", "glab"]) {
         }
         return args[1] === "create"
           ? "https://github.example.test/example/repository/pull/17"
-          : "";
+          : command === "gh" && args[1] === "list"
+            ? "[]"
+            : "";
       },
     }),
   );

@@ -430,6 +430,35 @@ async function requireGitWorktreeBinding(
       signal,
       options,
     );
+    if (options.runGit !== undefined) {
+      // The command context pins --work-tree; verify the repository's own binding too.
+      const configuredWorktree = await options.runGit([
+        "config",
+        "--default",
+        "",
+        "--path",
+        "--get",
+        "core.worktree",
+      ]);
+      if (
+        configuredWorktree &&
+        relative(
+          repository,
+          await abortable(
+            () =>
+              realpath(
+                isAbsolute(configuredWorktree)
+                  ? configuredWorktree
+                  : `${directory}${sep}${configuredWorktree}`,
+              ),
+            signal,
+          ),
+        ) !== ""
+      )
+        throw new InvalidTargetError(
+          "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+        );
+    }
     if (
       [directory, commonDirectory].every(
         (path) => !relativePathIsOutside(relative(repository, path)),
