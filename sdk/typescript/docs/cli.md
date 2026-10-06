@@ -1039,10 +1039,10 @@ over this fallback; uncertain pairs can still be grouped by these criteria.
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
 
-Only high-confidence root-cause matches are grouped. Uncertain and related
-findings remain separate. Rebuilding retains stable identities, triage, and
-sealed artifacts; interruption preserves completed comparisons. Model/effort
-changes alone do not invalidate cached decisions.
+Semantic matching groups high-confidence root-cause matches and records
+uncertain or related pairs separately. Rebuilding retains stable identities,
+triage, and sealed artifacts; interruption preserves completed comparisons.
+Model/effort changes alone do not invalidate cached decisions.
 
 ```ts
 import { readFile } from "node:fs/promises";
