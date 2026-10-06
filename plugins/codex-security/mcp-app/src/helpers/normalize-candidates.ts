@@ -121,7 +121,10 @@ function readScope(
   root: string,
   allowMissing: boolean,
 ): Set<string> {
-  const lines = decodeUtf8(readFile(path)).split(/\r?\n/u);
+  const bytes = readFile(path);
+  const lines = (windows ? decodeUtf8(bytes) : decodePosixBytes(bytes)).split(
+    /\r?\n/u,
+  );
   const scope = new Set<string>();
   for (const [index, line] of lines.entries()) {
     if (line === "") continue;
