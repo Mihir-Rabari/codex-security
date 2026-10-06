@@ -3203,6 +3203,7 @@ describe("patch change tracking", () => {
       "ssh-api",
       "ssh-enterprise",
       "scp",
+      "scp-userless",
       "scp-mixed",
       "ssh-uri",
       "ssh-uri-mixed",
@@ -3252,24 +3253,30 @@ describe("patch change tracking", () => {
       const pushRemote =
         transport === "local"
           ? remote
-          : transport === "ssh-api"
-            ? "git@github.com:push-owner/repository.git"
-            : transport === "ssh-enterprise"
-              ? "git@enterprise.example.test:push-owner/other-repository.git"
-              : transport.startsWith("scp")
-                ? `git@${alias}:example/repository.git`
-                : transport.startsWith("ssh-uri")
-                  ? `ssh://git@${alias}:2222/example/repository.git`
-                  : "git@ssh.github.com:example/repository.git";
+          : transport === "scp-userless"
+            ? "github.com:example/repository.git"
+            : transport === "ssh-api"
+              ? "git@github.com:push-owner/repository.git"
+              : transport === "ssh-enterprise"
+                ? "git@enterprise.example.test:push-owner/other-repository.git"
+                : transport.startsWith("scp")
+                  ? `git@${alias}:example/repository.git`
+                  : transport.startsWith("ssh-uri")
+                    ? `ssh://git@${alias}:2222/example/repository.git`
+                    : "git@ssh.github.com:example/repository.git";
       const directLookup = ["local", "ssh-api", "ssh-enterprise"].includes(
         transport,
       );
       const lookupRemote = directLookup
         ? pushRemote
-        : "ssh://git@github.com/example/repository.git";
+        : transport === "scp-userless"
+          ? "ssh://github.com/example/repository.git"
+          : "ssh://git@github.com/example/repository.git";
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
-        `git@${transport.startsWith("scp") || transport.startsWith("ssh-uri") ? alias : "ssh.github.com"}`,
+        transport === "scp-userless"
+          ? "github.com"
+          : `git@${transport.startsWith("scp") || transport.startsWith("ssh-uri") ? alias : "ssh.github.com"}`,
       ];
       if (transport !== "local") {
         git(
@@ -3443,75 +3450,108 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each([
-    "root",
-    "package",
-    ...(process.platform === "win32" ? [] : ["package-space"]),
-  ])("reports nested changes on one Git basis from %s", async (scope) => {
-    const parent = await fixtures.create("synthetic-nested-basis-");
-    const root = join(
-      parent,
-      scope === "package-space" ? "checkout " : "checkout",
-    );
-    const directory = join(root, "package");
-    const nested = join(directory, "nested");
-    await mkdir(nested, { recursive: true });
-    const git = repositoryGit(root);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
-    const inner = repositoryGit(nested);
-    inner("init", "--initial-branch=main");
-    inner("config", "user.name", "Synthetic User");
-    inner("config", "user.email", "synthetic@example.test");
-    await writeFile(join(nested, "app.ts"), "unsafe\n");
-    inner("add", ".");
-    inner("commit", "-m", "Synthetic inner baseline");
-    await writeFile(join(directory, "app.ts"), "unsafe\n");
-    git("add", ".");
-    git("commit", "-m", "Synthetic outer baseline");
-    const target = scope === "root" ? root : directory;
-    const snapshots = new Map<string, Set<string>>();
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: target,
-      onRepositoryCommand: (command, args, cwd, options) => {
-        expect(cwd).not.toBe(nested);
-        if (args[0] === "-C") {
-          expect(cwd).toBe(root);
-          expect([root, nested]).toContain(args[1]!);
-        }
-        const index = options?.environment?.["GIT_INDEX_FILE"];
-        if (index !== undefined) {
-          expect(cwd).toBe(root);
-          const checkout = args[0] === "-C" ? args[1]! : cwd;
-          const indices = snapshots.get(checkout) ?? new Set<string>();
-          indices.add(index);
-          snapshots.set(checkout, indices);
-        }
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        expect(output?.appServer?.directory).toBe(target);
-        await writeFile(join(directory, "app.ts"), "fixed\n");
-        await writeFile(join(nested, "app.ts"), "fixed\n");
-        output?.stdout.write("Fixed and checked.");
-        return 0;
-      },
-    });
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(JSON.parse(outcome.stdout).files).toEqual([
-      "package/app.ts",
-      "package/nested/app.ts",
-    ]);
-    expect([...snapshots.keys()].sort()).toEqual([root, nested].sort());
-    expect(snapshots.get(root)!.size).toBe(2);
-    expect(snapshots.get(nested)!.size).toBe(2);
-    expect(
-      new Set([...snapshots.values()].flatMap((indices) => [...indices])).size,
-    ).toBe(4);
-    expect(git("diff", "--cached", "--name-only")).toBe("");
-    expect(inner("diff", "--cached", "--name-only")).toBe("");
-  });
+  test.each(
+    [
+      "root",
+      "package",
+      ...(process.platform === "win32" ? [] : ["package-space"]),
+    ].flatMap((scope) =>
+      [false, true].map((exported) => ({ scope, exported })),
+    ),
+  )(
+    "reports nested changes from $scope with exported Git settings=$exported",
+    async ({ scope, exported }) => {
+      const parent = await fixtures.create("synthetic-nested-basis-");
+      const root = join(
+        parent,
+        scope === "package-space" ? "checkout " : "checkout",
+      );
+      const directory = join(root, "package");
+      const nested = join(directory, "nested");
+      await mkdir(nested, { recursive: true });
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      const inner = repositoryGit(nested);
+      inner("init", "--initial-branch=main");
+      inner("config", "user.name", "Synthetic User");
+      inner("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "unsafe\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic inner baseline");
+      await writeFile(join(directory, "app.ts"), "unsafe\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic outer baseline");
+      const target = scope === "root" ? root : directory;
+      const gitEnvironment = {
+        ...(exported
+          ? { GIT_DIR: join(root, ".git"), GIT_WORK_TREE: root }
+          : {}),
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.quotePath",
+        GIT_CONFIG_VALUE_0: "false",
+        SYNTHETIC_GIT_SETTING: "preserved",
+      };
+      const snapshots = new Map<string, Set<string>>();
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: target,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            expect(cwd).not.toBe(nested);
+            if (args[0] === "-C") {
+              expect(cwd).toBe(root);
+              expect([root, nested]).toContain(args[1]!);
+            }
+            const index = options?.environment?.["GIT_INDEX_FILE"];
+            if (index !== undefined) {
+              expect(cwd).toBe(root);
+              const checkout = args[0] === "-C" ? args[1]! : cwd;
+              const indices = snapshots.get(checkout) ?? new Set<string>();
+              indices.add(index);
+              snapshots.set(checkout, indices);
+            }
+            const environment = { ...gitEnvironment, ...options?.environment };
+            if (args[0] === "-C" && args[1] === nested) {
+              expect(environment["GIT_DIR"]).toBeUndefined();
+              expect(environment["GIT_WORK_TREE"]).toBeUndefined();
+            } else if (exported) {
+              expect(environment["GIT_DIR"]).toBe(join(root, ".git"));
+              expect(environment["GIT_WORK_TREE"]).toBe(root);
+            }
+            expect(environment["GIT_CONFIG_COUNT"]).toBe("1");
+            expect(environment["SYNTHETIC_GIT_SETTING"]).toBe("preserved");
+            return runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment,
+            });
+          },
+          onCodex: async (_args, output) => {
+            expect(output?.appServer?.directory).toBe(target);
+            await writeFile(join(directory, "app.ts"), "fixed\n");
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout).files).toEqual([
+        "package/app.ts",
+        "package/nested/app.ts",
+      ]);
+      expect([...snapshots.keys()].sort()).toEqual([root, nested].sort());
+      expect(snapshots.get(root)!.size).toBe(2);
+      expect(snapshots.get(nested)!.size).toBe(2);
+      expect(
+        new Set([...snapshots.values()].flatMap((indices) => [...indices]))
+          .size,
+      ).toBe(4);
+      expect(git("diff", "--cached", "--name-only")).toBe("");
+      expect(inner("diff", "--cached", "--name-only")).toBe("");
+    },
+  );
   test.each([
     "regular",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),

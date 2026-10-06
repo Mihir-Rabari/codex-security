@@ -6777,7 +6777,6 @@ async function patchPublicationDestination(
       url.hostname =
         hostname.toLowerCase() === "ssh.github.com" ? "github.com" : hostname;
       url.port = "";
-      if (url.hostname.toLowerCase() === host) throw initialError;
       try {
         headRepository = await repositoryId(url.href);
       } catch (error) {
@@ -7224,7 +7223,12 @@ async function changedPatchFiles(
         head,
       ],
       root,
-      { trim: false },
+      {
+        trim: false,
+        environment: directory
+          ? { GIT_DIR: undefined, GIT_WORK_TREE: undefined }
+          : undefined,
+      },
     );
     for (const path of output.split("\0").filter(Boolean))
       files.add(directory ? `${directory}/${path}` : path);
@@ -7269,7 +7273,13 @@ async function snapshotGitPatchState(
       "git",
       ["-C", checkout, "ls-tree", "-r", "-z", tree],
       repository,
-      { trim: false, maxBuffer: Infinity },
+      {
+        trim: false,
+        maxBuffer: Infinity,
+        environment: directory
+          ? { GIT_DIR: undefined, GIT_WORK_TREE: undefined }
+          : undefined,
+      },
     );
     for (const entry of entries.split("\0")) {
       if (!entry.startsWith("160000 ")) continue;
@@ -7465,7 +7475,12 @@ async function snapshotPatchTree(
   commandRoot = repository,
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = { GIT_INDEX_FILE: join(root, "index") };
+  const environment = {
+    GIT_INDEX_FILE: join(root, "index"),
+    ...(commandRoot === repository
+      ? {}
+      : { GIT_DIR: undefined, GIT_WORK_TREE: undefined }),
+  };
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand(
       "git",
