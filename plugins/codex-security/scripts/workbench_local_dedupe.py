@@ -14,6 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
 from workbench_findings import find_potential_duplicates, store_dedupe_groups
+from workbench_target_state import stable_target_id
 
 
 def cache_key(space: str, document: str) -> str:
@@ -78,6 +79,17 @@ def local_dedupe(
 def prepare(
     connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str
 ) -> dict[str, Any]:
+    # Artifact seals establish consistency, not permission to select another local corpus.
+    target = Path(payload["repositoryPath"]).resolve()
+    registered = connection.execute(
+        "SELECT id FROM security_targets WHERE current_path = ?", (str(target),)
+    ).fetchone()
+    target_id = registered["id"] if registered is not None else stable_target_id(target)
+    if (
+        payload["anchorRepositoryId"] != target_id
+        or payload.get("repositoryId", target_id) != target_id
+    ):
+        raise ValueError("target_mismatch")
     if not payload["findings"]:
         return {"entries": []}
     # A sealed historical scan selects logical IDs; never overwrite their current bodies.

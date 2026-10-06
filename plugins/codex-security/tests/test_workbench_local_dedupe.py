@@ -33,13 +33,17 @@ def request(api, connection, action, **values):
 
 
 def prepare(api, connection, findings, **values):
+    repository_path = str(Path(__file__).resolve().parent)
+    with connection:
+        target_id = api["ensure_security_target"](connection, repository_path)
     return request(
         api,
         connection,
         "prepare",
         findings=findings,
-        anchorRepositoryId="repository-a",
-        repositoryId="repository-a",
+        anchorRepositoryId=target_id,
+        repositoryId=target_id,
+        repositoryPath=repository_path,
         **values,
     )
 

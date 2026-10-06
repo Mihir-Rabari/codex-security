@@ -289,8 +289,13 @@ the configured embeddings endpoint and require `OPENAI_API_KEY` or `CODEX_API_KE
 on the CLI host; ChatGPT login alone is insufficient. Cached vectors avoid those
 requests, but fresh duplicate reviews still need the configured model provider.
 
-Local scope uses the scan's `targetId`, which identifies its local checkout;
-separate clones are not automatically combined. `--all-repositories` searches
+Local scope uses the scan's `targetId`, which identifies its local checkout.
+Preparation checks this identity against the approved checkout and existing
+target registration before reading findings. A detached scan directory must use
+its original local target (including registered imports); artifacts cannot select
+another checkout's stored corpus. The explicit findings-service mode remains
+available for remotely stored artifacts. Separate clones are not automatically
+combined. `--all-repositories` searches
 the selected local database, including untagged imports. Historical scan IDs
 select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { LocalDeduplication } from "../src/deduplication/local.js";
@@ -29,6 +30,24 @@ const vector = [1, ...Array<number>(EMBEDDING_DIMENSIONS - 1).fill(0)];
 async function fixture() {
   const value = await workflowFixture();
   temporaryDirectories.track(value.root);
+  const hash = (text: string) =>
+    createHash("sha256").update(text).digest("hex");
+  const targetId = `target_sha256_${hash(`local-workspace\0${value.repository}`)}`;
+  for (const finding of value.document.findings) {
+    const fingerprint = `codex-security/v1:sha256:${hash(["codex-security/v1", targetId, finding.ruleId, finding.identity.anchor, finding.identity.instance ?? ""].join("\0"))}`;
+    finding.fingerprints.primary = fingerprint;
+    finding.findingId = `csf_${hash(fingerprint).slice(0, 24)}`;
+    finding.occurrenceId = `occ_${hash([value.document.scanId, fingerprint].join("\0")).slice(0, 24)}`;
+  }
+  const findingsText = JSON.stringify(value.document);
+  await writeFile(join(value.scanDir, "findings.json"), findingsText);
+  const manifestPath = join(value.scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.scan.target.targetId = targetId;
+  manifest.scan.artifacts.find(
+    (artifact: { path: string }) => artifact.path === "findings.json",
+  ).sha256 = hash(findingsText);
+  await writeFile(manifestPath, JSON.stringify(manifest));
   const options = {
     environment: value.environment,
     pluginRoot: PLUGIN_ROOT,
@@ -43,15 +62,15 @@ async function fixture() {
   ) =>
     new LocalDeduplication(
       value.environment,
-      allRepositories
-        ? { allRepositories: true }
-        : { repositoryId: "target_sha256_example" },
+      allRepositories ? { allRepositories: true } : { repositoryId: targetId },
+      value.repository,
       undefined,
       undefined,
       embedder,
     );
   return {
     ...value,
+    targetId,
     options,
     embed,
     local,
@@ -109,7 +128,7 @@ test("saved-scan local review persists a group with an existing repository findi
   };
   await f.store.insert(
     [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
-    "target_sha256_example",
+    f.targetId,
   );
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
@@ -161,14 +180,14 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
   };
   await f.store.insert(
     [{ finding: newer, embedding: { model: EMBEDDING_MODEL, vector } }],
-    "target_sha256_example",
+    f.targetId,
   );
   await f.store.insert(
     [{ finding: other, embedding: { model: EMBEDDING_MODEL, vector } }],
     "other-repository",
   );
   const local = f.local();
-  await local.prepare([original], "target_sha256_example");
+  await local.prepare([original], f.targetId);
   expect(f.embed.mock.calls.map(([findings]) => findings[0]!.title)).toEqual([
     newer.title,
   ]);
@@ -176,7 +195,7 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
     (await local.potentialDuplicates(original.findingId)).potentialDuplicates,
   ).toEqual([]);
   const all = f.local(undefined, true);
-  await all.prepare([original], "target_sha256_example");
+  await all.prepare([original], f.targetId);
   expect(
     (await all.potentialDuplicates(original.findingId)).potentialDuplicates.map(
       (v) => v.findingId,
@@ -191,7 +210,7 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
         embedding: { model: EMBEDDING_MODEL, vector },
       },
     ],
-    "target_sha256_example",
+    f.targetId,
   );
   await expect(local.potentialDuplicates(original.findingId)).rejects.toThrow(
     "Findings changed",
@@ -213,30 +232,31 @@ test("embedding writes reject stale content and resume completed preparation aft
       return await f.embed(findings);
     },
   });
-  await expect(
-    racing.prepare([finding], "target_sha256_example"),
-  ).rejects.toThrow("Findings changed");
+  await expect(racing.prepare([finding], f.targetId)).rejects.toThrow(
+    "Findings changed",
+  );
   const local = f.local();
-  await local.prepare([finding], "target_sha256_example");
+  await local.prepare([finding], f.targetId);
   expect(
     (await local.potentialDuplicates(finding.findingId)).finding.title,
   ).toBe("Concurrent body");
   const unavailable = f.local({
     embed: rejecting("Missing embedding credentials"),
   });
-  await unavailable.prepare([finding], "target_sha256_example");
+  await unavailable.prepare([finding], f.targetId);
   const differentProvider = new LocalDeduplication(
     {
       ...f.environment,
       CODEX_SECURITY_EMBEDDINGS_URL: "https://synthetic.invalid/embeddings",
     },
-    { repositoryId: "target_sha256_example" },
+    { repositoryId: f.targetId },
+    f.repository,
     undefined,
     undefined,
     { embed: rejecting("Missing embedding credentials") },
   );
   await expect(
-    differentProvider.prepare([finding], "target_sha256_example"),
+    differentProvider.prepare([finding], f.targetId),
   ).rejects.toThrow("Missing embedding credentials");
 });
 
@@ -298,22 +318,83 @@ test("empty input does not embed unrelated history and cancellation stops prepar
         embedding: { model: EMBEDDING_MODEL, vector },
       },
     ],
-    "target_sha256_example",
+    f.targetId,
   );
   await f
     .local({ embed: rejecting("Empty scan must not embed") })
-    .prepare([], "target_sha256_example");
+    .prepare([], f.targetId);
   const controller = new AbortController();
   controller.abort(new Error("Canceled"));
   const local = new LocalDeduplication(
     f.environment,
     { allRepositories: true },
+    f.repository,
     controller.signal,
     undefined,
     { embed: f.embed },
   );
-  await expect(
-    local.prepare(f.document.findings, "target_sha256_example"),
-  ).rejects.toThrow("Canceled");
+  await expect(local.prepare(f.document.findings, f.targetId)).rejects.toThrow(
+    "Canceled",
+  );
   expect(f.embed).not.toHaveBeenCalled();
+});
+
+test("sealed artifacts cannot select a different local repository corpus", async () => {
+  const f = await fixture();
+  await f.store.insert(
+    [
+      {
+        finding: f.document.findings[0]!,
+        embedding: { model: EMBEDDING_MODEL, vector },
+      },
+    ],
+    f.targetId,
+  );
+  const differentRepository = join(f.root, "other-checkout");
+  await mkdir(differentRepository);
+  await expect(
+    deduplicateScanDirectoryInternal(
+      f.scanDir,
+      { repository: differentRepository },
+      {
+        environment: f.environment,
+        embedder: { embed: f.embed },
+        reviewer: emptyNeighborhoodReviewer(),
+      },
+    ),
+  ).rejects.toThrow("scan target does not match");
+  expect(f.embed).not.toHaveBeenCalled();
+});
+
+test("local workbench calls receive cancellation and cannot report success after a canceled commit", async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  const reason = new Error("Canceled during group commit");
+  const actions: string[] = [];
+  await expect(
+    deduplicateScanDirectoryInternal(
+      f.scanDir,
+      { repository: f.repository, signal: controller.signal },
+      {
+        environment: f.environment,
+        embedder: { embed: f.embed },
+        reviewer: emptyNeighborhoodReviewer(),
+        runWorkbench: async (args, input, signal) => {
+          expect(signal).toBe(controller.signal);
+          const result = await runWorkbench(
+            { ...f.options, signal },
+            args,
+            input,
+          );
+          if (args[0] === "local-dedupe") {
+            const { action } = JSON.parse(input!);
+            actions.push(action);
+            if (action === "commit") controller.abort(reason);
+          }
+          return result;
+        },
+      },
+    ),
+  ).rejects.toBe(reason);
+  expect(actions).toEqual(["prepare", "embed", "neighbors", "commit"]);
 });

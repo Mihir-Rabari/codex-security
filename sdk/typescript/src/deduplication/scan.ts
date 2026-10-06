@@ -116,7 +116,9 @@ export async function deduplicateScanInternal(
   const scan = await resolveCompletedScan(scanId, {
     currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
     runWorkbench:
-      dependencies.runWorkbench ??
+      (dependencies.runWorkbench &&
+        ((args, input) =>
+          dependencies.runWorkbench!(args, input, options.signal))) ??
       (async (args) => {
         const stateEnvironment = workbenchEnvironment(environment);
         return await runWorkbench(
@@ -171,15 +173,21 @@ async function deduplicateResolvedScan(
     dependencies.runWorkbench === undefined
       ? undefined
       : (
-          _options: Parameters<typeof runWorkbench>[0],
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
-        ) => dependencies.runWorkbench!(args, input);
+        ) =>
+          dependencies.runWorkbench!(
+            args,
+            input,
+            workbenchOptions.signal ?? options.signal,
+          );
   const local =
     options.findingsUrl === undefined
       ? new LocalDeduplication(
           environment,
           scope,
+          repositoryPath,
           options.signal,
           workbench,
           dependencies.embedder,

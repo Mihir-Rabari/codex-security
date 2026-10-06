@@ -119,6 +119,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     try {
       payload = (await response.json()) as typeof payload;
     } catch {
+      this.signal?.throwIfAborted();
       throw invalidEmbeddingResponse();
     }
     if (

@@ -37,6 +37,7 @@ export class LocalDeduplication {
   constructor(
     private readonly environment: NodeJS.ProcessEnv,
     private readonly scope: FindingSearchScope,
+    private readonly repositoryPath: string,
     private readonly signal?: AbortSignal,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     embedder?: FindingEmbedder,
@@ -72,6 +73,7 @@ export class LocalDeduplication {
       action: "prepare",
       findings,
       anchorRepositoryId: repositoryId,
+      repositoryPath: this.repositoryPath,
     });
     const entries = result["entries"] as unknown as Entry[];
     this.cacheKeys = Object.fromEntries(
@@ -140,14 +142,17 @@ export class LocalDeduplication {
           : { repositoryId: this.scope.repositoryId }),
       }),
     );
+    this.signal?.throwIfAborted();
     const code = result["error"];
     if (code !== undefined) {
       const message =
         code === "finding_changed"
           ? "Findings changed during local deduplication. Retry with a new workflow ID if resuming."
-          : code === "finding_not_indexed"
-            ? "A local finding has no complete document. Reimport its scan before deduplicating."
-            : `Local deduplication failed: ${String(code)}.`;
+          : code === "target_mismatch"
+            ? "The scan target does not match the approved local checkout. Use its original checkout or an explicitly configured findings service."
+            : code === "finding_not_indexed"
+              ? "A local finding has no complete document. Reimport its scan before deduplicating."
+              : `Local deduplication failed: ${String(code)}.`;
       throw new CodexSecurityError(message);
     }
     return result;
