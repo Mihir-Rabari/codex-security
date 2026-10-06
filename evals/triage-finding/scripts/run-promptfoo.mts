@@ -92,8 +92,11 @@ async function runPromptfoo(
     const handler = () => {
       interrupted = signal;
       if (!child?.pid) return;
-      if (process.platform === "win32") child.kill(signal);
-      else {
+      if (process.platform === "win32") {
+        // Console Ctrl+C already reaches the inherited child. Node's kill()
+        // would terminate it before Promptfoo can save its progress.
+        if (signal !== "SIGINT") child.kill(signal);
+      } else {
         try {
           process.kill(-child.pid, signal);
         } catch (error) {

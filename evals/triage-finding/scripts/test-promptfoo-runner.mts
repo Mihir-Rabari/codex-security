@@ -65,6 +65,89 @@ test("runner launches the installed Promptfoo JavaScript entry point through Nod
   assert.match(output, /0\.123\.1/);
 });
 
+test(
+  "Windows console Ctrl+C lets the child save progress before runtime cleanup",
+  { timeout: 15000 },
+  async (t) => {
+    const target = `
+      const fs = require('node:fs');
+      let received = 0;
+      process.on('SIGINT', () => {
+        received++;
+        if (received > 1) process.exit(99);
+        setTimeout(() => {
+          console.log('saved:' + received + ':' + fs.existsSync(process.env.TRIAGE_RUNTIME_ROOT));
+          process.exit(0);
+        }, 150);
+      });
+      // IPC delivers the console event without using Windows kill(SIGINT).
+      process.on('message', () => process.emit('SIGINT'));
+      console.log(JSON.stringify({ root: process.env.TRIAGE_RUNTIME_ROOT }));
+    `;
+    const driver = `
+      const cp = require('node:child_process');
+      const spawn = cp.spawn;
+      process.env.TEMP = require('node:os').tmpdir();
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      let child;
+      cp.spawn = (command, args, options) => {
+        if (args[0].endsWith('build_mcp_app.mjs'))
+          return spawn(command, ['--eval', ''], options);
+        child = spawn(command, ['--eval', ${JSON.stringify(target)}], {
+          ...options, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+        });
+        const kill = child.kill.bind(child);
+        child.kill = signal => {
+          console.log('forced:' + signal);
+          return kill('SIGKILL');
+        };
+        return child;
+      };
+      process.on('message', () => {
+        child.send('console-interrupt');
+        process.emit('SIGINT');
+      });
+      import(${JSON.stringify(new URL("./run-promptfoo.mts", import.meta.url).href)}).then(({ runPromptfoo }) => runPromptfoo([])).then(code => { process.exitCode = code; process.disconnect(); });
+    `;
+    const child = spawn(
+      process.execPath,
+      ["--experimental-strip-types", "--eval", driver],
+      { stdio: ["ignore", "pipe", "pipe", "ipc"] },
+    );
+    t.after(() => {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    });
+    let stderr = "";
+    child.stderr!.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    let output = "";
+    const ready = new Promise<{ root: string }>((resolve) => {
+      child.stdout!.on("data", (chunk) => {
+        output += chunk;
+        if (output.includes("\n")) resolve(JSON.parse(output.split("\n")[0]));
+      });
+    });
+    const { root } = await Promise.race([
+      ready,
+      exited.then(() => {
+        throw new Error(`runner exited early: ${stderr}`);
+      }),
+    ]);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    assert.ok(fs.existsSync(root));
+    child.send("console-interrupt");
+    assert.equal(await exited, 130, stderr);
+    assert.match(output, /saved:1:true/);
+    assert.doesNotMatch(output, /forced:/);
+    assert.equal(fs.existsSync(root), false);
+  },
+);
+
 for (const [signal, exitCode] of [
   ["SIGINT", 130],
   ["SIGTERM", 143],
