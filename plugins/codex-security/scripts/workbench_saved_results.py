@@ -1412,6 +1412,8 @@ def merge_saved_results(
         if parent_manifest
         else {"scan": {"target": target, "scope": binding["scope"]}}
     )
+    if allow_frozen_legacy_parent:
+        manifest["scan"]["target"] = target
     for key in ("sealedAt", "artifacts"):
         manifest["scan"].pop(key, None)
     manifest["scan"]["preservedSources"] = source_digests
