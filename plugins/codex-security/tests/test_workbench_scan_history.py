@@ -1699,3 +1699,17 @@ def test_history_repair_rebinds_unscanned_directory(tmp_path: Path) -> None:
             is None
         )
     create_cli_scan(state, tmp_path / "results", repository)
+
+
+@pytest.mark.parametrize(
+    "timestamp", ["2026-07-01T00:00:00Z", "2026-07-01T00:00:00+00:00", "2026-06-30T19:00:00-05:00"]
+)
+def test_history_timestamp_preserves_utc_completion_order(workbench_api, timestamp):
+    target_state = sys.modules["workbench_target_state"]
+    assert target_state._timestamp_ns(timestamp) == 1782864000000000000
+
+
+@pytest.mark.parametrize("timestamp", [None, "invalid", "2026-07-01T00:00:00"])
+def test_history_timestamp_keeps_unavailable_completion_order(workbench_api, timestamp):
+    target_state = sys.modules["workbench_target_state"]
+    assert target_state._timestamp_ns(timestamp) is None

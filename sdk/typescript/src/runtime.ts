@@ -1611,7 +1611,22 @@ export async function runWorkbench(
         input = undefined;
       }
     }
-    stdout = await run(arguments_, input);
+    try {
+      stdout = await run(arguments_, input);
+    } catch (error) {
+      const focusedIndex = arguments_.indexOf("--after-scan-id");
+      if (
+        arguments_[0] !== "list-unmatched-scan-pairs" ||
+        focusedIndex === -1 ||
+        !/unrecognized arguments: --after-scan-id(?:\s+\S+)?$/u.test(
+          processErrorDetail(error),
+        )
+      )
+        throw error;
+      options.signal?.throwIfAborted();
+      arguments_.splice(focusedIndex, 2);
+      stdout = await run(arguments_, input);
+    }
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
