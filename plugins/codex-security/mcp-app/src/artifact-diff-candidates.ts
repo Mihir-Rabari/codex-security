@@ -10,6 +10,7 @@ import {
 import type { ArtifactContext } from "./artifact-context.js";
 import { readArtifactJsonl } from "./artifact-io.js";
 import {
+  exactUnion,
   preserveFindingDetails,
   type ScanDraftInput,
 } from "./artifact-scan-draft.js";
@@ -150,6 +151,23 @@ export function refreshDiffCandidateHistory(
           );
         } else if (generatedFollowUp) {
           closed.add(key);
+          const resolved = deferred.filter(
+            (row) => coverageCandidateKey(row) === key,
+          );
+          for (const [field, archive] of [
+            ["candidate", "originalCandidates"],
+            ["finding", "previousFindings"],
+          ] as const) {
+            const values = resolved.flatMap((row) => [
+              ...(row[field] === undefined ? [] : [row[field]]),
+              ...(Array.isArray(row[archive]) ? row[archive] : []),
+            ]);
+            if (values.length > 0)
+              surface[archive] = exactUnion(
+                Array.isArray(surface[archive]) ? surface[archive] : [],
+                values,
+              );
+          }
         }
         return {
           ...surface,
@@ -407,6 +425,13 @@ export function preserveUnresolvedDiffCandidates(
       }
       if (object(pending.finding))
         preserveFindingDetails(finding, pending.finding as JsonObject);
+      if (Array.isArray(pending.previousFindings))
+        provenance.previousFindings = exactUnion(
+          Array.isArray(provenance.previousFindings)
+            ? provenance.previousFindings
+            : [],
+          pending.previousFindings,
+        );
       continue;
     }
     const decision = decisions.get(key);
@@ -423,6 +448,13 @@ export function preserveUnresolvedDiffCandidates(
         decision[archive] = [...previous, structuredClone(pending[field])];
       decision[field] ??= structuredClone(pending[field]);
     }
+    if (Array.isArray(pending.previousFindings))
+      decision.previousFindings = exactUnion(
+        Array.isArray(decision.previousFindings)
+          ? decision.previousFindings
+          : [],
+        pending.previousFindings,
+      );
   }
   const replacedDecisions = new Set<JsonObject>();
   const pending = new Map(

@@ -44,6 +44,24 @@ def recover_candidate_receipts(
     return parent
 
 
+def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        for field, archive in (
+            ("candidate", "originalCandidates"),
+            ("finding", "previousFindings"),
+        ):
+            values = [row[field]] if field in row else []
+            if isinstance(row.get(archive), list):
+                values.extend(row[archive])
+            if not values:
+                continue
+            if not isinstance(destination.get(archive), list):
+                destination[archive] = []
+            for value in values:
+                if value not in destination[archive]:
+                    destination[archive].append(copy.deepcopy(value))
+
+
 def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:
     candidate = item.get("candidate")
     return (
@@ -274,9 +292,6 @@ def preserve_budget_candidates(
                 retained_candidate.update(
                     {k: v for k, v in previous.items() if k not in {"validation", "attack_path"}}
                 )
-        previous_findings = [
-            item["finding"] for item in deferred if isinstance(item.get("finding"), dict)
-        ]
         for surface in surfaces:
             if disposition == "reported" or surface.get("disposition") not in (
                 "rejected",
@@ -284,12 +299,7 @@ def preserve_budget_candidates(
             ):
                 surface["disposition"] = disposition
             surface["candidate"] = {**retained_candidate, **candidate}
-            if previous_findings:
-                if not isinstance(surface.get("previousFindings"), list):
-                    surface["previousFindings"] = []
-                for finding in previous_findings:
-                    if finding not in surface["previousFindings"]:
-                        surface["previousFindings"].append(finding)
+            archive_candidate_payloads(surface, deferred)
         if disposition != "needs_follow_up":
             continue
         coverage["deferred"].append(

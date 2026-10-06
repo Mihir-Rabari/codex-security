@@ -1655,3 +1655,84 @@ def test_stopped_diff_recovers_receipts_before_freezing_authored_gap(
     if rows:
         assert original_pending in rows
     assert any(row.get("id") == "other-review" for row in saved["deferred"])
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("decision", ["suppressed", "deferred"])
+def test_stopped_diff_archives_every_deferred_payload_before_resolution(
+    tmp_path: Path, termination: str, decision: str
+) -> None:
+    state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    history = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    original = next(row for row in coverage["deferred"] if row.get("candidateId"))
+    rows = []
+    for index in range(2):
+        row = copy.deepcopy(original)
+        row.update(
+            id=f"history-gap-{index}",
+            reason=f"Original authored proof gap {index}.",
+            candidate={**candidate, "savedEvidence": f"Candidate annotation {index}."},
+            finding={"title": f"Original compact finding annotation {index}."},
+            previousFindings=[{**history, "summary": f"Original saved finding history {index}."}],
+        )
+        rows.append(row)
+    coverage["deferred"] = [*rows, {"id": "other-review", "reason": "Independent review."}]
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": []},
+                "coverage": coverage,
+            }
+        )
+    )
+    run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    candidate["validation"] = {"disposition": decision}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state, termination, "--scan-id", scan_id, *arguments)
+
+    def contains(value: object, expected: object) -> bool:
+        if isinstance(value, list):
+            return any(contains(child, expected) for child in value)
+        if isinstance(value, dict):
+            if isinstance(expected, dict) and all(
+                key in value and value[key] == item for key, item in expected.items()
+            ):
+                return True
+            return any(contains(child, expected) for child in value.values())
+        return value == expected
+
+    def assert_retained() -> None:
+        saved = json.loads(coverage_path.read_text())
+        for row in rows:
+            assert contains(saved, {"savedEvidence": row["candidate"]["savedEvidence"]})
+            assert contains(saved, row["finding"])
+            assert contains(saved, row["previousFindings"][0])
+        pending = [
+            row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+        ]
+        assert bool(pending) is (decision == "deferred")
+        assert any(row.get("id") == "other-review" for row in saved["deferred"])
+
+    assert_retained()
+    frozen = {
+        scan_dir / relative: (scan_dir / relative).read_bytes()
+        for relative in json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
+            "preservedSources"
+        ]
+    }
+    ledger.unlink()
+    if termination == "fail-scan":
+        run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    else:
+        refused = run_workbench(state, "recover-scan-results", "--scan-id", scan_id, check=False)
+        assert refused["returncode"] != 0
+        assert "Canceled scans cannot recover terminal results." in refused["stderr"]
+        run_workbench(state, "get-scan", "--scan-id", scan_id)
+    assert_retained()
+    assert all(path.read_bytes() == content for path, content in frozen.items())

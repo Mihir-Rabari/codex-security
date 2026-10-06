@@ -166,8 +166,9 @@ def test_budget_exhaustion_reconciles_saved_candidate_rows_without_losing_other_
 
 
 @pytest.mark.parametrize("decision", ["reported", "suppressed", "not_applicable"])
+@pytest.mark.parametrize("saved_payload", ["finding", "previousFindings"])
 def test_budget_exhaustion_retains_original_deferred_finding_evidence(
-    tmp_path: Path, decision: str
+    tmp_path: Path, decision: str, saved_payload: str
 ) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -193,7 +194,7 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
             "id": "pending-candidate",
             "candidateId": candidate["candidate_id"],
             "candidate": candidate,
-            "finding": original,
+            saved_payload: [original] if saved_payload == "previousFindings" else original,
             "reason": "Authored review gap.",
         }
     ]

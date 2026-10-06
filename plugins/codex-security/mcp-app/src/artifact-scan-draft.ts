@@ -720,7 +720,12 @@ async function preserveScanDraft(
       ...(result.coverage.explicitExclusions as JsonObject[]),
     ].filter(isTerminalCandidateDecision);
     const candidateRows = [...dispositions, ...deferred];
-    for (const pending of source.coverage.deferred as JsonObject[]) {
+    for (const pending of [
+      ...(source.coverage.deferred as JsonObject[]),
+      ...(source.coverage.surfaces as JsonObject[]).filter(
+        isTerminalCandidateDecision,
+      ),
+    ]) {
       const candidateId = coverageKey(pending);
       if (typeof candidateId !== "string") continue;
       const finding = result.findings.find(
@@ -737,6 +742,13 @@ async function preserveScanDraft(
           );
         if (isObject(pending.finding))
           preserveFindingDetails(finding, pending.finding);
+        if (Array.isArray(pending.previousFindings))
+          provenance.previousFindings = exactUnion(
+            Array.isArray(provenance.previousFindings)
+              ? provenance.previousFindings
+              : [],
+            pending.previousFindings,
+          );
       } else {
         const candidateRow = candidateRows.find(
           (item) =>
@@ -1961,7 +1973,7 @@ function coverageHasOutstandingWork(coverage: JsonObject): boolean {
   );
 }
 
-function exactUnion<Value>(...groups: Value[][]): Value[] {
+export function exactUnion<Value>(...groups: Value[][]): Value[] {
   const seen = new Set<string>();
   return groups.flat().filter((value) => {
     const key = JSON.stringify(value);

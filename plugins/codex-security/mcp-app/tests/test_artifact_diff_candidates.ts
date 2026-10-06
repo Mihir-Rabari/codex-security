@@ -2962,7 +2962,7 @@ for (const shared of [false, true]) {
 }
 
 for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
-  for (const payload of ["candidate", "finding"] as const) {
+  for (const payload of ["candidate", "finding", "previousFindings"] as const) {
     test(`first Diff submission archives ${payload} evidence on ${outcome}`, async (t) => {
       const reviewed = candidate("first-submission", "reportable");
       const context = await fixture(t, [reviewed]);
@@ -2979,13 +2979,14 @@ for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
         id: "original-proof-gap",
         candidateId: reviewed.candidate_id,
         reason: "Original source review.",
-        [payload]: evidence,
+        [payload]: payload === "previousFindings" ? [evidence] : evidence,
       };
       const otherPending = {
         ...pending,
         id: "independent-proof-gap",
         reason: "Independent source review.",
-        [payload]: otherEvidence,
+        [payload]:
+          payload === "previousFindings" ? [otherEvidence] : otherEvidence,
       };
       const input = draft([pending, otherPending]);
       input.coverage.completeness = "partial";
@@ -3168,5 +3169,81 @@ for (const confirmed of [false, true]) {
           (row: FixtureObject) => row.id === "receipt-terminal",
         ),
       );
+  });
+}
+
+for (const outcome of [
+  "finding",
+  "rejected",
+  "not_applicable",
+  "pending",
+] as const) {
+  test(`saved Diff row-level history survives ${outcome}`, async (t) => {
+    const reviewed = candidate("row-level-history", "deferred");
+    const context = await fixture(t, [reviewed]);
+    const history = finding(reviewed.candidate_id);
+    history.summary = "Earlier evidence exists only in the deferred history.";
+    const pending = {
+      id: "historical-proof-gap",
+      candidateId: reviewed.candidate_id,
+      reason: "The saved proof remains unfinished.",
+      previousFindings: [history],
+    };
+    const initial = draft([pending]);
+    initial.complete = false;
+    initial.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, initial);
+    const next = draft();
+    next.complete = true;
+    if (outcome === "pending") next.coverage.completeness = "partial";
+    if (outcome === "finding") {
+      await writeLedger(context, [
+        candidate(reviewed.candidate_id, "reportable", "reportable"),
+      ]);
+      next.findings = [finding(reviewed.candidate_id)];
+    } else if (outcome !== "pending") {
+      await writeLedger(context, [
+        candidate(
+          reviewed.candidate_id,
+          outcome === "rejected" ? "suppressed" : outcome,
+        ),
+      ]);
+      next.coverage.surfaces = [
+        {
+          id: "authored-terminal",
+          candidateId: reviewed.candidate_id,
+          label: "Current authored terminal decision",
+          disposition: outcome,
+          receiptRefs: [],
+        },
+      ];
+    }
+    await recordCodexSecurityScanDraft(context, next);
+    const canonical =
+      outcome === "finding"
+        ? JSON.parse(
+            await readFile(path.join(context.root, "findings.json"), "utf8"),
+          )
+        : await readCoverage(context);
+    const contains = (value: unknown): boolean => {
+      if (isDeepStrictEqual(value, history)) return true;
+      if (Array.isArray(value)) return value.some(contains);
+      return (
+        value !== null &&
+        typeof value === "object" &&
+        Object.values(value).some(contains)
+      );
+    };
+    assert.ok(
+      contains(canonical),
+      "the published history retains its original full finding",
+    );
+    const saved = await readCoverage(context);
+    assert.equal(
+      saved.deferred.some(
+        (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+      ),
+      outcome === "pending",
+    );
   });
 }

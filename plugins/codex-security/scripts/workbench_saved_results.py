@@ -58,6 +58,7 @@ from workbench_budget_candidates import (
     _diff_candidate_decision,
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
+    archive_candidate_payloads,
     recover_candidate_receipts,
 )
 from workbench_budget_candidates import (
@@ -953,6 +954,9 @@ def _stopped_diff_candidate_decisions(
                         **decision,
                         "candidate": candidate,
                     }
+                    archive_candidate_payloads(
+                        decisions[candidate_id], pending.get(candidate_id, [])
+                    )
                     pending.pop(candidate_id, None)
                     continue
                 item = pending.setdefault(candidate_id, [{"candidateId": candidate_id}])[0]
