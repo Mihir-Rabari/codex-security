@@ -5333,6 +5333,7 @@ export async function main(
                 gitRepository,
                 identifier ?? directPatchDigest(positionals, imports),
                 gitDependencies,
+                patchGitBase!.context,
               )
             : undefined;
           const commandContext =
@@ -5429,7 +5430,7 @@ export async function main(
               publication,
               publicationFiles.length > 0 ? publicationFiles : files,
               errorOutput,
-              gitDependencies,
+              dependencies,
               patchRisk?.summary,
               identifier === undefined
                 ? "Applies a security fix generated from supplied issue data."
@@ -6785,6 +6786,7 @@ function directPatchDigest(
 }
 
 interface PatchPublication {
+  context: GitPatchState["context"];
   branch: string;
   directory: string;
   dirtyFiles: Set<string>;
@@ -7023,6 +7025,7 @@ async function patchCommandContext(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<{
+  root: string;
   directory: string;
   gitDirectory: string;
   environment: NodeJS.ProcessEnv;
@@ -7033,7 +7036,7 @@ async function patchCommandContext(
         "git",
         ["rev-parse", ...args],
         repository,
-        { trim: false },
+        { trim: false, directory },
       )
     ).replace(/\n$/u, "");
   const gitDirectory = await gitPath(["--git-dir"]);
@@ -7064,6 +7067,7 @@ async function patchCommandContext(
     environment[name] = value === "" ? value : resolve(directory, value);
   }
   return {
+    root: await realpath(repository),
     directory: await realpath(directory),
     gitDirectory: await realpath(environment["GIT_DIR"]!),
     environment,
@@ -7081,7 +7085,13 @@ async function bindPatchCommandContext(
       (await lstat(path)).isDirectory() ? path : undefined,
     )
     .catch(() => undefined);
-  if (currentDirectory !== context.directory) directory = repository;
+  if (currentDirectory !== context.directory) {
+    if ((await realpath(repository)) !== context.root)
+      throw new CodexSecurityError(
+        "The patch repository is no longer available at its original path.",
+      );
+    directory = repository;
+  }
   return {
     directory,
     dependencies: {
@@ -7100,6 +7110,7 @@ async function preparePatchPublication(
   repository: string,
   patchId: string,
   dependencies: CliDependencies,
+  context?: GitPatchState["context"],
 ): Promise<PatchPublication> {
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const refs = branch
@@ -7186,7 +7197,15 @@ async function preparePatchPublication(
     if (/[RC]/u.test(entry.slice(0, 2)))
       dirtyFiles.add(relative(directory, resolve(root, paths[++index]!)));
   }
-  return { branch, directory, dirtyFiles, tree, root };
+  return {
+    branch,
+    directory,
+    dirtyFiles,
+    tree,
+    root,
+    context:
+      context ?? (await patchCommandContext(repository, root, dependencies)),
+  };
 }
 
 async function publishPatchBranch(
@@ -7353,7 +7372,15 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, directory, dirtyFiles, tree, root } = publication;
+  const { branch, directory, dirtyFiles, tree, root, context } = publication;
+  const bound = await bindPatchCommandContext(
+    context.directory,
+    root,
+    context,
+    dependencies,
+  );
+  dependencies = bound.dependencies;
+  repository = root;
   const deleted =
     dirtyFiles.size === 0
       ? ""
@@ -7401,11 +7428,11 @@ async function createPatchPullRequest(
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const pathspec = files.map((file) =>
-    relative(directory, resolve(directory, file)),
+    relative(bound.directory, resolve(directory, file)),
   );
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  const runFiles = (args: string[]) => run(["-C", directory, ...args]);
+  const runFiles = (args: string[]) => run(["-C", bound.directory, ...args]);
   await runFiles([
     "--literal-pathspecs",
     "add",

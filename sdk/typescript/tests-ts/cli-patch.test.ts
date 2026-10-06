@@ -7141,9 +7141,9 @@ describe("ordinary patch snapshot context", () => {
     ["ordinary", "saved", "inline"].flatMap((route) =>
       ["stable", "remove", "replace", "relative-filter"].flatMap((operation) =>
         (route === "inline"
-          ? [undefined]
+          ? [undefined, "--create-pr"]
           : route === "saved"
-            ? [undefined, "--assess-patch-risk"]
+            ? [undefined, "--assess-patch-risk", "--create-pr"]
             : [undefined, "--assess-patch-risk", "--create-pr"]
         ).flatMap((flag) =>
           ["ordinary", "relative"].map((settings) => ({
@@ -7169,9 +7169,18 @@ describe("ordinary patch snapshot context", () => {
       if (operation === "relative-filter")
         git("config", "diff.relative", "true");
       await writeFile(join(root, "app.ts"), "unsafe\n");
+      await writeFile(join(root, "unrelated.ts"), "original unrelated\n");
       await writeFile(join(directory, "keep.ts"), "component\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
+      const stagedUnrelated =
+        flag === "--create-pr" &&
+        route !== "ordinary" &&
+        (operation === "stable" || operation === "relative-filter");
+      if (stagedUnrelated) {
+        await writeFile(join(root, "unrelated.ts"), "staged unrelated\n");
+        git("add", "unrelated.ts");
+      }
       const index = await readFile(join(root, ".git/index"));
       const remote = await fixtures.create("patch-captured-remote-");
       git("init", "--bare", remote);
@@ -7181,9 +7190,14 @@ describe("ordinary patch snapshot context", () => {
       foreignGit("init", "--initial-branch=main");
       foreignGit("config", "user.name", "Synthetic User");
       foreignGit("config", "user.email", "synthetic@example.test");
-      await writeFile(join(foreign, "tracked.ts"), "unrelated baseline\n");
+      await writeFile(join(foreign, "keep.ts"), "unrelated baseline\n");
       foreignGit("add", ".");
       foreignGit("commit", "-m", "Synthetic unrelated baseline");
+      await writeFile(join(foreign, "keep.ts"), "foreign preexisting edit\n");
+      const foreignHead = foreignGit("rev-parse", "HEAD");
+      const foreignRemote = await fixtures.create("patch-unselected-remote-");
+      foreignGit("init", "--bare", foreignRemote);
+      foreignGit("remote", "add", "origin", foreignRemote);
       await writeFile(
         join(foreign, "untracked.ts"),
         "unrelated local content\n",
@@ -7194,6 +7208,7 @@ describe("ordinary patch snapshot context", () => {
         ...(settings === "relative"
           ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
           : {}),
+        GH_CONFIG_DIR: "provider-config",
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
@@ -7215,15 +7230,18 @@ describe("ordinary patch snapshot context", () => {
           environment,
           result: scan,
           onWorkbench: () => savedScan(scan, "scan-1", directory),
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, {
-                  ...options,
-                  environment: { ...environment, ...options?.environment },
-                })
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              });
+            if (args[1] === "list") return "[]";
+            expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(
+              resolve(directory, "provider-config"),
+            );
+            return "https://github.example.test/example/repository/pull/1";
+          },
           onCodex: async (args, output, childEnvironment) => {
             if (
               output?.appServer?.prompt.includes(
@@ -7286,6 +7304,11 @@ describe("ordinary patch snapshot context", () => {
       expect(modelCalls).toBe(1);
       expect(assessmentCalls).toBe(flag === "--assess-patch-risk" ? 1 : 0);
       expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
+      expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
+      expect(foreignGit("ls-remote", "origin")).toBe("");
+      expect(await readFile(join(foreign, "keep.ts"), "utf8")).toBe(
+        "foreign preexisting edit\n",
+      );
       expect(await readFile(join(foreign, ".git/index"))).toEqual(foreignIndex);
       expect(await readFile(join(foreign, "untracked.ts"), "utf8")).toBe(
         "unrelated local content\n",
@@ -7309,7 +7332,14 @@ describe("ordinary patch snapshot context", () => {
       }
       if (flag !== "--create-pr" || publicationRejected)
         expect(await readFile(join(root, ".git/index"))).toEqual(index);
-      else expect(git("show", "HEAD:app.ts")).toBe("fixed");
+      else
+        expect(git("show", "HEAD:app.ts")).toBe(
+          route === "ordinary" ? "fixed" : "unsafe",
+        );
+      expect(git("show", "HEAD:unrelated.ts")).toBe("original unrelated");
+      expect(git("diff", "--cached", "--name-only")).toBe(
+        stagedUnrelated ? "unrelated.ts" : "",
+      );
       if (publicationRejected) expect(git("ls-remote", "origin")).toBe("");
     },
   );
@@ -7407,3 +7437,133 @@ test.each(
     }
   },
 );
+
+describe("patch worktree root identity", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  test.each([
+    ...["ordinary", "saved", "inline"].flatMap((route) =>
+      ["replace", "stable", "alias"].map((operation) => ({
+        route,
+        operation,
+        layout: "external metadata",
+      })),
+    ),
+    { route: "ordinary", operation: "replace", layout: "nested invocation" },
+  ])(
+    "preserves checkout identity for $route $operation with $layout",
+    async ({ route, operation, layout }) => {
+      const root = await fixtures.create("patch-root-identity-");
+      const foreignRoot = await fixtures.create("patch-root-unselected-");
+      const external = layout === "external metadata";
+      for (const parent of [root, foreignRoot]) {
+        const worktree = join(parent, "worktree");
+        await mkdir(join(worktree, "component"), { recursive: true });
+        const git = repositoryGit(worktree);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(worktree, "keep.ts"), "original\n");
+        await writeFile(
+          join(worktree, "component", "anchor.ts"),
+          "component\n",
+        );
+        git("add", ".");
+        git("commit", "-m", "Synthetic baseline");
+        const remote = join(parent, "remote.git");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        if (external)
+          await rename(join(worktree, ".git"), join(parent, ".git"));
+      }
+      const worktree = join(root, "worktree");
+      const foreign = join(foreignRoot, "worktree");
+      const foreignMetadata = join(external ? foreignRoot : foreign, ".git");
+      const foreignGit = (...args: string[]) =>
+        repositoryGit(foreignRoot)(
+          "--git-dir",
+          foreignMetadata,
+          "--work-tree",
+          foreign,
+          ...args,
+        );
+      await writeFile(join(foreign, "keep.ts"), "foreign preexisting edit\n");
+      const foreignObjects = foreignGit("count-objects", "-v");
+      const foreignHead = foreignGit("rev-parse", "HEAD");
+      const foreignIndex = await readFile(join(foreignMetadata, "index"));
+      const foreignStatus = foreignGit("status", "--porcelain=v1");
+      const directory =
+        operation === "alias"
+          ? join(root, "worktree-alias")
+          : external
+            ? worktree
+            : join(worktree, "component");
+      if (operation === "alias")
+        await symlink(
+          worktree,
+          directory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      const environment = external ? { GIT_DIR: join("..", ".git") } : {};
+      const scan = resultWithFindings(["high"]);
+      scan.findings.findings[0]!.locations[0]!.path = "keep.ts";
+      const argv =
+        route === "ordinary"
+          ? ["patch", "Synthetic issue"]
+          : route === "saved"
+            ? ["patch", "--scan", "scan-1"]
+            : ["scan", directory, "--patch"];
+      let modelCalls = 0;
+      const outcome = await runWorkflow([...argv, "--create-pr", "--json"], {
+        currentDirectory: directory,
+        environment,
+        result: scan,
+        onWorkbench: () => savedScan(scan, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "git")
+            return runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            });
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
+        onCodex: async (args, output) => {
+          modelCalls++;
+          if (operation === "replace") {
+            await rename(worktree, join(root, "original-worktree"));
+            await symlink(
+              foreign,
+              worktree,
+              process.platform === "win32" ? "junction" : "dir",
+            );
+          } else await writeFile(join(worktree, "keep.ts"), "fixed\n");
+          if (route === "ordinary") output?.stdout.write("Fixed and checked.");
+          else completePatches(args, output);
+          return 0;
+        },
+      });
+      expect(modelCalls).toBe(1);
+      expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
+      expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
+      expect(await readFile(join(foreignMetadata, "index"))).toEqual(
+        foreignIndex,
+      );
+      expect(foreignGit("status", "--porcelain=v1")).toBe(foreignStatus);
+      expect(foreignGit("ls-remote", "origin")).toBe("");
+      expect(await readFile(join(foreign, "keep.ts"), "utf8")).toBe(
+        "foreign preexisting edit\n",
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        operation === "replace" ? 2 : 0,
+      );
+      const published = repositoryGit(root)(
+        "ls-remote",
+        join(root, "remote.git"),
+      );
+      if (operation === "replace") expect(published).toBe("");
+      else expect(published).toContain("refs/heads/codex-security/patch-");
+    },
+  );
+});
