@@ -37,7 +37,13 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       false,
     );
     if (behavior !== "explicit_issue") {
-      for (const suffix of ["/42/instances", "-wrong"]) {
+      for (const suffix of [
+        "/42/instances",
+        "-wrong",
+        ".json",
+        "_wrong",
+        "Extra",
+      ]) {
         assert.equal(
           github(output.replaceAll("?", `${suffix}?`), {
             vars: { expected_github_rest_behavior: behavior },
@@ -46,7 +52,18 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
           `${behavior} must reject collection endpoint suffix ${suffix}`,
         );
       }
-      for (const delimiter of ["\n", "` ", '" ', " "]) {
+      for (const delimiter of [
+        "\n",
+        "` ",
+        '" ',
+        " ",
+        ") ",
+        ", ",
+        ". ",
+        "; ",
+        ": ",
+        "] ",
+      ]) {
         const formatted = github(output.replaceAll("?", `${delimiter}?`), {
           vars: { expected_github_rest_behavior: behavior },
         });

@@ -10,7 +10,7 @@ function endpointPattern(path: string, queryParts: string[] = []) {
     .replace(/\\\{(?:owner|repo)\\\}/g, "[^/\\s?`]+");
   const queryPatterns = queryParts.map((part) => new RegExp(part, "i"));
   return (text: string) =>
-    new RegExp(escapedPath + "(?=$|[?\\s`\"'])", "i").test(text) &&
+    new RegExp(escapedPath + "\\b(?![/-]|\\.\\w)", "i").test(text) &&
     containsAll(text, queryPatterns);
 }
 

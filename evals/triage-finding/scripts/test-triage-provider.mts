@@ -292,3 +292,146 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     );
   },
 );
+
+test(
+  "provider resolves each call's Node template without leaking sibling configuration",
+  { skip: process.platform === "win32", timeout: 120000 },
+  async (t) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "triage-provider-vars-"),
+    );
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const nodes = [
+      "first & node/node",
+      "second/node",
+      "literal/{{custom_node}}",
+    ].map((name) => path.join(root, name));
+    for (const node of nodes) {
+      fs.mkdirSync(path.dirname(node), { recursive: true });
+      fs.writeFileSync(node, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    const extra = path.join(root, "extra");
+    fs.mkdirSync(extra);
+    const fakeCodex = path.join(root, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      `#!${process.execPath}
+const details = {node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
+console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-thread'}));
+console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify(details)}}));
+console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
+`,
+      { mode: 0o755 },
+    );
+    const environment = {
+      TRIAGE_RUNTIME_ROOT: root,
+      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+      PROMPTFOO_DISABLE_TELEMETRY: "1",
+      PROMPTFOO_DISABLE_UPDATE: "1",
+      PROMPTFOO_DISABLE_WAL_MODE: "true",
+      PROMPTFOO_DISABLE_TEMPLATING: "",
+      NODE_BASENAME: "node",
+      OPENAI_API_KEY: "synthetic-test-key",
+    };
+    const original = new Map(
+      Object.keys(environment).map((key) => [key, process.env[key]]),
+    );
+    t.after(() => {
+      for (const [key, value] of original) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    Object.assign(process.env, environment);
+    const { loadApiProvider } = await import("promptfoo");
+    const load = (template: string) =>
+      loadApiProvider(
+        `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
+        {
+          basePath: root,
+          options: {
+            config: {
+              working_dir: root,
+              codex_path_override: fakeCodex,
+              skip_git_repo_check: true,
+              model: "gpt-5.5",
+              maxRetries: 0,
+              cli_env: { CODEX_MCP_NODE_PATH: template },
+            },
+          },
+        },
+      );
+    for (const template of [
+      "{{custom_node}}",
+      '{{custom_node | replace("second", "second")}}',
+      "{{custom_node_json | load}}",
+      nodes[0],
+    ]) {
+      const provider = await load(template);
+      const overrides = template === nodes[0];
+      const invoke = async (node: string) => {
+        const context = {
+          vars: {
+            custom_node: node,
+            custom_node_json: JSON.stringify(node),
+            marker: node,
+          },
+          ...(overrides
+            ? {
+                prompt: {
+                  raw: "synthetic",
+                  label: "synthetic",
+                  config: {
+                    cli_env: {
+                      CODEX_MCP_NODE_PATH: "{{custom_node}}",
+                      EXTRA_MARKER: "{{marker}}",
+                    },
+                    additional_directories: [extra],
+                  },
+                },
+              }
+            : {}),
+        };
+        const saved = structuredClone(context);
+        const result = await provider.callApi(
+          "Return synthetic launch details",
+          context,
+        );
+        assert.equal(result.error, undefined, result.error);
+        const captured = JSON.parse(String(result.output));
+        assert.equal(captured.node, node);
+        assert.deepEqual(captured.directories, [
+          ...(overrides ? [extra] : []),
+          path.dirname(node),
+        ]);
+        if (overrides) assert.equal(captured.marker, node);
+        assert.deepEqual(context, saved);
+      };
+      try {
+        for (const node of nodes.slice(0, 2)) await invoke(node);
+        await Promise.all(nodes.slice(0, 2).map(invoke));
+      } finally {
+        await provider.cleanup?.();
+      }
+    }
+    const mixed = await load("{{prefix}}/{{env.NODE_BASENAME}}");
+    try {
+      const result = await mixed.callApi("synthetic", {
+        vars: { prefix: path.dirname(nodes[1]) },
+      });
+      assert.equal(JSON.parse(String(result.output)).node, nodes[1]);
+    } finally {
+      await mixed.cleanup?.();
+    }
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = "true";
+    const disabled = await load(nodes[2]);
+    try {
+      const result = await disabled.callApi("synthetic", {
+        vars: { custom_node: "other" },
+      });
+      assert.equal(JSON.parse(String(result.output)).node, nodes[2]);
+    } finally {
+      await disabled.cleanup?.();
+    }
+  },
+);
