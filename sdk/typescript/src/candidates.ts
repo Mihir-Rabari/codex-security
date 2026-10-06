@@ -76,7 +76,7 @@ export function unresolvedCandidates(
       continue;
     const key = candidateIdentity(
       candidate.candidateId,
-      candidate.sourceWorkerId,
+      candidate["sourceWorkerId"],
     );
     if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
   }

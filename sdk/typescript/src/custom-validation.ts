@@ -409,7 +409,7 @@ export async function runCustomValidation(options: {
   const previousDeferred = new Map<string, DeferredCoverage[]>();
   coverage.deferred = coverage.deferred.filter((item) => {
     if (item.candidateId === undefined) return true;
-    const key = candidateIdentity(item.candidateId, item.sourceWorkerId);
+    const key = candidateIdentity(item.candidateId, item["sourceWorkerId"]);
     if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDeferred.get(key) ?? [];
     rows.push(item);
@@ -497,11 +497,13 @@ export async function runCustomValidation(options: {
           continue;
         const sameCandidate =
           typeof surface.candidateId === "string"
-            ? candidateIdentity(surface.candidateId, surface.sourceWorkerId) ===
-              key
+            ? candidateIdentity(
+                surface.candidateId,
+                surface["sourceWorkerId"],
+              ) === key
             : previousSurfaceIds.has(surface.id) &&
-              (typeof surface.sourceWorkerId !== "string" ||
-                surface.sourceWorkerId === sourceWorkerId);
+              (typeof surface["sourceWorkerId"] !== "string" ||
+                surface["sourceWorkerId"] === sourceWorkerId);
         if (sameCandidate) surfaceIds.add(surface.id);
       }
     }
@@ -597,7 +599,7 @@ export async function runCustomValidation(options: {
         surface.disposition === "not_applicable") &&
       !surfaceCandidateKeys
         .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, surface.sourceWorkerId))
+        ?.has(candidateIdentity(surface.candidateId, surface["sourceWorkerId"]))
     ) {
       const baseId = `${surface.id}-decision`;
       let id = baseId;
@@ -621,7 +623,7 @@ export async function runCustomValidation(options: {
         surface.disposition === "not_applicable") &&
       !surfaceCandidateKeys
         .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, surface.sourceWorkerId))
+        ?.has(candidateIdentity(surface.candidateId, surface["sourceWorkerId"]))
     )
       delete surface.candidateId;
     surface.receiptRefs = [

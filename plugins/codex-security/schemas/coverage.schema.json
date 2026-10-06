@@ -99,9 +99,6 @@
             "type": "string",
             "minLength": 1,
             "description": "Stable identity of a saved candidate; omitted for general coverage work."
-          },
-          "sourceWorkerId": {
-            "description": "Logical Deep worker owning this candidate identity, preserved across resumed attempts."
           }
         }
       }
@@ -155,9 +152,6 @@
             "type": "string",
             "minLength": 1,
             "description": "Stable identity of a saved candidate; omitted for general coverage work."
-          },
-          "sourceWorkerId": {
-            "description": "Logical Deep worker owning this candidate identity, preserved across resumed attempts."
           },
           "candidate": {
             "type": "object",

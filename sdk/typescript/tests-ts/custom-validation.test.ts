@@ -260,7 +260,7 @@ for (const disposition of [
       join(f.scanDir, "coverage.json"),
     );
     coverage.surfaces[0]!.candidateId = "independent-a";
-    coverage.surfaces[0]!.sourceWorkerId = "worker-a";
+    coverage.surfaces[0]!["sourceWorkerId"] = "worker-a";
     const independent = {
       id: "independent-review",
       candidateId: "independent-a",
@@ -468,11 +468,11 @@ describe("custom validation", () => {
       const terminal = saved.coverage.surfaces.find(
         (surface) =>
           surface.candidateId === previous.candidateId &&
-          surface.sourceWorkerId === previous.sourceWorkerId,
+          surface["sourceWorkerId"] === previous["sourceWorkerId"],
       );
       expect(terminal).toMatchObject({
         candidateId: previous.candidateId,
-        sourceWorkerId: previous.sourceWorkerId,
+        sourceWorkerId: previous["sourceWorkerId"],
         candidate: previous.candidate,
         finding: {
           ...finding,
@@ -1442,7 +1442,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
         const reopened = saved.unresolvedCandidates.filter(
           (row) =>
             row.candidateId === "validated-candidate" &&
-            row.sourceWorkerId === "worker-current",
+            row["sourceWorkerId"] === "worker-current",
         );
         expect(reopened).toHaveLength(disposition === "deferred" ? 1 : 0);
         if (gap === "none") {

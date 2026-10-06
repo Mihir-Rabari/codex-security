@@ -321,10 +321,6 @@ export interface CoverageDocument {
      * Stable identity of a saved candidate; omitted for general coverage work.
      */
     candidateId?: string;
-    /**
-     * Logical Deep worker owning this candidate identity, preserved across resumed attempts.
-     */
-    sourceWorkerId?: string;
     [k: string]: unknown;
   }[];
   explicitExclusions: {
@@ -341,10 +337,6 @@ export interface CoverageDocument {
      * Stable identity of a saved candidate; omitted for general coverage work.
      */
     candidateId?: string;
-    /**
-     * Logical Deep worker owning this candidate identity, preserved across resumed attempts.
-     */
-    sourceWorkerId?: string;
     /**
      * Saved candidate details and evidence awaiting a final decision.
      */
