@@ -68,7 +68,14 @@ for (const resume of [false, true]) {
               details: { evidence: ["source review"] },
               workerId: review.workerId,
               attempt: review.attempt,
-              ...(field === "surfaces" ? { sourceId: "shared-surface" } : {}),
+              ...(field === "surfaces"
+                ? {
+                    sourceId:
+                      item.label === "Archive route"
+                        ? "shared-surface"
+                        : "shared-surface-2",
+                  }
+                : {}),
               ...(field === "deferred"
                 ? { sourceId: "same-id", candidateId: "candidate-1" }
                 : {}),

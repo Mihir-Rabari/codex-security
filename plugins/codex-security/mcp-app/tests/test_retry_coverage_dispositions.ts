@@ -122,7 +122,9 @@ for (const surfaceOnly of [false, true]) {
               coverage.surfaces.filter(
                 (item) => item.disposition === disposition,
               ).length,
-              disposition === "reported" && !resolveOnRetry ? 0 : 1,
+              resolveOnRetry || (surfaceOnly && disposition !== "reported")
+                ? 1
+                : 0,
             );
             assert.ok(
               coverage.deferred.some(
