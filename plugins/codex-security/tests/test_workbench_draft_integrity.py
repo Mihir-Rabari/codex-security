@@ -2024,3 +2024,50 @@ def test_saved_collision_reserves_finalizer_identity_with_optional_metadata(
     }
     assert by_candidate["candidate-c"]["identity"] == reserved["identity"]
     assert len({row["findingId"] for row in saved["findings"]}) == 3
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("raw_anchor", ["synthetic-collision", "Synthetic Collision"])
+def test_saved_collision_uses_recovered_identity_for_allocation(tmp_path, retry, raw_anchor):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    first = document["findings"][0]
+    first["identity"] = {"anchor": raw_anchor}
+    first["provenance"]["candidateId"] = "candidate-a"
+    first["summary"] = "First independent candidate."
+    second = copy.deepcopy(first)
+    second["provenance"]["candidateId"] = "candidate-b"
+    second["summary"] = "Second independent candidate."
+    document["findings"] = [first, second]
+    path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not saved["resultsRecoveryNeeded"]
+    assert saved["findingCount"] == 2
+    assert {row["identity"]["anchor"] for row in saved["findings"]} == {"synthetic-collision"}
+    assert len({row["findingId"] for row in saved["findings"]}) == 2
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("changed_note", [False, True])
+def test_saved_identity_metadata_does_not_allocate_another_logical_finding(
+    tmp_path, retry, changed_note
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    first = document["findings"][0]
+    first["identity"] = {"anchor": "synthetic-observation", "note": "Initial metadata."}
+    first["provenance"]["candidateId"] = "same-candidate"
+    second = copy.deepcopy(first)
+    if changed_note:
+        second["identity"]["note"] = "Later metadata."
+    document["findings"] = [first, second]
+    path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not saved["resultsRecoveryNeeded"]
+    assert saved["findingCount"] == 1
+    assert {row["provenance"]["candidateId"] for row in saved["findings"]} == {"same-candidate"}
+    assert "instance" not in saved["findings"][0]["identity"]

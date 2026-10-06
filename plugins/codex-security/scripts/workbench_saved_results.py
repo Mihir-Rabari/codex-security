@@ -2304,7 +2304,7 @@ def merge_saved_results(
         if not isinstance(identity, dict):
             continue
         key = _fingerprint("", recovered)
-        variant = _finding_key(recovered)
+        variant = _digest(_finding_locations(recovered))
         assigned = identities.setdefault(key, [])
         matching = next(
             (
@@ -2334,7 +2334,11 @@ def merge_saved_results(
             while True:
                 identity["instance"] = prefix if suffix == 1 else f"{prefix}-{suffix}"
                 instance_key = _fingerprint(
-                    "", {**recovered, "identity": {**recovered["identity"], **identity}}
+                    "",
+                    {
+                        **recovered,
+                        "identity": {**recovered["identity"], "instance": identity["instance"]},
+                    },
                 )
                 if instance_key not in reserved_identities:
                     reserved_identities.add(instance_key)
