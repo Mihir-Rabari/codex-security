@@ -7535,10 +7535,23 @@ async function verifiedPatchFiles(
   const ancestors = new Set<string>();
   for (const file of [
     ...reported,
-    ...[...before.keys()]
-      .map((file) => relative(context.directory, resolve(root, file)))
-      .filter((file) => !isOutsidePath(file))
-      .flatMap(locations),
+    ...[...before].flatMap(([file, entry]) => {
+      const path = relative(context.directory, resolve(root, file));
+      if (isOutsidePath(path)) return [];
+      const destination = resolve(directory, path);
+      if (
+        after.get(relative(root, destination).split(sep).join("/")) !== entry
+      ) {
+        let verified = destination;
+        while (!reported.has(verified) && verified !== dirname(verified))
+          verified = dirname(verified);
+        if (!reported.has(verified))
+          throw new CodexSecurityError(
+            `Moved file changed without verification: ${path}. Local edits and patches were kept.`,
+          );
+      }
+      return locations(path);
+    }),
   ]) {
     for (let path = file; !ancestors.has(path); path = dirname(path))
       ancestors.add(path);

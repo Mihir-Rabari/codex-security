@@ -8240,6 +8240,55 @@ describe("in-repository directory moves", () => {
       destination: "source",
       caller: "component",
     },
+    {
+      route: "saved",
+      publish: true,
+      local: "unreported-edit",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "inline",
+      publish: true,
+      local: "unreported-edit",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "unreported-delete",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "verified-edit",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "verified-delete",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "directory-edit",
+      destination: "source",
+      caller: "component",
+    },
+    {
+      route: "saved",
+      publish: true,
+      local: "directory-delete",
+      destination: "source",
+      caller: "component",
+    },
   ])(
     "preserves complete $route moves; publish=$publish local=$local destination=$destination caller=$caller",
     async ({ route, publish, local, destination, caller }) => {
@@ -8251,10 +8300,27 @@ describe("in-repository directory moves", () => {
       const source =
         destination === "root" ? repository : join(repository, "source");
       const prefix = destination === "root" ? "" : "source/";
+      const sibling = local.startsWith("directory-")
+        ? "nested/sibling.ts"
+        : "sibling.ts";
+      const deleted = local.endsWith("-delete");
+      const unverified =
+        local.startsWith("unreported-") || local === "nested-new";
+      const reported =
+        local === "ignored-reported"
+          ? "local.txt"
+          : local === "reported-directory"
+            ? "reported"
+            : local.startsWith("verified-")
+              ? sibling
+              : local.startsWith("directory-")
+                ? "nested"
+                : undefined;
       const remote = join(root, "remote.git");
       await mkdir(component, { recursive: true });
       await writeFile(join(component, "app.ts"), "unsafe\n");
-      await writeFile(join(component, "sibling.ts"), "unchanged sibling\n");
+      await mkdir(dirname(join(component, sibling)), { recursive: true });
+      await writeFile(join(component, sibling), "unchanged sibling\n");
       if (local === "nested-new")
         await writeFile(join(component, "marker.ts"), "original marker\n");
       if (caller === "alias")
@@ -8277,7 +8343,7 @@ describe("in-repository directory moves", () => {
           join(component, "sibling.ts"),
           "preexisting local edit\n",
         );
-        if (local === "staged") git("add", "component/sibling.ts");
+        if (local === "staged") git("add", `component/${sibling}`);
       }
       if (local.startsWith("ignored"))
         await writeFile(
@@ -8320,7 +8386,8 @@ describe("in-repository directory moves", () => {
                   .find((line) => line.startsWith('{"path":'))!,
               ) as { path: string; changedFiles: string[] };
               expect(artifact.changedFiles).toContain(`${prefix}app.ts`);
-              expect(artifact.changedFiles).toContain(`${prefix}sibling.ts`);
+              if (!deleted)
+                expect(artifact.changedFiles).toContain(`${prefix}${sibling}`);
               expect(artifact.changedFiles).toContain("component/app.ts");
               expect(artifact.changedFiles).not.toContain("unrelated.ts");
               expect(artifact.changedFiles).not.toContain(
@@ -8343,7 +8410,7 @@ describe("in-repository directory moves", () => {
                 expect(artifact.changedFiles).toContain(
                   caller === "alias" ? "alias" : "component",
                 );
-                expect(patch).toContain("component/sibling.ts");
+                expect(patch).toContain(`component/${sibling}`);
                 expect(patch).toContain("deleted file mode");
               }
               assessments++;
@@ -8361,6 +8428,9 @@ describe("in-repository directory moves", () => {
                 process.platform === "win32" ? "junction" : "dir",
               );
               await writeFile(join(source, "app.ts"), "fixed\n");
+              if (local.endsWith("-edit"))
+                await writeFile(join(source, sibling), "model sibling edit\n");
+              if (deleted) await rm(join(source, sibling));
               if (local === "reported-directory") {
                 await mkdir(join(source, "reported"));
                 await writeFile(
@@ -8384,22 +8454,14 @@ describe("in-repository directory moves", () => {
                 join(repository, "unrelated.ts"),
                 "unrelated model edit\n",
               );
-              if (
-                local === "ignored-reported" ||
-                local === "reported-directory"
-              )
+              if (reported !== undefined)
                 output?.stdout.write(
                   JSON.stringify({
                     patches: [
                       {
                         occurrenceId: "occ_1",
                         status: "verified",
-                        files: [
-                          "app.ts",
-                          local === "ignored-reported"
-                            ? "local.txt"
-                            : "reported",
-                        ],
+                        files: ["app.ts", reported],
                         verification:
                           "The exploit fails and focused tests pass.",
                       },
@@ -8412,11 +8474,44 @@ describe("in-repository directory moves", () => {
           },
         },
       );
-      expect(assessments, outcome.stderr).toBe(route === "saved" ? 1 : 0);
+      expect(assessments, outcome.stderr).toBe(
+        route === "saved" && !unverified ? 1 : 0,
+      );
       expect(await readFile(join(source, "app.ts"), "utf8")).toBe("fixed\n");
       expect(await readFile(join(repository, "unrelated.ts"), "utf8")).toBe(
         "unrelated model edit\n",
       );
+      if (unverified) {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Moved file changed without verification",
+        );
+        expect(git("rev-parse", "HEAD")).toBe(originalHead);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(repository, ".git/index"))).toEqual(index);
+        expect(git("show", `HEAD:component/${sibling}`)).toBe(
+          "unchanged sibling",
+        );
+        expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
+          "unreported.ts",
+        );
+        if (deleted)
+          await expect(readFile(join(source, sibling))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        else if (local === "nested-new") {
+          expect(git("show", "HEAD:component/marker.ts")).toBe(
+            "original marker",
+          );
+          expect(
+            await readFile(join(source, "marker.ts/unreported.ts"), "utf8"),
+          ).toBe("unreported nested file\n");
+        } else
+          expect(await readFile(join(source, sibling), "utf8")).toBe(
+            "model sibling edit\n",
+          );
+        return;
+      }
       if (
         local === "dirty" ||
         local === "staged" ||
@@ -8456,9 +8551,16 @@ describe("in-repository directory moves", () => {
       if (publish) {
         expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
         expect(git("show", `HEAD:${prefix}app.ts`)).toBe("fixed");
-        expect(git("show", `HEAD:${prefix}sibling.ts`)).toBe(
-          "unchanged sibling",
-        );
+        if (deleted)
+          expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
+            `${prefix}${sibling}`,
+          );
+        else
+          expect(git("show", `HEAD:${prefix}${sibling}`)).toBe(
+            local.endsWith("-edit")
+              ? "model sibling edit"
+              : "unchanged sibling",
+          );
         expect(git("show", "HEAD:unrelated.ts")).toBe("unrelated original");
         if (local === "reported-directory")
           expect(git("show", `HEAD:${prefix}reported/fixed.ts`)).toBe(
@@ -8491,6 +8593,103 @@ describe("in-repository directory moves", () => {
       } else {
         expect(git("rev-parse", "HEAD")).toBe(originalHead);
         expect(git("ls-remote", "origin")).toBe("");
+      }
+    },
+  );
+});
+
+describe("in-repository directory moves: executable modes", () => {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  // Git on Windows does not track executable-bit changes from chmod.
+  test.skipIf(process.platform === "win32").each([false, true])(
+    "requires verification for a moved file mode change: reported=%s",
+    async (reported) => {
+      const root = await fixtures.create("patch-moved-file-mode-");
+      const repository = join(root, "repository"),
+        component = join(repository, "component"),
+        source = join(repository, "source"),
+        remote = join(root, "remote.git");
+      await mkdir(component, { recursive: true });
+      await writeFile(join(component, "app.ts"), "unsafe\n");
+      await writeFile(join(component, "sibling.ts"), "unchanged sibling\n");
+      await chmod(join(component, "sibling.ts"), 0o644);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "core.filemode", "true");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const beforeHead = git("rev-parse", "HEAD"),
+        entry = git("ls-tree", "HEAD", "component/sibling.ts").split("\t")[0]!;
+      expect(entry).toStartWith("100644 blob ");
+      const index = await readFile(join(repository, ".git/index"));
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const scan = resultWithFindings(["high"]);
+      scan.findings.findings[0]!.locations[0]!.path = "app.ts";
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: component,
+          result: scan,
+          onWorkbench: () => savedScan(scan, "scan-1", component),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            await rename(component, source);
+            await symlink(source, component, "dir");
+            await writeFile(join(source, "app.ts"), "fixed\n");
+            await chmod(join(source, "sibling.ts"), 0o755);
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["app.ts", ...(reported ? ["sibling.ts"] : [])],
+                    verification: "The exploit fails and focused tests pass.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(await readFile(join(source, "app.ts"), "utf8")).toBe("fixed\n");
+      expect(await readFile(join(source, "sibling.ts"), "utf8")).toBe(
+        "unchanged sibling\n",
+      );
+      expect(
+        (
+          await (
+            await import("node:fs/promises")
+          ).stat(join(source, "sibling.ts"))
+        ).mode & 0o111,
+      ).toBe(0o111);
+      if (reported) {
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(git("ls-tree", "HEAD", "source/sibling.ts").split("\t")[0]).toBe(
+          entry.replace("100644 ", "100755 "),
+        );
+        expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      } else {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Moved file changed without verification",
+        );
+        expect(git("rev-parse", "HEAD")).toBe(beforeHead);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(repository, ".git/index"))).toEqual(index);
+        expect(
+          git("ls-tree", "HEAD", "component/sibling.ts").split("\t")[0],
+        ).toBe(entry);
       }
     },
   );
