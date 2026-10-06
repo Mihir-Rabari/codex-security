@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -150,8 +151,9 @@ def test_unsealed_coverage_retains_nonstring_owner_for_finalizer_recovery(
         assert pending in result[2]["deferred"]
 
 
-def test_retained_source_finding_resolves_its_worker_candidate_without_current_result(
-    tmp_path: Path, workbench_api
+@pytest.mark.parametrize("checkpoint_time", [100, 200, 300])
+def test_retained_source_finding_respects_worker_checkpoint_order_without_current_result(
+    tmp_path: Path, workbench_api, checkpoint_time: int
 ) -> None:
     scan_id = "retained-source-candidate"
     scan_dir, manifest, finding, _ = saved_parent(tmp_path, scan_id)
@@ -162,6 +164,7 @@ def test_retained_source_finding_resolves_its_worker_candidate_without_current_r
         sourceFindings=[{"id": "worker-one:0", "finding": source_finding}],
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": [finding]}))
+    os.utime(scan_dir / "coverage.json", ns=(200, 200))
     artifact_dir = scan_dir / "worker"
     artifact_dir.mkdir()
     checkpoint = write_checkpoint(
@@ -179,6 +182,7 @@ def test_retained_source_finding_resolves_its_worker_candidate_without_current_r
             },
         },
     )
+    os.utime(checkpoint, ns=(checkpoint_time, checkpoint_time))
     original = checkpoint.read_bytes()
     workers = [
         {
@@ -206,7 +210,9 @@ def test_retained_source_finding_resolves_its_worker_candidate_without_current_r
     assert result is not None
     assert warnings == []
     assert len(result[1]["findings"]) == 1
-    assert not any(item.get("candidateId") for item in result[2]["deferred"])
+    assert any(item.get("candidateId") for item in result[2]["deferred"]) is (
+        checkpoint_time >= 200
+    )
     assert checkpoint.read_bytes() == original
 
 

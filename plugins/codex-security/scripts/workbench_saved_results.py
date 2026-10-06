@@ -2045,8 +2045,9 @@ def merge_saved_results(
 
     ordered_candidates = {
         (owner, identity)
-        for (owner, _), (_, row, _) in active_deferred.items()
+        for owner, row in reopened_rows
         if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
+        and (owner, identity) in candidate_ids
     }
     ordered_outcomes = {}
 
@@ -2071,7 +2072,7 @@ def merge_saved_results(
     ordered_candidates.update(
         (owner, candidate_id)
         for relative, owner, candidate_id, _ in outcomes
-        if owner is not None and relative in selected_observations
+        if owner is not None and (relative == "parent" or relative in selected_observations)
     )
     # Reopened work and selected checkpoint outcomes follow the saved source order.
     for relative, owner, candidate_id, disposition in outcomes:

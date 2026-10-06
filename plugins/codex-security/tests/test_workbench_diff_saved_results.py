@@ -1244,7 +1244,10 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
         in json.loads((scan_dir / path).read_text()).get("coverage", {}).get("surfaces", [])
         for path in sources
     )
-    assert any("Skipped malformed coverage surface" in warning for warning in stopped["warnings"])
+    assert imported_surface in json.loads(coverage_path.read_text())["surfaces"]
+    assert not any(
+        "Skipped malformed coverage surface" in warning for warning in stopped["warnings"]
+    )
     assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
     assert (scan_dir / "report.md").is_file()
 
