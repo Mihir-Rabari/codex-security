@@ -71,6 +71,32 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       }
     }
   }
+  for (const alert of ["42", "{alert_number}"]) {
+    for (const [suffix, pass] of [
+      ["", true],
+      ["?per_page=100", true],
+      [". ", true],
+      ["; ", true],
+      ["` ", true],
+      ["/extra", false],
+      ["-wrong", false],
+      [".json", false],
+      ["_wrong", false],
+      ["Extra", false],
+    ] as const) {
+      const output = examples.code_scanning.replace(
+        "/42/instances",
+        `/${alert}/instances${suffix}`,
+      );
+      assert.equal(
+        github(output, {
+          vars: { expected_github_rest_behavior: "code_scanning" },
+        }).pass,
+        pass,
+        `instances endpoint ${alert} with suffix ${JSON.stringify(suffix)}`,
+      );
+    }
+  }
 }
 assert.equal(hasTriageJson("```sh\necho hello\n```"), false);
 assert.equal(
