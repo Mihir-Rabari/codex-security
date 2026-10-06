@@ -274,6 +274,7 @@ export class DeepScanCoordinator {
     this.cancellationPersistence = persistence;
     try {
       const parentStatus = await readParentStatus();
+      if (parentStatus === "canceled") this.cancel(reason);
       if (
         parentStatus === "running" &&
         !this.failurePersisted &&
