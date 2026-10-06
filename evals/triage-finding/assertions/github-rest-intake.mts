@@ -10,7 +10,8 @@ function endpointPattern(path: string, queryParts: string[] = []) {
     .replace(/\\\{(?:owner|repo)\\\}/g, "[^/\\s?`]+");
   const queryPatterns = queryParts.map((part) => new RegExp(part, "i"));
   return (text: string) =>
-    new RegExp(escapedPath, "i").test(text) && containsAll(text, queryPatterns);
+    new RegExp(escapedPath + "(?=$|[?\\s`\"'])", "i").test(text) &&
+    containsAll(text, queryPatterns);
 }
 
 function escapedLiteralPattern(value: unknown) {

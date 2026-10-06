@@ -36,6 +36,23 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       }).pass,
       false,
     );
+    if (behavior !== "explicit_issue") {
+      for (const suffix of ["/42/instances", "-wrong"]) {
+        assert.equal(
+          github(output.replaceAll("?", `${suffix}?`), {
+            vars: { expected_github_rest_behavior: behavior },
+          }).pass,
+          false,
+          `${behavior} must reject collection endpoint suffix ${suffix}`,
+        );
+      }
+      for (const delimiter of ["\n", "` ", '" ', " "]) {
+        const formatted = github(output.replaceAll("?", `${delimiter}?`), {
+          vars: { expected_github_rest_behavior: behavior },
+        });
+        assert.equal(formatted.pass, true, formatted.reason);
+      }
+    }
   }
 }
 assert.equal(hasTriageJson("```sh\necho hello\n```"), false);
