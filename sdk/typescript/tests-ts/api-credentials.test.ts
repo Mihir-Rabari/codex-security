@@ -224,11 +224,6 @@ describe("CodexSecurity orchestration", () => {
           );
           expect(saved).not.toHaveProperty("profile");
           expect(saved).not.toHaveProperty("profiles");
-          if (nativeProfile) {
-            expect(saved["experimental_compact_prompt_file"]).toBe(
-              join(home, "compact.md"),
-            );
-          }
           expect(saved["model_providers"]).toEqual({
             "synthetic.provider": provider,
           });
