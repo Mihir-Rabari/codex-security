@@ -5,6 +5,34 @@ export type HandoffClaimToken = string;
 export type Text = string;
 export type TextList = Text[];
 /**
+ * Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.
+ */
+export type ThreatModel =
+  | {
+      summary: Text;
+      assets?: TextList;
+      trustBoundaries?: TextList;
+      attackerCapabilities?: TextList;
+      securityObjectives?: TextList;
+      assumptions?: TextList;
+      [k: string]: unknown;
+    }
+  | {
+      format: "markdown";
+      content: Text;
+      /**
+       * The modeled source scope, which may differ from the scan scope. Omit when unknown.
+       */
+      scope?: {
+        includePaths: string[];
+        excludePaths?: string[];
+        summary?: string;
+        [k: string]: unknown;
+      };
+      origin?: "generated" | "provided" | "reconciled" | "recovered";
+      [k: string]: unknown;
+    };
+/**
  * Copy the reviewed candidate's exact cwe_ids array. Use an empty array when no CWE is established; do not invent one.
  */
 export type TextList1 = Text[];
@@ -65,15 +93,6 @@ export interface Scope {
   validationMode?: Text;
   context?: Text;
   limitations?: TextList;
-  [k: string]: unknown;
-}
-export interface ThreatModel {
-  summary: Text;
-  assets?: TextList;
-  trustBoundaries?: TextList;
-  attackerCapabilities?: TextList;
-  securityObjectives?: TextList;
-  assumptions?: TextList;
   [k: string]: unknown;
 }
 export interface Finding {
@@ -254,6 +273,9 @@ export interface Coverage {
     reason: Text;
     [k: string]: unknown;
   }[];
+  /**
+   * Each supplied id identifies one task and must be unique within this draft. Reuse saved IDs in later updates.
+   */
   deferred: {
     id?: Text;
     candidateId?: string;
@@ -261,6 +283,13 @@ export interface Coverage {
     paths?: TextList;
     surfaceIds?: TextList;
     [k: string]: unknown;
+  }[];
+  /**
+   * On final Standard or diff drafts, close generic tasks by saved ID and completion reason. Reuse saved surface IDs for updates. Candidate tasks need findings or dispositions; redundant closure entries for those outcomes are ignored.
+   */
+  resolvedDeferred?: {
+    id: Text;
+    reason: Text;
   }[];
   openQuestions?: (
     | Text

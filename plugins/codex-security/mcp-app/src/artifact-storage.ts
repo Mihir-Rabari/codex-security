@@ -67,7 +67,7 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot };
   }
-  const existingRoot = await fs.realpath(scanRoot).catch(() => scanRoot);
+  const existingRoot = await resolveStoragePath(scanRoot);
   if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
     throw new Error("Artifact storage must be outside the target repository.");
   }
@@ -106,7 +106,17 @@ async function storageContext(
       .catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "EEXIST") throw error;
       });
-  return { ...context, root };
+  const canonicalRoot = await requireArtifactRoot(
+    root,
+    "Temporary artifact storage",
+  );
+  const uid = process.geteuid?.();
+  if (uid !== undefined && (await fs.lstat(root)).uid !== uid) {
+    throw new Error(
+      "Temporary artifact storage must be owned by the current user.",
+    );
+  }
+  return { ...context, root: canonicalRoot };
 }
 
 function components(path: string): string[] {
@@ -130,6 +140,7 @@ function components(path: string): string[] {
 function supplementalPath(
   input: ArtifactLocation,
   context: ArtifactContext,
+  write = false,
 ): string[] {
   const parts = components(input.path!);
   if (input.storage === "temporary") return parts;
@@ -138,7 +149,8 @@ function supplementalPath(
     (parts.length > 1 &&
       ["artifacts", "findings", "hardening"].includes(parts[0]!)) ||
     path === "report_validation.md" ||
-    (!context.scanId && path === "threat_model.md");
+    (path === "threatmodel.md" && (!context.scanId || !write)) ||
+    (!context.scanId && !write && path === "threat_model.md");
   if (
     !allowed ||
     reservedArtifactPaths.some(
@@ -169,7 +181,9 @@ export async function saveCodexSecurityArtifact(
     );
   }
   const parts =
-    input.path === undefined ? undefined : supplementalPath(input, context);
+    input.path === undefined
+      ? undefined
+      : supplementalPath(input, context, true);
   // Deep Scan runtime state belongs to the host.
   if (
     input.storage === "persistent" &&

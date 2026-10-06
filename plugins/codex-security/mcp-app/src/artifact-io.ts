@@ -1,3 +1,5 @@
+import { canonicalDirectory } from "./artifact-context.js";
+import { isRecord } from "./record.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -43,6 +45,39 @@ export async function readArtifactText(
   components: readonly string[],
   label: string,
 ): Promise<string> {
+  const canonical = await artifactSourcePath(context, components, label);
+  try {
+    return await fs.readFile(canonical, "utf8");
+  } catch {
+    throw new Error(label + ": the requested artifact cannot be read.");
+  }
+}
+
+export async function readArtifactTextWithMetadata(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<{ contents: string; modifiedMs: number }> {
+  const canonical = await artifactSourcePath(context, components, label);
+  try {
+    const handle = await fs.open(canonical, "r");
+    try {
+      const contents = await handle.readFile("utf8");
+      const metadata = await handle.stat();
+      return { contents, modifiedMs: Number(metadata.mtimeMs) };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    throw new Error(label + ": the requested artifact cannot be read.");
+  }
+}
+
+async function artifactSourcePath(
+  context: ArtifactContext,
+  components: readonly string[],
+  label: string,
+): Promise<string> {
   validateArtifactComponents(components, label);
   const root = await requireArtifactRoot(context.root, label);
   let current = root;
@@ -54,10 +89,7 @@ export async function readArtifactText(
       throw new Error(label + ": the requested artifact is unavailable.");
     }
     const isLast = index === components.length - 1;
-    if (
-      metadata.isSymbolicLink() ||
-      (isLast ? !metadata.isFile() : !metadata.isDirectory())
-    ) {
+    if (isLast ? !metadata.isFile() : !metadata.isDirectory()) {
       throw new Error(
         label + ": the requested artifact is not a safe regular file.",
       );
@@ -70,11 +102,7 @@ export async function readArtifactText(
       label + ": the requested artifact escaped its bound context.",
     );
   }
-  try {
-    return await fs.readFile(canonical, "utf8");
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
-  }
+  return canonical;
 }
 
 export async function readArtifactJsonObject(
@@ -95,11 +123,11 @@ export async function readArtifactJsonObject(
   return value as Record<string, unknown>;
 }
 
-export async function readArtifactJsonl<Row = Record<string, unknown>>(
+export async function readArtifactJsonl<Row>(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
-  rowSchema?: ArtifactRowSchema<Row>,
+  rowSchema: ArtifactRowSchema<Row>,
 ): Promise<Row[]> {
   const source = await readArtifactText(context, components, label);
   const rows: Row[] = [];
@@ -117,11 +145,6 @@ export async function readArtifactJsonl<Row = Record<string, unknown>>(
         label + ": row " + (index + 1) + " must be a JSON object.",
       );
     }
-    if (!rowSchema) {
-      rows.push(value as Row);
-      continue;
-    }
-
     const parsed = rowSchema.safeParse(value);
     if (!parsed.success) {
       throw new Error(
@@ -188,7 +211,7 @@ export async function artifactDestination(
       }
       metadata = await inspectOptionalPath(directory, label);
     }
-    if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    if (!metadata || !metadata.isDirectory()) {
       throw new Error(
         label + ": destination directory is not a regular directory.",
       );
@@ -203,8 +226,7 @@ export async function artifactDestination(
   if (!destination.startsWith(root + sep)) {
     throw new Error(label + ": destination escaped its bound context.");
   }
-  const metadata = await inspectOptionalPath(destination, label);
-  if (metadata && (metadata.isSymbolicLink() || !metadata.isFile())) {
+  if ((await inspectOptionalPath(destination, label))?.isFile() === false) {
     throw new Error(label + ": destination is not a regular file.");
   }
   return destination;
@@ -258,27 +280,16 @@ function validateArtifactComponents(
   }
 }
 
-export async function requireArtifactRoot(
+export function requireArtifactRoot(
   artifactRoot: string,
   label: string,
 ): Promise<string> {
   if (!artifactRoot || !isAbsolute(artifactRoot)) {
-    throw new Error(
-      label + ": artifact context must have an absolute bound root.",
+    return Promise.reject(
+      new Error(label + ": artifact context must have an absolute bound root."),
     );
   }
-  const requested = resolve(artifactRoot);
-  const metadata = await fs.lstat(requested).catch(() => undefined);
-  if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new Error(
-      label + ": artifact context is not a safe regular directory.",
-    );
-  }
-  try {
-    return await fs.realpath(requested);
-  } catch {
-    throw new Error(label + ": artifact context cannot be resolved.");
-  }
+  return canonicalDirectory(artifactRoot, label + ": artifact context");
 }
 
 async function inspectOptionalPath(
@@ -307,8 +318,4 @@ function formatRowSchemaError(error: unknown): string {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -644,74 +644,8 @@ function buildCoverage(
   scope: ScanScope,
   target: ScanTargetRecord,
 ): PreparedCoverage {
-  const surfaces = semanticCoverage.surfaces;
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      typeof surface["id"] === "string" ? [surface["id"]] : [],
-    ),
-  );
-  const surfaceIds = new Set<string>();
-  const normalizedSurfaces = surfaces.map((surface, index) => {
-    const explicitId = typeof surface["id"] === "string";
-    const baseId = explicitId
-      ? surface.id!
-      : `surface_${semanticIdentifier(surface.label, String(index + 1))}`;
-    let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-      let suffix = 2;
-      do {
-        id = `${baseId}-${suffix}`;
-        suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-    }
-    surfaceIds.add(id);
-    return {
-      ...surface,
-      id,
-      receiptRefs: surface["receiptRefs"] ?? [],
-    };
-  });
-  const deferred = semanticCoverage.deferred;
-  // Reserve later owned identities before deriving any earlier missing ones.
-  const deferredIds = new Set(
-    deferred.flatMap((item) =>
-      typeof item["id"] === "string" ? [item["id"]] : [],
-    ),
-  );
-  const reservedCandidateIds = new Set(
-    deferred.flatMap((item) =>
-      typeof item["candidateId"] === "string" ? [item["candidateId"]] : [],
-    ),
-  );
-  const normalizedDeferred = deferred.map((item) => {
-    if (typeof item["id"] === "string") return { ...item, id: item.id };
-
-    const candidateId = item["candidateId"];
-    const baseId =
-      typeof candidateId === "string"
-        ? candidateId
-        : `deferred-${createHash("sha256")
-            .update(
-              JSON.stringify([
-                item["reason"],
-                item["paths"] ?? [],
-                item["surfaceIds"] ?? [],
-              ]),
-            )
-            .digest("hex")
-            .slice(0, 16)}`;
-    let id = baseId;
-    let suffix = 2;
-    while (
-      deferredIds.has(id) ||
-      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
-    ) {
-      id = `${baseId}-${suffix}`;
-      suffix += 1;
-    }
-    deferredIds.add(id);
-    return { ...item, id };
-  });
+  const normalizedSurfaces = normalizeSurfaces(semanticCoverage.surfaces);
+  const normalizedDeferred = normalizeDeferred(semanticCoverage.deferred);
   const openQuestions = semanticCoverage.openQuestions;
 
   const result: PreparedCoverage = {
@@ -799,4 +733,78 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[^a-z0-9._/-]+/gu, "-")
     .replace(/^-+|-+$/gu, "");
   return identifier || fallback;
+}
+
+export function normalizeSurfaces(surfaces: SemanticCoverage["surfaces"]) {
+  const reservedSurfaceIds = new Set(
+    surfaces.flatMap((surface) =>
+      typeof surface["id"] === "string" ? [surface["id"]] : [],
+    ),
+  );
+  const surfaceIds = new Set<string>();
+  const normalizedSurfaces = surfaces.map((surface, index) => {
+    const explicitId = typeof surface["id"] === "string";
+    const baseId = explicitId
+      ? surface.id!
+      : `surface_${semanticIdentifier(surface.label, String(index + 1))}`;
+    let id = baseId;
+    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+      let suffix = 2;
+      do {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+    }
+    surfaceIds.add(id);
+    return {
+      ...surface,
+      id,
+      receiptRefs: surface["receiptRefs"] ?? [],
+    };
+  });
+  return normalizedSurfaces;
+}
+
+export function normalizeDeferred(deferred: SemanticCoverage["deferred"]) {
+  // Reserve later owned identities before deriving any earlier missing ones.
+  const deferredIds = new Set(
+    deferred.flatMap((item) =>
+      typeof item["id"] === "string" ? [item["id"]] : [],
+    ),
+  );
+  const reservedCandidateIds = new Set(
+    deferred.flatMap((item) =>
+      typeof item["candidateId"] === "string" ? [item["candidateId"]] : [],
+    ),
+  );
+  const normalizedDeferred = deferred.map((item) => {
+    if (typeof item["id"] === "string") return { ...item, id: item.id };
+
+    const candidateId = item["candidateId"];
+    const baseId =
+      typeof candidateId === "string"
+        ? candidateId
+        : `deferred-${createHash("sha256")
+            .update(
+              JSON.stringify([
+                item["reason"],
+                item["paths"] ?? [],
+                item["surfaceIds"] ?? [],
+              ]),
+            )
+            .digest("hex")
+            .slice(0, 16)}`;
+    let id = baseId;
+    let suffix = 2;
+    while (
+      deferredIds.has(id) ||
+      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
+    ) {
+      id = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    deferredIds.add(id);
+    return { ...item, id };
+  });
+  return normalizedDeferred;
 }

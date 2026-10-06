@@ -6,7 +6,7 @@ import type { ScanCost } from "./cost.js";
 import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
-  safeErrorMessage,
+  errorMessage,
 } from "./errors.js";
 import type { DeepScanOptions } from "./scan-settings.js";
 import {
@@ -372,7 +372,7 @@ export async function runDeepScans(
           : await input.merge(
               validationError === undefined
                 ? prompt
-                : `${prompt}\n\nYour previous merge response failed validation: ${safeErrorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
+                : `${prompt}\n\nYour previous merge response failed validation: ${errorMessage(validationError)}\nReturn a complete corrected JSON object using the same source findings and schema.`,
               executionSignal,
             );
         try {
@@ -418,7 +418,7 @@ export async function runDeepScans(
         "--scan-id",
         pass.scanId,
         "--message",
-        safeErrorMessage(error).slice(0, 2400),
+        errorMessage(error).slice(0, 2400),
         ...(latestCost ? ["--cost-json", JSON.stringify(latestCost)] : []),
       ]);
     };
@@ -485,7 +485,7 @@ export async function runDeepScans(
             return;
           }
           input.onRetry?.(
-            `Deep Scan pass ${state.passes.indexOf(pass) + 1} will retry: ${safeErrorMessage(error)}`,
+            `Deep Scan pass ${state.passes.indexOf(pass) + 1} will retry: ${errorMessage(error)}`,
           );
           await delay(retries[attempt], undefined, { signal: discoverySignal });
         }

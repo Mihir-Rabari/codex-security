@@ -204,6 +204,7 @@ test.each([
     const nativeSettings = {
       model: "gpt-6-astra",
       model_reasoning_effort: "ultra",
+      service_tier: "priority",
       forced_login_method: "chatgpt",
       cli_auth_credentials_store: "file",
       ...(provider === undefined
@@ -346,6 +347,7 @@ process.exit(0);
             },
             recipe: nativeRecipe ?? {
               postScanPrompt: "Post-scan instructions once.",
+              cyberAccessProgram: "daybreak_blue",
             },
             savedDeepScanSettings: {
               workers: 1,
@@ -373,6 +375,7 @@ process.exit(0);
           codexOverrides: {
             model: "gpt-6-astra",
             model_reasoning_effort: "ultra",
+            service_tier: "priority",
             ...(provider === undefined
               ? {}
               : {
@@ -478,6 +481,16 @@ process.exit(0);
               const thread = {
                 id: savedThreadId,
                 async runStreamed(prompt: string, turnOptions?: TurnOptions) {
+                  expect(
+                    (
+                      turnOptions as TurnOptions & {
+                        cyberAccessProgram?: string;
+                      }
+                    )?.cyberAccessProgram,
+                  ).toBe("daybreak_blue");
+                  expect(options.config).toMatchObject({
+                    service_tier: "priority",
+                  });
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
                   let groups: Array<{
@@ -904,6 +917,7 @@ process.exit(0);
     try {
       const scanOptions: ScanOptions = {
         mode: "deep",
+        cyberAccessProgram: "daybreak_blue",
         preserveProviderEnvironment: provider !== undefined,
         workers: 1,
         subagents: 3,

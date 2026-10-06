@@ -15,6 +15,7 @@ import pytest
 from workbench_test_support import (
     finding_fixture,
     run_workbench,
+    worker_paths,
     write_checkpoint,
     write_completed_contract,
 )
@@ -55,10 +56,12 @@ def test_recovery_validation_does_not_scale_with_superseded_checkpoints(
             saved, "_recover_unsealed_findings", wraps=saved._recover_unsealed_findings
         ) as recover,
     ):
-        result = saved.merge_saved_results(scan_dir, scan_id, binding, [], stopped=False, reason="")
+        result = saved.merge_saved_results(
+            scan_dir, scan_id, binding, [], [], stopped=False, reason=""
+        )
     assert result is not None
     assert result[1]["findings"] == findings
-    assert read_schema.call_count == 1
+    assert read_schema.call_count == 2
     assert recover.call_count == len(findings)
 
 
@@ -561,7 +564,7 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
         f"sys.path.insert(0, {str(scripts_dir)!r})\n"
         "import workbench_db\n"
         "import workbench_saved_results\n"
-        "def fail_after_sources_are_frozen(prepared):\n"
+        "def fail_after_sources_are_frozen(prepared, **kwargs):\n"
         "    raise OSError('injected late publication failure')\n"
         "workbench_saved_results._write_prepared_scan_finalization = "
         "fail_after_sources_are_frozen\n"
@@ -619,7 +622,12 @@ def test_explicit_recovery_retries_frozen_parent_after_write_failure(
     ]
     frozen_sources = json.loads(frozen_before)
     assert published_sources.items() >= frozen_sources.items()
-    parent_sources = published_sources.keys() - frozen_sources.keys()
+    added_sources = published_sources.keys() - frozen_sources.keys()
+    parent_sources = {path for path in added_sources if path.startswith("checkpoints/")}
+    assert all(
+        path.startswith(("checkpoints/", "checkpoint-heads/", "source-order/"))
+        for path in added_sources
+    )
     assert len(parent_sources) == 1
     parent_source = next(iter(parent_sources))
     assert parent_source.startswith("checkpoints/")
@@ -1213,7 +1221,9 @@ def test_complete_parent_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
             "deferred": [{"id": "obsolete-work", "reason": "This was later completed."}],
         },
     }
-    write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    path = write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    earlier = (scan_dir / "coverage.json").stat().st_mtime_ns - 1
+    os.utime(path, ns=(earlier, earlier))
 
     stop_scan(state_dir, scan_id, "Stopped after the parent draft completed.", status="failed")
 
@@ -1238,7 +1248,7 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
     final_coverage["completeness"] = "partial"
     final_coverage["openQuestions"] = []
     coverage_path.write_text(json.dumps(final_coverage))
-    write_checkpoint(
+    path = write_checkpoint(
         scan_dir / "checkpoints",
         {
             "scanId": scan_id,
@@ -1254,6 +1264,8 @@ def test_complete_partial_parent_supersedes_obsolete_checkpoint_questions(
         },
     )
 
+    earlier = coverage_path.stat().st_mtime_ns - 1
+    os.utime(path, ns=(earlier, earlier))
     stop_scan(state_dir, scan_id, "Stopped after the final partial parent draft.", status="failed")
 
     recovered = json.loads(coverage_path.read_text())
@@ -1460,7 +1472,7 @@ def test_merge_saved_results_deduplicates_open_questions(
     }
 
     result = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, [], stopped=False, reason=""
+        scan_dir, scan_id, binding, [], [], stopped=False, reason=""
     )
     assert result is not None
     _, _, coverage = result
@@ -1484,10 +1496,12 @@ def test_parent_validation_does_not_scale_with_superseded_checkpoints(
     for index in range(checkpoint_count):
         earlier = copy.deepcopy(findings["findings"][0])
         earlier["summary"] = f"Superseded observation {index}."
-        write_checkpoint(
+        path = write_checkpoint(
             scan_dir / "checkpoints",
             {"scanId": scan_id, "findings": [earlier], "coverage": coverage},
         )
+        modified = (scan_dir / "coverage.json").stat().st_mtime_ns - 1
+        os.utime(path, ns=(modified, modified))
     binding = {
         "status": "completed",
         "allowedTargetKinds": [manifest["target"]["kind"]],
@@ -1499,9 +1513,158 @@ def test_parent_validation_does_not_scale_with_superseded_checkpoints(
         saved_results, "_recover_unsealed_findings", wraps=saved_results._recover_unsealed_findings
     ) as recover:
         result = saved_results.merge_saved_results(
-            scan_dir, scan_id, binding, [], stopped=False, reason=""
+            scan_dir, scan_id, binding, [], [], stopped=False, reason=""
         )
     assert result is not None
     assert result[1]["findings"] == findings["findings"]
     # The unchanged parent and merged output share one cached validation result.
     assert recover.call_count == 1
+
+
+def run_workbench_with_fault(script_path, state_dir, codex_home, setup, *args):
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    script_path.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+        "import workbench_db\n"
+        "import workbench_saved_results\n" + setup + "raise SystemExit(workbench_db.main())\n"
+    )
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "CODEX_SECURITY_STATE_DIR": str(state_dir),
+        },
+        text=True,
+    )
+
+
+def deep_scan_fixture(
+    tmp_path: Path, *, budget: bool = False, workers: int = 1
+) -> tuple[Path, Path, Path, Path, str]:
+    state_dir = tmp_path / "state"
+    codex_home = tmp_path / "codex-home"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("value = request.args['value']\n")
+    config_path = codex_home / "codex-security" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(f"[deep_scan]\nworkers = {workers}\nmax_discovery_runs = {workers}\n")
+    environment = {"CODEX_HOME": str(codex_home)}
+
+    if budget:
+        scan_dir = tmp_path / "scan"
+        scan_dir.mkdir(mode=0o700)
+        registered = run_workbench(
+            state_dir,
+            "register-cli-scan",
+            "--scan-dir",
+            str(scan_dir),
+            "--repository",
+            str(target),
+            "--recipe-json",
+            json.dumps(
+                {
+                    "config": {},
+                    "mode": "deep",
+                    "repository": str(target),
+                    "target": {"kind": "repository", "paths": []},
+                    "maxCostUsd": 0.005,
+                }
+            ),
+        )
+        scan_id = str(registered["scanId"])
+        run_workbench(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "standard-worker-thread",
+            "--scan-id",
+            scan_id,
+            environment=environment,
+        )
+    else:
+        begun = run_workbench(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "standard-worker-thread",
+            "--target-path",
+            str(target),
+            "--scope",
+            ".",
+            "--scan-root",
+            str(tmp_path / "scans"),
+            "--available-parallelism",
+            "16",
+            environment=environment,
+        )["deepScan"]
+        scan_id = str(begun["scanId"])
+        scan_dir = Path(str(begun["scanDir"]))
+
+    return state_dir, codex_home, target, scan_dir, scan_id
+
+
+def accepted_standard_worker(
+    state_dir: Path,
+    codex_home: Path,
+    scan_dir: Path,
+    scan_id: str,
+    *,
+    name: str = "standard-worker",
+) -> tuple[str, Path]:
+    worker_id = str(uuid.uuid4())
+    prompt_path, artifact_dir, result_path = worker_paths(scan_dir, name)
+    base_args = (
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--kind",
+        "discovery",
+        "--prompt-path",
+        str(prompt_path),
+        "--artifact-dir",
+        str(artifact_dir),
+        "--attempt",
+        "1",
+    )
+    environment = {"CODEX_HOME": str(codex_home)}
+    run_workbench(state_dir, *base_args, "--status", "running", environment=environment)
+    result_path.write_text(
+        json.dumps(
+            {
+                "scanId": scan_id,
+                "findings": [],
+                "coverage": {
+                    "completeness": "complete",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                },
+                "threatModel": {"summary": "The ordinary Standard worker threat model."},
+            }
+        )
+    )
+    run_workbench(
+        state_dir,
+        *base_args,
+        "--status",
+        "succeeded",
+        "--result-manifest-path",
+        str(result_path),
+        environment=environment,
+    )
+    return worker_id, result_path
+
+
+def write_saved_parent(scan_dir: Path, draft: dict, modified: int) -> None:
+    (scan_dir / "scan-manifest.json").write_text(
+        json.dumps({"scan": {"complete": draft["complete"]}})
+    )
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": draft["findings"]}))
+    (scan_dir / "coverage.json").write_text(json.dumps(draft["coverage"]))
+    os.utime(scan_dir / "coverage.json", ns=(modified, modified))

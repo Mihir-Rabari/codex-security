@@ -1178,7 +1178,7 @@ try {
   );
   assert.doesNotMatch(
     unknownTrustedAccess.result.content[0].text,
-    /protected results may not be displayable/,
+    /protected results.*may not be displayable/,
   );
 
   const grantedTrustedAccess = {
@@ -1280,7 +1280,7 @@ try {
   });
   assert.doesNotMatch(
     staleGrantedAccess.result.content[0].text,
-    /protected results may not be displayable/,
+    /protected results.*may not be displayable/,
   );
 
   const untrustedReplay = await requestAndWait(9603, "tools/call", {
@@ -1329,7 +1329,7 @@ try {
   );
   assert.match(
     refreshedTrustedAccess.result.content[0].text,
-    /protected results may not be displayable/,
+    /protected results.*may not be displayable/,
   );
 
   const timestampedTrustedAccess = await requestAndWait(9608, "tools/call", {

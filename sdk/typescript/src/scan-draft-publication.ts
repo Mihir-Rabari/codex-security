@@ -36,7 +36,7 @@ export async function writePreparedScanDraft(
   options: ScanDraftPublicationOptions,
   draft: SemanticScan,
   documents: PreparedScanDraft,
-): Promise<void> {
+): Promise<unknown> {
   const draftPath = `drafts/${randomUUID()}.json`;
   const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
   // The locked workbench writer owns acknowledgement and successful-stage cleanup.
@@ -54,7 +54,7 @@ export async function writePreparedScanDraft(
     checkpointPath,
     Buffer.from(JSON.stringify(checkpoint)),
   );
-  await options.workbench([
+  return options.workbench([
     "write-scan-draft",
     "--scan-id",
     draft.scanId,

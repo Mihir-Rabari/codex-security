@@ -36,6 +36,9 @@ interface ScanEventRunOptions {
   signal: AbortSignal;
   scanDir: string;
   pluginRoot: string;
+  pythonPath?: string;
+  protectedRoot?: string;
+  modelProvider?: unknown;
   expectation: ScanExpectation;
   authentication?: ScanAuthentication;
   workbenchValidated?: boolean;

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import type { ComponentReceipt } from "../src/component-scan.js";
 import { ScanDashboard } from "../src/scan-dashboard.js";
 import { capture, fakeResult } from "./cli-fixtures.js";
@@ -15,6 +15,17 @@ function fakeClock(now: () => number = () => STARTED_AT) {
     setInterval: () => ({}) as NodeJS.Timeout,
     clearInterval: () => {},
   };
+}
+
+function createDashboard(
+  stream: ConstructorParameters<typeof ScanDashboard>[0],
+  options: Partial<ConstructorParameters<typeof ScanDashboard>[1]> = {},
+) {
+  return new ScanDashboard(stream, {
+    repository: "/code/juice-shop",
+    clock: fakeClock(),
+    ...options,
+  });
 }
 
 function lastFrame(stderr: ReturnType<typeof capture>): string {
@@ -44,13 +55,9 @@ class DashboardTestInput extends EventEmitter {
 describe("live scan dashboard", () => {
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 60, rows: 24 },
-      {
-        repository: "/synthetic/repository",
-        showCost: true,
-        clock: fakeClock(),
-      },
+      { repository: "/synthetic/repository", showCost: true },
     );
     dashboard.start();
     dashboard.setCost({
@@ -77,10 +84,9 @@ describe("live scan dashboard", () => {
   test("edits a higher total budget while continuing to show live cost", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(stderr.stream, {
+    const dashboard = createDashboard(stderr.stream, {
       repository: "/synthetic/repository",
       maxCostUsd: 20,
-      clock: fakeClock(),
       input,
     });
     const controller = new AbortController();
@@ -131,10 +137,9 @@ describe("live scan dashboard", () => {
       const stderr = capture(true);
       const input = new DashboardTestInput();
       let interrupted = false;
-      const dashboard = new ScanDashboard(stderr.stream, {
+      const dashboard = createDashboard(stderr.stream, {
         repository: "/synthetic/repository",
         maxCostUsd: 20,
-        clock: fakeClock(),
         input,
         onInterrupt: () => {
           interrupted = true;
@@ -313,21 +318,17 @@ describe("live scan dashboard", () => {
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
   });
 
-  test("navigates a long component list and shows sanitized failure details", () => {
+  test("navigates a long component list and shows original failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
-    const dashboard = new ScanDashboard(
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       {
         repository: "/synthetic/project",
         presentation: "components",
         input,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
-        onInterrupt: () => {
-          interrupted = true;
-        },
+        onInterrupt,
       },
     );
     const receipts: ComponentReceipt[] = Array.from(
@@ -352,7 +353,7 @@ describe("live scan dashboard", () => {
     input.emit("data", "\u001B[F");
     expect(frame()).toContain("Component 19");
     expect(frame()).not.toContain("Component 0 ");
-    expect(frame()).toContain("[redacted] unavailable");
+    expect(frame()).toContain("synthetic-secret unavailable");
     expect(frame()).not.toContain("Cost");
     expect(
       frame()
@@ -362,21 +363,20 @@ describe("live scan dashboard", () => {
     input.emit("data", "\r");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
   });
 
   test("renders publication progress without scan-only inventory and cost fields", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 100, rows: 18 },
       {
         repository: "/synthetic/payments-api",
         presentation: "publication",
         input,
         color: false,
-        clock: fakeClock(),
       },
     );
 
@@ -413,31 +413,23 @@ describe("live scan dashboard", () => {
   test("restores terminal state when dashboard initialization fails", () => {
     const input = new DashboardTestInput();
     const output: string[] = [];
-    let timerCleared = false;
+    const clearIntervalMock = mock();
     const dashboard = new ScanDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
       {
         repository: "/synthetic/repository",
         input,
         clock: {
           ...fakeClock(),
-          clearInterval: () => {
-            timerCleared = true;
-          },
+          clearInterval: clearIntervalMock,
         },
       },
     );
 
     expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
-    expect(timerCleared).toBe(true);
+    expect(clearIntervalMock).toHaveBeenCalled();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
     expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
@@ -454,10 +446,9 @@ describe("live scan dashboard", () => {
           : "Raw mode cleanup failed.",
       );
     };
-    const dashboard = new ScanDashboard(stderr.stream, {
+    const dashboard = createDashboard(stderr.stream, {
       repository: "/synthetic/repository",
       input,
-      clock: fakeClock(),
     });
 
     expect(() => dashboard.start()).toThrow("Raw mode initialization failed.");
@@ -473,17 +464,11 @@ describe("live scan dashboard", () => {
       input.isRaw = enabled;
       return input;
     };
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       {
-        write(chunk: string): boolean {
-          output.push(chunk);
-          if (chunk.includes("\u001B[H")) {
-            throw new Error("Dashboard rendering failed.");
-          }
-          return true;
-        },
+        write: failingDashboardOutput(output),
       },
-      { repository: "/synthetic/repository", input, clock: fakeClock() },
+      { repository: "/synthetic/repository", input },
     );
 
     expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
@@ -638,13 +623,9 @@ describe("live scan dashboard", () => {
 
   test("hides stage and file counts during Deep scans without wasting screen rows", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 12 },
-      {
-        repository: "/code/juice-shop",
-        mode: "deep",
-        clock: fakeClock(),
-      },
+      { mode: "deep" },
     );
 
     dashboard.start();
@@ -724,10 +705,7 @@ describe("live scan dashboard", () => {
 
   test("shows repeated file inventory commands as one activity", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     for (const [id, description] of [
@@ -752,10 +730,7 @@ describe("live scan dashboard", () => {
 
   test("labels actual delegated worker activity", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     dashboard.record({
@@ -775,10 +750,7 @@ describe("live scan dashboard", () => {
 
   test("keeps parent and worker file inventories distinct", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream);
 
     dashboard.start();
     for (const activity of [
@@ -803,17 +775,10 @@ describe("live scan dashboard", () => {
   test("scrolls through history while keeping terminal text selectable", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    let interrupted = false;
-    const dashboard = new ScanDashboard(
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      {
-        repository: "/code/juice-shop",
-        input,
-        onInterrupt: () => {
-          interrupted = true;
-        },
-        clock: fakeClock(),
-      },
+      { input, onInterrupt },
     );
 
     dashboard.start();
@@ -859,7 +824,7 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("ACTIVITY");
 
     input.emit("data", "\u0003");
-    expect(interrupted).toBe(true);
+    expect(onInterrupt).toHaveBeenCalled();
     dashboard.stop();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
@@ -872,9 +837,9 @@ describe("live scan dashboard", () => {
   test("batches trackpad scroll events without dropping movement", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
 
     dashboard.start();
@@ -909,9 +874,9 @@ describe("live scan dashboard", () => {
   test("scrolls half a page with Mac-friendly Ctrl+U and Ctrl+D", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
 
     dashboard.start();
@@ -946,18 +911,12 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+  test("preserves chronological session events and strips terminal controls from activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 140, rows: 24 },
-      {
-        repository: "/code/juice-shop",
-        input,
-        color: true,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
-      },
+      { input, color: true },
     );
 
     dashboard.start();
@@ -1030,7 +989,7 @@ describe("live scan dashboard", () => {
     }
 
     let frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     expect(frame).toContain("d details");
 
     input.emit("data", "d");
@@ -1078,17 +1037,16 @@ describe("live scan dashboard", () => {
 
     input.emit("data", "d");
     frame = lastFrame(stderr);
-    expect(frame).toContain("rg -n [redacted] routes/login.ts");
-    expect(frame).not.toContain("synthetic-secret");
+    expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
     dashboard.stop();
   });
 
   test("filters workers and scrolls the details separately from scan activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 14 },
-      { repository: "/code/juice-shop", input, clock: fakeClock() },
+      { input },
     );
     let payloadReads = 0;
     const event = (threadId: string, text: string, worker?: number) => {
@@ -1169,13 +1127,11 @@ describe("live scan dashboard", () => {
 
   test("wraps real reasoning and assistant prose into chronological history", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
-      { ...stderr.stream, columns: 55, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        clock: fakeClock(),
-      },
-    );
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 55,
+      rows: 18,
+    });
 
     dashboard.start();
     dashboard.record({
@@ -1212,13 +1168,9 @@ describe("live scan dashboard", () => {
 
   test("shows streamed worker reasoning fully expanded and updates it in place", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 72, rows: 45 },
-      {
-        repository: "/code/juice-shop",
-        color: true,
-        clock: fakeClock(),
-      },
+      { color: true },
     );
     const details = `${"The login route crosses an organization authorization boundary. ".repeat(18)}Final tenant-isolation check.`;
 
@@ -1253,10 +1205,11 @@ describe("live scan dashboard", () => {
     const stderr = capture(true);
     const target =
       "/private/tmp/codex security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl";
-    const dashboard = new ScanDashboard(
-      { ...stderr.stream, columns: 55, rows: 18 },
-      { repository: "/code/juice-shop", clock: fakeClock() },
-    );
+    const dashboard = createDashboard({
+      ...stderr.stream,
+      columns: 55,
+      rows: 18,
+    });
 
     dashboard.start();
     dashboard.record({
@@ -1280,9 +1233,9 @@ describe("live scan dashboard", () => {
 
   test("renders fenced Markdown code with exact indentation and one timestamp", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 90, rows: 18 },
-      { repository: "/code/juice-shop", color: true, clock: fakeClock() },
+      { color: true },
     );
 
     dashboard.start();
@@ -1319,9 +1272,9 @@ describe("live scan dashboard", () => {
 
   test("renders inline code while preserving clickable links and exact commands", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
-      { repository: "/code/juice-shop", color: true, clock: fakeClock() },
+      { color: true },
     );
 
     dashboard.start();
@@ -1358,16 +1311,11 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("redacts external Markdown link targets and rejects unsafe links", () => {
+  test("preserves external Markdown link targets and rejects unsafe links", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        color: false,
-        clock: fakeClock(),
-        sanitize: (value) => value.replaceAll("secret-token", "[redacted]"),
-      },
+      { color: false },
     );
 
     dashboard.start();
@@ -1381,9 +1329,8 @@ describe("live scan dashboard", () => {
     });
 
     expect(stderr.text()).toContain(
-      "See \u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007, unsafe, and control.",
+      "See \u001B]8;;https://example.com/report?token=secret-token\u0007report\u001B]8;;\u0007, unsafe, and control.",
     );
-    expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
     expect(stderr.text()).not.toContain("spoof");
     expect(stderr.text()).not.toContain("\u001B]8;;javascript:");
@@ -1402,17 +1349,11 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("sanitizes complete activity descriptions before line wrapping", () => {
+  test("preserves credential-shaped activity descriptions across line wrapping", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(
+    const dashboard = createDashboard(
       { ...stderr.stream, columns: 50, rows: 18 },
-      {
-        repository: "/code/juice-shop",
-        color: false,
-        clock: fakeClock(),
-        sanitize: (value) =>
-          value.includes("client_secret=") ? "[redacted]" : value,
-      },
+      { color: false },
     );
 
     dashboard.start();
@@ -1425,18 +1366,14 @@ describe("live scan dashboard", () => {
       paths: [],
     });
 
-    expect(lastFrame(stderr)).toContain("[redacted]");
-    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET_VALUE");
+    expect(lastFrame(stderr)).toContain("client_secret=");
+    expect(lastFrame(stderr)).toContain("SYNTHETIC_SECRET_VALUE");
     dashboard.stop();
   });
 
   test("colors important activity while keeping prose readable across terminal themes", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: true,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: true });
 
     dashboard.start();
     dashboard.record({
@@ -1490,11 +1427,7 @@ describe("live scan dashboard", () => {
 
   test("colors successful scan milestones and warnings distinctly", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: true,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: true });
 
     dashboard.start();
     for (const status of [
@@ -1518,11 +1451,7 @@ describe("live scan dashboard", () => {
 
   test("leaves activity uncolored when colors are disabled", () => {
     const stderr = capture(true);
-    const dashboard = new ScanDashboard(stderr.stream, {
-      repository: "/code/juice-shop",
-      color: false,
-      clock: fakeClock(),
-    });
+    const dashboard = createDashboard(stderr.stream, { color: false });
 
     dashboard.start();
     dashboard.record({
@@ -1570,3 +1499,13 @@ describe("live scan dashboard", () => {
     );
   });
 });
+
+function failingDashboardOutput(output: string[]) {
+  return (chunk: string): boolean => {
+    output.push(chunk);
+    if (chunk.includes("\u001B[H")) {
+      throw new Error("Dashboard rendering failed.");
+    }
+    return true;
+  };
+}

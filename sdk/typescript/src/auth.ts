@@ -285,9 +285,10 @@ export const CODEX_AUTH_CONFIG_KEYS = [
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =
-  "No credentials were found. Run 'codex-security login', use " +
-  "'codex-security login --device-auth' on a remote or headless machine, or set " +
-  "OPENAI_API_KEY or CODEX_API_KEY for CI.";
+  "No credentials were found. Run 'codex-security login'. On a remote or headless " +
+  "machine, use 'codex-security login --device-auth' if your workspace allows it. " +
+  "If device auth is disabled, see 'codex-security login --help' for browser login over SSH. " +
+  "For CI, set OPENAI_API_KEY or CODEX_API_KEY.";
 
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
@@ -330,4 +331,16 @@ function plainTerminalText(value: string): string {
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
+}
+
+/** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
 }

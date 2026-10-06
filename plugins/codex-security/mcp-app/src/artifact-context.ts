@@ -1,3 +1,4 @@
+import { asRecord } from "./record.js";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ArtifactContext } from "./artifact-io.js";
@@ -110,7 +111,7 @@ function scanRecord(
   return scan;
 }
 
-async function canonicalDirectory(
+export async function canonicalDirectory(
   value: string,
   label: string,
 ): Promise<string> {
@@ -118,8 +119,7 @@ async function canonicalDirectory(
     throw new Error(label + " must be an absolute directory.");
   }
   const requested = resolve(value);
-  const metadata = await fs.lstat(requested).catch(() => undefined);
-  if (!metadata || metadata.isSymbolicLink() || !metadata.isDirectory()) {
+  if (!(await fs.lstat(requested).catch(() => undefined))?.isDirectory()) {
     throw new Error(label + " is not a safe regular directory.");
   }
   try {
@@ -139,13 +139,7 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function defined<Key extends string, Value>(
+export function defined<Key extends string, Value>(
   key: Key,
   value: Value | undefined,
 ): Partial<Record<Key, Value>> {

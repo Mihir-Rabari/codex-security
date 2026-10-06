@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -18,7 +19,7 @@ import {
   sessionStartedAt,
 } from "./scan-sessions.js";
 import {
-  scanProgressUpdatesFromEvent,
+  scanProgressUpdatesFromText,
   type ScanProgress,
 } from "./worker-progress.js";
 
@@ -205,10 +206,8 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
-    if (this.#timer !== null) {
-      clearInterval(this.#timer);
-      this.#timer = null;
-    }
+    clearInterval(this.#timer ?? undefined);
+    this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     await this.refresh();
     if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
@@ -290,21 +289,19 @@ export class ScanCostTracker {
         }
       }
     }
-    let changed = true;
-    while (changed) {
-      changed = false;
+    let previousSize: number;
+    do {
+      previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
+          included.has(session.parentThreadId)
         ) {
           included.add(session.threadId);
-          changed = true;
         }
       }
-    }
+    } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
     }
@@ -400,10 +397,9 @@ export class ScanCostTracker {
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        [...this.#workerProgress.values()].reduce(
-          (total, reviewed) => total + reviewed,
-          0,
-        ),
+        this.#workerProgress
+          .values()
+          .reduce((total, reviewed) => total + reviewed, 0),
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
@@ -715,10 +711,7 @@ function readSessionEvent(
       typeof payload["message"] === "string"
     ) {
       session.progress?.push(
-        ...scanProgressUpdatesFromEvent({
-          type: "item.completed",
-          item: { type: "agent_message", text: payload["message"] },
-        }),
+        ...scanProgressUpdatesFromText(payload["message"]),
       );
     }
     if (repository === undefined) return;
@@ -847,13 +840,7 @@ function sessionProgressUpdates(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     const content = payload["content"];
     if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromEvent({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: sessionContentText(content, false),
-      },
-    });
+    return scanProgressUpdatesFromText(sessionContentText(content, false));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -872,10 +859,7 @@ function sessionProgressUpdates(
   if (payload["status"] === "failed" || output === null) {
     return [];
   }
-  return scanProgressUpdatesFromEvent({
-    type: "item.completed",
-    item: { type: "command_execution", aggregated_output: output },
-  });
+  return scanProgressUpdatesFromText(output);
 }
 
 function sessionContentText(
@@ -934,10 +918,6 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {

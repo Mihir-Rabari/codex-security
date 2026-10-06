@@ -1378,7 +1378,9 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     },
   };
   await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
-  await recordCodexSecurityScanDraft(surfaceContext, {
+  const deferredId = (await readJson(surfaceRoot, "coverage.json")).deferred[0]
+    .id;
+  const closedSurfaceDraft = {
     ...surfaceDraft,
     complete: true,
     coverage: {
@@ -1389,16 +1391,51 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         { ...surfaceDraft.coverage.surfaces[0], disposition: "not_applicable" },
       ],
     },
+  };
+  // A surface disposition alone does not acknowledge independent generic work.
+  await recordCodexSecurityScanDraft(surfaceContext, closedSurfaceDraft);
+  assert.equal(
+    (await readJson(surfaceRoot, "coverage.json")).deferred.length,
+    1,
+  );
+  await assert.rejects(
+    recordCodexSecurityScanDraft(surfaceContext, {
+      ...closedSurfaceDraft,
+      coverage: {
+        ...closedSurfaceDraft.coverage,
+        resolvedDeferred: [
+          { id: "unknown-review", reason: "Synthetic review completed." },
+        ],
+      },
+    }),
+    /names no saved generic deferral/,
+  );
+  const closure = { id: deferredId, reason: "Synthetic review completed." };
+  await recordCodexSecurityScanDraft(surfaceContext, {
+    ...closedSurfaceDraft,
+    coverage: { ...closedSurfaceDraft.coverage, resolvedDeferred: [closure] },
   });
-  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
   assert.equal(
     (await readJson(surfaceRoot, "coverage.json")).completeness,
     "complete",
   );
   assert.deepEqual((await readJson(surfaceRoot, "coverage.json")).deferred, []);
+  assert.deepEqual(
+    (await readJson(surfaceRoot, "coverage.json")).resolvedDeferred,
+    [closure],
+  );
+  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
+  const reopenedCoverage = await readJson(surfaceRoot, "coverage.json");
+  assert.equal(reopenedCoverage.completeness, "partial");
+  assert.equal(reopenedCoverage.deferred.length, 1);
+  assert.equal(reopenedCoverage.resolvedDeferred, undefined);
 
   for (const [name, candidate] of [
     ["candidate-id", { candidateId: "candidate-still-pending" }],
+    [
+      "candidate-scoped",
+      { id: "candidate-still-pending", candidateScoped: true },
+    ],
     [
       "original-candidate",
       {
@@ -1445,6 +1482,21 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         ],
       },
     };
+    await assert.rejects(
+      recordCodexSecurityScanDraft(sharedSurfaceContext, {
+        ...resolvedSurfaceDraft,
+        coverage: {
+          ...resolvedSurfaceDraft.coverage,
+          resolvedDeferred: [
+            {
+              id: candidate.candidateId ?? candidate.id,
+              reason: "A generic closure cannot resolve a candidate.",
+            },
+          ],
+        },
+      }),
+      /cannot close candidate/,
+    );
     await recordCodexSecurityScanDraft(
       sharedSurfaceContext,
       resolvedSurfaceDraft,
@@ -1486,6 +1538,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     scanId,
     findingCount: 1,
     surfaceCount: 1,
+    coverage: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });
@@ -2567,6 +2620,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     scanId,
     findingCount: 1,
     surfaceCount: 1,
+    coverage: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });

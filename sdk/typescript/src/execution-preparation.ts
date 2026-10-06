@@ -1,8 +1,8 @@
 import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
-import { statSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { join } from "node:path";
+import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   Codex,
   type CodexOptions,
@@ -364,34 +364,6 @@ export function createExecutionCodex(
     },
     environment,
   };
-}
-
-function bundledCodexSdkEnvironment(
-  command: string,
-  environment: Record<string, string>,
-): Record<string, string> {
-  // An SDK executable override disables its bundled-tool PATH setup.
-  const toolsDirectory = join(dirname(dirname(command)), "codex-path");
-  try {
-    if (!statSync(toolsDirectory).isDirectory()) return environment;
-  } catch {
-    return environment;
-  }
-  const result = { ...environment };
-  const pathKeys = Object.keys(result).filter(
-    (key) => key.toLowerCase() === "path",
-  );
-  const pathKey = pathKeys.includes("Path")
-    ? "Path"
-    : (pathKeys.at(-1) ?? "PATH");
-  for (const key of pathKeys) {
-    if (key !== pathKey) delete result[key];
-  }
-  const entries = (result[pathKey] ?? "")
-    .split(delimiter)
-    .filter((entry) => entry.length > 0 && entry !== toolsDirectory);
-  result[pathKey] = [toolsDirectory, ...entries].join(delimiter);
-  return result;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

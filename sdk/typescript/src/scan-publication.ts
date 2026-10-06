@@ -1,3 +1,5 @@
+import { readThreatModelPath } from "./artifact-export.js";
+import { relative, sep } from "node:path";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ScanArtifactRestorer } from "./runtime.js";
@@ -31,6 +33,8 @@ export interface CompletedScanTurn {
 interface ScanResultContext {
   scanDir: string;
   pluginRoot: string;
+  pythonPath?: string;
+  protectedRoot?: string;
   expectation: ScanExpectation;
   signal: AbortSignal;
 }
@@ -407,6 +411,12 @@ export async function collectResult(
     threadId,
     turnResult,
     sarifPath,
+    threatModelPath: await readThreatModelPath(scanDir, {
+      pluginRoot,
+      pythonPath: context.pythonPath,
+      protectedRoot: context.protectedRoot,
+      signal,
+    }),
   });
 }
 
@@ -420,6 +430,8 @@ export async function preservePublishedArtifacts(
   context: {
     result: ScanResult;
     pluginRoot: string;
+    pythonPath?: string;
+    protectedRoot?: string;
     expectation: ScanExpectation;
     signal: AbortSignal;
     onRestorationError: (error: OutputDirectoryError) => void;
@@ -436,6 +448,9 @@ export async function preservePublishedArtifacts(
         "findings.json",
         "coverage.json",
         "report.md",
+        ...(result.threatModelPath === null
+          ? []
+          : [relative(scanDir, result.threatModelPath).split(sep).join("/")]),
         ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
       ]),
     ].map(async (name) => ({

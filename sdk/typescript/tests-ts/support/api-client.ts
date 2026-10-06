@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { preparedRuntime } from "./api-events.js";
 import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
+import { throwing } from "./errors.js";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
@@ -67,11 +68,10 @@ export class TestClient extends CodexSecurity {
     super(
       config,
       {
-        createCodex: () => {
-          throw new Error("Unexpected Codex invocation in test");
-        },
+        createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
         acquireScanExecution: async () => () => {},
+        probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           async projectChild() {
             throw new Error("Unexpected projection in test");

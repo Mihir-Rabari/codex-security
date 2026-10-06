@@ -2625,6 +2625,91 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).not.toContain("TRIGGER_RUN_ID");
   });
 
+  test.each([
+    {
+      description: "a version already visible in the registry",
+      missingAttempts: 0,
+      errorCode: "E404",
+      calls: 1,
+      waits: 0,
+      status: 0,
+    },
+    {
+      description: "a version becoming visible after npm processing",
+      missingAttempts: 4,
+      errorCode: "E404",
+      calls: 5,
+      waits: 4,
+      status: 0,
+    },
+    {
+      description: "a version remaining absent past the publication wait",
+      missingAttempts: 100,
+      errorCode: "E404",
+      calls: 21,
+      waits: 20,
+      status: 1,
+    },
+    {
+      description: "an unrelated registry authorization failure",
+      missingAttempts: 1,
+      errorCode: "E401",
+      calls: 1,
+      waits: 0,
+      status: 1,
+    },
+  ])(
+    "handles $description before GitHub release verification",
+    async ({ missingAttempts, errorCode, calls, waits, status }) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Wait for the published npm package",
+      );
+      const workspace = mkdtempSync(
+        join(tmpdir(), "codex-security-release-visibility-"),
+      );
+      const callLog = join(workspace, "calls.log");
+      writeFileSync(callLog, "");
+      try {
+        const mocks = [
+          "npm() {",
+          '  if [[ "$1" != "view" || "$2" != "@openai/codex-security@0.1.2" ]]; then return 64; fi',
+          '  printf "query\\n" >> "$MOCK_CALL_LOG"',
+          "  if (( attempt <= MOCK_MISSING_ATTEMPTS )); then",
+          '    printf \'{"error":{"code":"%s","summary":"synthetic registry diagnostic"}}\\n\' "$MOCK_ERROR_CODE"',
+          "    return 1",
+          "  fi",
+          "  printf '\"0.1.2\"\\n'",
+          "}",
+          "sleep() {",
+          '  if [[ "$1" != "30" ]]; then return 65; fi',
+          '  printf "wait\\n" >> "$MOCK_CALL_LOG"',
+          "}",
+        ].join("\n");
+        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
+          env: {
+            ...process.env,
+            MOCK_CALL_LOG: callLog,
+            MOCK_MISSING_ATTEMPTS: String(missingAttempts),
+            MOCK_ERROR_CODE: errorCode,
+            RELEASE_VERSION: "0.1.2",
+          },
+          timeout: releaseWorkflowTimeout,
+        });
+        const events = readFileSync(callLog, "utf8").split("\n");
+        expect(result.status).toBe(status);
+        expect(events.filter((event) => event === "query")).toHaveLength(calls);
+        expect(events.filter((event) => event === "wait")).toHaveLength(waits);
+        if (missingAttempts > 0) {
+          expect(result.stderr).toContain("synthetic registry diagnostic");
+          expect(result.stderr).toContain(errorCode);
+        }
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("dispatches the exact protected run and release tag from trusted main", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,
@@ -4041,6 +4126,12 @@ describe("GitHub release workflow safeguards", () => {
     const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
+    const coverageGate = (job: string) =>
+      workflow.jobs[job]?.steps.find(
+        ({ name }) =>
+          name ===
+          `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
+      );
     for (const [ciMode, validation, upstream, gateFailure] of [
       ["full", "success", "success", false],
       ["full", "success", "skipped", true],
@@ -4064,10 +4155,7 @@ describe("GitHub release workflow safeguards", () => {
       };
       for (const job of ["required-test", "windows"]) {
         expect(
-          evaluateWorkflowCondition(
-            workflow.jobs[job]?.steps[0]?.if ?? "",
-            values,
-          ),
+          evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
           `${job}: ${ciMode}/${validation}/${upstream}`,
         ).toBe(gateFailure);
       }
@@ -4086,6 +4174,7 @@ describe("GitHub release workflow safeguards", () => {
       windows: [
         "static-checks",
         "plugin-host",
+        "plugin-source",
         "windows-test",
         "windows-verify",
       ],
@@ -4093,7 +4182,7 @@ describe("GitHub release workflow safeguards", () => {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {
           expect(
-            evaluateWorkflowCondition(workflow.jobs[gate]?.steps[0]?.if ?? "", {
+            evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
               "needs.validate-title.result": "success",
               "needs.validate-title.outputs.ci-mode": "full",
               ...Object.fromEntries(
@@ -4107,7 +4196,7 @@ describe("GitHub release workflow safeguards", () => {
           ).toBe(true);
         }
       }
-      expect(workflow.jobs[gate]?.steps[0]?.run).toBe("exit 1");
+      expect(coverageGate(gate)?.run).toBe("exit 1");
     }
 
     const renderName = (template: string, values: Record<string, string>) => {
@@ -4234,8 +4323,7 @@ describe("GitHub release workflow safeguards", () => {
           ]),
         );
         for (const stepName of [
-          "Set up pnpm",
-          "Set up Node.js",
+          "Set up TypeScript tools",
           "Install dependencies",
           "Check Markdown formatting",
         ]) {

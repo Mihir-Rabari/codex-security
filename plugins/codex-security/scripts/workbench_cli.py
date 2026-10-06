@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import workbench_remediation as remediation
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -20,6 +19,7 @@ from workbench_constants import (
     PHASE_PROGRESS_UNITS,
     PHASES,
     REMEDIATION_UPDATE_STATES,
+    positive_int,
 )
 
 
@@ -362,7 +362,10 @@ def parse_args(description: str) -> argparse.Namespace:
     release_finding_remediation_claim.add_argument("--request-id", required=True)
     release_finding_remediation_claim.add_argument("--action-token", required=True)
 
-    remediation.register_cancel_finding_remediation_request(subparsers)
+    cancel_remediation = subparsers.add_parser("cancel-finding-remediation-request")
+    cancel_remediation.add_argument("--occurrence-id", required=True)
+    cancel_remediation.add_argument("--request-id", required=True)
+    cancel_remediation.add_argument("--action-token", required=True)
 
     set_finding_remediation = subparsers.add_parser("set-finding-remediation")
     set_finding_remediation.add_argument("--occurrence-id", required=True)
@@ -380,7 +383,11 @@ def parse_args(description: str) -> argparse.Namespace:
 
     export_findings = subparsers.add_parser("export-findings")
     export_findings.add_argument("--scan-id", required=True)
-    export_findings.add_argument("--format", choices=EXPORT_FORMATS, required=True)
+    export_findings.add_argument(
+        "--artifact", choices=("findings", "threat-model"), default="findings"
+    )
+    export_findings.add_argument("--format", choices=(*EXPORT_FORMATS, "md"))
+    export_findings.add_argument("--validate-only", action="store_true")
 
     for command in (
         "inspect-linear-publication",
@@ -417,19 +424,12 @@ def parse_args(description: str) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
+if __name__ == "__main__":
+    parse_args(__doc__)
+
+
 def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
-        raise argparse.ArgumentTypeError("expected a non-negative integer")
+        raise argparse.ArgumentTypeError("Value must be non-negative.")
     return parsed
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
-
-
-if __name__ == "__main__":
-    parse_args(__doc__)

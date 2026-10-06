@@ -11,6 +11,7 @@ import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Timer
 from unittest import mock
 
 import pytest
@@ -23,6 +24,7 @@ from workbench_test_support import (
     initialize_git_repository,
     run_workbench,
     start_delivered_scan,
+    start_workspace_scan,
     write_completed_contract,
 )
 
@@ -436,15 +438,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         "--mode",
         "standard",
     )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     (repository / "outside.py").write_text("outside = 2\n")
     write_completed_contract(
         scan_dir,
@@ -475,8 +469,21 @@ def test_workbench_defaults_to_persistent_codex_home_state(tmp_path: Path) -> No
     }
 
 
-def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: bool) -> None:
     state_dir = tmp_path / "state"
+    if upgrade:
+        state_dir.mkdir()
+        namespace = runpy.run_path(str(SCRIPT), run_name="concurrent_migration_upgrade")
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            namespace["apply_schema_migrations"](
+                connection,
+                tuple(migration for migration in namespace["MIGRATIONS"] if migration[0] <= 32),
+                namespace["now"],
+                namespace["backfill_security_targets"],
+            )
+            connection.execute("PRAGMA journal_mode=WAL")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: run_workbench(state_dir, "database-info"), range(2)))
     assert results == [
@@ -485,6 +492,73 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (44,)
+
+
+def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    workspace = create_saved_workspace(state_dir, target)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    write_completed_contract(scan_dir, scan_id, target)
+    run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    thread_scan_id, _ = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
+        )
+
+    # Hold admission beyond one busy timeout, as a large registration hash can.
+    connection = sqlite3.connect(database, check_same_thread=False)
+    connection.execute("BEGIN IMMEDIATE")
+    release = Timer(7, connection.rollback)
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            release.start()
+            started = pool.submit(
+                run_workbench,
+                state_dir,
+                "start-prompt-only-scan",
+                "--thread-id",
+                "concurrent-thread",
+                "--target-path",
+                str(target),
+                "--scope",
+                ".",
+                "--mode",
+                "standard",
+                "--target-summary",
+                "Fixture",
+                "--scan-root",
+                str(tmp_path / "scans"),
+            )
+            updated = pool.submit(
+                run_workbench,
+                state_dir,
+                "set-scan-thread",
+                "--scan-id",
+                thread_scan_id,
+                "--thread-id",
+                "updated-thread",
+            )
+            backfilled = pool.submit(run_workbench, state_dir, "get-scan", "--scan-id", scan_id)
+            assert started.result(timeout=15)["startDisposition"] == "created"
+            assert updated.result(timeout=15)["threadId"] == "updated-thread"
+            assert (
+                backfilled.result(timeout=15)["scan"]["findings"][0]["attackPath"]["impact"][
+                    "level"
+                ]
+                == "high"
+            )
+    finally:
+        release.cancel()
+        release.join()
+        connection.close()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT details_json != '{}' FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+        ).fetchone() == (1,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -1675,6 +1749,16 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
         assert connection.execute(
             "SELECT name FROM schema_migrations WHERE version = 20"
         ).fetchone() == ("phase-specific scan progress",)
+        with pytest.raises(sqlite3.IntegrityError) as invalid_unit:
+            connection.execute(
+                "UPDATE scan_progress SET phase_progress_unit = 'invalid' WHERE scan_id = ?",
+                (scan_id,),
+            )
+        assert str(invalid_unit.value) == (
+            "CHECK constraint failed: phase_progress_unit IS NULL OR phase_progress_unit IN ("
+            "'checks', 'threat_surfaces', 'review_receipts', 'candidate_findings', "
+            "'validated_findings', 'report_artifacts')"
+        )
 
 
 @pytest.mark.parametrize(

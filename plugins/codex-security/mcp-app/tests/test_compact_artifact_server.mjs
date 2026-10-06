@@ -719,6 +719,15 @@ async function testSemanticScanDraftCompletion() {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
+      coverage: Object.fromEntries(
+        Object.entries(
+          JSON.parse(
+            await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+          ),
+        ).filter(
+          ([key]) => !["documentType", "schemaVersion", "scanId"].includes(key),
+        ),
+      ),
       operation: "replace",
       status: "draft_written",
     });

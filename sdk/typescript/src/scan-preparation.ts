@@ -76,6 +76,7 @@ export function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
   discoveryPrompt?: string,
+  modelProvider?: unknown,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -83,6 +84,11 @@ export function scanPrompt(
     discoveryPrompt ??
       `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
+    ...(modelProvider === "amazon-bedrock"
+      ? [
+          "This scan uses Amazon Bedrock with AWS authentication. Skip the ChatGPT account Daybreak access advisory, including get_codex_security_daybreak_access and get_tac_status; it does not check Bedrock model access or access to local scan results. OpenAI login is not required for this scan. Report any actual provider error unchanged.",
+        ]
+      : []),
     ...(skillName === "security-scan" || customValidation
       ? [
           `The SDK has already registered this scan. Use exactly ${JSON.stringify(scanId)} and ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}; never call a scan-start or completion tool, and leave finalization to the SDK.`,
