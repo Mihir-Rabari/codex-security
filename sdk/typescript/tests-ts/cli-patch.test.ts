@@ -2620,11 +2620,14 @@ describe("patch publication integrity", () => {
           "clean-staged-rename",
           "clean-staged-rename-supplied",
           "clean-source-directory",
+          "clean-selected-source-directory",
+          "clean-selected-absent",
           "clean-ignored-directory",
         ].flatMap((state) =>
           [
             "new.ts",
-            ...(state.startsWith("clean-staged-rename")
+            ...(state.startsWith("clean-staged-rename") ||
+            state.startsWith("clean-selected")
               ? [
                   "src/new.ts",
                   ...(process.platform === "win32" ? ["src\\new.ts"] : []),
@@ -2710,12 +2713,12 @@ describe("patch publication integrity", () => {
           if (dirty.startsWith("clean-staged-rename")) git("mv", source, file);
           else await rm(join(directory, source), { force: true });
           if (
-            dirty === "clean-source-directory" ||
+            dirty.endsWith("source-directory") ||
             dirty === "clean-ignored-directory"
           ) {
             await mkdir(join(directory, source));
             await writeFile(
-              join(directory, "old.ts/unverified.txt"),
+              join(directory, source, "unverified.txt"),
               "unverified\n",
             );
             if (dirty === "clean-ignored-directory")
@@ -2732,7 +2735,10 @@ describe("patch publication integrity", () => {
                 {
                   occurrenceId: "occ_1",
                   status: "verified",
-                  files: [file],
+                  files: [
+                    file,
+                    ...(dirty.startsWith("clean-selected") ? [source] : []),
+                  ],
                   verification: "Synthetic regression passed.",
                 },
               ],
@@ -2771,15 +2777,15 @@ describe("patch publication integrity", () => {
       supplied ? "original\n" : "working work\n",
     );
     if (
-      dirty === "clean-source-directory" ||
+      dirty.endsWith("source-directory") ||
       dirty === "clean-ignored-directory"
     ) {
       expect(
-        await readFile(join(directory, "old.ts/unverified.txt"), "utf8"),
+        await readFile(join(directory, source, "unverified.txt"), "utf8"),
       ).toBe("unverified\n");
-      expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
-        "unverified.txt",
-      );
+      expect(
+        git("ls-tree", "-r", "--name-only", "HEAD").includes("unverified.txt"),
+      ).toBe(dirty === "clean-selected-source-directory");
     }
     expect(await readFile(join(directory, file), "utf8")).toBe(
       `fixed\n${content}\n`,
