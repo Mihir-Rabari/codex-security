@@ -452,8 +452,13 @@ def _inspect_repository_target(
                 """,
                 (target_id, target_path),
             ).fetchall()
+            git_scans = [
+                scan
+                for scan in scans
+                if "target_revision" not in scan.keys() or scan["target_revision"] != "unversioned"
+            ]
             generation_predates_history = repository is not None and _repository_predates_history(
-                repository, scans
+                repository, git_scans
             )
             for scan in scans:
                 historical_scan = True
@@ -491,10 +496,6 @@ def _inspect_repository_target(
                 and historical_scan
                 and not verified_repository
                 and not generation_predates_history
-                and not all(
-                    "target_revision" in scan.keys() and scan["target_revision"] == "unversioned"
-                    for scan in scans
-                )
             )
         ownership_matches = ownership_matches and not generation_conflict
     return RepositoryTargetState(

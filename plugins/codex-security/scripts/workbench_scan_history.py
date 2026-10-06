@@ -180,9 +180,7 @@ def _same_repository(
         after_relative = repository_relative_path(Path(after_state.target_path))
         after_origin = identities.origin(after_state)
         return (
-            before_stored is None
-            and after_stored is None
-            and before_relative is not None
+            before_relative is not None
             and before_relative == after_relative
             and after_origin is not None
             and identities.origin(before_state) == after_origin

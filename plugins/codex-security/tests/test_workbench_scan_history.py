@@ -1931,3 +1931,122 @@ def test_portable_identity_history_lookup_uses_indexes(tmp_path: Path, reopen: b
         assert not any(line.startswith("SCAN scans") for line in plan), plan
         assert any("target_id=?" in line for line in plan), plan
         assert any("target_path=?" in line for line in plan), plan
+
+
+@pytest.mark.parametrize("mode", ("standard", "deep"))
+def test_legacy_aliases_restore_mixed_plain_and_git_history(tmp_path: Path, mode: str) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "README.md").write_text("fixture\n")
+    state = tmp_path / "state"
+    before = create_cli_scan(state, tmp_path / "results", repository, mode=mode)
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "."],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "Initialize repository",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    after = create_cli_scan(
+        state, tmp_path / "results", repository, mode=mode, target_revision=revision
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET repository_generation = NULL")
+        connection.execute("UPDATE security_targets SET repository_identity = NULL")
+    current = create_cli_scan(
+        state, tmp_path / "results", repository, mode=mode, target_revision=revision
+    )
+    assert compare_scan_pair(state, after, current)["afterScanId"] == current["scanId"]
+    assert before["scanId"] != current["scanId"]
+
+
+@pytest.mark.parametrize("missing_birth", ("before", "after"))
+@pytest.mark.parametrize("same_origin", (True, False))
+def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_birth: str, same_origin: bool
+) -> None:
+    import argparse
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_scan_history as history
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.test/synthetic/project.git"],
+        cwd=repository,
+        check=True,
+    )
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.test/synthetic/project.git"
+            if same_origin
+            else "https://example.test/synthetic/other.git",
+        ],
+        cwd=clone,
+        check=True,
+    )
+    state = tmp_path / "state"
+    before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
+    missing = before if missing_birth == "before" else after
+    missing_path = repository if missing_birth == "before" else clone
+    original_birth = target_state._repository_birth_time_ns
+    monkeypatch.setattr(
+        target_state,
+        "_repository_birth_time_ns",
+        lambda path, metadata: (
+            None if Path(path) == missing_path / ".git" else original_birth(path, metadata)
+        ),
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (missing["scanId"],)
+        )
+        connection.execute(
+            "UPDATE security_targets SET repository_identity = NULL WHERE current_path = ?",
+            (str(missing_path),),
+        )
+        args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
+
+        def compare():
+            return history.compare_scans(
+                connection,
+                args,
+                require_scan=lambda db, id: db.execute(
+                    "SELECT * FROM scans WHERE id = ?", (id,)
+                ).fetchone(),
+                read_coverage=lambda row: json.loads(
+                    (Path(row["scan_dir"]) / "coverage.json").read_text()
+                ),
+            )
+
+        if same_origin:
+            assert compare()["afterScanId"] == after["scanId"]
+        else:
+            with pytest.raises(SystemExit, match="same repository"):
+                compare()
