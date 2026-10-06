@@ -51,7 +51,9 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
 test("opens a private WAL database at the configured state path", async () => {
   const directory = await temporary.create("workbench-database-");
   const home = join(directory, "codex-home");
-  const { databasePath } = await databaseInfo({ CODEX_HOME: home });
+  const { databasePath } = await databaseInfo(
+    join(home, "state/plugins/codex-security"),
+  );
   assert.equal(
     databasePath,
     join(home, "state/plugins/codex-security/workbench.sqlite3"),
@@ -83,12 +85,7 @@ test("opens a private WAL database at the configured state path", async () => {
   const override = join(directory, "existing-state");
   await mkdir(override, { mode: 0o755 });
   assert.equal(
-    (
-      await databaseInfo({
-        CODEX_HOME: home,
-        CODEX_SECURITY_STATE_DIR: override,
-      })
-    ).databasePath,
+    (await databaseInfo(override)).databasePath,
     join(override, "workbench.sqlite3"),
   );
   if (process.platform !== "win32")
@@ -148,12 +145,12 @@ test("configured state paths resolve symlinks before parent traversal", async ()
     process.platform === "win32" ? "junction" : "dir",
   );
   assert.equal(
-    (await databaseInfo({ CODEX_SECURITY_STATE_DIR: alias + "/../state" }))
-      .databasePath,
+    (await databaseInfo(alias + "/../state")).databasePath,
     join(actual, "state", "workbench.sqlite3"),
   );
   assert.equal(
-    (await databaseInfo({ CODEX_HOME: alias + "/.." })).databasePath,
+    (await databaseInfo(alias + "/../state/plugins/codex-security"))
+      .databasePath,
     join(actual, "state/plugins/codex-security/workbench.sqlite3"),
   );
 });
@@ -168,9 +165,7 @@ test("configured directory links create missing destinations privately", async (
       alias,
       process.platform === "win32" ? "junction" : "dir",
     );
-    const result = await databaseInfo({
-      CODEX_SECURITY_STATE_DIR: nested ? join(alias, "nested") : alias,
-    });
+    const result = await databaseInfo(nested ? join(alias, "nested") : alias);
     assert.equal(
       result.databasePath,
       join(destination, ...(nested ? ["nested"] : []), "workbench.sqlite3"),
@@ -200,7 +195,7 @@ test(
       "CREATE TABLE retained (value TEXT); INSERT INTO retained VALUES ('original')",
     );
     existing.close();
-    const result = await databaseInfo({ CODEX_SECURITY_STATE_DIR: alias });
+    const result = await databaseInfo(alias);
     assert.equal(
       result.databasePath,
       directory + "/state-\udcff/workbench.sqlite3",
@@ -668,14 +663,11 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
 
 test("an up-to-date database-info reader does not wait for a writer", async () => {
   const directory = await temporary.create("workbench-reader-");
-  const first = await databaseInfo({ CODEX_SECURITY_STATE_DIR: directory });
+  const first = await databaseInfo(directory);
   const writer = new DatabaseSync(first.databasePath);
   try {
     writer.exec("BEGIN IMMEDIATE; UPDATE workspaces SET updated_at = 'writer'");
-    assert.deepEqual(
-      await databaseInfo({ CODEX_SECURITY_STATE_DIR: directory }),
-      first,
-    );
+    assert.deepEqual(await databaseInfo(directory), first);
   } finally {
     writer.exec("ROLLBACK");
     writer.close();

@@ -10,6 +10,7 @@ import { rankShardsCommand } from "./src/helpers/rank-shards";
 import { rankPoolCommand } from "./src/helpers/rank-pool";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls } from "./src/helpers/json";
+import { decodeUtf8 } from "./src/helpers/utf8";
 
 let commandLine = process.argv.slice(2);
 if (process.platform === "win32") {
@@ -67,21 +68,22 @@ if (command === "resolve-security-md") {
       options: { help: { type: "boolean", short: "h" } },
     });
     if (values.help) {
-      console.log("Usage: database-info");
+      console.log(
+        "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+      );
       return;
     }
     const { databaseInfo } = await import("./src/workbench/database");
     console.log(
-      JSON.stringify(await databaseInfo()).replace(
-        /[\p{Cc}\p{Cf}]/gu,
-        (character) =>
-          character
-            .split("")
-            .map(
-              (unit) =>
-                `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
-            )
-            .join(""),
+      JSON.stringify(
+        await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0)))),
+      ).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+        character
+          .split("")
+          .map(
+            (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+          )
+          .join(""),
       ),
     );
   })().catch((error: unknown) => {

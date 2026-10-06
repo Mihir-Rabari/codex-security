@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,7 +120,8 @@ test("escapes terminal controls in database helper diagnostics", async () => {
   const result = await runCodexCommand(
     { command: "node" },
     [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
-    { ...process.env, CODEX_SECURITY_STATE_DIR: join(blocked, "state") },
+    process.env,
+    JSON.stringify(join(blocked, "state")),
   );
   expect(result.success).toBe(false);
   expect(result.stderr).toContain("\\u202e");
@@ -127,7 +135,8 @@ test("successful database helper JSON escapes terminal controls without changing
   const result = await runCodexCommand(
     { command: "node" },
     [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
-    { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+    process.env,
+    JSON.stringify(state),
   );
   expect(result.success).toBe(true);
   expect(JSON.parse(result.stdout)).toEqual({
@@ -135,6 +144,52 @@ test("successful database helper JSON escapes terminal controls without changing
   });
   expect(result.stdout.trimEnd()).not.toMatch(/[\p{Cc}\p{Cf}]/u);
   expect(result.stdout).toContain("\\udb40\\udc01");
+});
+
+test("database initialization uses the SDK's existing CODEX_HOME configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-home-"));
+  directories.push(directory);
+  const result = await runWorkbench(
+    {
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        CODEX_HOME: directory,
+        PYTHON: join(directory, "missing-python"),
+      },
+    },
+    ["database-info"],
+  );
+  expect(result).toEqual({
+    databasePath: join(
+      await realpath(directory),
+      "state/plugins/codex-security/workbench.sqlite3",
+    ),
+  });
+});
+
+test("database helper rejects invalid state-directory input before writing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "database-info-input-"));
+  directories.push(directory);
+  const ignoredEnvironmentPath = join(directory, "must-not-be-created");
+  for (const input of [
+    undefined,
+    JSON.stringify(null),
+    JSON.stringify("~synthetic-user"),
+    JSON.stringify("C:"),
+    JSON.stringify(directory + "/raw\udcff"),
+  ]) {
+    const result = await runCodexCommand(
+      { command: "node" },
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "database-info"],
+      { ...process.env, CODEX_SECURITY_STATE_DIR: ignoredEnvironmentPath },
+      input,
+    );
+    expect(result.success).toBe(false);
+    expect(result.stderr).not.toBe("");
+  }
+  expect(await readdir(directory)).toEqual([]);
 });
 
 async function start(

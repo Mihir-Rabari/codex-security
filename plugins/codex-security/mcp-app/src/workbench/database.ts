@@ -5,7 +5,6 @@ import {
   readlinkSync,
   realpathSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout } from "node:timers/promises";
@@ -68,22 +67,17 @@ export async function openWorkbenchDatabase(
 }
 
 export async function databaseInfo(
-  environment: NodeJS.ProcessEnv = process.env,
+  state: string,
 ): Promise<{ databasePath: string }> {
-  const home =
-    (process.platform === "win32"
-      ? environment.USERPROFILE
-      : environment.HOME) || homedir();
-  const expandHome = (path: string) =>
-    path === "~" ? home : /^~[/\\]/u.test(path) ? home + path.slice(1) : path;
-  const state = environment.CODEX_SECURITY_STATE_DIR
-    ? expandHome(environment.CODEX_SECURITY_STATE_DIR)
-    : [
-        expandHome(environment.CODEX_HOME ?? "~/.codex") || ".",
-        "state",
-        "plugins",
-        "codex-security",
-      ].join(sep);
+  if (
+    typeof state !== "string" ||
+    !isAbsolute(state) ||
+    !state.isWellFormed()
+  ) {
+    throw new Error(
+      "database-info requires an absolute Unicode state-directory string.",
+    );
+  }
   // Keep an ASCII alias usable even when its destination has raw POSIX bytes.
   const database = await openWorkbenchDatabase(
     `${state}${sep}workbench.sqlite3`,

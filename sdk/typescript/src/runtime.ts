@@ -1579,7 +1579,10 @@ export async function runWorkbench(
         ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
         : ["-I", "-X", "utf8", "-B", script, ...arguments_],
       pluginHelperEnvironment(options.environment),
-      input,
+      // The SDK owns configuration normalization; the helper receives its resolved location.
+      native
+        ? JSON.stringify(codexSecurityStateDirectory(options.environment))
+        : input,
       options.signal,
     );
     if (!result.success) {
