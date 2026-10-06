@@ -859,6 +859,9 @@ def test_generic_closeout_preserves_projected_surface_receipts(
         (True, "merged"),
         ("changed", "merged"),
         ("changed-surface", "merged"),
+        ("same-attempt-changed-surface", "merged"),
+        ("same-attempt-receipts", "merged"),
+        ("same-attempt-multiple", "merged"),
         (True, "merging"),
         (True, "buffered"),
     ],
@@ -867,6 +870,9 @@ def test_generic_closeout_preserves_projected_surface_receipts(
         "retained-projection",
         "changed-projection",
         "changed-surface",
+        "same-attempt-changed-surface",
+        "same-attempt-receipts",
+        "same-attempt-multiple",
         "merging-projection",
         "buffered-projection",
     ],
@@ -884,6 +890,15 @@ def test_reopened_generic_work_uses_worker_projection(
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    if retained == "same-attempt-receipts":
+        output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET merge_state = ? WHERE id = ?", (merge_state, worker_id)
@@ -899,6 +914,15 @@ def test_reopened_generic_work_uses_worker_projection(
         "reason": "A later observation reopens this review.",
         "surfaceIds": ["surface"],
     }
+    prior_surfaces = []
+    if retained == "same-attempt-receipts":
+        (result.parent / "artifacts").mkdir()
+        for name in ("current.txt", "prior.txt"):
+            (result.parent / "artifacts" / name).write_text(f"Synthetic {name} receipt.\n")
+        surface["receiptRefs"] = ["artifacts/current.txt"]
+        prior_surfaces = [
+            {**surface, "disposition": "no_issue_found", "receiptRefs": ["artifacts/prior.txt"]}
+        ]
     checkpoint = write_checkpoint(
         result.parent / "checkpoints",
         {
@@ -907,10 +931,12 @@ def test_reopened_generic_work_uses_worker_projection(
             "findings": [],
             "coverage": {
                 "completeness": "complete",
-                "surfaces": [],
+                "surfaces": prior_surfaces,
                 "explicitExclusions": [],
                 "deferred": [],
-                "resolvedDeferred": [{"id": "review", "reason": "Earlier review completed."}],
+                "resolvedDeferred": []
+                if retained == "same-attempt-multiple"
+                else [{"id": "review", "reason": "Earlier review completed."}],
             },
         },
     )
@@ -931,6 +957,25 @@ def test_reopened_generic_work_uses_worker_projection(
         )
     )
     os.utime(result, ns=(200, 200))
+    if retained == "same-attempt-multiple":
+        intermediate = json.loads(result.read_text())
+        intermediate["complete"] = False
+        intermediate["coverage"]["surfaces"][0]["label"] = "Intermediate review"
+        intermediate["coverage"]["deferred"][0].update(
+            id="intermediate", reason="Intermediate review remains."
+        )
+        saved_intermediate = write_checkpoint(result.parent / "checkpoints", intermediate)
+        os.utime(saved_intermediate, ns=(150, 150))
+        current = json.loads(result.read_text())
+        current["complete"] = False
+        equal = write_checkpoint(result.parent / "checkpoints", current)
+        os.utime(equal, ns=(200, 200))
+        result.unlink()
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = NULL WHERE id = ?",
+                (worker_id,),
+            )
     attempt = 2 if retained == "changed-surface" else 1
     with workbench_db:
         workbench_db.execute(
@@ -942,6 +987,11 @@ def test_reopened_generic_work_uses_worker_projection(
         "id": f"{worker_id}-attempt-{attempt}-surface-1",
         "provenance": {**provenance, "sourceId": "surface"},
     }
+    if retained == "same-attempt-receipts":
+        projected_surface["receiptRefs"] = [
+            (result.parent / "artifacts/current.txt").relative_to(scan.scan_dir).as_posix(),
+            (result.parent / "artifacts/prior.txt").relative_to(scan.scan_dir).as_posix(),
+        ]
     projected_pending = {
         **pending,
         "id": f"{worker_id}-attempt-{attempt}-deferred-1",
@@ -958,7 +1008,12 @@ def test_reopened_generic_work_uses_worker_projection(
         else [],
         "reviews": [{**provenance, "completeness": "partial"}],
     }
-    if retained == "changed-surface":
+    if retained in (
+        "changed-surface",
+        "same-attempt-changed-surface",
+        "same-attempt-receipts",
+        "same-attempt-multiple",
+    ):
         previous_surface = {
             **projected_surface,
             "id": f"{worker_id}-attempt-1-surface-1",
@@ -1010,7 +1065,12 @@ def test_reopened_generic_work_uses_worker_projection(
             (str(reducer.parent),),
         ).fetchone()
         assert tuple(state) == ("failed", None)
-    saved = {path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*.json")}
+    saved = {
+        path: path.read_bytes()
+        for directory in (scan.scan_dir / "workers", scan.scan_dir / "artifacts")
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
     with monkeypatch.context() as interrupted:
 
         def fail_publication(*args, **kwargs):
@@ -1040,14 +1100,55 @@ def test_reopened_generic_work_uses_worker_projection(
         )["scan"]
         assert recovered["resultsRecoveryNeeded"] is False
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        if retained == "changed-surface":
+        if retained in (
+            "same-attempt-changed-surface",
+            "same-attempt-receipts",
+            "same-attempt-multiple",
+        ):
+            assert len(coverage["surfaces"]) == (3 if retained == "same-attempt-multiple" else 2)
+            assert len({row["id"] for row in coverage["surfaces"]}) == len(coverage["surfaces"])
+            assert (
+                next(
+                    row for row in coverage["surfaces"] if row["label"] == previous_surface["label"]
+                )
+                == previous_surface
+            )
+            recovered_surface = next(
+                row for row in coverage["surfaces"] if row["label"] == surface["label"]
+            )
+            assert recovered_surface["id"] != previous_surface["id"]
+            assert {key: value for key, value in recovered_surface.items() if key != "id"} == {
+                key: value for key, value in projected_surface.items() if key != "id"
+            }
+        elif retained == "changed-surface":
             assert len(coverage["surfaces"]) == 2
             assert projected_surface in coverage["surfaces"]
             assert previous_surface in coverage["surfaces"]
         else:
             assert coverage["surfaces"] == [projected_surface]
         pending_rows = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
-        if retained == "changed-surface":
+        if retained in (
+            "same-attempt-changed-surface",
+            "same-attempt-receipts",
+            "same-attempt-multiple",
+        ):
+            assert len(pending_rows) == (3 if retained == "same-attempt-multiple" else 2)
+            assert len({row["id"] for row in pending_rows}) == len(pending_rows)
+            if retained == "same-attempt-multiple":
+                middle = next(
+                    row for row in coverage["surfaces"] if row["label"] == "Intermediate review"
+                )
+                pending_middle = next(
+                    row for row in pending_rows if row["reason"] == "Intermediate review remains."
+                )
+                assert pending_middle["surfaceIds"] == [middle["id"]]
+            assert previous_pending in pending_rows
+            recovered_pending = next(
+                row for row in pending_rows if row["reason"] == pending["reason"]
+            )
+            assert recovered_pending["surfaceIds"] == [recovered_surface["id"]]
+            assert recovered_pending["provenance"] == projected_pending["provenance"]
+        elif retained == "changed-surface":
             assert len(pending_rows) == 2
             assert projected_pending in pending_rows
             assert previous_pending in pending_rows

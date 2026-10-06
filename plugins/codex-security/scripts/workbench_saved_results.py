@@ -1287,6 +1287,8 @@ def merge_saved_results(
                     break
         return attempt
 
+    allocated_projections: dict[str, list[tuple[str, int, dict[str, Any]]]] = {}
+
     def project_missing_record(
         field: str,
         item: dict[str, Any],
@@ -1312,6 +1314,7 @@ def merge_saved_results(
                 result["provenance"][name] = original[key]
         if field == "surfaces":
             result["id"] = f"{prefix}-surface-{index}"
+            result["receiptRefs"] = coverage_receipts(item, worker, relative)
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if "candidateId" in item:
@@ -1340,12 +1343,32 @@ def merge_saved_results(
                     surface_ids[surface["id"]] = (
                         retained["id"]
                         if retained is not None and isinstance(retained.get("id"), str)
-                        else f"{worker['id']}-attempt-{coverage_attempt('surfaces', surface, worker, relative)}-surface-{offset}"
+                        else project_missing_record(
+                            "surfaces", surface, offset, worker, source, relative
+                        )["id"]
                     )
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
                 ]
+        if field in ("surfaces", "deferred"):
+            allocations = allocated_projections.setdefault(field, [])
+            content = {key: value for key, value in result.items() if key != "id"}
+            for saved_path, saved_index, allocated in allocations:
+                if saved_index == index and (
+                    saved_path == relative
+                    or {key: value for key, value in allocated.items() if key != "id"} == content
+                ):
+                    result["id"] = allocated["id"]
+                    return result
+            reserved = [allocated for _, _, allocated in allocations]
+            for projection in [*projected_coverages, coverage]:
+                rows = projection.get(field, [])
+                if isinstance(rows, list):
+                    reserved.extend(row for row in rows if isinstance(row, dict))
+            if result not in reserved and any(row.get("id") == result["id"] for row in reserved):
+                result["id"] = f"{result['id']}-{_digest(result)[:16]}"
+            allocations.append((relative, index, copy.deepcopy(result)))
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
@@ -1923,7 +1946,7 @@ def merge_saved_results(
             and field != "reviews"
         ):
             item = project_missing_record(field, item, index, worker, source, relative)
-        if field == "surfaces" and worker is not None and isinstance(item, dict):
+        elif field == "surfaces" and worker is not None and isinstance(item, dict):
             item = copy.deepcopy(item)
             item["receiptRefs"] = coverage_receipts(item, worker, relative)
         if isinstance(item, dict) and "id" not in item:

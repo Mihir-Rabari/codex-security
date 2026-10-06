@@ -50,6 +50,8 @@ export async function publishCoverageFixture(
     linkedRetry = false,
     missingProjection = false,
     changedRetry = false,
+    sameAttemptChange = false,
+    duplicateRows = false,
     interruptReducer,
     checkpointOnly = false,
     parentTiming,
@@ -210,6 +212,8 @@ export async function publishCoverageFixture(
       for (const deferred of coverage.deferred)
         deferred.reason = "An earlier independent observation.";
     }
+    if (duplicateRows)
+      coverage.surfaces.push(structuredClone(coverage.surfaces[0]));
     if (competingIds) {
       coverage.surfaces.push({ ...coverage.surfaces[0], id: "owned-surface" });
       if (coverage.deferred.length)
@@ -669,7 +673,8 @@ export async function publishCoverageFixture(
           ])
             draft.coverage[field].splice(1, 1);
         } else {
-          if (missingProjection !== "deferred") draft.coverage.surfaces.shift();
+          if (missingProjection !== "deferred")
+            draft.coverage.surfaces.splice(0, duplicateRows ? 2 : 1);
           if (missingProjection !== "surfaces") draft.coverage.deferred.shift();
         }
       }
@@ -732,6 +737,42 @@ export async function publishCoverageFixture(
   const parentCoverage = JSON.parse(
     await readFile(path.join(run.scanDir, "coverage.json"), "utf8"),
   );
+  if (sameAttemptChange) {
+    const worker = accepted.persistedWorkers.find(
+      (worker) => worker.kind === "discovery",
+    );
+    const resultPath = worker.resultManifestPath;
+    const updated = JSON.parse(await readFile(resultPath, "utf8"));
+    updated.coverage.surfaces[0].label = "Updated source review";
+    updated.coverage.surfaces[0].provenance.description =
+      "Updated surface context.";
+    updated.coverage.deferred[0].reason = "Updated source review remains.";
+    if (directFile) await writeFile(resultPath, JSON.stringify(updated));
+    else {
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: worker.artifactDir,
+          repoRoot: targetPath,
+          layout: "worker",
+          scanId: run.scanId,
+        },
+        updated,
+      );
+      for (const name of await readdir(
+        path.join(worker.artifactDir, "checkpoints"),
+      )) {
+        const file = path.join(worker.artifactDir, "checkpoints", name);
+        if (!rawSources.has(file))
+          rawSources.set(file, await readFile(file, "utf8"));
+      }
+    }
+    rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+    const after = await store.get(run.scanId, threadId);
+    assert.equal(
+      after.persistedWorkers.find((row) => row.id === worker.id).attempt,
+      worker.attempt,
+    );
+  }
   if (stopAfterDraft) {
     await runWorkbench([
       "fail-scan",
@@ -788,7 +829,11 @@ export async function publishCoverageFixture(
       }
     }
   }
-  if ((directFile || omitCoverageIds) && !descriptiveVariants) {
+  if (
+    (directFile || omitCoverageIds) &&
+    !descriptiveVariants &&
+    !sameAttemptChange
+  ) {
     const expected = expectedCoverage ?? parentCoverage;
     const rows = (items) =>
       missingProjection
@@ -799,6 +844,31 @@ export async function publishCoverageFixture(
       rows(finalCoverage.deferred.filter((row) => row.id !== "scan-stopped")),
       rows(expected.deferred),
     );
+  }
+  if (sameAttemptChange) {
+    for (const surface of parentCoverage.surfaces)
+      assert.ok(
+        finalCoverage.surfaces.some((row) => isDeepStrictEqual(row, surface)),
+      );
+    for (const deferred of parentCoverage.deferred)
+      assert.ok(
+        finalCoverage.deferred.some((row) => isDeepStrictEqual(row, deferred)),
+      );
+    const changed = finalCoverage.surfaces.filter(
+      (row) => row.label === "Updated source review",
+    );
+    assert.equal(changed.length, 1);
+    assert.notEqual(changed[0].id, parentCoverage.surfaces[0].id);
+    assert.equal(
+      changed[0].provenance.attempt,
+      parentCoverage.surfaces[0].provenance.attempt,
+    );
+    assert.equal(changed[0].provenance.description, "Updated surface context.");
+    const pending = finalCoverage.deferred.filter(
+      (row) => row.reason === "Updated source review remains.",
+    );
+    assert.equal(pending.length, 1);
+    assert.deepEqual(pending[0].surfaceIds, [changed[0].id]);
   }
   if (changedRetry) {
     for (const field of ["surfaces", "deferred"])

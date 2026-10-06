@@ -593,3 +593,41 @@ for (const parentTiming of ["older", "newer"]) {
     }
   });
 }
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const directFile of [false, true]) {
+    test(`same-attempt changed surface keeps its deferred links (${workflowVersion}, ${directFile ? "direct" : "writer"})`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "coverage-changed-surface-"),
+      );
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          directFile,
+          sameAttemptChange: true,
+          stopAfterDraft: true,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  test(`missing equal ID-less surface rows preserve separate positions (${workflowVersion})`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "coverage-equal-surface-"));
+    try {
+      await publishCoverageFixture(root, "partial", {
+        workflowVersion,
+        directFile: true,
+        omitCoverageIds: true,
+        duplicateRows: true,
+        missingProjection: "surfaces",
+        stopAfterDraft: true,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
