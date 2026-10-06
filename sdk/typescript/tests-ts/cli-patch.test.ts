@@ -7851,20 +7851,25 @@ describe("ordinary patch snapshot context", () => {
 
 test.each(
   ["ordinary", "environment", "config"].flatMap((binding) =>
-    [false, true].map((remove) => ({ binding, remove })),
+    [false, true].flatMap((remove) =>
+      [false, true].map((redirect) => ({ binding, remove, redirect })),
+    ),
   ),
 )(
-  "keeps assessment Git discovery after component removal: $binding remove=$remove",
-  async ({ binding, remove }) => {
+  "keeps assessment Git discovery after component removal: $binding remove=$remove redirect=$redirect",
+  async ({ binding, remove, redirect }) => {
     const root = await temporaryDirectory("patch-assessment-discovery-");
     const metadata = join(root, "metadata");
     const worktree = binding === "ordinary" ? metadata : join(root, "worktree");
     const invocation = join(metadata, "component");
+    const replacement = join(root, "replacement");
     const gitEnvironment =
       binding === "environment" ? { GIT_WORK_TREE: worktree } : {};
     try {
       await mkdir(invocation, { recursive: true });
       await mkdir(worktree, { recursive: true });
+      await mkdir(replacement);
+      await writeFile(join(replacement, "app.ts"), "unrelated checkout\n");
       const rawGit = repositoryGit(metadata);
       rawGit("init", "--initial-branch=main");
       rawGit("config", "user.name", "Synthetic User");
@@ -7898,6 +7903,14 @@ test.each(
               )
             ) {
               assessmentCalls++;
+              expect(
+                resolve(
+                  gitText(["rev-parse", "--show-toplevel"], {
+                    cwd: output.appServer.directory,
+                    env: environment,
+                  }).trim(),
+                ),
+              ).toBe(worktree);
               const result = await promisify(execFile)(
                 "git",
                 ["rev-parse", "HEAD"],
@@ -7924,6 +7937,7 @@ test.each(
               output.stdout.write(patchRiskAssessment().report);
             } else {
               await writeFile(join(worktree, "app.ts"), "fixed\n");
+              if (redirect) rawGit("config", "core.worktree", replacement);
               if (remove) await rm(invocation, { recursive: true });
               output?.stdout.write("Patch complete.");
             }
@@ -7936,6 +7950,9 @@ test.each(
       expect(await readFile(join(worktree, "app.ts"), "utf8")).toBe("fixed\n");
       expect(await readFile(join(metadata, ".git", "index"))).toEqual(index);
       expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(replacement, "app.ts"), "utf8")).toBe(
+        "unrelated checkout\n",
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
