@@ -249,13 +249,14 @@ describe("TypeScript package skeleton", () => {
     expect(testStep.run).toContain('python -m pytest "$PYTHON_TEST_PATH"');
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
-    for (const name of [
-      "Install plugin dependencies",
-      "Build SDK and type-check eval tooling",
-    ]) {
-      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+    for (const [name, condition] of [
+      ["Install plugin dependencies", "matrix.os == 'ubuntu-latest'"],
+      [
+        "Build SDK and type-check eval tooling",
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
-      );
+      ],
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(condition);
     }
     expect(jobs["required-test"]?.needs).toContain("plugin-source");
     expect(jobs["windows"]?.needs).toContain("plugin-source");
