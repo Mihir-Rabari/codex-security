@@ -252,7 +252,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("projects private saved recipe config in public history output", async () => {
+  test("preserves saved recipe configuration in public history output", async () => {
     const publicConfig = {
       model: "model-test",
       model_provider: "custom",
@@ -302,12 +302,10 @@ describe("CLI workbench", () => {
         await runCli(argv, dependencies({ onWorkbench: () => response })),
       ).toBe(0);
       expect(stderr.text()).toBe("");
-      expect(stdout.text()).not.toContain("SYNTHETIC_PRIVATE");
+      expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_TOKEN");
+      expect(stdout.text()).toContain("SYNTHETIC_PRIVATE_WORKSPACE");
       if (argv.includes("--json")) {
-        expect(JSON.parse(stdout.text()).recipe).toEqual({
-          ...originalRecipe,
-          config: publicConfig,
-        });
+        expect(JSON.parse(stdout.text()).recipe).toEqual(originalRecipe);
       } else {
         expect(stdout.text()).toContain("model=model-test");
         expect(stdout.text()).toContain("approval_policy=on-request");
