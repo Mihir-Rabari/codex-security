@@ -1665,6 +1665,25 @@ def merge_saved_results(
             return owner, candidate_id
         return None
 
+    def coverage_generic_key(
+        owner: str | None, item: dict[str, Any]
+    ) -> tuple[str | None, str] | None:
+        identity = item.get("id")
+        provenance = item.get("provenance")
+        if owner is None and isinstance(provenance, dict):
+            source_owner = provenance.get("workerId")
+            source_id = provenance.get("sourceId")
+            if (
+                isinstance(source_owner, str)
+                and source_owner in workers_by_id
+                and isinstance(provenance.get("attempt"), int)
+                and (source_owner, provenance["attempt"]) in reviewed_attempts
+                and item in accepted_projection_records
+                and isinstance(source_id, str)
+            ):
+                return source_owner, source_id
+        return (owner, identity) if isinstance(identity, str) else None
+
     source_order["parent"] = (0, parent_modified)
     deferred_rows = {
         relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
@@ -1837,10 +1856,22 @@ def merge_saved_results(
         for relative, owner, candidate_id, _ in outcomes
         if owner is not None and relative in selected_observations
     )
+    selected_pending_candidates = {
+        candidate
+        for relative, _, owner in current_drafts
+        if relative in selected_observations
+        for row in deferred_rows[relative]
+        if isinstance(row, dict)
+        and (candidate := coverage_candidate(owner, row)) is not None
+        and not any(
+            outcome_relative == relative and (outcome_owner, identity) == candidate
+            for outcome_relative, outcome_owner, identity, _ in outcomes
+        )
+    }
     # Reopened work and selected checkpoint outcomes follow the saved source order.
     for relative, owner, candidate_id, disposition in outcomes:
         key = (owner, candidate_id)
-        if relative == "parent" and owner is not None and key not in ordered_candidates:
+        if relative == "parent" and owner is not None and key not in selected_pending_candidates:
             # An accepted parent review names a worker candidate in its source
             # namespace; the raw worker checkpoint has not absorbed that review.
             resolved.setdefault(key, disposition)
@@ -1860,6 +1891,24 @@ def merge_saved_results(
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
             resolved[key] = disposition
             ordered_outcomes[key] = (order, relative)
+    # Canonical coverage was copied before worker outcomes and closures were
+    # reconciled. Apply them to retained projections as well as appended rows.
+    for field in ("surfaces", "deferred"):
+        if isinstance(coverage.get(field), list):
+            coverage[field] = [
+                row
+                for row in coverage[field]
+                if not (
+                    isinstance(row, dict)
+                    and (
+                        (field == "deferred" and coverage_generic_key(None, row) in closed_deferred)
+                        or (
+                            coverage_candidate(None, row) in resolved
+                            and (field == "deferred" or row.get("disposition") == "needs_follow_up")
+                        )
+                    )
+                )
+            ]
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
@@ -2333,7 +2382,7 @@ def merge_saved_results(
                     field == "deferred"
                     and isinstance(item, dict)
                     and isinstance(item.get("id"), str)
-                    and (worker_id, item["id"]) in closed_deferred
+                    and coverage_generic_key(worker_id, item) in closed_deferred
                 ):
                     continue
                 string_question = field == "openQuestions" and isinstance(item, str)

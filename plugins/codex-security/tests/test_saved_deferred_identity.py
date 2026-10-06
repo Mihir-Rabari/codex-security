@@ -699,3 +699,98 @@ def test_parent_rejection_keeps_a_newer_selected_reopened_candidate(
         assert bool(surfaces) is selected_reopened
     assert coverage == replay
     assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+@pytest.mark.parametrize("kind", ["candidate", "generic"])
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_projected_parent_pending_tracks_selected_completion(
+    tmp_path, monkeypatch, saved_results, kind, closed, retry
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    identity = "caller-review"
+    task = {"id": identity, "reason": "Validate the selected caller.", "paths": ["api.py"]}
+    if kind == "candidate":
+        task["candidateId"] = identity
+    pending_surface = {
+        "id": "api",
+        "label": "API",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    if kind == "candidate":
+        pending_surface["candidateId"] = identity
+    initial = saved_draft(scan_id, deferred=[task], surfaces=[pending_surface], complete=True)
+    if kind == "candidate":
+        terminal = saved_draft(
+            scan_id, surfaces=[{**pending_surface, "disposition": "rejected"}], complete=True
+        )
+    else:
+        terminal = saved_draft(
+            scan_id,
+            closures=[{"id": identity, "reason": "Selected review completed."}],
+            complete=True,
+        )
+    result_path.write_text(json.dumps(initial))
+    reducer_input = scan_dir / "reducer-input.json"
+    reducer_input.write_text(json.dumps(saved_draft(scan_id, complete=True)))
+    committed_standard_reducer(state, codex_home, scan_dir, scan_id, worker_id, reducer_input)
+    os.utime(result_path, ns=(200, 200))
+    selected = write_checkpoint(result_path.parent / "checkpoints", terminal if closed else initial)
+    os.utime(selected, ns=(300, 300))
+    head = result_path.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    provenance = {"workerId": worker_id, "attempt": 1, "sourceId": identity}
+    if kind == "candidate":
+        provenance["candidateId"] = identity
+    projected = {**task, "id": "projected-task", "provenance": provenance}
+    if kind == "candidate":
+        projected["candidateId"] = "projected-candidate"
+    surface = {
+        **pending_surface,
+        "id": "projected-surface",
+        "provenance": {**provenance, "sourceId": "api"},
+    }
+    if kind == "candidate":
+        surface["candidateId"] = "projected-candidate"
+    independent = {"id": identity, "reason": "Independent parent review."}
+    parent = saved_draft(
+        scan_id, deferred=[projected, independent], surfaces=[surface], complete=True
+    )
+    parent["coverage"]["reviews"] = [
+        {"workerId": worker_id, "attempt": 1, "completeness": "partial"}
+    ]
+    write_saved_parent(scan_dir, parent, 200)
+    originals = {path: path.read_bytes() for path in [result_path, selected]}
+    if retry:
+        coverage, replay = cancel_and_preserve(
+            monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
+        )
+    else:
+        run_workbench(
+            state, "cancel-scan", "--scan-id", scan_id, environment={"CODEX_HOME": str(codex_home)}
+        )
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        run_workbench(
+            state,
+            "preserve-scan-results",
+            "--scan-id",
+            scan_id,
+            "--thread-id",
+            "standard-worker-thread",
+            environment={"CODEX_HOME": str(codex_home)},
+        )
+        replay = json.loads((scan_dir / "coverage.json").read_text())
+    for saved in [coverage, replay]:
+        pending = [row for row in saved["deferred"] if row.get("reason") == task["reason"]]
+        assert bool(pending) is not closed
+        assert independent in saved["deferred"]
+        if kind == "candidate":
+            assert (
+                any(row.get("disposition") == "needs_follow_up" for row in saved["surfaces"])
+                is not closed
+            )
+    assert coverage == replay
+    assert all(path.read_bytes() == content for path, content in originals.items())
