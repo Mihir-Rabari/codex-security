@@ -2117,9 +2117,16 @@ def merge_saved_results(
                     mapped_key is not None
                     and candidate_key not in canonical_candidates
                     and distinct_candidates(finding, findings[finding_positions[mapped_key]])
+                    and not any(
+                        _finding_key(retained) == key
+                        and not distinct_candidates(finding, retained, previous_owner=owner)
+                        for retained, owner in _retained_findings(
+                            findings[finding_positions[mapped_key]]
+                        )
+                    )
                 ):
                     # A shared historical alias cannot absorb an independent
-                    # current candidate without an explicit parent source link.
+                    # current candidate without a recorded parent source relationship.
                     mapped_key = None
                 mapped_candidate = mapped_key
                 historical_contents = represented_history.get(key, set())
