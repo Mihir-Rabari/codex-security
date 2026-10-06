@@ -5185,6 +5185,12 @@ export async function main(
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
+            patchResult = { ...patchResult, patches };
+            const patchContext = patchRiskBase?.context ?? publication?.context;
+            const verifiedFiles =
+              patchContext === undefined || exitCode !== 0
+                ? []
+                : await verifiedPatchFiles(selected, patches, patchContext);
             const { files } = await changedPatchFiles(
               selected.repository,
               patchBase,
@@ -5209,19 +5215,13 @@ export async function main(
             );
             let patchRisk: PatchRiskAssessment | undefined;
             if (patchRiskBase !== undefined) {
-              const files = await verifiedPatchFiles(
-                selected,
-                patches,
-                patchRiskBase,
-                dependencies,
-              );
-              if (files.length > 0) {
+              if (verifiedFiles.length > 0) {
                 patchRisk = await runPatchRiskAssessment(
                   {
                     repository: patchRiskBase.root,
                     directory: selected.repository,
                     base: patchRiskBase.tree,
-                    files: files.map((file) =>
+                    files: verifiedFiles.map((file) =>
                       relative(
                         patchRiskBase.root,
                         resolve(patchRiskBase.context.directory, file),
@@ -5242,12 +5242,7 @@ export async function main(
               ? await createPatchPullRequest(
                   selected.repository,
                   publication,
-                  await verifiedPatchFiles(
-                    selected,
-                    patches,
-                    publication,
-                    dependencies,
-                  ),
+                  verifiedFiles,
                   errorOutput,
                   dependencies,
                   patchRisk?.summary,
@@ -7485,8 +7480,7 @@ async function resumePatchPullRequest(
 async function verifiedPatchFiles(
   selected: SelectedFindings,
   patches: readonly FindingPatch[],
-  base: Pick<PatchPublication, "root" | "tree" | "context">,
-  dependencies: CliDependencies,
+  context: GitPatchState["context"],
 ): Promise<string[]> {
   const files = [
     ...new Set(
@@ -7506,69 +7500,14 @@ async function verifiedPatchFiles(
     }
     return path;
   });
-  const { root, tree, context } = base;
   const directory = await realpath(selected.repository).catch(
     () => context.directory,
   );
-  if (files.length === 0 || directory === context.directory) return files;
-  const bound = await bindPatchCommandContext(
-    selected.repository,
-    root,
-    context,
-    dependencies,
-  );
-  const before = await patchTreeEntries(root, root, tree, bound.dependencies);
-  const after = await patchTreeEntries(
-    root,
-    root,
-    await snapshotPatchTree(root, bound.dependencies),
-    bound.dependencies,
-  );
-  // Keep the original subtree's moved files and changed caller links, without
-  // selecting unreported destination files. Only reported paths select children.
-  const locations = (file: string) => [
-    resolve(context.directory, file),
-    resolve(directory, file),
-    resolve(selected.repository, file),
-  ];
-  const reported = new Set(files.flatMap(locations));
-  const ancestors = new Set<string>();
-  for (const file of [
-    ...reported,
-    ...[...before.keys()]
-      .map((file) => relative(context.directory, resolve(root, file)))
-      .filter((file) => !isOutsidePath(file))
-      .flatMap(locations),
-  ]) {
-    for (let path = file; !ancestors.has(path); path = dirname(path))
-      ancestors.add(path);
-  }
-  const changed = new Set(
-    [...new Set([...before.keys(), ...after.keys()])]
-      .filter((file) => before.get(file) !== after.get(file))
-      .map((file) => resolve(root, file))
-      .filter((file) => {
-        if (ancestors.has(file)) return true;
-        for (
-          let path = dirname(file);
-          path !== dirname(path);
-          path = dirname(path)
-        )
-          if (reported.has(path)) return true;
-        return false;
-      }),
-  );
-  return [...changed]
-    .filter((file) => {
-      for (
-        let path = dirname(file);
-        path !== dirname(path);
-        path = dirname(path)
-      )
-        if (changed.has(path)) return false;
-      return true;
-    })
-    .map((file) => relative(context.directory, file));
+  if (files.length > 0 && directory !== context.directory)
+    throw new CodexSecurityError(
+      "Patch directory changed during patching. Local edits and patches were kept.",
+    );
+  return files;
 }
 
 async function createPatchPullRequest(
@@ -7593,13 +7532,6 @@ async function createPatchPullRequest(
     context,
     dependencies,
   );
-  const currentDirectory = await realpath(repository).catch(() => directory);
-  if (currentDirectory !== directory) {
-    for (const file of [...dirtyFiles]) {
-      if (!isOutsidePath(file))
-        dirtyFiles.add(relative(directory, resolve(currentDirectory, file)));
-    }
-  }
   dependencies = bound.dependencies;
   repository = root;
   if (ignoredFiles.size > 0) {
@@ -7625,10 +7557,6 @@ async function createPatchPullRequest(
     );
     for (const file of ignoredFiles) {
       if (publishable.has(file)) dirtyFiles.add(file);
-      if (!isOutsidePath(file)) {
-        const moved = relative(directory, resolve(currentDirectory, file));
-        if (publishable.has(moved)) dirtyFiles.add(moved);
-      }
     }
   }
   const deleted =
@@ -10064,12 +9992,7 @@ async function executeScan(
         const pullRequest = await createPatchPullRequest(
           selected.repository,
           publication,
-          await verifiedPatchFiles(
-            selected,
-            patches,
-            publication,
-            dependencies,
-          ),
+          await verifiedPatchFiles(selected, patches, publication.context),
           errorOutput,
           dependencies,
         );
