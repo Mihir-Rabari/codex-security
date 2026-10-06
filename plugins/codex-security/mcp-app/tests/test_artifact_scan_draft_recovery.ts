@@ -772,7 +772,13 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         (row: Record<string, unknown>) => row.id !== named.id,
       );
       assert.ok(independent);
-      assert.deepEqual(independent, { ...raw, id: independent.id });
+      assert.deepEqual(independent, {
+        ...raw,
+        id: independent.id,
+        ...(payload === "generic" || layout === "worker"
+          ? {}
+          : { candidateId: independent.id }),
+      });
       const outcome =
         payload === "generic"
           ? { resolvedDeferred: [close(named.id)] }

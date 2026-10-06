@@ -332,24 +332,15 @@ export function preserveDiffCandidateDecisions(
         const key = findingCandidateKey(finding);
         const candidate = ledger.get(key ?? "");
         if (!candidate || !currentFindingKeys.has(key)) return finding;
-        if (
-          candidateDisposition(candidate) === undefined &&
-          object(finding.provenance)?.diffCandidateDecision === undefined
-        )
-          return finding;
         const { diffCandidateDecision: _previousDecision, ...provenance } =
           object(finding.provenance) ?? {};
         return {
           ...finding,
           provenance: {
             ...provenance,
-            ...(candidateDisposition(candidate) === undefined
-              ? {}
-              : {
-                  diffCandidateDecision: structuredClone(
-                    candidateDecision(candidate),
-                  ),
-                }),
+            diffCandidateDecision: structuredClone(
+              candidateDecision(candidate),
+            ),
           },
         };
       }),

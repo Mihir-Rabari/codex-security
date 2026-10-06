@@ -6,9 +6,10 @@ import { importSource } from "./import-module.ts";
 import { fixture } from "./scan-draft-recovery-fixture.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
-for (const mode of ["standard", "diff"] as const) {
+for (const mode of ["standard", "diff", "worker"] as const) {
   for (const outcome of ["reported", "rejected"] as const) {
     for (const sameOwner of [false, true]) {
+      if (mode === "worker" && !sameOwner) continue;
       for (const payload of ["candidate", "finding"] as const) {
         test(`legacy candidate coverage reconciles ${mode}/${outcome}/${payload}/${sameOwner ? "same" : "other"} owner`, async (t) => {
           const f = await fixture(t, mode);
@@ -70,7 +71,13 @@ for (const mode of ["standard", "diff"] as const) {
           );
           if (sameOwner && outcome === "reported") {
             const saved = JSON.parse(
-              await readFile(path.join(f.root, "findings.json"), "utf8"),
+              await readFile(
+                path.join(
+                  f.root,
+                  mode === "worker" ? "result.json" : "findings.json",
+                ),
+                "utf8",
+              ),
             );
             assert.ok(
               JSON.stringify(saved.findings[0].provenance).includes(
