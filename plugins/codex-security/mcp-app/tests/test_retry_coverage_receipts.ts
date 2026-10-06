@@ -72,3 +72,46 @@ for (const resume of [false, true]) {
     }
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    for (const receiptSpelling of [
+      "active scan",
+      "equivalent active scan",
+    ] as const) {
+      test(`linked archived receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${receiptSpelling} spelling`, async () => {
+        const root = await mkdtemp(path.join(tmpdir(), "receipt-namespace-"));
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            receiptSpelling,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    test(`shared scan receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome}`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "shared-scan-receipts-"));
+      try {
+        await publishCoverageFixture(root, "complete", {
+          receiptRetry: true,
+          sharedReceipt: true,
+          stopAfterDraft: outcome === "recovery",
+          stopBeforeDraft: outcome === "no parent",
+          resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}

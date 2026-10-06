@@ -1,4 +1,4 @@
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
 import type { ZodType } from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
@@ -105,6 +105,22 @@ export async function readDeepReductionSources(
           },
         }));
         const { coverage, ...reduction } = result;
+        const scanReceiptRefs = new Set<string>();
+        for (const surface of coverage.surfaces as Record<string, unknown>[]) {
+          for (const ref of (surface.receiptRefs as string[] | undefined) ??
+            []) {
+            const normalized = posix.normalize(ref);
+            try {
+              await requireRegularFile(
+                join(bound.artifacts.scanDir, normalized),
+                bound.artifacts.scanDir,
+              );
+              scanReceiptRefs.add(normalized);
+            } catch {
+              // Worker-local receipts are qualified below; finalization validates evidence.
+            }
+          }
+        }
         return {
           workerId: worker.id,
           coverage: projectDiscoveryCoverage(
@@ -113,6 +129,7 @@ export async function readDeepReductionSources(
             relative(bound.artifacts.scanDir, dirname(worker.resultPath))
               .split(sep)
               .join("/"),
+            scanReceiptRefs,
           ),
           result: reduction,
         };

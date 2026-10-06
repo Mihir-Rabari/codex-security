@@ -1346,6 +1346,7 @@ async function readArchivedWorkerCheckpoints(
 
   const archived: SavedScanDraft[] = [];
   const archivePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/attempts/`;
+  const activePrefix = `artifacts/deep_discovery/workers/${basename(workerRoot)}/output/`;
   const attempts = (
     await fs.readdir(canonicalAttemptsRoot, { withFileTypes: true })
   )
@@ -1443,7 +1444,7 @@ async function readArchivedWorkerCheckpoints(
           .map((ref) =>
             ref.startsWith(archivePrefix)
               ? ref
-              : `${archivePrefix}${attempt.name}/${ref}`,
+              : `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`,
           );
       }
       archived.push({ ...draft, attempt: attempt.name });

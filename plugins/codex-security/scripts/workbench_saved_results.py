@@ -1208,9 +1208,28 @@ def merge_saved_results(
         output = Path(worker["artifact_dir"]).relative_to(scan_dir)
         worker_root = output.parent if output.name == "output" else output
         worker_prefix = worker_root.as_posix() + "/"
+        active_prefix = output.as_posix() + "/"
+        if directory != output:
+            refs = [
+                f"{directory.as_posix()}/{Path(ref).as_posix()[len(active_prefix) :]}"
+                if isinstance(ref, str) and Path(ref).as_posix().startswith(active_prefix)
+                else ref
+                for ref in refs
+            ]
+
+        def scan_receipt(ref: str) -> bool:
+            try:
+                descriptor = open_scan_local_file_descriptor(scan_dir, ref, "coverage receipt")
+            except (ContractError, OSError):
+                return False
+            os.close(descriptor)
+            return True
+
         return [
             Path(f"{directory.as_posix()}/{ref}").as_posix()
-            if isinstance(ref, str) and not Path(ref).as_posix().startswith(worker_prefix)
+            if isinstance(ref, str)
+            and not Path(ref).as_posix().startswith(worker_prefix)
+            and not scan_receipt(Path(ref).as_posix())
             else Path(ref).as_posix()
             if isinstance(ref, str)
             else ref
@@ -1221,6 +1240,9 @@ def merge_saved_results(
         refs = item.get("receiptRefs", [])
         if field != "surfaces" or not isinstance(refs, list):
             return item
+        origin = projection_origins.get(id(item))
+        if origin is not None and (worker := workers_by_id.get(origin[0])) is not None:
+            refs = coverage_receipts(item, worker, origin[1])
         return {
             **item,
             "receiptRefs": [Path(ref).as_posix() if isinstance(ref, str) else ref for ref in refs],
@@ -1260,7 +1282,8 @@ def merge_saved_results(
             return [
                 position
                 for position, accepted in accepted_surfaces.get((worker["id"], surface["id"]), [])
-                if accepted == surface
+                if canonical_coverage_record("surfaces", accepted)
+                == canonical_coverage_record("surfaces", surface)
             ]
 
         def surface_id(surface: dict[str, Any], offset: int) -> str:
@@ -1319,11 +1342,15 @@ def merge_saved_results(
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                         source_surface_ids.setdefault(surface["id"], (offset, surface))
+                for (owner, source_id), accepted in accepted_surfaces.items():
+                    if owner == worker["id"] and accepted:
+                        source_surface_ids.setdefault(source_id, accepted[0])
                 for source_id, (offset, surface) in source_surface_ids.items():
                     projected_id = surface_id(surface, offset)
                     if id(source) in accepted_coverage_sources or accepted_positions(surface):
+                        origin = projection_origins.get(id(surface))
                         projected = project_missing_record(
-                            "surfaces", surface, offset, worker, source
+                            "surfaces", surface, offset, worker, origin[4] if origin else source
                         )
                         if origin := projection_origins.get(id(surface)):
                             projected["receiptRefs"] = coverage_receipts(

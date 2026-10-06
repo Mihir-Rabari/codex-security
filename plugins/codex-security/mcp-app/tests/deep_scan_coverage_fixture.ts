@@ -24,8 +24,14 @@ interface CoverageFixtureOptions {
   stopAfterDraft?: boolean;
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
-  receiptSpelling?: "worker" | "scan" | "equivalent scan";
+  receiptSpelling?:
+    | "worker"
+    | "scan"
+    | "equivalent scan"
+    | "active scan"
+    | "equivalent active scan";
   activeReceiptSpelling?: "worker" | "scan" | "equivalent scan";
+  sharedReceipt?: boolean;
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
   retryFindings?: JsonObject[][];
@@ -95,6 +101,7 @@ export async function publishCoverageFixture(
     receiptRetry = false,
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
+    sharedReceipt = false,
     retryPending = false,
     retryCoverage,
     retryFindings,
@@ -202,7 +209,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         ? "artifacts/prior.txt"
         : receiptSpelling === "scan"
           ? archivedRef
-          : archivedRef.replace("artifacts/", "artifacts/./");
+          : receiptSpelling === "equivalent scan"
+            ? archivedRef.replace("artifacts/", "artifacts/./")
+            : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`.replace(
+                "artifacts/",
+                receiptSpelling === "equivalent active scan"
+                  ? "artifacts/./"
+                  : "artifacts/",
+              );
     await recordCodexSecurityWorkerScanDraft(
       {
         root: artifactDir,
@@ -321,8 +335,19 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       "Synthetic review evidence.\n",
     );
     const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
-    const activeReceiptRef =
-      activeReceiptSpelling === "worker"
+    const sharedRef = "artifacts/01_context/false_positive_feedback.json";
+    if (sharedReceipt) {
+      await mkdir(path.dirname(path.join(run.scanDir, sharedRef)), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(run.scanDir, sharedRef),
+        "Synthetic review evidence.\n",
+      );
+    }
+    const activeReceiptRef = sharedReceipt
+      ? sharedRef
+      : activeReceiptSpelling === "worker"
         ? "artifacts/review.md"
         : activeReceiptSpelling === "scan"
           ? activeQualifiedRef
@@ -623,7 +648,16 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       (surface) => surface.label === "Current review",
     );
     assert.equal(current.length, 1);
-    assert.match(current[0].receiptRefs[0], /\/output\/artifacts\/review\.md$/);
+    if (sharedReceipt)
+      assert.equal(
+        current[0].receiptRefs[0],
+        "artifacts/01_context/false_positive_feedback.json",
+      );
+    else
+      assert.match(
+        current[0].receiptRefs[0],
+        /\/output\/artifacts\/review\.md$/,
+      );
     assert.equal(
       await readFile(path.join(run.scanDir, current[0].receiptRefs[0]), "utf8"),
       "Synthetic review evidence.\n",

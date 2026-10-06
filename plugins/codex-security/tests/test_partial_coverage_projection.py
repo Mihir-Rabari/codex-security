@@ -1787,3 +1787,157 @@ def test_generic_surface_receipt_union_keeps_each_source_directory(
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert coverage["surfaces"] == [projected]
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("spelling", ["unchanged", "equivalent", "scan relative", "omitted"])
+@pytest.mark.parametrize("parent", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_linked_archived_receipts_preserve_accepted_surface_links(
+    workbench_api, workbench_db, publication_scan, monkeypatch, spelling, parent, retry
+):
+    scan = publication_scan()
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    receipt = output / "artifacts" / "review.txt"
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic completed review.\n")
+    surface = {
+        "id": "source-surface",
+        "label": "Source review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    projected = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix()],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
+    }
+    coverage_path = scan.scan_dir / "coverage.json"
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    coverage_path.write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [projected],
+                "deferred": [],
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+            }
+        )
+    )
+    selected = copy.deepcopy(draft)
+    selected["complete"] = False
+    selected["coverage"]["deferred"] = [
+        {"id": "pending", "reason": "Verify accepted source review.", "surfaceIds": [surface["id"]]}
+    ]
+    if spelling == "equivalent":
+        selected["coverage"]["surfaces"][0]["receiptRefs"] = ["artifacts/./review.txt"]
+    elif spelling == "scan relative":
+        selected["coverage"]["surfaces"][0]["receiptRefs"] = [
+            receipt.relative_to(scan.scan_dir).as_posix()
+        ]
+    elif spelling == "omitted":
+        selected["coverage"]["surfaces"] = []
+    checkpoint = write_checkpoint(output / "checkpoints", selected)
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    for path, stamp in ((result, 100), (coverage_path, 200), (checkpoint, 300), (head, 300)):
+        os.utime(path, ns=(stamp, stamp))
+    if not parent:
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+    originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    pending = [
+        row for row in coverage["deferred"] if row.get("reason") == "Verify accepted source review."
+    ]
+    assert len(pending) == 1
+    assert pending[0]["surfaceIds"] == [projected["id"]]
+    assert coverage["surfaces"] == [projected]
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("equivalent", [False, True])
+@pytest.mark.parametrize("parent", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_shared_scan_receipts_preserve_existing_context_evidence(
+    workbench_api, workbench_db, publication_scan, monkeypatch, shared, equivalent, parent, retry
+):
+    scan = publication_scan()
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    ref = "artifacts/01_context/false_positive_feedback.json" if shared else "artifacts/review.txt"
+    receipt = (scan.scan_dir if shared else output) / ref
+    receipt.parent.mkdir(exist_ok=True, parents=True)
+    receipt.write_text("Synthetic completed source review.\n")
+    source_ref = ref.replace("artifacts/", "artifacts/./") if equivalent else ref
+    surface = {
+        "id": "review",
+        "label": "Completed source review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [source_ref],
+    }
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "surfaces": [surface], "deferred": []},
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix()],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    if parent:
+        publish_review_projection(
+            workbench_api,
+            workbench_db,
+            scan,
+            {
+                **scan.coverage,
+                "surfaces": [projected],
+                "deferred": [],
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "complete"}],
+            },
+        )
+    else:
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert coverage["surfaces"] == [projected]
+    assert result.read_bytes() == original
