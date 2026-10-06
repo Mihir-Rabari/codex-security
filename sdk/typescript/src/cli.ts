@@ -9432,8 +9432,8 @@ async function parseScanCodexOverrides(
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
-    isRecord(providers) &&
-    isRecord(providers[provider])
+    isJsonObject(providers) &&
+    isJsonObject(providers[provider])
   ) {
     // The file supplies this provider. Keep explicit CLI refinements without
     // combining native command auth with a generated env-key definition.
