@@ -2434,7 +2434,7 @@ for (const layout of ["standard", "diff"] as const) {
         const findings = await recoverPublishedFindings(f, stopped);
         assert.equal(findings.length, 1);
         assert.equal(findings[0]!.severity.level, "high");
-        assert.deepEqual(findings[0]!.provenance.workerId, workerId);
+        assert.deepEqual(Reflect.get(findings[0]!.provenance, "workerId"), workerId);
       }
     });
   }
