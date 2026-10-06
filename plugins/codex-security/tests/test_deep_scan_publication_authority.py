@@ -83,7 +83,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     current = stage_publication(
         scan, generation=3, result_path=new_result, title="Current accepted aggregate"
     )
-    workbench_api["write_scan_draft"](workbench_db, current)
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, current
+    )
     saved = {
         path: path.read_bytes()
         for path in scan.scan_dir.rglob("*.json")
@@ -98,7 +100,9 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     )
 
     with pytest.raises(SystemExit, match="coordinator|aggregate"):
-        workbench_api["write_scan_draft"](workbench_db, old)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, old
+        )
 
     assert {
         path: path.read_bytes()
@@ -109,8 +113,11 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
 
 @pytest.mark.parametrize("generation", [None, 3], ids=["legacy-generation-one", "current-lease"])
 def test_current_publication_replays_without_changing_checkpoint_or_worker_state(
-    workbench_api, workbench_db, publication_scan, generation
+    workbench_api, workbench_db, publication_scan, generation, monkeypatch
 ):
+    # Keep replay time fixed while comparing the preserved publication bytes.
+    instant = workbench_api["now"]()
+    monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     with workbench_db:
@@ -128,13 +135,17 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     run_before = dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone())
     worker_before = dict(workbench_db.execute("SELECT * FROM deep_scan_workers").fetchone())
 
-    workbench_api["write_scan_draft"](workbench_db, draft)
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, draft
+    )
     published = {
         path: path.read_bytes()
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     }
-    replay = workbench_api["write_scan_draft"](workbench_db, draft)
+    replay = workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, draft
+    )
 
     assert replay == {"scanId": scan.scan_id, "status": "draft_written"}
     assert {
@@ -142,7 +153,8 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     } == published
-    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 1
+    # Main retains both the submitted checkpoint and its normalized parent snapshot.
+    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 2
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_workers").fetchone()) == worker_before
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -200,7 +212,9 @@ def test_failed_publication_does_not_acknowledge_staged_input(
         saved_results.ContractError if failure.startswith("windows-emulated:") else OSError
     )
     with pytest.raises(expected_error, match="Synthetic"):
-        workbench_api["write_scan_draft"](workbench_db, args)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+        )
 
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
 
@@ -276,6 +290,17 @@ def test_receipt_io_failure_preserves_successful_publication(
         )
     args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
     draft = json.loads(Path(args.draft_path).read_text())
+    instant = workbench_api["now"]()
+    monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
+    scan_row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    binding = workbench_api["workbench_completion_binding"](scan_row, instant)
+    saved = workbench_api["saved_results"]
+    saved._populate_unsealed_manifest_envelope(
+        draft["manifest"], draft["manifest"]["scan"], binding
+    )
+    saved._populate_unsealed_artifact_envelope(
+        draft["manifest"], draft["findings"], draft["coverage"], binding
+    )
     staged = {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()}
     saved_results = workbench_api["saved_results"]
     original_write = saved_results.write_scan_local_bytes
@@ -326,13 +351,15 @@ def test_receipt_io_failure_preserves_successful_publication(
     monkeypatch.setattr(saved_results, "write_scan_local_bytes", write_file)
     monkeypatch.setattr(os, "replace", replace_file)
 
-    assert workbench_api["write_scan_draft"](workbench_db, args) == {
+    assert workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+    ) == {
         "scanId": scan.scan_id,
         "status": "draft_written",
     }
     assert len(failures) == 1
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
-    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 1
+    assert len(list((scan.scan_dir / "checkpoints").glob("*.json"))) == 2
 
 
 @pytest.mark.parametrize("failure", ["validation", "unsafe-path", "windows-reparse-emulated"])
@@ -372,7 +399,9 @@ def test_receipt_contract_errors_still_reject_publication(
 
     monkeypatch.setattr(saved_results, "write_scan_local_bytes", write_file)
     with pytest.raises(finalizer.ContractError, match="validation|safe|reparse"):
-        workbench_api["write_scan_draft"](workbench_db, args)
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+        )
     assert len(attempts) == 1
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
     assert not (scan.scan_dir.parent / "outside.accepted.json").exists()
