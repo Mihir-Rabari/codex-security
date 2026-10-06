@@ -3924,6 +3924,101 @@ describe("patch publication integrity", () => {
       files: [path],
     });
   });
+  test.each([
+    "initialized during patching",
+    "initialized without edits",
+    "left uninitialized",
+    "already initialized with local edits",
+  ])("tracks patch changes when a registered child is %s", async (state) => {
+    const root = await fixtures.create("patch-submodule-initialization-");
+    const repository = join(root, "repository");
+    const source = join(root, "child-source");
+    const child = join(repository, "dependency");
+    await mkdir(repository);
+    await mkdir(source);
+    const git = repositoryGit(repository);
+    const sourceGit = repositoryGit(source);
+    for (const run of [git, sourceGit]) {
+      run("init", "--initial-branch=main");
+      run("config", "user.name", "Synthetic User");
+      run("config", "user.email", "synthetic@example.test");
+    }
+    await writeFile(join(source, "app.ts"), "unsafe\noriginal\n");
+    sourceGit("add", ".");
+    sourceGit("commit", "-m", "Synthetic child baseline");
+    git(
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      source,
+      "dependency",
+    );
+    git("add", ".");
+    git("commit", "-m", "Synthetic parent baseline");
+    const retained = state === "already initialized with local edits";
+    const changed = retained || state === "initialized during patching";
+    if (retained)
+      await writeFile(
+        join(child, "app.ts"),
+        (await readFile(join(child, "app.ts"), "utf8")) + "local edit\n",
+      );
+    else git("submodule", "deinit", "-f", "--", "dependency");
+    const originalIndex = git("write-tree");
+    const originalGitlink = git("ls-tree", "HEAD", "dependency");
+    let modelCalls = 0;
+    let expectedContents: string | undefined;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        modelCalls++;
+        expect(
+          git("submodule", "status", "--", "dependency").startsWith("-"),
+        ).toBe(!retained);
+        if (!retained && state !== "left uninitialized")
+          git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--",
+            "dependency",
+          );
+        if (state !== "left uninitialized") {
+          expectedContents = await readFile(join(child, "app.ts"), "utf8");
+          if (changed) {
+            expectedContents = expectedContents.replace("unsafe", "fixed");
+            await writeFile(join(child, "app.ts"), expectedContents);
+          }
+        }
+        output?.stdout.write("Checked the synthetic patch.");
+        return 0;
+      },
+    });
+    expect(modelCalls).toBe(1);
+    expect(outcome.exitCode, outcome.stderr).toBe(changed ? 0 : 2);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: changed,
+      files: changed ? ["dependency/app.ts"] : [],
+      ...(changed ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
+    });
+    expect(git("write-tree")).toBe(originalIndex);
+    expect(git("ls-tree", "HEAD", "dependency")).toBe(originalGitlink);
+    if (expectedContents === undefined)
+      expect(git("submodule", "status", "--", "dependency")).toStartWith("-");
+    else {
+      expect(await readFile(join(child, "app.ts"), "utf8")).toBe(
+        expectedContents,
+      );
+      expect(repositoryGit(child)("diff", "--name-only")).toBe(
+        changed ? "app.ts" : "",
+      );
+      if (retained) expect(expectedContents).toContain("local edit\n");
+    }
+  });
+
   test("keeps the outer executable boundary for nested patch snapshots", async () => {
     const repository = await fixtures.create("patch-nested-executable-");
     const nested = join(repository, "dependency");

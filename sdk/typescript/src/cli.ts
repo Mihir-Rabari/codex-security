@@ -7273,7 +7273,11 @@ async function changedPatchFiles(
   const rootFiles: string[] = [];
   for (const [directory, tree] of base.trees) {
     const head = heads.get(directory);
-    if (head === undefined) continue;
+    if (
+      head === undefined ||
+      (directory && !existsSync(join(repository, directory, ".git")))
+    )
+      continue;
     const gitDependencies = directory
       ? await nestedPatchGitDependencies(repository, dependencies)
       : dependencies;
@@ -7359,8 +7363,9 @@ async function snapshotGitPatchState(
     for (const entry of entries.split("\0")) {
       if (!entry.startsWith("160000 ")) continue;
       const path = entry.slice(entry.indexOf("\t") + 1);
-      if (existsSync(join(checkout, path, ".git")))
-        await visit(directory ? `${directory}/${path}` : path);
+      const child = directory ? `${directory}/${path}` : path;
+      if (existsSync(join(checkout, path, ".git"))) await visit(child);
+      else trees.set(child, entry.slice(0, entry.indexOf("\t")).split(" ")[2]!);
     }
   };
   await visit("");
