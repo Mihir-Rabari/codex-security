@@ -2067,16 +2067,20 @@ export async function main(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            let target: JsonObject | undefined;
-            for (const entry of value["repositories"] as JsonObject[]) {
-              const storedPath = entry["targetPath"] as string;
-              if (
-                storedPath === requestedRepository ||
-                (await realpath(storedPath).catch(() => storedPath)) ===
+            const repositories = value["repositories"] as JsonObject[];
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === requestedRepository,
+            );
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (
+                  (await realpath(storedPath).catch(() => storedPath)) ===
                   repository
-              ) {
-                target = entry;
-                break;
+                ) {
+                  target = entry;
+                  break;
+                }
               }
             }
             const findings =
