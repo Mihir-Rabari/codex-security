@@ -437,6 +437,8 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
             )
     return {
         "scanId": run["scan_id"],
+        "ownerThreadId": scan["deep_scan_owner_thread_id"]
+        or dependencies().require_workspace(connection, scan["workspace_id"])["thread_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "model": scan["model"],

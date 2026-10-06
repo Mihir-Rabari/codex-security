@@ -10,10 +10,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -346,9 +344,13 @@ describe("bundled plugin build", () => {
       const sdk = join(root, "sdk", "typescript");
       await mkdir(sdk, { recursive: true });
       for (const name of ["src", "package.json", "tsconfig.json"]) {
-        await cp(new URL(`../${name}`, import.meta.url), join(sdk, name), { recursive: true });
+        await cp(new URL(`../${name}`, import.meta.url), join(sdk, name), {
+          recursive: true,
+        });
       }
-      await expect(stat(join(sdk, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(join(sdk, "node_modules"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
         recursive: true,
         filter: (path) =>

@@ -807,6 +807,7 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
   };
   return {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
+    ownerThreadId: optionalString(value.ownerThreadId),
     schemaVersion: optionalPositiveInteger(value.schemaVersion),
     workflowVersion: optionalString(value.workflowVersion),
     finalizationInput: parseFinalizationInput(value.finalizationInput),

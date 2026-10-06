@@ -42,6 +42,7 @@ export interface DeepScanFinalizationInput {
 
 export interface DeepScanRunState {
   scanId: string;
+  ownerThreadId?: string;
   startDisposition?: "created" | "joined";
   schemaVersion?: number;
   workflowVersion?: string;

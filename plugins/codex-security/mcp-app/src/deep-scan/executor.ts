@@ -47,6 +47,7 @@ export interface CodexSdkWorkerModelSettings {
   reasoningEffort?: string;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
+  runtimeSettings?: CodexSdkWorkerRuntimeSettings;
 }
 
 /** The coordinator supplies scan identity; worker tools never choose paths. */
@@ -59,7 +60,7 @@ export interface CodexSdkWorkerArtifactContext {
   pythonCommand?: string;
 }
 
-interface CodexSdkWorkerRuntimeSettings {
+export interface CodexSdkWorkerRuntimeSettings {
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
@@ -89,8 +90,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
-      const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+      const runtimeSettings = await (this.runtimeSettings ??= this.modelSettings
+        .runtimeSettings
+        ? Promise.resolve(this.modelSettings.runtimeSettings)
+        : workerRuntimeSettings(childEnv));
       if (resolved?.apiKey !== undefined)
         childEnv.CODEX_API_KEY = resolved.apiKey;
       // Snapshot per-scan selections once; a reconstructed owner can supply them.
@@ -590,7 +593,14 @@ async function workerRuntimeSettings(
     process.platform,
   );
   if (!configPath) return {};
-  const config = parseToml(await fs.readFile(configPath, "utf8"));
+  return workerRuntimeSettingsFromConfig(
+    parseToml(await fs.readFile(configPath, "utf8")),
+  );
+}
+
+export function workerRuntimeSettingsFromConfig(
+  config: Record<string, unknown>,
+): CodexSdkWorkerRuntimeSettings {
   const profiles = config.profiles;
   const profile =
     typeof config.profile === "string" && isRecord(profiles)

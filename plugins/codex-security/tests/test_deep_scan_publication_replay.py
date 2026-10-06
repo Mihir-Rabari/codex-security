@@ -144,7 +144,17 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         )["scan"]
         assert completed["progress"]["status"] == "complete"
         assert completed["findingCount"] == 1
-        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
+        run_after = dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone())
+        if run_before["finalization_input_json"] is not None:
+            before_selection = json.loads(run_before["finalization_input_json"])
+            after_selection = json.loads(run_after["finalization_input_json"])
+            digest = after_selection.pop("publicationSha256")
+            assert len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
+            if "publicationSha256" in before_selection:
+                assert digest == before_selection.pop("publicationSha256")
+            assert after_selection == before_selection
+            run_after["finalization_input_json"] = run_before["finalization_input_json"]
+        assert run_after == run_before
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
         ] == workers_before

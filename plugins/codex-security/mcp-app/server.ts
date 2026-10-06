@@ -1160,7 +1160,8 @@ export function createCodexSecurityServer(): McpServer {
           const recoverableSelection =
             begun.status === "succeeded" &&
             begun.finalizationInput &&
-            !sdkOwned;
+            !sdkOwned &&
+            begun.ownerThreadId === threadId;
           if (immediate && !completingLocally && !recoverableSelection)
             return { begun, immediate, sdkOwned };
           const started = await startOrJoinDeepScanCoordinator({
@@ -1246,8 +1247,9 @@ export function createCodexSecurityServer(): McpServer {
                 );
               },
               onFinalized: async (run, signal) => {
-                // The SDK stops its usage tracker and enforces the budget after this turn.
-                if (sdkOwned) return;
+                // Active owners finish through the completion tool after this call;
+                // detached native scans still publish without another observer.
+                if (sdkOwned || !abortSignalFromExtra(extra)?.aborted) return;
                 try {
                   await runWorkbench(
                     [

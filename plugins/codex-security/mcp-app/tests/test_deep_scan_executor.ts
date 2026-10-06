@@ -99,6 +99,7 @@ try {
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
   await testWorkerCyberAccessSettings();
+  await testIsolatedReconstructedWorkers();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -109,6 +110,8 @@ try {
     await testBedrockCredentialsReachWorker();
     await testArtifactServerUsesExtendedStartupTimeout();
     await testReducerCoveragePersistenceBinding();
+    await testWorkerProviderSelection();
+    await testNullUsageCompletion();
     await testZeroSubagentsPreservesHostRestrictions();
     await testSdkResumesExistingThread();
     await testRetryNotificationDoesNotInterruptTurn();
@@ -2210,7 +2213,11 @@ async function runFixtureWorker(
 }
 
 async function fakeCodexFixture(
-  preflightProfile = emptyWorkerPermissionProfile,
+  preflightProfile: {
+    extends: string;
+    filesystem: Record<string, string | number>;
+    network: { enabled: boolean };
+  } = emptyWorkerPermissionProfile,
   preflightAllowed = true,
   accountResult: {
     account: { type: string } | null;
@@ -2233,7 +2240,7 @@ const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 if (process.argv.includes('app-server')) {
-  const preflight = { cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -2444,18 +2451,15 @@ async function testIsolatedReconstructedWorkers() {
     };
     const currentParentSandbox =
       name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
-    const expectedProfile = {
-      ...structuredClone(deniedWorkerPermissionProfile),
+    const fixture = await fakeCodexFixture({
+      ...deniedWorkerPermissionProfile,
       filesystem: {
         ":root": "read",
-        ":minimal": "read",
-        ":cwd": "write",
         "/repo/.env": "deny",
         "/repo/**/*.pem": "deny",
         "/repo/**/.secret": "deny",
       },
-    };
-    const fixture = await fakeCodexFixture(expectedProfile);
+    });
     const codexHome = path.join(fixture.root, "home");
     const configPath = path.join(fixture.root, "scan config.toml");
     const promptPath = path.join(fixture.root, "prompt.md");
@@ -2483,7 +2487,8 @@ async function testIsolatedReconstructedWorkers() {
         .join("") +
         (name === "second"
           ? '[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
-          : ""),
+          : "") +
+        `[codex_security]\ncyber_access_program = "${name === "first" ? "daybreak_blue" : "standard"}"\n[features]\napi_key_cyber_access_programs = ${name === "first"}\napi_key_model_discovery = ${name !== "first"}\n`,
     );
     const providerKeys =
       name === "first"
@@ -2865,7 +2870,10 @@ async function testIsolatedReconstructedWorkers() {
             );
             assert.equal(preflight.codexHome, child.codexHome);
             assert.equal(child.scanValue, `${scan.name}-${phase}`);
-            assert.equal(child.configPath, scan.configPath);
+            assert.equal(
+              child.configPath,
+              scan.runtimeEnvironment.CODEX_SECURITY_CONFIG_PATH,
+            );
             assert.deepEqual(child.openaiAuthentication, {
               CODEX_API_KEY: `synthetic-${scan.name}-${phase}`,
             });
@@ -2879,6 +2887,15 @@ async function testIsolatedReconstructedWorkers() {
               ),
             );
             assertFlagPair(child.argv, "--model", scan.settings.model);
+            assertFlagPair(
+              child.argv,
+              "--cyber-access-program",
+              scan.name === "first" ? "daybreak_blue" : "standard",
+            );
+            assertConfigOverrides(child.argv, {
+              "features.api_key_cyber_access_programs": scan.name === "first",
+              "features.api_key_model_discovery": scan.name !== "first",
+            });
             for (const key of [
               "model_provider",
               "model_reasoning_summary",
@@ -2916,7 +2933,10 @@ async function testIsolatedReconstructedWorkers() {
               const providers = parseToml(provider.join("\n"))
                 .model_providers as Record<string, Record<string, unknown>>;
               if (scan.expectedProvider)
-                assert.deepEqual(providers, scan.expectedProvider);
+                assert.deepEqual(
+                  JSON.parse(JSON.stringify(providers)),
+                  scan.expectedProvider,
+                );
               else
                 assert.deepEqual(Object.keys(providers.openrouter).sort(), [
                   "base_url",
@@ -2963,10 +2983,16 @@ async function testIsolatedReconstructedWorkers() {
       }
       if (phase === "fresh") {
         for (const scan of scans) {
-          await writeFile(
-            scan.configPath,
-            'model_provider = "changed-provider"\nmodel_reasoning_summary = "detailed"\n',
+          const replacementConfig = path.join(
+            scan.fixture.root,
+            "replacement config.toml",
           );
+          await writeFile(
+            replacementConfig,
+            'model_provider = "changed-provider"\nmodel_reasoning_summary = "detailed"\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+          );
+          scan.runtimeEnvironment.CODEX_SECURITY_CONFIG_PATH =
+            replacementConfig;
         }
       }
     }

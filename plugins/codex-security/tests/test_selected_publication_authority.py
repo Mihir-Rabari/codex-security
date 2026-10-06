@@ -74,12 +74,22 @@ def test_publication_uses_committed_finalization_selection(
             )
         assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
     assert accepted.read_bytes() == contents
-    assert (
-        json.loads(
-            workbench_db.execute(
-                "SELECT finalization_input_json FROM deep_scan_runs WHERE scan_id = ?",
-                (scan.scan_id,),
-            ).fetchone()[0]
-        )
-        == selection
+    current = json.loads(
+        workbench_db.execute(
+            "SELECT finalization_input_json FROM deep_scan_runs WHERE scan_id = ?",
+            (scan.scan_id,),
+        ).fetchone()[0]
     )
+    if publication == "selected":
+        digest = current.pop("publicationSha256")
+        assert len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
+        current_scan = workbench_api["require_scan"](workbench_db, scan.scan_id)
+        db = workbench_api["_WORKBENCH_DB_CONTEXT"]
+        saved = workbench_api["saved_results"]
+        prepared = saved._prepare_scan_finalization(
+            scan.scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(current_scan),
+            completion_binding=db.workbench_completion_binding(current_scan, db.now()),
+        )
+        saved.require_selected_publication(db, workbench_db, current_scan, prepared)
+    assert current == selection

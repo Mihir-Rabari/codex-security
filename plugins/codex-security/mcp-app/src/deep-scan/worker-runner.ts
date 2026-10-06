@@ -4,7 +4,7 @@ import {
   runAcceptedAudit,
 } from "../../../../../sdk/typescript/src/accepted-audit.js";
 import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
   readDiscoveryAuditDraft,

@@ -100,6 +100,11 @@ def test_missing_or_unsupported_settings_reject_before_takeover(
             }
         ).encode()
         settings_path.write_bytes(saved)
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET execution_settings_json = ? WHERE scan_id = ?",
+                (saved.decode(), run["scanId"]),
+            )
     before = snapshot(state)
     result = claim_requiring_original_settings(state, run["scanId"])
     assert snapshot(state) == before, (

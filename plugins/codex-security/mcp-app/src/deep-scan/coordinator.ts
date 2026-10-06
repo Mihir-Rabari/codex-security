@@ -1025,7 +1025,7 @@ export class DeepScanCoordinator {
       );
     }
     return {
-      reason: stopReason ?? "capped",
+      reason: stopReason,
       omittedWorkerIds: unique(omittedWorkerIds),
       result: latestResult,
       resultPath: previousReducerResultPath,
@@ -1348,8 +1348,4 @@ function errorKind(error: unknown): string {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
-}
-function removeValue(values: string[], value: string): void {
-  for (let index = values.length - 1; index >= 0; index--)
-    if (values[index] === value) values.splice(index, 1);
 }

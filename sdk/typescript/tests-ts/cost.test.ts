@@ -2156,6 +2156,116 @@ describe("recorded Deep worker homes", () => {
       expect(estimateScanCostLowerBound("gpt-5.6-sol", invalid)).toBeNull();
   });
 
+  test.each(["gpt-5.6-sol", "synthetic-unpriced-model"])(
+    "prices live worker counters after an earlier response receipt with model %s",
+    async (currentModel) => {
+      const home = await codexHome();
+      const at = "2026-09-01T00:00:02Z";
+      await writeSession(home, "owner", {});
+      const worker = await writeSession(home, "worker", {});
+      const receipt = (id: string, model: string, input: number) => ({
+        type: "token_usage_record",
+        timestamp: at,
+        payload: {
+          thread_id: "worker",
+          turn_id: "worker-turn",
+          response_id: id,
+          model,
+          usage: { input_tokens: input, output_tokens: 0 },
+        },
+      });
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "worker-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "event_msg",
+            timestamp: at,
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 100,
+                  output_tokens: 0,
+                },
+              },
+            },
+          },
+          receipt("earlier", "gpt-5.6-sol", 100),
+        ]) + "\n",
+      );
+      const costUpdates: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.002,
+        onCost: (cost) => costUpdates.push(cost),
+        onCostLowerBound: (cost) => costUpdates.push(cost),
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: ["worker"],
+        owner: { threadId: "owner", turnId: "turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("owner");
+      try {
+        await tracker.refresh();
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(0.0004, 10);
+        await appendFile(
+          worker,
+          jsonLines([
+            {
+              type: "turn_context",
+              timestamp: at,
+              payload: { turn_id: "worker-turn", model: currentModel },
+            },
+            {
+              type: "event_msg",
+              timestamp: at,
+              payload: {
+                type: "token_count",
+                info: {
+                  total_token_usage: {
+                    input_tokens: 1_100,
+                    output_tokens: 0,
+                  },
+                },
+              },
+            },
+          ]) + "\n",
+        );
+        const running = await tracker.refresh();
+        expect(tokenUsage(running.usage)?.input_tokens).toBe(1_100);
+        expect(running.cost).toBeNull();
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(
+          currentModel === "gpt-5.6-sol" ? 0.0044 : 0.0004,
+          10,
+        );
+        if (currentModel === "gpt-5.6-sol")
+          expect(costUpdates.at(-1)!.estimatedUsd).toBeGreaterThan(0.002);
+        const completedReceipt = receipt("current", currentModel, 1_000);
+        await appendFile(
+          worker,
+          jsonLines([completedReceipt, completedReceipt]) + "\n",
+        );
+        const completed = await tracker.refresh();
+        expect(tokenUsage(completed.usage)?.input_tokens).toBe(1_100);
+        expect(costUpdates.at(-1)?.estimatedUsd).toBeCloseTo(
+          currentModel === "gpt-5.6-sol" ? 0.0044 : 0.0004,
+          10,
+        );
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([null, "synthetic-unpriced-model"])(
     "reports an internal priced lower bound with model %p without inventing a total",
     async (unknownModel) => {

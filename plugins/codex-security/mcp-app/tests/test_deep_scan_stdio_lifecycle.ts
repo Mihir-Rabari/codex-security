@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  appendFile,
   chmod,
   mkdir,
   readFile,
@@ -48,6 +49,9 @@ if (process.platform === "win32") {
     "failure",
     "active-failure",
     "remote-replay",
+    "snapshot-observer",
+    "native-owner-usage",
+    "native-detached-usage",
     "lost-response",
     "lost-response-corrupt",
     "lost-response-remove",
@@ -80,6 +84,14 @@ async function testDeepScanDetachedCompletion(mode: string) {
       : `.deep-scan-detached-${randomUUID()}.cjs`,
   );
   const threadId = "deep-scan-detached-result-conversation";
+  const usageMode =
+    mode === "native-owner-usage" || mode === "native-detached-usage";
+  const explicitCompletion =
+    mode === "active-failure" ||
+    mode === "cancel-after-seal" ||
+    mode.startsWith("cancel-finalizer") ||
+    mode.startsWith("late-rejoin");
+  const ownerRolloutPath = path.join(codexHome, "owner-rollout.jsonl");
   for (const directory of [
     targetPath,
     stateDir,
@@ -97,7 +109,7 @@ async function testDeepScanDetachedCompletion(mode: string) {
   await writePythonWrapper(pythonWrapperPath);
   if (mode === "cancel-after-seal")
     await writeFile(committedControlPath, "wait");
-  if (mode !== "detached")
+  if (mode !== "detached" && !usageMode)
     await writeFile(
       finalizerControlPath,
       mode === "joined" ||
@@ -105,7 +117,9 @@ async function testDeepScanDetachedCompletion(mode: string) {
         mode.startsWith("cancel-finalizer") ||
         mode.startsWith("late-rejoin")
         ? "wait"
-        : mode === "active-failure" || mode === "remote-replay"
+        : mode === "active-failure" ||
+            mode === "remote-replay" ||
+            mode === "snapshot-observer"
           ? "failure"
           : mode.startsWith("lost-response")
             ? "lost-response"
@@ -137,6 +151,36 @@ async function testDeepScanDetachedCompletion(mode: string) {
       "unused-signal-control",
     ),
   };
+  if (usageMode) {
+    environment.CODEX_SQLITE_HOME = codexHome;
+    environment.CODEX_STATE_DB = "";
+    await writeFile(
+      ownerRolloutPath,
+      [
+        { type: "session_meta", payload: { id: threadId, source: "cli" } },
+        {
+          timestamp: new Date().toISOString(),
+          type: "turn_context",
+          payload: { turn_id: "native-owner-turn", model: "gpt-5.6-sol" },
+        },
+      ]
+        .map((record) => JSON.stringify(record) + "\n")
+        .join(""),
+    );
+    await execFileAsync(environment.REAL_PYTHON!, [
+      "-c",
+      `
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+    connection.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL)")
+    connection.execute("INSERT INTO threads VALUES (?, ?)", (sys.argv[2], sys.argv[3]))
+`,
+      path.join(codexHome, "state_5.sqlite"),
+      threadId,
+      ownerRolloutPath,
+    ]);
+  }
   const server = startServer(serverBundlePath, environment);
   let remote: ReturnType<typeof startServer> | undefined;
   try {
@@ -159,6 +203,7 @@ async function testDeepScanDetachedCompletion(mode: string) {
     const scanId = await waitForScanId({ server, requestId: 2 });
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [worker] = await waitForJsonLines(startLogPath, 1);
+    if (usageMode) await appendOwnerUsage(10);
     if (mode === "joined") {
       server.sendRequest(
         3,
@@ -197,6 +242,7 @@ async function testDeepScanDetachedCompletion(mode: string) {
     }
     if (
       mode !== "active-failure" &&
+      mode !== "native-owner-usage" &&
       mode !== "cancel-after-seal" &&
       !mode.startsWith("cancel-finalizer") &&
       !mode.startsWith("late-rejoin")
@@ -252,6 +298,54 @@ async function testDeepScanDetachedCompletion(mode: string) {
       createHash("sha256").update(selectedBytes).digest("hex"),
       finished.finalizationInput.resultSha256,
     );
+    if (usageMode) {
+      if (mode === "native-owner-usage") {
+        assertNoError(await server.waitForResponse(2));
+      } else {
+        await waitFor(
+          async () =>
+            (await runWorkbench(environment, ["get-scan", "--scan-id", scanId]))
+              .scan.progress.status === "complete",
+          "detached native publication",
+        );
+        await appendFile(
+          ownerRolloutPath,
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "turn_context",
+            payload: { turn_id: "unrelated-later-turn", model: "gpt-5.6-sol" },
+          }) + "\n",
+        );
+      }
+      await appendOwnerUsage(1010);
+      const completed = await server.request(
+        60,
+        "tools/call",
+        toolCall("complete_codex_security_scan", { scanId }, threadId),
+      );
+      assertNoError(completed);
+      const afterOwner = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]);
+      assert.equal(afterOwner.scan.progress.status, "complete");
+      assert.equal(
+        afterOwner.scan.usage.inputTokens,
+        mode === "native-owner-usage" ? 1010 : 10,
+        "completion accounts for the owning continuation, excluding later conversation work",
+      );
+      console.log("native owning continuation usage passed", mode, scanId);
+      return;
+    }
+    if (explicitCompletion) {
+      assertNoError(await server.waitForResponse(2));
+      server.sendRequest(
+        60,
+        "tools/call",
+        toolCall("complete_codex_security_scan", { scanId }, threadId),
+      );
+    }
     if (mode === "cancel-after-seal") {
       await waitForJsonLines(committedLogPath, 1);
       const beforeCancel = await runWorkbench(environment, [
@@ -268,15 +362,9 @@ async function testDeepScanDetachedCompletion(mode: string) {
         "tools/call",
         toolCall("cancel_codex_security_scan", { scanId }, threadId),
       );
-      await waitFor(
-        () =>
-          server
-            .stderrEvents()
-            .some((event) => event.event === "coordinator_cancel_requested"),
-        "cancellation after parent completion committed",
-      );
-      await rm(committedControlPath, { force: true });
       const cancellation = await server.waitForResponse(6);
+      await rm(committedControlPath, { force: true });
+      assertNoError(await server.waitForResponse(60));
       assert.equal(cancellation.result?.isError, true);
       const afterCancel = await runWorkbench(environment, [
         "get-scan",
@@ -301,18 +389,11 @@ async function testDeepScanDetachedCompletion(mode: string) {
         "tools/call",
         toolCall("cancel_codex_security_scan", { scanId }, threadId),
       );
-      await waitFor(
-        () =>
-          server
-            .stderrEvents()
-            .some((event) => event.event === "coordinator_cancel_requested"),
-        "owner cancellation before releasing parent completion",
-      );
+      const canceled = await server.waitForResponse(6);
       if (mode === "cancel-finalizer-failure")
         await writeFile(finalizerControlPath, "failure");
       else await rm(finalizerControlPath, { force: true });
-      const canceled = await server.waitForResponse(6);
-      const ownerResponse = await server.waitForResponse(2);
+      const ownerResponse = await server.waitForResponse(60);
       const publicScan = await runWorkbench(environment, [
         "get-scan",
         "--scan-id",
@@ -325,7 +406,13 @@ async function testDeepScanDetachedCompletion(mode: string) {
         "cancellation observed before parent completion must remain canceled",
       );
       assertNoError(canceled);
-      assertCanceled(ownerResponse, scanId, finished.scanDir);
+      assert.equal(ownerResponse.result?.isError, true);
+      assert.match(
+        ownerResponse.result.content
+          .map((item: { text: string }) => item.text)
+          .join(" "),
+        /Only a running scan can be completed|injected complete-scan failure/,
+      );
       assert.equal(stopped.status, "canceled");
       assert.deepEqual(
         await readFile(
@@ -370,7 +457,7 @@ async function testDeepScanDetachedCompletion(mode: string) {
       if (mode === "late-rejoin-failure")
         await writeFile(finalizerControlPath, "failure");
       else await rm(finalizerControlPath);
-      const ownerResponse = await server.waitForResponse(2);
+      const ownerResponse = await server.waitForResponse(60);
       const invocations = await readJsonLines(finalizerLogPath);
       assertNoError(observed);
       assert.equal(
@@ -449,26 +536,27 @@ async function testDeepScanDetachedCompletion(mode: string) {
       mode === "failure" ||
       mode === "active-failure" ||
       mode === "remote-replay" ||
+      mode === "snapshot-observer" ||
       mode.startsWith("lost-response")
     ) {
-      await waitFor(
-        () =>
-          server
-            .stderrEvents()
-            .some((event) => event.event === "coordinator_publication_pending"),
-        "public finalization failure to remain pending",
-      );
+      if (mode !== "active-failure")
+        await waitFor(
+          () =>
+            server
+              .stderrEvents()
+              .some(
+                (event) => event.event === "coordinator_publication_pending",
+              ),
+          "public finalization failure to remain pending",
+        );
       if (mode === "active-failure") {
-        const failed = await server.waitForResponse(2);
+        const failed = await server.waitForResponse(60);
         assert.equal(failed.result?.isError, true);
         const message = failed.result.content
           .map((item: { text: string }) => item.text)
           .join(" ");
         assert.match(message, /injected complete-scan failure/);
-        assert.match(
-          message,
-          /Do not call start_codex_security_deep_scan again in this response/,
-        );
+        assert.match(message, /Do not retry completion/);
         assert.match(message, /no final|Do not.*final/i);
       }
       const pending = await getDeepScan({ environment, scanId, threadId });
@@ -492,6 +580,28 @@ async function testDeepScanDetachedCompletion(mode: string) {
       const manifestBeforeReplay = await readFile(
         path.join(finished.scanDir, "scan-manifest.json"),
       );
+      if (mode === "snapshot-observer") {
+        const observed = await server.request(
+          50,
+          "tools/call",
+          toolCall(
+            "start_codex_security_deep_scan",
+            { targetPath, scope: "." },
+            "independent-snapshot-observer",
+          ),
+        );
+        assertNoError(observed);
+        assert.equal(observed.result.structuredContent.scanId, scanId);
+        assert.equal(
+          observed.result.structuredContent.manifestPath,
+          path.join(finished.scanDir, "scan-manifest.json"),
+        );
+        assert.equal(
+          (await readJsonLines(finalizerLogPath)).length,
+          1,
+          "a snapshot observer must not acquire publication ownership",
+        );
+      }
       let replayServer = server;
       if (mode === "remote-replay") {
         await server.stop();
@@ -564,6 +674,14 @@ async function testDeepScanDetachedCompletion(mode: string) {
         return;
       }
       assertNoError(rejoined);
+      if (!mode.startsWith("lost-response"))
+        assertNoError(
+          await replayServer.request(
+            61,
+            "tools/call",
+            toolCall("complete_codex_security_scan", { scanId }, threadId),
+          ),
+        );
       assert.equal(
         rejoined.result.structuredContent.manifestPath,
         path.join(finished.scanDir, "scan-manifest.json"),
@@ -623,7 +741,8 @@ async function testDeepScanDetachedCompletion(mode: string) {
       (await readJsonLines(finalizerLogPath)).length,
       mode === "failure" ||
         mode === "active-failure" ||
-        mode === "remote-replay"
+        mode === "remote-replay" ||
+        mode === "snapshot-observer"
         ? 2
         : 1,
     );
@@ -637,6 +756,28 @@ async function testDeepScanDetachedCompletion(mode: string) {
     await server.stop();
     if (!installedPluginRoot) await rm(serverBundlePath, { force: true });
     await rm(fixtureRoot, { recursive: true, force: true });
+  }
+  async function appendOwnerUsage(inputTokens: number) {
+    await appendFile(
+      ownerRolloutPath,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: {
+              input_tokens: inputTokens,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+              output_tokens: 1,
+              reasoning_output_tokens: 0,
+              total_tokens: inputTokens + 1,
+            },
+          },
+        },
+      }) + "\n",
+    );
   }
 }
 

@@ -173,6 +173,8 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
             workbench_db.backup(connection)
             with monkeypatch.context() as patch:
                 patch.setattr(saved, "retain_unmerged_budget_coverage", legacy_projection)
+                # The legacy writer predates the selected-publication digest.
+                patch.setattr(saved, "record_selected_publication", lambda *args: None)
                 patch.setitem(budget.__globals__, "complete_scan_locked", interrupt_before_seal)
                 with pytest.raises(RuntimeError, match="budget draft committed"):
                     budget(connection, args)

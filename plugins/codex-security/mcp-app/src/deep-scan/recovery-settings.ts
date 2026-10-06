@@ -9,7 +9,11 @@ import {
   type JsonObject,
 } from "../../../../../sdk/typescript/src/config.js";
 import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
-import { resolveCodexPath } from "./executor.js";
+import {
+  resolveCodexPath,
+  workerRuntimeSettingsFromConfig,
+  type CodexSdkWorkerRuntimeSettings,
+} from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type { DeepScanRunState } from "./types.js";
 
@@ -26,6 +30,7 @@ export interface DeepScanExecutionSettings {
   nativeServiceTierAbsent?: true;
   providerConfig?: JsonObject;
   parentSandbox?: DeepWorkerParentSandbox;
+  runtimeSettings?: CodexSdkWorkerRuntimeSettings;
 }
 
 export interface DeepScanLegacySettingsContext {
@@ -101,6 +106,7 @@ export async function captureDeepScanExecutionSettings(
       ? { nativeServiceTierAbsent: true as const }
       : {}),
     providerConfig: selected.model_providers as JsonObject | undefined,
+    runtimeSettings: workerRuntimeSettingsFromConfig(config),
     parentSandbox,
   });
 }
@@ -334,6 +340,7 @@ export function restoredDeepScanWorkerSettings(
   model?: string;
   reasoningEffort?: string;
   parentSandbox: DeepWorkerParentSandbox;
+  runtimeSettings?: CodexSdkWorkerRuntimeSettings;
 } {
   const originalSandbox = settings.parentSandbox;
   const depths = [
@@ -352,6 +359,9 @@ export function restoredDeepScanWorkerSettings(
   return {
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
+    ...(settings.runtimeSettings === undefined
+      ? {}
+      : { runtimeSettings: settings.runtimeSettings }),
     parentSandbox: {
       filesystemDenies: [
         ...new Set([
@@ -432,6 +442,9 @@ function executionSettings(
       ? { nativeServiceTierAbsent: true }
       : {}),
     ...(provider === undefined ? {} : { providerConfig: provider }),
+    ...(value.runtimeSettings === undefined
+      ? {}
+      : { runtimeSettings: structuredClone(value.runtimeSettings) }),
     ...(value.parentSandbox === undefined
       ? {}
       : {
