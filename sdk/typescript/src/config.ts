@@ -243,7 +243,6 @@ export async function mergedCodexConfig(
   validateOverrideKeys(config.codexOverrides ?? {});
   const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
-  validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
   let nativeProfile: JsonObject = {};
   const profileName = overrides["profile"];
@@ -279,7 +278,17 @@ export async function mergedCodexConfig(
     }
     validateOverrideKeys(nativeProfile);
     validateOverrides(nativeProfile);
-    validateNativeMultiAgentV2Overrides(nativeProfile);
+    // CLI overrides otherwise resolve this file against the scan directory.
+    const instructions = nativeProfile["model_instructions_file"];
+    if (
+      typeof instructions === "string" &&
+      !/^~(?:[/\\]|$)/u.test(instructions)
+    ) {
+      nativeProfile["model_instructions_file"] = resolve(
+        profileHome,
+        instructions,
+      );
+    }
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
   const profiles = overrides["profiles"];
@@ -292,6 +301,7 @@ export async function mergedCodexConfig(
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";

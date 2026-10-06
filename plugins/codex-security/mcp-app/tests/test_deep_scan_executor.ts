@@ -1124,7 +1124,11 @@ async function testWorkerRuntimeSettings() {
       'model_reasoning_summary = "none"\nprofile = "selected"\n[profiles.selected]\nmodel = "fixture-model"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n',
       "none",
     ],
-    ['model_reasoning_summary = "concise"\n', "concise", true],
+    [
+      'model_reasoning_summary = "concise"\n[features]\nshell_tool = false\nunified_exec = false\n',
+      "concise",
+      true,
+    ],
   ];
   const saved = [
     "PYTHON",
@@ -1347,6 +1351,8 @@ refresh_interval_ms = 2000`
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
+              "features.shell_tool": commandAuth ? false : undefined,
+              "features.unified_exec": commandAuth ? false : undefined,
             });
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>
@@ -1426,23 +1432,27 @@ async function testWorkerCyberAccessSettings() {
     {
       name: "blue",
       configuration:
-        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
+        'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\nshell_tool = true\nunified_exec = false\n',
       serviceTier: "fast",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: true,
         api_key_model_discovery: true,
+        shell_tool: true,
+        unified_exec: false,
       },
     },
     {
       name: "explicit-false",
       configuration:
-        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
+        'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\nshell_tool = false\nunified_exec = false\n',
       serviceTier: "flex",
       program: "daybreak_blue",
       features: {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
+        shell_tool: false,
+        unified_exec: false,
       },
     },
     {
@@ -1465,6 +1475,12 @@ async function testWorkerCyberAccessSettings() {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: true,
       },
+    },
+    {
+      name: "selected-tool-settings",
+      configuration:
+        'profile = "selected"\n[features]\nshell_tool = true\nunified_exec = false\n[profiles.selected.features]\nshell_tool = false\nunified_exec = true\n',
+      features: { shell_tool: false, unified_exec: true },
     },
   ];
   const saved = [
@@ -1558,6 +1574,8 @@ async function testWorkerCyberAccessSettings() {
           for (const feature of [
             "api_key_cyber_access_programs",
             "api_key_model_discovery",
+            "shell_tool",
+            "unified_exec",
           ]) {
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>

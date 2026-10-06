@@ -1568,13 +1568,23 @@ export class CodexSecurity {
         onError: reportTrackingError,
       });
       costTracker = tracker;
+      // Saved launches reload the native file; preflight uses resolved values.
+      const profileName = effectiveConfig["profile"];
+      const inlineProfiles = effectiveConfig["profiles"];
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: { ...preflightConfig, approval_policy: approvalPolicy },
+        config: {
+          ...preflightConfig,
+          ...(typeof profileName === "string" &&
+          !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
+            ? { profile: profileName }
+            : {}),
+          approval_policy: approvalPolicy,
+        },
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
         maxCostUsd: options.maxCostUsd,
@@ -4658,6 +4668,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "enable_fanout",
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
+      "shell_tool",
+      "unified_exec",
     ]) {
       if (typeof value[key] === "boolean") result[key] = value[key];
     }
@@ -4721,6 +4733,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   for (const key of [
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
+    "shell_tool",
+    "unified_exec",
   ]) {
     if (resolvedFeatures[key] !== undefined) {
       result["features"] = {

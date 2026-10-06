@@ -790,6 +790,18 @@ describe("CodexSecurity preflight configuration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("keeps resolved tool disables in isolated worker settings", () => {
+    expect(
+      scanPreflightCodexConfig({
+        profile: "review",
+        features: { shell_tool: true, unified_exec: true },
+        profiles: {
+          review: { features: { shell_tool: false, unified_exec: false } },
+        },
+      })["features"],
+    ).toEqual({ shell_tool: false, unified_exec: false });
+  });
+
   test("uses resolved native file settings without a legacy profile selector", async () => {
     const root = await temporaryDirectory();
     const path = join(root, "config-preflight.toml");

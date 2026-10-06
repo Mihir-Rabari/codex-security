@@ -7,10 +7,19 @@ import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
+import {
+  mergedCodexConfig,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
+import {
+  mockWorkbench,
+  shellEnvironmentReference,
+  TestClient,
+} from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
@@ -55,6 +64,7 @@ describe("CodexSecurity orchestration", () => {
             model_reasoning_effort: "high",
             model_reasoning_summary: "concise",
             model_provider: "synthetic.provider",
+            features: { shell_tool: false, unified_exec: false },
             model_providers: { "synthetic.provider": providerConfig },
           }),
         );
@@ -68,6 +78,7 @@ describe("CodexSecurity orchestration", () => {
                 profiles: {
                   review: {
                     model_provider: "synthetic.provider",
+                    features: { shell_tool: false, unified_exec: false },
                     ...(selection === "profile-partial"
                       ? {
                           model_providers: {
@@ -86,6 +97,7 @@ describe("CodexSecurity orchestration", () => {
           : { model_providers: { "synthetic.provider": providerConfig } }),
       };
       let captured: CodexOptions | undefined;
+      let savedRecipe: JsonObject | undefined;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
         {
@@ -99,11 +111,18 @@ describe("CodexSecurity orchestration", () => {
                 }
               : {}),
           },
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            }
+            return mockWorkbench(args, input);
+          },
           resolvePluginPython: async () => "/managed/python",
           ...(profile && !nativeProfile
             ? {
                 prepareRuntime: async () => ({
                   ...preparedRuntime(runtimeHome),
+                  configPath: join(root, "scan-preflight.toml"),
                   credentialsAvailable: false,
                 }),
               }
@@ -138,6 +157,34 @@ describe("CodexSecurity orchestration", () => {
         await expect(client.run(repository)).rejects.toThrow(
           "synthetic command-auth scan started",
         );
+        expect(savedRecipe).toBeDefined();
+        const savedConfig = savedRecipe!["config"] as JsonObject;
+        expect(JSON.stringify(savedConfig)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(savedConfig["profile"]).toBe("review");
+          const replay = resolveCodexProfile(
+            await mergedCodexConfig({ codexOverrides: savedConfig }, home),
+          );
+          expect(replay["model_providers"]).toEqual({
+            "synthetic.provider": providerConfig,
+          });
+        }
+        if (profile) {
+          expect(captured?.config?.["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+          const snapshot = parseToml(
+            await readFile(
+              captured!.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+              "utf8",
+            ),
+          );
+          expect(snapshot["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+        }
         expect(captured?.apiKey).toBeUndefined();
         expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");

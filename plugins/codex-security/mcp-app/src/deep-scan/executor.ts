@@ -58,6 +58,8 @@ interface CodexSdkWorkerRuntimeSettings {
   features?: {
     api_key_cyber_access_programs?: boolean;
     api_key_model_discovery?: boolean;
+    shell_tool?: boolean;
+    unified_exec?: boolean;
   };
 }
 
@@ -504,12 +506,20 @@ async function workerRuntimeSettings(
       security.cyber_access_program as CyberAccessProgram;
   }
   const features = config.features;
-  if (isRecord(features)) {
+  const profileFeatures = isRecord(profile) ? profile.features : undefined;
+  if (isRecord(features) || isRecord(profileFeatures)) {
     for (const name of [
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
+      "shell_tool",
+      "unified_exec",
     ] as const) {
-      const value = features[name];
+      const value =
+        isRecord(profileFeatures) && profileFeatures[name] !== undefined
+          ? profileFeatures[name]
+          : isRecord(features)
+            ? features[name]
+            : undefined;
       if (typeof value === "boolean") {
         (settings.features ??= {})[name] = value;
       }

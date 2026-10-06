@@ -195,6 +195,60 @@ describe("Codex configuration", () => {
     expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
   });
 
+  test.each([undefined, "explicit.md"])(
+    "resolves file-profile instructions before explicit overrides: %s",
+    async (explicit) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_instructions_file = "instructions.md"\n',
+      );
+      const overrides = {
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { model_instructions_file: explicit }),
+      };
+      const config = await mergedCodexConfig(
+        { codexOverrides: overrides },
+        home,
+      );
+      expect(config["model_instructions_file"]).toBe(
+        explicit ?? join(home, "instructions.md"),
+      );
+      expect(overrides).toEqual({
+        profile: "review",
+        ...(explicit === undefined
+          ? {}
+          : { model_instructions_file: explicit }),
+      });
+    },
+  );
+
+  test("validates effective native multi-agent settings after file overrides", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      "[features.multi_agent_v2]\nenabled = false\n",
+    );
+    await expect(
+      mergedCodexConfig({ codexOverrides: { profile: "review" } }, home),
+    ).rejects.toThrow("cannot be disabled");
+    await expect(
+      mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            features: { multi_agent_v2: { enabled: true } },
+          },
+        },
+        home,
+      ),
+    ).resolves.toMatchObject({
+      features: { multi_agent_v2: { enabled: true } },
+    });
+  });
+
   test.each([undefined, "other helpers", "~/helpers"])(
     "retains inherited command auth cwd unless the profile overrides it: %s",
     async (cwd) => {

@@ -508,7 +508,9 @@ npx @openai/codex-security scan . --codex 'profile="review"'
 SDK callers can set `codexOverrides: { profile: "review" }`, and project config
 files can set `codex.profile: review`. The file uses top-level Codex TOML keys.
 Its settings override scanner defaults; explicit scan settings override the
-file. The scan runs from an isolated Codex home, so include any custom provider
+file. Relative `model_instructions_file` paths in that file resolve from its
+directory. Saved scan launches retain the file-profile name to reload its
+settings. The scan runs from an isolated Codex home, so include any custom provider
 definition in the profile file. An absent profile file contributes no settings.
 Inline `profiles` tables remain supported for existing scanner configurations.
 
