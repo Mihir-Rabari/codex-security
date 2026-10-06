@@ -2197,3 +2197,39 @@ def test_saved_alias_metadata_preserves_explicit_worker_siblings(
     findings = scan["findings"]
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("candidate", [False, True])
+@pytest.mark.parametrize("changed_note", [False, True])
+def test_stopped_explicit_replay_ignores_optional_identity_metadata(
+    tmp_path: Path, retry: bool, candidate: bool, changed_note: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    if candidate:
+        finding["provenance"]["candidateId"] = "candidate-a"
+    finding["identity"] = {
+        "anchor": "stable-candidate",
+        "instance": "reported",
+        "note": "Initial metadata.",
+    }
+    finding["locations"][0].update(startLine=1, endLine=1)
+    write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[finding]))
+    finding["locations"][0].update(startLine=2, endLine=2)
+    if changed_note:
+        finding["identity"]["note"] = "Later metadata."
+    path.write_text(json.dumps(document))
+
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+
+    findings = json.loads(path.read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["identity"] == finding["identity"]
+    assert findings[0]["locations"] == finding["locations"]
+    assert any(
+        previous["locations"][0]["startLine"] == 1
+        for previous in findings[0]["provenance"]["previousFindings"]
+    )

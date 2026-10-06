@@ -1735,7 +1735,8 @@ def merge_saved_results(
                 provenance.get("workerId") or owner,
                 finding_candidate_id(finding),
                 recovered["ruleId"],
-                recovered["identity"],
+                recovered["identity"].get("anchor"),
+                recovered["identity"].get("instance"),
                 extensions.get("reportId"),
                 extensions.get("ledgerRowId"),
             ]
