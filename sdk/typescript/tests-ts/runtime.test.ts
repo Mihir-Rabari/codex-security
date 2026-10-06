@@ -4133,7 +4133,10 @@ describe("runtime directories and plugin Python boundary", () => {
         await runWorkbench(
           {
             pluginRoot: PLUGIN_ROOT,
-            environment: { CODEX_SECURITY_STATE_DIR: `${volume}\\` },
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: `${volume}\\`,
+            },
           },
           ["database-info"],
         );
@@ -4151,6 +4154,7 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const environment = {
+        ...process.env,
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       };
       await runWorkbench({ pluginRoot: PLUGIN_ROOT, environment }, [
