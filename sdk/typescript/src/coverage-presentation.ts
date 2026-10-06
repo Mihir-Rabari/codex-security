@@ -7,7 +7,8 @@ export type CoverageSummary = Pick<
   Partial<Pick<CoverageDocument, "explicitExclusions">>;
 
 export function formatScopePath(path: string): string {
-  const normalizationSensitive = path.normalize("NFC") !== path;
+  const normalizationSensitive =
+    path.normalize("NFC") !== path || /\p{Cn}/u.test(path);
   if (
     path.length > 0 &&
     !normalizationSensitive &&

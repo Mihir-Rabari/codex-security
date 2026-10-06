@@ -106,6 +106,52 @@ describe("coverage scope presentation", () => {
     }
   });
 
+  test("keeps Unicode 17 scope paths distinct on older supported Node runtimes", () => {
+    const paths = ["src/a\u1acf\u1add.ts", "src/a\u1add\u1acf.ts"];
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const source = new URL("../src/coverage-presentation.ts", import.meta.url);
+    const script = `
+      const { formatScopePath, formatCoverageScope } = await import(${JSON.stringify(source.href)});
+      const paths = ${JSON.stringify(paths)};
+      console.log(JSON.stringify({
+        paths: paths.map(formatScopePath),
+        scopes: paths.map(path => formatCoverageScope({
+          mode: "scoped_path", includePaths: [path], excludePaths: []
+        })),
+        readable: formatScopePath("src/café.ts")
+      }));
+    `;
+    const result = Bun.spawnSync(
+      [
+        node!,
+        "--experimental-strip-types",
+        "--input-type=module",
+        "-e",
+        script,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    const rendered = JSON.parse(new TextDecoder().decode(result.stdout)) as {
+      paths: string[];
+      scopes: string[];
+      readable: string;
+    };
+    for (const [index, path] of paths.entries()) {
+      const display = rendered.paths[index]!;
+      expect(display.startsWith('"') ? JSON.parse(display) : display).toBe(
+        path,
+      );
+    }
+    // Unicode 17 orders U+1ADD (class 220) before U+1ACF (class 230).
+    const normalizedScopes = rendered.scopes.map((scope) =>
+      scope.replaceAll("\u1acf\u1add", "\u1add\u1acf"),
+    );
+    expect(normalizedScopes[0]).not.toBe(normalizedScopes[1]);
+    expect(rendered.readable).toBe("src/café.ts");
+  });
+
   test("escapes non-ASCII spaces while preserving ordinary spaces", () => {
     for (const [path, encoded] of [
       ["src/a b.ts", '"src/a b.ts"'],
