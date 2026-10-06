@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import sqlite3
 from itertools import permutations
 from pathlib import Path
 from uuid import UUID
@@ -2362,3 +2363,112 @@ def test_saved_optional_worker_metadata_keeps_bound_sibling_owners(
     findings = scan["findings"]
     run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
     assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == findings
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("stronger_has_identity", [False, True])
+def test_stronger_checkpoint_keeps_restored_published_identity(
+    tmp_path: Path, retry: bool, stronger_has_identity: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    published = json.loads(path.read_text())
+    finding = published["findings"][0]
+    finding.update(
+        title="Synthetic restored finding",
+        summary="Earlier accepted observation",
+        identity={"anchor": "published-original"},
+    )
+    finding["severity"]["level"] = "low"
+    finding["provenance"]["candidateId"] = "candidate-a"
+    path.write_text(json.dumps(published))
+    raw = copy.deepcopy(finding)
+    raw.pop("identity")
+    earlier = write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[raw]))
+    stronger = copy.deepcopy(raw)
+    stronger["provenance"].pop("candidateId", None)
+    stronger["summary"] = "Stronger accepted observation"
+    stronger["severity"]["level"] = "high"
+    if stronger_has_identity:
+        stronger["identity"] = {"anchor": "published-original"}
+    later = write_checkpoint(scan_dir / "checkpoints", saved_draft(scan_id, findings=[stronger]))
+    os.utime(earlier, ns=(100, 100))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan_dir / name, ns=(200, 200))
+    os.utime(later, ns=(300, 300))
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    retained = next(row for row in scan["findings"] if row["summary"] == stronger["summary"])
+    assert retained["identity"]["anchor"] == "published-original"
+    ids = retained["findingId"], retained["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        retained["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Synthetic accepted risk",
+    )
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    replayed = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    retained = next(row for row in replayed if row["summary"] == stronger["summary"])
+    assert (retained["findingId"], retained["occurrenceId"]) == ids
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        triage = connection.execute(
+            "SELECT status FROM finding_triage WHERE occurrence_id = ?", (retained["occurrenceId"],)
+        ).fetchone()
+    assert triage == ("closed",)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("parent_head", [False, True])
+def test_findings_only_reducer_retains_headless_parent_coverage(
+    tmp_path: Path, retry: bool, parent_head: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    document = saved_draft(scan_id, findings=[finding])
+    result_path.write_text(json.dumps(document))
+    reducer_input = scan_dir / "synthetic-reducer-input.json"
+    reducer_input.write_text(json.dumps({"scanId": scan_id, "findings": [finding]}))
+    _, reducer_path, _ = committed_standard_reducer(
+        state, home, scan_dir, scan_id, worker_id, reducer_input
+    )
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        (scan_dir / name).unlink()
+    for checkpoint in (reducer_path.parent / "checkpoints").glob("*.json"):
+        checkpoint.unlink()
+    pending = saved_draft(
+        scan_id,
+        deferred=[
+            {"id": "pending-review", "reason": "Synthetic review remains", "paths": ["app.py"]}
+        ],
+        surfaces=[
+            {
+                "id": "pending-surface",
+                "label": "Synthetic pending surface",
+                "disposition": "needs_follow_up",
+                "paths": ["app.py"],
+            }
+        ],
+    )
+    pending["coverage"]["explicitExclusions"] = [
+        {"pattern": "excluded.py", "reason": "Synthetic exclusion"}
+    ]
+    checkpoint = write_checkpoint(scan_dir / "checkpoints", pending)
+    os.utime(checkpoint, ns=(100, 100))
+    if parent_head:
+        head = scan_dir / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(150, 150))
+    os.utime(reducer_path, ns=(200, 200))
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert any(row.get("reason") == "Synthetic review remains" for row in coverage["deferred"])
+    assert any(row.get("label") == "Synthetic pending surface" for row in coverage["surfaces"])
+    assert any(row.get("reason") == "Synthetic exclusion" for row in coverage["explicitExclusions"])

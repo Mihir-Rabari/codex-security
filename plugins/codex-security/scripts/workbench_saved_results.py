@@ -1193,6 +1193,7 @@ def merge_saved_results(
             elif modified == parent_modified and draft != parent:
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
+    parent_coverage_modified = parent_modified
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
         parent_modified = source_order[latest_reducer][1]
@@ -1912,14 +1913,14 @@ def merge_saved_results(
             for (owner, candidate_id), (_, source) in ordered_outcomes.items()
             if owner == worker_id and source == relative
         }
-        superseded = (
+        parent_supersedes = (
             worker_id is None
             and parent is not None
             and parent.get("complete") is not False
             and relative != "parent"
-            and source_order[relative] <= (0, parent_modified)
             and (not stopped_parent_seal or relative in parent_preserved_sources)
-        ) or (
+        )
+        worker_supersedes = (
             relative not in current_results
             and worker_result_order is not None
             and (
@@ -1927,6 +1928,13 @@ def merge_saved_results(
                 or source_order[relative] < worker_result_order
             )
         )
+        superseded = (
+            parent_supersedes and source_order[relative] <= (0, parent_modified)
+        ) or worker_supersedes
+        # A findings-only reducer does not replace earlier parent coverage.
+        coverage_superseded = (
+            parent_supersedes and source_order[relative] <= (0, parent_coverage_modified)
+        ) or worker_supersedes
         # A failed result write can leave pending work outside the accepted result.
         accepted_order = (
             (0, parent_modified)
@@ -1942,7 +1950,7 @@ def merge_saved_results(
         )
         if (
             (relative != "parent" or not parent_is_canonical)
-            and not superseded
+            and not coverage_superseded
             and not selected_coverage_superseded
             and (
                 draft.get("complete") is False
@@ -1958,7 +1966,12 @@ def merge_saved_results(
                 recovered_finding(finding) for finding in (parent["findings"] if parent else [])
             )
         )
-        if skip_superseded_findings and not selected_candidates and not retain_pending:
+        if (
+            skip_superseded_findings
+            and coverage_superseded
+            and not selected_candidates
+            and not retain_pending
+        ):
             continue
         if (
             not skip_superseded_findings
@@ -2193,6 +2206,17 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
+                        if (
+                            id(finding) in inferred_identities
+                            and id(retained) not in inferred_identities
+                            and isinstance(retained.get("identity"), dict)
+                        ):
+                            finding["identity"] = copy.deepcopy(retained["identity"])
+                            if "preservedIdentity" in retained["provenance"]:
+                                finding["provenance"]["preservedIdentity"] = copy.deepcopy(
+                                    retained["provenance"]["preservedIdentity"]
+                                )
+                            inferred_identities.pop(id(finding))
                         retained = finding
                         findings[position] = retained
                     else:
@@ -2230,10 +2254,10 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded and not selected_candidates and not retain_pending:
+        if coverage_superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-            if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
+            if coverage_superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
                 continue
             items = draft["coverage"].get(field, [])
             if field == "deferred":
@@ -2258,7 +2282,7 @@ def merge_saved_results(
                 ):
                     continue
                 # A selected outcome must retain its evidence even if its result write failed.
-                if superseded and not (
+                if coverage_superseded and not (
                     isinstance(item, dict)
                     and (
                         (field == "deferred" and retain_pending)
