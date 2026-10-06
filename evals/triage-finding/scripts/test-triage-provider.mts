@@ -357,8 +357,12 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
               skip_git_repo_check: true,
               model: "gpt-5.5",
               maxRetries: 0,
-              cli_env:
-                template === undefined ? {} : { CODEX_MCP_NODE_PATH: template },
+              cli_env: {
+                EXTRA_MARKER: "{{marker}}",
+                ...(template === undefined
+                  ? {}
+                  : { CODEX_MCP_NODE_PATH: template }),
+              },
             },
           },
         },
@@ -378,6 +382,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
             custom_node_json: JSON.stringify(node),
             marker: node,
           },
+          prompt: { raw: "synthetic", label: "synthetic" },
           ...(overrides
             ? {
                 prompt: {
@@ -399,7 +404,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
           "Return synthetic launch details",
           context,
         );
-        assert.equal(result.error, undefined, result.error);
+        assert.equal(result.error, undefined);
         const captured = JSON.parse(String(result.output));
         assert.equal(captured.node, node);
         assert.deepEqual(captured.directories, [
@@ -420,6 +425,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     try {
       const result = await mixed.callApi("synthetic", {
         vars: { prefix: path.dirname(nodes[1]) },
+        prompt: { raw: "synthetic", label: "synthetic" },
       });
       assert.equal(JSON.parse(String(result.output)).node, nodes[1]);
     } finally {
@@ -432,16 +438,17 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       [nodes[0], "{{custom_node}}", "", process.execPath],
       [undefined, "{{missing_node}}", "", process.execPath],
       [nodes[0], undefined, "", nodes[0]],
-      [nodes[0], "{{custom_node}}", nodes[1], nodes[1]],
-    ]) {
+      [nodes[0], "{{custom_node}}", nodes[1]!, nodes[1]],
+    ] as const) {
       if (ambient === undefined) delete process.env.CODEX_MCP_NODE_PATH;
       else process.env.CODEX_MCP_NODE_PATH = ambient;
       const provider = await load(template);
       try {
         const result = await provider.callApi("synthetic", {
           vars: { custom_node: value },
+          prompt: { raw: "synthetic", label: "synthetic" },
         });
-        assert.equal(result.error, undefined, result.error);
+        assert.equal(result.error, undefined);
         const captured = JSON.parse(String(result.output));
         const selected = fs.realpathSync(expected!);
         assert.equal(captured.node, selected);
@@ -450,11 +457,21 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         await provider.cleanup?.();
       }
     }
+    const withoutContext = await load(nodes[0]);
+    try {
+      const result = await withoutContext.callApi("synthetic");
+      const captured = JSON.parse(String(result.output));
+      assert.equal(captured.node, nodes[0]);
+      assert.equal(captured.marker, "{{marker}}");
+    } finally {
+      await withoutContext.cleanup?.();
+    }
     process.env.PROMPTFOO_DISABLE_TEMPLATING = "true";
     const disabled = await load(nodes[2]);
     try {
       const result = await disabled.callApi("synthetic", {
         vars: { custom_node: "other" },
+        prompt: { raw: "synthetic", label: "synthetic" },
       });
       assert.equal(JSON.parse(String(result.output)).node, nodes[2]);
     } finally {

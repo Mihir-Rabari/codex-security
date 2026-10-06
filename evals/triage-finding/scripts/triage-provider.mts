@@ -88,7 +88,7 @@ export default class TriageProvider implements ApiProvider {
     return (await this.provider).callApi(
       args[0],
       {
-        ...args[1],
+        ...args[1]!,
         prompt: {
           raw: args[0],
           label: args[0],

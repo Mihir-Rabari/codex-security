@@ -34,5 +34,8 @@
     "@opencode-ai/sdk": "1.18.33",
     "nunjucks": "3.2.4",
     "promptfoo": "0.123.1"
+  },
+  "devDependencies": {
+    "@types/nunjucks": "3.2.6"
   }
 }
