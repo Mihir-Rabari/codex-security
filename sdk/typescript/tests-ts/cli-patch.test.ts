@@ -4128,8 +4128,8 @@ describe("patch publication integrity", () => {
     let path = "app.ts";
     let alternateObjects: string | undefined;
     let primaryObjects: string | undefined;
-    let parentIndex: string | undefined;
-    let nestedIndex: string | undefined;
+    let parentIndex = "";
+    let nestedIndex = "";
     if (kind.startsWith("nested")) {
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
@@ -4183,8 +4183,16 @@ describe("patch publication integrity", () => {
         await mkdir(join(directory, ".git", "objects"));
         expect(() => git("rev-parse", "HEAD^{tree}")).toThrow();
         expect(() => inner("rev-parse", "HEAD^{tree}")).toThrow();
-        parentIndex = hash(await readFile(join(directory, ".git", "index")));
-        nestedIndex = hash(await readFile(join(gitDirectory, "index")));
+        parentIndex = hash(
+          "sha256",
+          await readFile(join(directory, ".git", "index")),
+          "hex",
+        );
+        nestedIndex = hash(
+          "sha256",
+          await readFile(join(gitDirectory, "index")),
+          "hex",
+        );
         if (kind.includes("relative"))
           primaryObjects = relative(directory, primaryObjects);
       }
@@ -4237,12 +4245,14 @@ describe("patch publication integrity", () => {
       },
     );
     if (primaryObjects !== undefined) {
-      expect(hash(await readFile(join(directory, ".git", "index")))).toBe(
-        parentIndex,
-      );
+      expect(
+        hash("sha256", await readFile(join(directory, ".git", "index")), "hex"),
+      ).toBe(parentIndex);
       expect(
         hash(
+          "sha256",
           await readFile(join(selectedDirectory, "nested", ".git", "index")),
+          "hex",
         ),
       ).toBe(nestedIndex);
     }
