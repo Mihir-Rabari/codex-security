@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 from argparse import Namespace
 
 import pytest
@@ -309,3 +310,219 @@ def test_missing_deferred_uses_retained_surface_from_its_reviewed_attempt(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
+
+
+@pytest.mark.parametrize("missing_surface", [False, True])
+@pytest.mark.parametrize("retry_publication", [False, True])
+def test_retry_recovery_restores_original_attempt_and_retained_deferral(
+    workbench_api, workbench_db, publication_scan, monkeypatch, missing_surface, retry_publication
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
+    surface = {
+        "id": "first-surface",
+        "label": "First attempt evidence",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    deferred = {
+        "id": "first-gap",
+        "reason": "First attempt still needs validation.",
+        "surfaceIds": [surface["id"]],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [deferred],
+        },
+    }
+    archived = result.parent / "attempts" / "attempt-1" / "result.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(json.dumps({**draft, "complete": False}))
+    result.write_text(json.dumps(draft))
+    prefix = f"{worker_id}-attempt-1"
+    projected_surface = {
+        **surface,
+        "id": f"{prefix}-surface-1",
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
+    }
+    projected_deferred = {
+        **deferred,
+        "id": f"{prefix}-deferred-1",
+        "surfaceIds": [projected_surface["id"]],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": deferred["id"]},
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "surfaces": [] if missing_surface else [projected_surface],
+                "deferred": [projected_deferred],
+                "reviews": [
+                    {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                    for attempt in (1, 2)
+                ],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in (result, archived)}
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        saved.fail_scan(
+            context,
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["surfaces"] == [projected_surface]
+    tasks = [row for row in coverage["deferred"] if row.get("reason") == deferred["reason"]]
+    assert tasks == [projected_deferred]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("interrupted_parent", [False, True])
+def test_selected_parent_checkpoint_supplies_review_projection(
+    workbench_api, workbench_db, publication_scan, monkeypatch, interrupted_parent
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surface = {"id": "review", "label": "Reviewed surface", "disposition": "needs_follow_up"}
+    deferred = {"id": "gap", "reason": "Validate the reviewed surface.", "surfaceIds": ["review"]}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "surfaces": [surface],
+                    "deferred": [deferred],
+                },
+            }
+        )
+    )
+    prefix = f"{worker_id}-attempt-1"
+    projected_surface = {
+        **surface,
+        "id": f"{prefix}-surface-1",
+        "receiptRefs": [],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    projected_deferred = {
+        **deferred,
+        "id": f"{prefix}-deferred-1",
+        "surfaceIds": [projected_surface["id"]],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "gap"},
+    }
+    documents = {
+        "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
+        "findings": {"findings": []},
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [projected_surface],
+            "deferred": [projected_deferred],
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    }
+    drafts = scan.scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    original_write = saved.write_scan_local_bytes
+
+    def interrupt_coverage(root, relative, contents):
+        if relative == "coverage.json":
+            raise OSError("Synthetic parent publication interruption.")
+        original_write(root, relative, contents)
+
+    with monkeypatch.context() as interrupted:
+        if interrupted_parent:
+            interrupted.setattr(saved, "write_scan_local_bytes", interrupt_coverage)
+        args = Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            draft_path=str(staged),
+            checkpoint_path=None,
+            expected_draft_digest=None,
+        )
+        if interrupted_parent:
+            with pytest.raises(OSError, match="Synthetic parent publication interruption"):
+                saved.write_scan_draft(context, workbench_db, args)
+        else:
+            saved.write_scan_draft(context, workbench_db, args)
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["surfaces"] == [projected_surface]
+    assert [row for row in coverage["deferred"] if row.get("reason") == deferred["reason"]] == [
+        projected_deferred
+    ]
+
+
+@pytest.mark.parametrize("padded", [False, True])
+def test_retained_worker_string_question_is_not_duplicated(
+    workbench_api, workbench_db, publication_scan, padded
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    question = (
+        "  Which deployment controls apply?  " if padded else "Which deployment controls apply?"
+    )
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "openQuestions": [question]},
+            }
+        )
+    )
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "openQuestions": [
+                    {"question": question, "provenance": {"workerId": worker_id, "attempt": 1}}
+                ],
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "complete"}],
+            }
+        )
+    )
+    saved = workbench_api["saved_results"]
+    saved.fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["openQuestions"] == [
+        {"question": question.strip(), "provenance": {"workerId": worker_id, "attempt": 1}}
+    ]

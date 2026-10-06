@@ -1160,6 +1160,43 @@ def merge_saved_results(
     source_order.update(selected_observations)
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
+    workers_by_id = {worker["id"]: worker for worker in workers}
+    latest_reducer_key = (
+        (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
+        if reducer is not None and latest_reducer in drafts_by_path
+        else None
+    )
+    if latest_reducer_key is None:
+        latest_reducer = None
+    for worker, result_path, checkpoint_paths, attempt in reducer_outputs:
+        result = drafts_by_path.get(result_path)
+        if result is None or not any(
+            drafts_by_path.get(checkpoint_path) == result for checkpoint_path in checkpoint_paths
+        ):
+            continue
+        current_results.add(result_path)
+        candidate_key = (worker["completed_at"] or "", worker["id"], attempt)
+        if latest_reducer_key is None or candidate_key > latest_reducer_key:
+            latest_reducer_key = candidate_key
+            latest_reducer = result_path
+
+    if parent_heads:
+        latest_observation = max(observed for observed, _ in parent_heads)
+        for observed, parent_path in parent_heads:
+            if observed != latest_observation:
+                continue
+            draft = drafts_by_path[parent_path]
+            modified = source_order[parent_path][1]
+            if parent is None or modified > parent_modified:
+                parent = draft
+                parent_modified = modified
+                parent_is_canonical = False
+            elif modified == parent_modified and draft != parent:
+                parent = _merge_tied_parent_observations(parent, draft)
+                parent_is_canonical = False
+    if parent is None and latest_reducer is not None:
+        parent = drafts_by_path[latest_reducer]
+
     if "sourceCoverage" not in drafts_by_path.get(accepted_reducer, {}):
         accepted_reducer = None
     accepted_coverage = drafts_by_path.get(accepted_reducer, {}).get("coverage", {})
@@ -1204,6 +1241,32 @@ def merge_saved_results(
             for ref in refs
         ]
 
+    def coverage_origin(field: str, item: Any, worker: Any, relative: str) -> int:
+        archived = []
+        for saved_relative, draft, owner in sources:
+            directory = Path(saved_relative).parent
+            if directory.name == "checkpoints":
+                directory = directory.parent
+            _, attempt = worker_attempts.get(directory.as_posix(), (owner, worker["attempt"]))
+            if owner == worker["id"] and attempt < worker["attempt"]:
+                archived.append((attempt, saved_relative, draft))
+        for attempt, saved_relative, draft in sorted(archived):
+            rows = draft["coverage"].get(field, [])
+            for row in rows if isinstance(rows, list) else []:
+                current, original = item, row
+                if field == "openQuestions" and isinstance(row, str):
+                    original = {"question": row}
+                if isinstance(item, dict) and isinstance(row, dict):
+                    current, original = dict(item), dict(row)
+                    if field in {"surfaces", "deferred"} and "id" not in row:
+                        current.pop("id", None)
+                    if field == "surfaces":
+                        current["receiptRefs"] = coverage_receipts(item, worker, relative)
+                        original["receiptRefs"] = coverage_receipts(row, worker, saved_relative)
+                if current == original:
+                    return attempt
+        return worker["attempt"]
+
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
     ) -> dict[str, Any] | None:
@@ -1233,14 +1296,26 @@ def merge_saved_results(
                 if "candidateId" in provenance:
                     original["candidateId"] = provenance["candidateId"]
                 if field == "deferred" and isinstance(original.get("surfaceIds"), list):
-                    surfaces = projection.get("surfaces", [])
+                    source_surfaces = drafts_by_path[relative]["coverage"].get("surfaces", [])
                     surface_ids = {
-                        surface.get("id"): surface["provenance"].get("sourceId")
-                        for surface in (surfaces if isinstance(surfaces, list) else [])
-                        if isinstance(surface, dict)
-                        and isinstance(surface.get("id"), str)
-                        and isinstance(surface.get("provenance"), dict)
+                        f"{worker['id']}-attempt-{coverage_origin('surfaces', surface, worker, relative)}-surface-{offset}": surface[
+                            "id"
+                        ]
+                        for offset, surface in enumerate(
+                            source_surfaces if isinstance(source_surfaces, list) else [], 1
+                        )
+                        if isinstance(surface, dict) and isinstance(surface.get("id"), str)
                     }
+                    surfaces = projection.get("surfaces", [])
+                    surface_ids.update(
+                        {
+                            surface.get("id"): surface["provenance"].get("sourceId")
+                            for surface in (surfaces if isinstance(surfaces, list) else [])
+                            if isinstance(surface, dict)
+                            and isinstance(surface.get("id"), str)
+                            and isinstance(surface.get("provenance"), dict)
+                        }
+                    )
                     original["surfaceIds"] = [
                         surface_ids.get(value, value) if isinstance(value, str) else value
                         for value in original["surfaceIds"]
@@ -1258,14 +1333,15 @@ def merge_saved_results(
         relative: str,
     ) -> dict[str, Any]:
         # Match projectDiscoveryCoverage so recovered holes retain source ownership.
-        prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+        attempt = coverage_origin(field, item, worker, relative)
+        prefix = f"{worker['id']}-attempt-{attempt}"
         result = copy.deepcopy(item)
         provenance = result.get("provenance")
         if not isinstance(provenance, dict):
             provenance = {}
         for key in ("workerId", "attempt", "sourceId", "candidateId"):
             provenance.pop(key, None)
-        provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+        provenance.update(workerId=worker["id"], attempt=attempt)
         result["provenance"] = provenance
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key in item:
@@ -1287,50 +1363,13 @@ def merge_saved_results(
                         surface["id"],
                         retained["id"]
                         if retained is not None and isinstance(retained.get("id"), str)
-                        else f"{prefix}-surface-{offset}",
+                        else f"{worker['id']}-attempt-{coverage_origin('surfaces', surface, worker, relative)}-surface-{offset}",
                     )
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
                 ]
         return result
-
-    workers_by_id = {worker["id"]: worker for worker in workers}
-    latest_reducer_key = (
-        (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
-        if reducer is not None and latest_reducer in drafts_by_path
-        else None
-    )
-    if latest_reducer_key is None:
-        latest_reducer = None
-    for worker, result_path, checkpoint_paths, attempt in reducer_outputs:
-        result = drafts_by_path.get(result_path)
-        if result is None or not any(
-            drafts_by_path.get(checkpoint_path) == result for checkpoint_path in checkpoint_paths
-        ):
-            continue
-        current_results.add(result_path)
-        candidate_key = (worker["completed_at"] or "", worker["id"], attempt)
-        if latest_reducer_key is None or candidate_key > latest_reducer_key:
-            latest_reducer_key = candidate_key
-            latest_reducer = result_path
-
-    if parent_heads:
-        latest_observation = max(observed for observed, _ in parent_heads)
-        for observed, parent_path in parent_heads:
-            if observed != latest_observation:
-                continue
-            draft = drafts_by_path[parent_path]
-            modified = source_order[parent_path][1]
-            if parent is None or modified > parent_modified:
-                parent = draft
-                parent_modified = modified
-                parent_is_canonical = False
-            elif modified == parent_modified and draft != parent:
-                parent = _merge_tied_parent_observations(parent, draft)
-                parent_is_canonical = False
-    if parent is None and latest_reducer is not None:
-        parent = drafts_by_path[latest_reducer]
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -2168,7 +2207,7 @@ def merge_saved_results(
                 ):
                     continue
                 if field == "openQuestions" and isinstance(item, str):
-                    item = {"question": item.strip()}
+                    item = {"question": item}
                 if reviewed and retained_coverage_record(field, item, worker, relative) is not None:
                     continue
                 if (

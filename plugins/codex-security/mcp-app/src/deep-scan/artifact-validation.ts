@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "../record.js";
 import {
   parsePersistedScanDraft,
   parseScanDraft,
@@ -320,9 +321,22 @@ export function projectDiscoveryCoverage(
   const reviews = [{ ...current, completeness: coverage.completeness }];
   const origin = (field: string, item: unknown) => {
     const saved = archived.findLast((saved) =>
-      ((saved.coverage[field] as unknown[] | undefined) ?? []).some((row) =>
-        isDeepStrictEqual(row, item),
-      ),
+      ((saved.coverage[field] as unknown[] | undefined) ?? []).some((row) => {
+        if (!isRecord(row) || !isRecord(item))
+          return isDeepStrictEqual(row, item);
+        const original = { ...row };
+        const normalized = { ...item };
+        if (
+          (field === "surfaces" || field === "deferred") &&
+          row.id === undefined
+        )
+          delete normalized.id;
+        if (field === "surfaces") {
+          original.receiptRefs ??= [];
+          normalized.receiptRefs ??= [];
+        }
+        return isDeepStrictEqual(original, normalized);
+      }),
     );
     const attempt = saved?.attempt?.match(/^attempt-(\d+)$/)?.[1];
     if (attempt === undefined) return current;
