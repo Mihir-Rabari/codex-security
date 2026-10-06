@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
@@ -20,7 +19,10 @@ import {
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { plainTarEntries } from "./package-tar-entries.mjs";
-import { regularTarListingLines } from "./package-tar-listing.mjs";
+import {
+  assertTarListingSizes,
+  regularTarListingLines,
+} from "./package-tar-listing.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
@@ -47,8 +49,6 @@ const archiveBytes = gunzipSync(compressedArchive, {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
 });
 const rawEntries = plainTarEntries(archiveBytes);
-const PUBLIC_LOGO_SHA256 =
-  "9b9c2b09b2fa064611fb62307d321d5c2ea70cf0789f7ce34cdb0fc0d9190b3a";
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
 const characterLocale =
@@ -146,7 +146,7 @@ for (const file of files) {
   }
 }
 
-const listing = tar(["-tvzf", "-"], "utf8");
+const listing = tar(["--numeric-owner", "-tvzf", "-"], "utf8");
 const listingLines = regularTarListingLines(listing);
 if (
   listingLines.length !== entries.length ||
@@ -156,6 +156,7 @@ if (
 ) {
   invalidTarEntry();
 }
+assertTarListingSizes(listingLines, MAX_EXPANDED_ASSET_BYTES);
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
   ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
@@ -278,15 +279,6 @@ assertExpectedGitHead(
   packageJson,
   process.env.CODEX_SECURITY_EXPECTED_GIT_HEAD,
 );
-
-for (const file of files) {
-  if (/\.png$/iu.test(file)) {
-    const digest = createHash("sha256").update(archiveFile(file)).digest("hex");
-    if (digest !== PUBLIC_LOGO_SHA256) {
-      throw new Error(`npm tarball contains an unexpected PNG asset: ${file}.`);
-    }
-  }
-}
 
 assertPublicPackageContents(archiveFiles);
 

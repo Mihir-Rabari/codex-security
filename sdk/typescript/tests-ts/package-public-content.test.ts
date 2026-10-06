@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { brotliCompressSync, brotliDecompressSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 
@@ -62,12 +63,22 @@ describe("npm package public contents", () => {
     },
   );
 
-  test("skips binary PNG contents checked by the package digest", () => {
-    expect(() =>
-      assertPublicPackageContents(
-        new Map([["package/logo.png", Buffer.from("go/synthetic-reference")]]),
+  test("checks the approved PNG digest before exempting binary contents", () => {
+    const approved = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
       ),
+    );
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", approved]])),
     ).not.toThrow();
+    const stored = Buffer.from(approved);
+    expect(stored.subarray(171, 178)).toEqual(Buffer.alloc(7));
+    stored.set(Buffer.from("\0go/x\0\0"), 171);
+    expect(() =>
+      assertPublicPackageContents(new Map([["package/logo.png", stored]])),
+    ).toThrow("npm tarball contains an unexpected PNG asset");
   });
 
   test("keeps the expanded Brotli size bound", () => {

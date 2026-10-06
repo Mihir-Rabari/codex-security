@@ -23,9 +23,12 @@ import {
   tarRecord,
 } from "./package-tar-fixtures.js";
 
-const { regularTarListingLines } = (await import(
+const { assertTarListingSizes, regularTarListingLines } = (await import(
   new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
-)) as { regularTarListingLines: (listing: string) => string[] };
+)) as {
+  regularTarListingLines: (listing: string) => string[];
+  assertTarListingSizes: (lines: string[], maximum: number) => void;
+};
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
@@ -143,6 +146,22 @@ describe("npm package tar listings", () => {
       file,
       directory,
     ]);
+  });
+
+  test.each([
+    "-rw-r--r-- 0/0        33554433 1970-01-01 00:00 package/README.md",
+    "-rw-r--r--  0 0      0    33554433 Jan  1  1970 package/README.md",
+  ])("bounds native sparse logical sizes before extraction: %s", (line) => {
+    expect(() => assertTarListingSizes([line], 32 * 1024 * 1024)).toThrow(
+      "npm tarball contains an invalid tar entry",
+    );
+    const bounded = line.replace("33554433", "33554432");
+    expect(() =>
+      assertTarListingSizes([bounded], 32 * 1024 * 1024),
+    ).not.toThrow();
+    expect(() =>
+      assertTarListingSizes([bounded, bounded], 32 * 1024 * 1024),
+    ).toThrow();
   });
 
   test("rejects symbolic links and other non-regular entries", () => {
@@ -406,7 +425,12 @@ process.exit(result.status ?? 1);
         expect(call.inputSha256).toBe(archiveSha256);
       }
       expect(calls[0]?.args).toEqual(["--ignore-zeros", "-tzf", "-"]);
-      expect(calls[1]?.args).toEqual(["--ignore-zeros", "-tvzf", "-"]);
+      expect(calls[1]?.args).toEqual([
+        "--ignore-zeros",
+        "--numeric-owner",
+        "-tvzf",
+        "-",
+      ]);
       expect(calls[2]?.args.slice(0, 10)).toEqual([
         "--ignore-zeros",
         "-m",
