@@ -7508,6 +7508,7 @@ async function assessPatchRisk(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<PatchRiskReport> {
+  const directory = await realpath(request.repository);
   const run = (
     args: string[],
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
@@ -7516,10 +7517,7 @@ async function assessPatchRisk(
   const pathspec =
     request.files === undefined
       ? []
-      : [
-          "--",
-          ...request.files.map((file) => resolve(request.repository, file)),
-        ];
+      : ["--", ...request.files.map((file) => resolve(directory, file))];
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
   const patchPath = join(root, "patch.diff");
   try {
