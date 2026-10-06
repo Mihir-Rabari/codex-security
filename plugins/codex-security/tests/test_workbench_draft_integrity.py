@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -14,9 +15,11 @@ from test_workbench_standard_deep_results import (
     run_workbench_with_fault,
 )
 from workbench_test_support import (
+    create_saved_workspace,
     run_workbench,
     saved_draft,
     start_saved_scan,
+    start_workspace_scan,
     write_checkpoint,
     write_completed_contract,
 )
@@ -72,6 +75,116 @@ def stop_draft(tmp_path, state, home, scan_id, *, deep=False, retry=False):
         ]
         args = ("recover-scan-results", "--scan-id", scan_id)
     run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("parent", ["checkpoint", "canonical"])
+@pytest.mark.parametrize("location", ["src/inside.py", "vendor/outside.py"])
+def test_recovered_parent_checkpoint_preserves_scope_filter(
+    tmp_path: Path, retry: bool, parent: str, location: str
+):
+    state, home, target = tmp_path / "state", tmp_path / "home", tmp_path / "target"
+    for path in ("src/inside.py", "vendor/outside.py"):
+        file = target / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("value = 1\n")
+    workspace = create_saved_workspace(state, target)
+    run_workbench(
+        state,
+        "save-workspace",
+        "--workspace-id",
+        workspace["id"],
+        "--target-path",
+        str(target),
+        "--scope",
+        "src",
+        "--mode",
+        "standard",
+        "--user-context",
+        "Scoped fixture.",
+    )
+    scan_id, scan_dir = start_workspace_scan(state, workspace["id"], tmp_path / "scans")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path=location, include_paths=["src"]
+    )
+    finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())["scan"]
+    manifest_path.write_text(
+        json.dumps({"scan": {key: manifest[key] for key in ("target", "scope")}})
+    )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(completeness="complete", surfaces=[], deferred=[])
+    coverage_path.write_text(json.dumps(coverage))
+    if parent == "checkpoint":
+        checkpoint = write_checkpoint(
+            scan_dir / "checkpoints",
+            {**saved_draft(scan_id, findings=[finding]), "coverage": coverage},
+        )
+        (scan_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+            (scan_dir / name).unlink()
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    # Existing canonical documents are authoritative on their first publication.
+    retained = location.startswith("src/") or (parent == "canonical" and not retry)
+    assert scan["findingCount"] == int(retained)
+    if retained:
+        assert scan["findings"][0]["locations"][0]["path"] == location
+    else:
+        assert any("out-of-scope" in warning for warning in scan["warnings"])
+    assert not scan["resultsRecoveryNeeded"]
+
+
+def test_checkpoint_history_recovery_reuses_repeated_observations(tmp_path: Path):
+    calls = []
+    for length in (5, 10):
+        case = tmp_path / str(length)
+        case.mkdir()
+        state, home, scan_dir, scan_id = draft_fixture(case)
+        original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        history = []
+        for index in range(length):
+            raw = copy.deepcopy(original)
+            raw["summary"] = f"Observation {index}"
+            raw["provenance"]["candidateId"] = "candidate-a"
+            finding = copy.deepcopy(raw)
+            finding["provenance"]["previousFindings"] = copy.deepcopy(history)
+            history.append(raw)
+            checkpoint = write_checkpoint(
+                scan_dir / "checkpoints",
+                {**saved_draft(scan_id, findings=[finding]), "coverage": coverage},
+            )
+        (scan_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        count_path = case / "recovery-count.txt"
+        result = run_workbench_with_fault(
+            case / "count.py",
+            state,
+            home,
+            "import atexit, pathlib\n"
+            "calls = 0\n"
+            "original = workbench_saved_results._recover_unsealed_findings\n"
+            "def counted(*args, **kwargs):\n"
+            "    global calls\n"
+            "    calls += 1\n"
+            "    return original(*args, **kwargs)\n"
+            "workbench_saved_results._recover_unsealed_findings = counted\n"
+            f"atexit.register(lambda: pathlib.Path({str(count_path)!r}).write_text(str(calls)))\n",
+            "fail-scan",
+            "--scan-id",
+            scan_id,
+            "--message",
+            "Stopped for test",
+        )
+        assert result.returncode == 0, result.stderr
+        scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 1
+        assert not scan["resultsRecoveryNeeded"]
+        calls.append(int(count_path.read_text()))
+    # Doubling the retained history must not repeatedly validate its shared prefix.
+    assert calls[1] <= 2 * calls[0]
 
 
 @pytest.mark.parametrize("operation", ["complete-scan", "fail-scan", "cancel-scan", "recover"])

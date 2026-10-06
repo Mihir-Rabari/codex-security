@@ -1385,7 +1385,12 @@ def merge_saved_results(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
+    recovered_observations: dict[bytes, dict[str, Any] | None] = {}
+
     def recovered_finding(value: Any) -> dict[str, Any] | None:
+        observation = _encoded(value)
+        if observation in recovered_observations:
+            return copy.deepcopy(recovered_observations[observation])
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
         document = {"scanId": scan_id, "findings": [copy.deepcopy(value)]}
@@ -1398,7 +1403,9 @@ def merge_saved_results(
             scan_dir,
             [],
         )
-        return next(iter(document["findings"]), None)
+        recovered = next(iter(document["findings"]), None)
+        recovered_observations[observation] = copy.deepcopy(recovered)
+        return recovered
 
     def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
         provenance = finding.get("provenance", {})
@@ -1857,8 +1864,7 @@ def merge_saved_results(
                 and resolved.get((worker_id, candidate_id)) == "reported"
             ):
                 continue
-            # Keep parent row order identical for publication and frozen replay.
-            if relative == "parent":
+            if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
                 if isinstance(value, dict) and (
                     "identity" not in value or id(value) in inferred_identities
@@ -1935,6 +1941,12 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             key = _finding_key(finding)
+            if relative == "parent":
+                # Keep checkpoint row order after the existing source validation.
+                position = candidate_position_key(finding, key)
+                finding_positions.setdefault(position, len(findings))
+                findings.append(finding)
+                continue
             candidate_key = (
                 _worker_candidate_key(worker_id, candidate_id, finding)
                 if worker_id and candidate_id
