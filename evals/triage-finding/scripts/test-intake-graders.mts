@@ -30,6 +30,39 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
       vars: { expected_github_rest_behavior: behavior },
     });
     assert.equal(result.pass, true, result.reason);
+    if (behavior === "code_scanning") {
+      for (const alert of ["42", "{alert_number}"]) {
+        for (const suffix of ["-wrong", "/child", ".json", "_wrong", "Extra"]) {
+          assert.equal(
+            github(
+              output.replace("/42/instances", `/${alert}/instances${suffix}`),
+              {
+                vars: { expected_github_rest_behavior: behavior },
+              },
+            ).pass,
+            false,
+            `must reject instances endpoint suffix ${suffix}`,
+          );
+        }
+        for (const delimiter of [
+          "?per_page=100",
+          "`",
+          '"',
+          ")",
+          ",",
+          ".",
+          ";",
+          ":",
+          "]",
+        ]) {
+          const formatted = github(
+            output.replace("/42/instances", `/${alert}/instances${delimiter}`),
+            { vars: { expected_github_rest_behavior: behavior } },
+          );
+          assert.equal(formatted.pass, true, formatted.reason);
+        }
+      }
+    }
     assert.equal(
       github(output.replace(/advisory|sarif|freeform/g, "wrong_type"), {
         vars: { expected_github_rest_behavior: behavior },

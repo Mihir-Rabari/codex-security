@@ -97,7 +97,7 @@ const checks = {
       ["state=open", "per_page=100"],
     )(text);
     const hasInstances =
-      /code-scanning\/alerts\/(?:\{alert_number\}|[0-9]+)\/instances/i.test(
+      /code-scanning\/alerts\/(?:\{alert_number\}|[0-9]+)\/instances\b(?![/-]|\.\w)/i.test(
         text,
       );
     return [
