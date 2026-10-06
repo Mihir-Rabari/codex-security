@@ -25,6 +25,7 @@
 - preserve carriage-return inventory filenames ([#1327](https://github.com/openai/codex-security/pull/1327))
 - update tsx and yaml tooling ([#1322](https://github.com/openai/codex-security/pull/1322))
 - update Action Node.js type definitions ([#1323](https://github.com/openai/codex-security/pull/1323))
+- update Action TypeScript compiler ([#1324](https://github.com/openai/codex-security/pull/1324))
 
 <!-- release-section: highlights:end -->
 
