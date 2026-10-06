@@ -452,6 +452,9 @@ export async function runCustomValidation(options: {
     retainDecision(item, false),
   );
   const surfaceCandidateKeys = new Map<string, Set<string>>();
+  const surfaceIdCounts = new Map<string, number>();
+  for (const surface of coverage.surfaces)
+    surfaceIdCounts.set(surface.id, (surfaceIdCounts.get(surface.id) ?? 0) + 1);
   for (const candidate of candidates) {
     const update = updates.get(candidate.candidateId)!;
     const { validation } = update;
@@ -497,20 +500,19 @@ export async function runCustomValidation(options: {
       for (const surface of coverage.surfaces) {
         if (
           surface.disposition !== "needs_follow_up" ||
-          (surface["sourceWorkerId"] != null &&
-            typeof surface["sourceWorkerId"] !== "string") ||
           sharedSurfaceIds.has(surface.id)
         )
           continue;
         const sameCandidate =
           typeof surface.candidateId === "string"
-            ? candidateIdentity(
+            ? (surface["sourceWorkerId"] == null ||
+                typeof surface["sourceWorkerId"] === "string") &&
+              candidateIdentity(
                 surface.candidateId,
                 surface["sourceWorkerId"],
               ) === key
             : previousSurfaceIds.has(surface.id) &&
-              candidateIdentity(candidateId!, surface["sourceWorkerId"]) ===
-                key;
+              surfaceIdCounts.get(surface.id) === 1;
         if (sameCandidate) surfaceIds.add(surface.id);
       }
     }

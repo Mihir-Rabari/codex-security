@@ -329,6 +329,9 @@ def test_new_work_survives_accepted_candidate_rejection(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[1].name}))
     os.utime(head, ns=(200, 200))
+    expected_rejection = (
+        {**rejection, "sourceWorkerId": "reviewer"} if layout == "worker" else rejection
+    )
     documents = recover(tmp_path, saved_results, workers)
     replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
@@ -338,7 +341,7 @@ def test_new_work_survives_accepted_candidate_rejection(
         assert len(pending) == 1
         assert {key: value for key, value in pending[0].items() if key != "id"} == reopened
         assert isinstance(pending[0]["id"], str)
-        assert result[2]["surfaces"] == [rejection]
+        assert result[2]["surfaces"] == [expected_rejection]
     assert replay[2] == documents[2]
 
 
@@ -352,7 +355,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     outcome: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     candidate = {
         "id": "caller-review",
         "reason": "Caller needs validation.",
@@ -408,7 +411,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
-        _, other_result = accepted_standard_worker(
+        worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker"
         )
         other_result.write_text(
@@ -429,7 +432,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
             any(row["id"] == candidate["id"] for row in coverage["deferred"]) is not rejected_here
         )
         if outcome != "unresolved":
-            assert rejection in coverage["surfaces"]
+            assert {**rejection, "sourceWorkerId": worker_id} in coverage["surfaces"]
     assert recovered["surfaces"] == first_coverage["surfaces"]
     assert recovered["deferred"] == first_coverage["deferred"]
 
@@ -516,7 +519,7 @@ def test_unnamed_observation_does_not_replace_saved_context(
     observation: str,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     broad = {
         "id": "caller-review",
         "reason": "Review the caller paths.",
@@ -551,6 +554,8 @@ def test_unnamed_observation_does_not_replace_saved_context(
     head = output / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": checkpoints[accepted_index].name}))
     os.utime(head, ns=(observed, observed))
+    if layout == "worker" and "candidateId" in expected:
+        expected = {**expected, "sourceWorkerId": worker_id}
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )

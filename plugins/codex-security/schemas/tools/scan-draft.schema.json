@@ -721,9 +721,6 @@
         },
         "notes": {
           "$ref": "#/$defs/text"
-        },
-        "candidateId": {
-          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
         }
       },
       "required": ["label", "disposition"],

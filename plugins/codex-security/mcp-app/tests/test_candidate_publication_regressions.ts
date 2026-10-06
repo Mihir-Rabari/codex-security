@@ -489,3 +489,106 @@ for (const provenance of [undefined, null, "Saved annotation", {}]) {
     });
   }
 }
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const disposition of [
+    undefined,
+    "imported-review",
+    "rejected",
+  ] as const) {
+    for (const update of ["deferred", "finding"] as const) {
+      test(`saved ordinary exclusion survives ${mode}/${disposition}/${update}`, async (t) => {
+        const f = await fixture(t, mode);
+        const exclusion = {
+          pattern: "vendor/**",
+          reason: "Third-party sources were excluded.",
+          candidateId: "review-candidate",
+          sourceWorkerId: "review-worker",
+          annotation: "Preserve the original scope rationale.",
+          ...(disposition === undefined ? {} : { disposition }),
+        };
+        await f.write(f.draft({ explicitExclusions: [exclusion] }));
+        const current = f.draft({
+          deferred:
+            update === "deferred"
+              ? [
+                  {
+                    id: "current-review",
+                    candidateId: "review-candidate",
+                    sourceWorkerId: "review-worker",
+                    reason: "The candidate still needs validation.",
+                  },
+                ]
+              : [],
+        });
+        if (update === "finding") {
+          const reported = finding("current", "src/handler.ts");
+          current.findings = [
+            {
+              ...reported,
+              provenance: {
+                ...reported.provenance,
+                candidateId: "review-candidate",
+                sourceWorkerId: "review-worker",
+              },
+            },
+          ];
+        }
+        await f.write(current);
+        const saved = await f.read();
+        assert.equal(
+          saved.explicitExclusions.some(
+            (row: unknown) => JSON.stringify(row) === JSON.stringify(exclusion),
+          ),
+          disposition !== "rejected",
+        );
+      });
+    }
+  }
+  for (const source of ["published", "checkpoint"] as const) {
+    for (const legacy of [true, false]) {
+      test(`saved surface extension identifier remains readable ${mode}/${source}/${legacy}`, async (t) => {
+        const f = await fixture(t, mode);
+        const previous = {
+          id: "historical-review",
+          label: "Saved review",
+          disposition: "no_issue_found",
+          candidateId: legacy ? "review/auth" : "review-auth",
+          notes: "Preserve original historical metadata.",
+        };
+        await f.write(
+          f.draft({ surfaces: [{ ...previous, candidateId: "review-auth" }] }),
+        );
+        if (source === "checkpoint") {
+          await draftApi.saveScanDraftCheckpoint(
+            f.context,
+            f.draft({ surfaces: [previous] }),
+          );
+        } else {
+          const file = path.join(f.root, "coverage.json");
+          const coverage = JSON.parse(await readFile(file, "utf8"));
+          coverage.surfaces[0].candidateId = previous.candidateId;
+          await writeFile(file, JSON.stringify(coverage, null, 2) + "\n");
+        }
+        await f.write(
+          f.draft({
+            deferred: [
+              { id: "independent-gap", reason: "Independent unfinished work." },
+            ],
+          }),
+        );
+        const saved = await f.read();
+        assert.ok(
+          saved.surfaces.some(
+            (row: any) =>
+              row.candidateId === previous.candidateId &&
+              row.notes === previous.notes,
+          ),
+        );
+        assert.ok(
+          saved.deferred.some((row: any) => row.id === "independent-gap"),
+        );
+      });
+    }
+  }
+}

@@ -302,3 +302,36 @@ def _diff_candidate_reason(candidate: dict[str, Any]) -> str:
         )
         if isinstance(value, str) and value.strip()
     )
+
+
+def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
+    validation = candidate.get("validation") or {}
+    attack_path = candidate.get("attack_path") or {}
+    if not isinstance(validation, dict) or not isinstance(attack_path, dict):
+        raise ValueError("Diff candidate phase records must be objects.")
+    disposition = diff_candidate_disposition(candidate)
+    if disposition is None:
+        return None
+    summary = candidate.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Diff candidate summary is missing.")
+    return {
+        "candidateId": candidate["candidate_id"],
+        "label": summary,
+        "disposition": disposition,
+        "notes": next(
+            value
+            for value in (
+                *(
+                    [attack_path.get("counterevidence"), attack_path.get("severity_rationale")]
+                    if attack_path.get("decision") == "ignore"
+                    else []
+                ),
+                validation.get("counterevidence_or_proof_gap"),
+                f"Candidate review concluded: {summary}",
+            )
+            if isinstance(value, str) and value.strip()
+        ),
+        "candidate": candidate,
+    }

@@ -1196,3 +1196,36 @@ def test_large_saved_candidate_projection_preserves_all_identities_and_proof_gap
     coverage = {"deferred": rows + copy.deepcopy(rows), "surfaces": [], "explicitExclusions": []}
     assert CANDIDATES.unresolved_candidate_rows(coverage) == rows
     assert CANDIDATES.unresolved_candidates(coverage) == rows
+
+
+@pytest.mark.parametrize("field", ["code_evidence", "codeEvidence"])
+@pytest.mark.parametrize("payload", ["candidate", "finding"])
+def test_projection_keeps_saved_code_evidence_alias(field: str, payload: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    original = {
+        "title": "Saved parser review",
+        "summary": "Saved candidate summary.",
+        field: [
+            {
+                "path": "src/parser.py",
+                "start_line": 12,
+                "end_line": 15,
+                "code": "parse(request.value)",
+                "explanation": "The saved request value reaches the parser.",
+            }
+        ],
+    }
+    coverage["deferred"] = [
+        {
+            "id": "saved-gap",
+            "candidateId": "saved-candidate",
+            "reason": "Saved review remains incomplete.",
+            payload: original,
+        }
+    ]
+    before = copy.deepcopy(coverage)
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "src/parser.py:12-15" in markdown
+    assert "parse(request.value)" in markdown
+    assert "The saved request value reaches the parser." in markdown
+    assert coverage == before

@@ -870,7 +870,8 @@ async function preserveScanDraft(
       ).filter((exclusion) => {
         const candidateId = coverageKey(exclusion);
         return (
-          (typeof candidateId !== "string" ||
+          (!isTerminalCandidateDecision(exclusion) ||
+            typeof candidateId !== "string" ||
             !representedCandidateKeys.has(candidateId)) &&
           !coverageEntryPresent(
             result.coverage.explicitExclusions as unknown[],

@@ -484,7 +484,7 @@ def _candidate_details(candidate: dict[str, Any], saved: dict[str, Any]) -> tupl
             for item in (value if isinstance(value, list) else [value])
             if isinstance(item, str) and item.strip()
         )
-    for field in ("locations", "sourceEvidence", "codeEvidence", "evidence"):
+    for field in ("locations", "sourceEvidence", "codeEvidence", "code_evidence", "evidence"):
         items = candidate.get(field, [])
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):

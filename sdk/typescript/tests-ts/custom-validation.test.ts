@@ -1951,3 +1951,69 @@ for (const owner of [undefined, "", " ", "other-worker"]) {
     });
   }
 }
+
+for (const disposition of ["reportable", "suppressed"] as const) {
+  for (const independent of [false, true]) {
+    for (const linked of [false, true]) {
+      test(`unique cross-owner historical follow-up ${disposition}/${independent}/${linked}`, async () => {
+        const f = await fixture();
+        const finding = f.findings.findings[0]!;
+        finding.provenance["candidateId"] = "current-candidate";
+        finding.provenance["sourceWorkerId"] = "worker-current";
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        const historical = {
+          id: "historical-proof",
+          sourceWorkerId: "worker-previous",
+          label: "Previously linked proof",
+          disposition: "needs_follow_up" as const,
+          receiptRefs: [],
+          notes: "Preserve the saved proof and owner.",
+        };
+        coverage.surfaces.push(historical);
+        coverage.completeness = "partial";
+        coverage.deferred = [
+          {
+            id: "candidate-gap",
+            candidateId: "current-candidate",
+            sourceWorkerId: "worker-current",
+            reason: "Previously incomplete candidate review.",
+            surfaceIds: linked ? [historical.id] : [],
+          },
+        ];
+        const generic = {
+          id: "independent-gap",
+          reason: "Independent pending work.",
+          surfaceIds: [historical.id],
+        };
+        if (independent) coverage.deferred.push(generic);
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        const surface = saved.coverage.surfaces.find(
+          (row) => row.id === historical.id,
+        )!;
+        expect(surface.disposition).toBe(
+          linked && !independent
+            ? disposition === "reportable"
+              ? "reported"
+              : "rejected"
+            : "needs_follow_up",
+        );
+        expect(surface.notes).toBe(historical.notes);
+        expect(surface["sourceWorkerId"]).toBe(historical.sourceWorkerId);
+        expect(
+          saved.coverage.deferred.some((row) => row.id === "candidate-gap"),
+        ).toBe(false);
+        if (independent)
+          expect(saved.coverage.deferred).toContainEqual(generic);
+        expect(saved.unresolvedCandidateCount).toBe(0);
+      });
+    }
+  }
+}

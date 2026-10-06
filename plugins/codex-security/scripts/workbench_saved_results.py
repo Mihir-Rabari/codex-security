@@ -24,7 +24,6 @@ from candidate_identity import (
     candidate_key,
     candidate_owner,
     coverage_candidate_key,
-    diff_candidate_disposition,
     finding_candidate_key,
     reducer_coverage,
     resolved_candidate_surface_keys,
@@ -56,6 +55,7 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from workbench_budget_candidates import (
+    _diff_candidate_decision,
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
     recover_candidate_receipts,
@@ -737,39 +737,6 @@ def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) ->
         if len(owners) == 1:
             _bind_finding_worker(finding, next(iter(owners)))
     return result
-
-
-def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
-    """Project a terminal Diff ledger decision; either deferred phase remains unresolved."""
-    validation = candidate.get("validation") or {}
-    attack_path = candidate.get("attack_path") or {}
-    if not isinstance(validation, dict) or not isinstance(attack_path, dict):
-        raise ValueError("Diff candidate phase records must be objects.")
-    disposition = diff_candidate_disposition(candidate)
-    if disposition is None:
-        return None
-    summary = candidate.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise ValueError("Diff candidate summary is missing.")
-    return {
-        "candidateId": candidate["candidate_id"],
-        "label": summary,
-        "disposition": disposition,
-        "notes": next(
-            value
-            for value in (
-                *(
-                    [attack_path.get("counterevidence"), attack_path.get("severity_rationale")]
-                    if attack_path.get("decision") == "ignore"
-                    else []
-                ),
-                validation.get("counterevidence_or_proof_gap"),
-                f"Candidate review concluded: {summary}",
-            )
-            if isinstance(value, str) and value.strip()
-        ),
-        "candidate": candidate,
-    }
 
 
 def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
@@ -1807,20 +1774,24 @@ def merge_saved_results(
             manifest["scan"]["threatModel"]["origin"] = "recovered"
         if selected_model_source is not None:
             selected_model_source[:] = [frozen_model_source]
-    coverage = {
-        "completeness": "partial",
-        "mode": binding["coverageMode"],
-        "inventoryStrategy": "diff"
-        if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
-        else "scoped_path"
-        if binding["coverageMode"] == "scoped_path"
-        else "repository",
-        **binding["scope"],
-        "surfaces": [],
-        "explicitExclusions": [],
-        "deferred": [],
-        **(copy.deepcopy(parent["coverage"]) if parent else {}),
-    }
+    coverage = (
+        copy.deepcopy(parent["coverage"])
+        if parent_is_canonical and parent and parent["coverage"]
+        else {
+            "completeness": "partial",
+            "mode": binding["coverageMode"],
+            "inventoryStrategy": "diff"
+            if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
+            else "scoped_path"
+            if binding["coverageMode"] == "scoped_path"
+            else "repository",
+            **binding["scope"],
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+            **(copy.deepcopy(parent["coverage"]) if parent else {}),
+        }
+    )
     if isinstance(coverage.get("openQuestions"), list):
         coverage["openQuestions"] = [
             {"question": item.strip()} if isinstance(item, str) else item
