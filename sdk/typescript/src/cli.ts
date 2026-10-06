@@ -6925,7 +6925,10 @@ async function patchCommandContext(
       environment[name] = await gitPath(["--path-format=absolute", ...args]);
   }
   if (
-    dependencies.environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] !== undefined
+    environmentValue(
+      dependencies.environment,
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ) !== undefined
   ) {
     const objects = await dependencies.runRepositoryCommand(
       "git",
