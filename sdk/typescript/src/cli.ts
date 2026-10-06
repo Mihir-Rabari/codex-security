@@ -2069,13 +2069,22 @@ export async function main(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
             const repositories = value["repositories"] as JsonObject[];
-            let target =
-              repositories.find(
-                (entry) => entry["targetPath"] === repository,
-              ) ??
-              repositories.find(
-                (entry) => entry["targetPath"] === canonicalRepository,
-              );
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === repository,
+            );
+            const canonicalTarget = repositories.find(
+              (entry) => entry["targetPath"] === canonicalRepository,
+            );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                repository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
             if (target === undefined) {
               for (const entry of repositories) {
                 const storedPath = entry["targetPath"] as string;

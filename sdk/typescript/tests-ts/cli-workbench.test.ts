@@ -25,6 +25,84 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test.skipIf(process.platform !== "linux")(
+    "findings list distinguishes an undecodable directory name from its replacement spelling",
+    async () => {
+      const root = await temporaryDirectory("finding-repository-byte-name-");
+      try {
+        const bytePath = Buffer.concat([
+          Buffer.from(`${root}/repository-`),
+          Buffer.from([0xff]),
+        ]);
+        const replacementPath = join(root, "repository-\uFFFD");
+        const alias = join(root, "repository-link");
+        const savedAlias = join(root, "saved-link");
+        await Promise.all([mkdir(bytePath), mkdir(replacementPath)]);
+        await Promise.all([
+          symlink(bytePath, alias),
+          symlink(bytePath, savedAlias),
+        ]);
+        expect(await realpath(alias)).toBe(replacementPath);
+        const [actual, replacement] = await Promise.all([
+          fs.stat(alias, { bigint: true }),
+          fs.stat(replacementPath, { bigint: true }),
+        ]);
+        expect(actual.ino).not.toBe(replacement.ino);
+        for (const includeMatchingAlias of [false, true]) {
+          const calls: Array<readonly string[]> = [];
+          const stdout = captureCli(main, "stdout");
+          expect(
+            await stdout.run(
+              ["findings", "list", alias, "--json"],
+              dependencies({
+                onWorkbench: (args): JsonObject => {
+                  calls.push(args);
+                  return args[0] === "list-repositories"
+                    ? {
+                        repositories: [
+                          {
+                            targetId: "unrelated",
+                            targetPath: replacementPath,
+                          },
+                          ...(includeMatchingAlias
+                            ? [{ targetId: "selected", targetPath: savedAlias }]
+                            : []),
+                        ],
+                      }
+                    : {
+                        findings: [{ title: `${args[2]} finding` }],
+                        nextOffset: null,
+                      };
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(calls).toEqual([
+            ["list-repositories"],
+            ...(includeMatchingAlias
+              ? [
+                  [
+                    "list-global-findings",
+                    "--target-id",
+                    "selected",
+                    "--status",
+                    "open",
+                  ],
+                ]
+              : []),
+          ]);
+          expect(JSON.parse(stdout.text())).toEqual({
+            repository: alias,
+            findings: includeMatchingAlias
+              ? [{ title: "selected finding" }]
+              : [],
+          });
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   test.each(["canonical", "original"])(
     "lists saved findings by %s path through a repository directory link",
     async (savedPath) => {
