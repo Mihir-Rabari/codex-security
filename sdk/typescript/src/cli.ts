@@ -5417,8 +5417,11 @@ export async function main(
               commandDirectory = gitRepository;
             commandEnvironment = commandContext.environment;
           }
-          const { files, rootFiles: publicationFiles } =
-            await changedPatchFiles(repository, patchBase, gitDependencies);
+          const { files } = await changedPatchFiles(
+            repository,
+            patchBase,
+            gitDependencies,
+          );
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -5466,7 +5469,7 @@ export async function main(
             await createPatchPullRequest(
               gitRepository,
               publication,
-              publicationFiles.length > 0 ? publicationFiles : files,
+              files,
               errorOutput,
               dependencies,
               patchRisk?.summary,
@@ -7480,7 +7483,7 @@ async function preparePatchPublication(
         ":/",
       ],
       root,
-      { trim: false, maxBuffer: Infinity },
+      { trim: false, maxBuffer: Infinity, directory: repository },
     );
     for (const path of ignored.split("\0").filter(Boolean)) {
       const digest = await hashPublicationFile(root, path);
@@ -8072,13 +8075,13 @@ async function changedPatchFiles(
   base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
   dirtyFiles?: Set<string>,
-): Promise<{ files: string[]; rootFiles: string[] }> {
+): Promise<{ files: string[] }> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
     const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
-    return { files, rootFiles: files };
+    return { files };
   }
   const root = base.root;
   const bound = await bindPatchCommandContext(
@@ -8129,8 +8132,7 @@ async function changedPatchFiles(
     root,
     { trim: false, directory: repository },
   );
-  const rootFiles = output.split("\0").filter(Boolean);
-  const files = new Set(rootFiles);
+  const files = new Set(output.split("\0").filter(Boolean));
   const before = new Map(base.files);
   const after = new Map(head.files);
   const hydrate = async (
@@ -8175,7 +8177,7 @@ async function changedPatchFiles(
     if (before.get(path) !== after.get(path)) files.add(path);
   }
 
-  return { files: [...files].sort(), rootFiles: rootFiles.sort() };
+  return { files: [...files].sort() };
 }
 
 async function snapshotPatchState(
