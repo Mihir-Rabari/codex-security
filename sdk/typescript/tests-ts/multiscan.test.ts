@@ -151,7 +151,9 @@ async function completedScan(
           `local-workspace\0${targetRoot ?? join(campaignRoot, "checkouts", id)}`,
         )
         .digest("hex")}`;
-      manifest.scan.target.displayName = id;
+      manifest.scan.target.displayName = basename(
+        targetRoot ?? join(campaignRoot, "checkouts", id),
+      );
       manifest.scan.target.revision = task["revision"]!;
       delete manifest.scan.target.snapshotDigest;
       const scope = task["scope"]?.trim();
@@ -2512,9 +2514,11 @@ describe("multiscan", () => {
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await reseal(outputDir);
-    const imported = await loadContract(outputDir, { pluginRoot });
+    const sealedManifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as ScanResult["manifest"];
     expect(
-      await contract.hasSealedReport(outputDir, imported.manifest),
+      await contract.hasSealedReport(outputDir, sealedManifest),
     ).toBeTrue();
 
     expect(await runMultiscan(campaign)).toMatchObject({
@@ -3368,3 +3372,173 @@ describe("multiscan", () => {
     ]);
   });
 });
+
+test("qualified campaign reuses a completed recovery checkout", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "recovery-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+  );
+  await runMultiscan(
+    options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+  );
+  const runs = mock(
+    async (
+      checkout: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => completedScan(settings.outputDir!, "complete", checkout),
+  );
+  const campaign = options(paths, client(runs), {
+    recoverScan: async () => undefined,
+  });
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+test("qualified campaign accepts referenced legacy evidence", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "legacy-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs));
+  const first = await runMultiscan(campaign);
+  const dir = (await results(first.resultsPath))[0]!["outputDir"] as string;
+  const path = join(dir, "findings.json");
+  const saved = JSON.parse(
+    await readFile(path, "utf8"),
+  ) as ScanResult["findings"];
+  saved.findings[0]!.code_evidence = [
+    { id: "saved-evidence", code: "extract()" },
+  ];
+  saved.findings[0]!.rootCause = {
+    summary: "Existing source evidence",
+    evidenceRefs: ["saved-evidence"],
+  };
+  await writeFile(path, JSON.stringify(saved));
+  await reseal(dir);
+  expect(
+    (await loadContract(dir, { pluginRoot: PLUGIN_ROOT })).findings.findings[0]!
+      .code_evidence,
+  ).toEqual(saved.findings[0]!.code_evidence);
+  const bytes = await readFile(path);
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(runs).toHaveBeenCalledTimes(1);
+  expect(await readFile(path)).toEqual(bytes);
+});
+
+for (const target of [["src"], ["src", "src/app.ts"]]) {
+  test(`qualified campaign retains configured scopes ${target.join(",")}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "configured-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        expect(settings.target).toEqual(target);
+        const result = await completedScan(
+          settings.outputDir!,
+          "complete",
+          checkout,
+        );
+        result.manifest.scan.scope.includePaths = target;
+        const coveragePath = join(settings.outputDir!, "coverage.json");
+        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+        coverage.includePaths = target;
+        coverage.mode = "scoped_path";
+        coverage.inventoryStrategy = "scoped_path";
+        await writeFile(coveragePath, JSON.stringify(coverage));
+        await writeFile(
+          join(settings.outputDir!, "scan-manifest.json"),
+          JSON.stringify(result.manifest),
+        );
+        await reseal(settings.outputDir!);
+        return result;
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      scanOptionsByMode: { standard: { target } },
+    });
+    await runMultiscan(campaign);
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+testPosix(
+  "qualified campaign retains resolved scope after in-place recovery",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "resolved-source");
+    await symlink("src", join(source.path, "alias"), "dir");
+    git(source.path, "add", "alias");
+    git(
+      source.path,
+      "-c",
+      "user.name=Multiscan Test",
+      "-c",
+      "user.email=multiscan@example.test",
+      "commit",
+      "-qm",
+      "Add directory alias",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},alias\n`,
+    );
+    const interrupted = client(async (checkout: string, settings = {}) => {
+      await completedScan(settings.outputDir!, "partial", checkout);
+      throw new Error("Interrupted after saved progress");
+    });
+    await runMultiscan(options(paths, interrupted, { maxAttempts: 1 }));
+    const recoverScan = mock(async (dir: string) => {
+      const result = await completedScan(dir);
+      result.manifest.scan.scope.includePaths = ["src"];
+      await writeFile(
+        join(dir, "scan-manifest.json"),
+        JSON.stringify(result.manifest),
+      );
+      const coveragePath = join(dir, "coverage.json");
+      const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+      coverage.includePaths = ["src"];
+      await writeFile(coveragePath, JSON.stringify(coverage));
+      await reseal(dir);
+      return result;
+    });
+    const runs = mock(completeRun);
+    const recovered = await runMultiscan(
+      options(paths, client(runs), { recoverScan }),
+    );
+    expect((await results(recovered.resultsPath)).at(-1)).toMatchObject({
+      status: "completed",
+      resolvedScope: "src",
+    });
+    expect(await runMultiscan(options(paths, client(runs)))).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(0);
+  },
+);

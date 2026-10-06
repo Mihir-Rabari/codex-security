@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { hostname } from "node:os";
 import {
+  basename,
   dirname,
   isAbsolute,
   join,
@@ -48,7 +49,13 @@ import {
   resolvePluginPath,
   resolvePluginPythonCommand,
 } from "./runtime.js";
-import { DiffTarget, gitMarkerRoot, type ScanMode } from "./targets.js";
+import {
+  DiffTarget,
+  gitMarkerRoot,
+  normalizeTarget,
+  type ScanMode,
+  type ScanTarget,
+} from "./targets.js";
 import {
   meetsSeverity,
   type ScanPromptSettings,
@@ -309,6 +316,8 @@ async function runCampaign(
         executablePathForSpawn(python.executable),
         [
           "-I",
+          "-X",
+          "utf8",
           "-B",
           join(helperRoot, "scripts", "finalize_scan_contract.py"),
           "--scan-dir",
@@ -413,6 +422,7 @@ async function runCampaign(
         schemaPluginRoot,
         receipt,
         checkout,
+        options.scanOptionsByMode?.[task.mode]?.target,
         options.signal,
         options.githubHost,
       );
@@ -608,6 +618,10 @@ async function runCampaign(
           }
           threatModelPath = result.threatModelPath;
           cost = result.cost;
+          if (task.scope !== undefined)
+            resolvedScope ??=
+              result.manifest?.scan.scope.includePaths[0] ??
+              receipts.get(task.id)?.resolvedScope;
           targetId = result.manifest?.scan.target.targetId;
           snapshotDigest = result.manifest?.scan.target.snapshotDigest;
           const failureSeverity = scanSettings?.failureSeverity;
@@ -1150,6 +1164,7 @@ async function loadResumableScan(
   pluginRoot: string,
   receipt: MultiscanReceipt,
   checkout: string,
+  configuredTarget: ScanTarget | undefined,
   signal?: AbortSignal,
   githubHost?: string,
 ): Promise<
@@ -1166,7 +1181,7 @@ async function loadResumableScan(
     });
     const { target, scope, producer } = manifest.scan;
     const campaignRoot = dirname(dirname(dirname(path)));
-    const targetIds = [
+    const targetRoots = [
       checkout,
       join(
         campaignRoot,
@@ -1174,18 +1189,21 @@ async function loadResumableScan(
         receipt.id,
         `attempt-${receipt.attempt}`,
       ),
-    ].map(
+    ];
+    const matchedRoot = targetRoots.find(
       (root) =>
-        `target_sha256_${createHash("sha256")
-          .update(`local-workspace\0${root}`)
-          .digest("hex")}`,
+        target.targetId ===
+        `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`,
     );
-    let expectedScope =
+    const requestedTarget =
       receipt.scope === undefined
-        ? "."
-        : posix.normalize(receipt.scope).replace(/\/+$/, "");
+        ? (configuredTarget ?? "repository")
+        : [receipt.scope];
+    const requestedPaths = Array.isArray(requestedTarget)
+      ? requestedTarget
+      : undefined;
     const expectedMode =
-      receipt.scope !== undefined
+      requestedPaths !== undefined
         ? "scoped_path"
         : receipt.mode === "deep"
           ? "deep_repository"
@@ -1193,53 +1211,46 @@ async function loadResumableScan(
     if (
       manifest.scan.status !== "completed" ||
       producer.name !== "codex-security-plugin" ||
-      !targetIds.includes(target.targetId) ||
+      matchedRoot === undefined ||
       (receipt.targetId !== undefined &&
         receipt.targetId !== target.targetId) ||
       target.kind !== "git_revision" ||
       target.snapshotDigest !== undefined ||
       receipt.snapshotDigest !== undefined ||
-      target.displayName !== receipt.id ||
+      target.displayName !== basename(matchedRoot) ||
       target.revision !== receipt.revision ||
       coverage.mode !== expectedMode ||
-      scope.includePaths.length !== 1 ||
       scope.excludePaths.length !== 0
-    ) {
+    )
       return undefined;
-    }
-    if (receipt.scope !== undefined) {
-      const requestedScope = expectedScope;
+    let expectedPaths = ["."];
+    if (requestedPaths !== undefined) {
       try {
         await rm(checkout, { recursive: true, force: true });
         await mkdir(checkout, { mode: 0o700 });
         await checkoutRevision(receipt, checkout, signal, githubHost);
-        const resolvedScope = await realpath(join(checkout, receipt.scope));
-        const relativeScope = relative(await realpath(checkout), resolvedScope);
-        if (
-          relativeScope === ".." ||
-          relativeScope.startsWith(`..${sep}`) ||
-          isAbsolute(relativeScope)
-        ) {
-          return undefined;
-        }
-        expectedScope = relativeScope.split(sep).join("/") || ".";
+        expectedPaths = [
+          ...(await normalizeTarget(checkout, requestedPaths, signal)).paths,
+        ];
       } finally {
         await rm(checkout, { recursive: true, force: true });
       }
       if (
-        expectedScope !== requestedScope &&
+        receipt.scope !== undefined &&
+        expectedPaths[0] !==
+          posix.normalize(receipt.scope).replace(/\/+$/, "") &&
         receipt.resolvedScope === undefined
-      ) {
+      )
         return undefined;
-      }
     }
     if (
-      scope.includePaths[0] !== expectedScope ||
+      scope.includePaths.length !== expectedPaths.length ||
+      scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
       (receipt.resolvedScope !== undefined &&
-        receipt.resolvedScope !== expectedScope)
-    ) {
+        (expectedPaths.length !== 1 ||
+          receipt.resolvedScope !== expectedPaths[0]))
+    )
       return undefined;
-    }
     const sealedArtifacts = new Set(
       manifest.scan.artifacts.map((artifact) => artifact.path),
     );
@@ -1285,7 +1296,10 @@ async function loadResumableScan(
         return undefined;
       }
       const evidenceIds = new Set<string>();
-      for (const evidence of finding.codeEvidence ?? []) {
+      for (const evidence of [
+        ...(finding.codeEvidence ?? []),
+        ...(finding.code_evidence ?? []),
+      ]) {
         if (evidenceIds.has(evidence.id)) return undefined;
         evidenceIds.add(evidence.id);
       }

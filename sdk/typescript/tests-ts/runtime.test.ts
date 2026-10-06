@@ -6460,3 +6460,34 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 });
+
+testPosix(
+  "qualified campaign keeps canonical Python across protected roots",
+  async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const additional = join(root, "campaign");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(repository, "venv", "bin");
+    const interpreter = join(systemBin, "python3");
+    await Promise.all([
+      mkdir(additional),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      interpreter,
+      '#!/bin/sh\ncase "$0" in */system/bin/python3) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(interpreter, 0o700);
+    const alias = join(virtualenvBin, "python");
+    await symlink(interpreter, alias);
+    const command = await resolvePluginPythonCommand({
+      configuredPath: alias,
+      environment: { PATH: "" },
+      protectedRoot: repository,
+      additionalProtectedRoots: [additional],
+    });
+    expect(command.executable).toBe(interpreter);
+  },
+);

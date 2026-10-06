@@ -3104,11 +3104,13 @@ async function usablePython(
     ? expandHome(candidate, environment)
     : candidate;
   let command: TrustedExecutable | null = null;
-  // Preserve the invocation name while each root further filters the same PATH.
+  // Keep explicit paths canonical across roots; bare names retain filtered PATH lookup.
   for (const protectedRoot of protectedRoots) {
     throwIfSignalAborted(signal);
     command = await resolveTrustedExecutable(
-      original,
+      isPythonPathCandidate(original)
+        ? (command?.executable ?? original)
+        : original,
       command?.environment ?? environment,
       protectedRoot,
     );
