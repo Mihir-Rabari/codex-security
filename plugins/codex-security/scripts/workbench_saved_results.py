@@ -1953,17 +1953,23 @@ def merge_saved_results(
         for item in deferred_rows[relative]:
             if not isinstance(item, dict):
                 continue
+            item_owner = owner
             if isinstance(item.get("candidateId"), str) or "candidate" in item or "finding" in item:
+                item_owner = candidate_owner(owner, item.get("sourceWorkerId"))
                 candidate_ids.update(
-                    (owner, identity)
+                    (item_owner, identity)
                     for identity in (item.get("id"), item.get("candidateId"))
                     if isinstance(identity, str)
                 )
             identity = item.get("id") or item.get("candidateId")
             if isinstance(identity, str):
-                key = (owner, identity)
+                key = (item_owner, identity)
                 previous = active_deferred.get(key)
-                if previous is None or order > previous[0]:
+                if previous is None or (
+                    order[1] > previous[0][1]
+                    if item_owner is not None and (relative == "parent" or previous[2] == "parent")
+                    else order > previous[0]
+                ):
                     active_deferred[key] = (order, item, relative)
                 if (
                     relative == "parent"
@@ -2044,6 +2050,14 @@ def merge_saved_results(
         if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
         and (owner, identity) in candidate_ids
     }
+    ordered_candidates.update(
+        (owner, identity)
+        for (owner, _), (_, row, relative) in active_deferred.items()
+        if relative == "parent"
+        and owner is not None
+        and (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
+        and (owner, identity) in candidate_ids
+    )
     ordered_outcomes = {}
 
     outcomes: list[tuple[str, str | None, str, str]] = []
@@ -2080,8 +2094,12 @@ def merge_saved_results(
         if any(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
-            and (modified[1] >= order[1] if relative == "parent" and owner else modified >= order)
-            for (saved_owner, _), (modified, row, _) in active_deferred.items()
+            and (
+                modified[1] >= order[1]
+                if (relative == "parent" or saved_relative == "parent") and owner
+                else modified >= order
+            )
+            for (saved_owner, _), (modified, row, saved_relative) in active_deferred.items()
         ):
             continue
         if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
