@@ -231,6 +231,13 @@ export function preserveDiffCandidateDecisions(
   currentFindings: JsonObject[] = input.findings,
 ): ScanDraftInput {
   if (candidates === undefined) return input;
+  input = {
+    ...input,
+    coverage: refreshDiffCandidateHistory(
+      [{ ...input, findings: [] }],
+      candidates,
+    )[0]!.coverage,
+  };
   const resolved = resolvedCandidateKeys({
     ...input,
     findings: currentFindings,

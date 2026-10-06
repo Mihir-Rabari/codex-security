@@ -905,6 +905,82 @@ def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
     assert draft["coverage"]["deferred"] == coverage["deferred"]
 
 
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("reopened", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_stopped_diff_freezes_the_accepted_parent_head(
+    tmp_path: Path, termination: str, reopened: bool, interrupted: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    original = json.loads(coverage_path.read_text())
+    terminal = {
+        "id": "authored-decision",
+        "candidateId": "candidate-synthetic",
+        "label": "Authored review",
+        "disposition": "rejected",
+        "notes": "The accepted review rejected this candidate.",
+        "receiptRefs": [],
+    }
+    rejected = {**original, "surfaces": [terminal], "deferred": []}
+    previous, current = (rejected, original) if reopened else (original, rejected)
+    coverage_path.write_text(json.dumps(previous))
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": []},
+                "coverage": current,
+            }
+        )
+    )
+    arguments = ["write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)]
+    if interrupted:
+        scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+        wrapper = tmp_path / "interrupt_accepted_publication.py"
+        wrapper.write_text(
+            f"import sys\nsys.path.insert(0, {str(scripts_dir)!r})\n"
+            "import workbench_db\nimport workbench_saved_results\n"
+            "original = workbench_saved_results.write_scan_local_bytes\n"
+            "def interrupt(scan_dir, relative, payload, **kwargs):\n"
+            "    if relative == 'coverage.json':\n"
+            "        raise OSError('synthetic interrupted canonical publication')\n"
+            "    return original(scan_dir, relative, payload, **kwargs)\n"
+            "workbench_saved_results.write_scan_local_bytes = interrupt\n"
+            "raise SystemExit(workbench_db.main())\n"
+        )
+        publication = subprocess.run(
+            [sys.executable, str(wrapper), *arguments],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
+        )
+        assert publication.returncode != 0
+        assert "synthetic interrupted canonical publication" in publication.stderr
+        assert json.loads(coverage_path.read_text()) == previous
+    else:
+        run_workbench(state_dir, *arguments)
+    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+    accepted = scan_dir / "checkpoints" / head["checkpoint"]
+    accepted_bytes = accepted.read_bytes()
+    assert json.loads(accepted_bytes)["coverage"]["deferred"] == current["deferred"]
+    ledger.unlink()
+    extra = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
+
+    def assert_accepted() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == int(reopened)
+        coverage = json.loads(coverage_path.read_text())
+        assert (terminal in coverage["surfaces"]) is (not reopened)
+        assert accepted.read_bytes() == accepted_bytes
+
+    assert_accepted()
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_accepted()
+
+
 @pytest.mark.parametrize("publication_failure", ["before_freeze", "after_freeze"])
 def test_stopped_diff_retries_saved_decisions_after_publication_failure(
     tmp_path: Path, publication_failure: str

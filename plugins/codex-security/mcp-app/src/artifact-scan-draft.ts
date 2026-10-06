@@ -1689,6 +1689,8 @@ function sameSavedFinding(
   owner?: string,
 ): boolean {
   if (left.ruleId !== right.ruleId) return false;
+  if (left.identity && right.identity)
+    return scanFindingIdentity(left) === scanFindingIdentity(right);
   if (
     owner === undefined &&
     !isDeepStrictEqual(
@@ -1697,8 +1699,6 @@ function sameSavedFinding(
     )
   )
     return false;
-  if (left.identity && right.identity)
-    return scanFindingIdentity(left) === scanFindingIdentity(right);
   const leftCandidate = findingCandidateKey(left, owner);
   if (leftCandidate && leftCandidate === findingCandidateKey(right, owner))
     return true;

@@ -114,13 +114,32 @@ export function deepReductionScanDraft(
   input: DeepReductionInput,
 ): ScanDraftInput {
   const { unresolvedCandidates = [], ...result } = structuredClone(input);
+  const reservedIds = new Set(
+    unresolvedCandidates.flatMap((item) =>
+      typeof item.id === "string" ? [item.id] : [],
+    ),
+  );
+  const usedIds = new Set<string>();
+  const deferred = unresolvedCandidates.map((item) => {
+    if (typeof item.id !== "string") return item;
+    const baseId = item.id;
+    let id = baseId;
+    let suffix = 2;
+    if (usedIds.has(id)) {
+      do {
+        id = `${baseId}-${suffix++}`;
+      } while (usedIds.has(id) || reservedIds.has(id));
+    }
+    usedIds.add(id);
+    return id === baseId ? item : { ...item, id };
+  });
   return {
     ...result,
     coverage: {
       completeness: unresolvedCandidates.length > 0 ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
-      deferred: unresolvedCandidates,
+      deferred,
     },
   };
 }

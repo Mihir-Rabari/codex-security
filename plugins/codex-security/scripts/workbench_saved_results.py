@@ -1627,6 +1627,22 @@ def merge_saved_results(
         # Invalid latest records must not hide valid history.
         return bool(recoverable_findings(scan_dir, scan_id, binding["target"], [value]))
 
+    drafts_by_path = {relative: draft for relative, draft, _ in sources}
+    if parent_heads:
+        latest_observation = max(observed for observed, _ in parent_heads)
+        for observed, parent_path in parent_heads:
+            if observed != latest_observation:
+                continue
+            draft = drafts_by_path[parent_path]
+            modified = source_order[parent_path][1]
+            if parent is None or modified > parent_modified:
+                parent = draft
+                parent_modified = modified
+                parent_is_canonical = False
+            elif modified == parent_modified and draft != parent:
+                parent = _merge_tied_parent_observations(parent, draft)
+                parent_is_canonical = False
+
     decision_drafts = [
         draft
         for _, draft, _ in sources
@@ -1707,20 +1723,6 @@ def merge_saved_results(
             latest_reducer_key = reducer_order
             latest_reducer = result_path
 
-    if parent_heads:
-        latest_observation = max(observed for observed, _ in parent_heads)
-        for observed, parent_path in parent_heads:
-            if observed != latest_observation:
-                continue
-            draft = drafts_by_path[parent_path]
-            modified = source_order[parent_path][1]
-            if parent is None or modified > parent_modified:
-                parent = draft
-                parent_modified = modified
-                parent_is_canonical = False
-            elif modified == parent_modified and draft != parent:
-                parent = _merge_tied_parent_observations(parent, draft)
-                parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
 

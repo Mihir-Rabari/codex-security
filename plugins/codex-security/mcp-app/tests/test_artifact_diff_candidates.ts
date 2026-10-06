@@ -196,6 +196,66 @@ test("Diff candidate recovery preserves generic review closeout", async (t) => {
   }
 });
 
+for (const disposition of ["deferred", "not_applicable"]) {
+  for (const authored of [false, true]) {
+    test(`resubmitted canonical coverage ${authored ? "retains authored" : "refreshes generated"} decisions after ${disposition}`, async (t) => {
+      const initial = candidate("resubmitted-review", "suppressed");
+      initial.validation.counterevidence_or_proof_gap =
+        "Earlier generated decision.";
+      const context = await fixture(t, [initial]);
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      const coverage = await readCoverage(context);
+      assert.equal(coverage.mode, "branch_diff");
+      assert.equal(coverage.inventoryStrategy, "diff");
+      assert.deepEqual(coverage.includePaths, ["."]);
+      if (authored) coverage.surfaces[0].notes = "Keep this authored decision.";
+      const current = {
+        ...initial,
+        summary: "Updated review summary.",
+        validation: {
+          disposition,
+          counterevidence_or_proof_gap: "Current review evidence.",
+        },
+      };
+      await writeLedger(context, [current]);
+      const {
+        mode: _mode,
+        includePaths: _includePaths,
+        excludePaths: _excludePaths,
+        receiptRefs: _receiptRefs,
+        inventoryStrategy: _inventoryStrategy,
+        ...semanticCoverage
+      } = coverage;
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        coverage: semanticCoverage,
+        complete: true,
+      });
+      const saved = await readCoverage(context);
+      assert.equal(
+        saved.deferred.length,
+        !authored && disposition === "deferred" ? 1 : 0,
+      );
+      assert.equal(
+        saved.surfaces[0].disposition,
+        authored
+          ? "rejected"
+          : disposition === "deferred"
+            ? "needs_follow_up"
+            : "not_applicable",
+      );
+      assert.equal(
+        saved.surfaces[0].notes,
+        authored ? "Keep this authored decision." : "Current review evidence.",
+      );
+      if (!authored) assert.deepEqual(saved.surfaces[0].candidate, current);
+    });
+  }
+}
+
 test("diff outcomes retain unresolved candidates and exclude terminal dismissals", async (t) => {
   const outcomes = [
     [undefined, undefined, true],
