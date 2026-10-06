@@ -7278,6 +7278,7 @@ async function requireCleanPatchPullRequestBase(
 
 interface GitPatchState {
   trees: Map<string, string>;
+  directory: string;
 }
 
 async function changedPatchFiles(
@@ -7298,6 +7299,7 @@ async function changedPatchFiles(
       ? new Map([["", await snapshotPatchTree(repository, dependencies)]])
       : (await snapshotGitPatchState(repository, dependencies)).trees;
   const files = new Set<string>();
+  const directoryRoot = typeof base === "string" ? repository : base.directory;
   for (const [directory, tree] of bases) {
     const head = heads.get(directory);
     if (head === undefined) continue;
@@ -7305,7 +7307,7 @@ async function changedPatchFiles(
       ? await nestedPatchGitDependencies(
           repository,
           dependencies,
-          join(repository, directory),
+          join(directoryRoot, directory),
         )
       : dependencies;
     const output = await gitDependencies.runRepositoryCommand(
@@ -7319,7 +7321,7 @@ async function changedPatchFiles(
         tree,
         head,
       ],
-      join(repository, directory),
+      directory ? join(directoryRoot, directory) : repository,
       { trim: false },
     );
     for (const path of output.split("\0").filter(Boolean))
@@ -7356,12 +7358,13 @@ async function snapshotGitPatchState(
   dependencies: CliDependencies,
 ): Promise<GitPatchState> {
   const trees = new Map<string, string>();
+  let directoryRoot = repository;
   const visit = async (directory: string): Promise<void> => {
-    const checkout = join(repository, directory);
+    const checkout = directory ? join(directoryRoot, directory) : repository;
     if (directory) {
       if (
         isOutsidePath(
-          relative(await realpath(repository), await realpath(checkout)),
+          relative(await realpath(directoryRoot), await realpath(checkout)),
         )
       ) {
         throw new CodexSecurityError(
@@ -7387,15 +7390,35 @@ async function snapshotGitPatchState(
       checkout,
       { trim: false, maxBuffer: Infinity },
     );
-    for (const entry of entries.split("\0")) {
-      if (!entry.startsWith("160000 ")) continue;
+    const gitlinks = entries
+      .split("\0")
+      .filter((entry) => entry.startsWith("160000 "));
+    if (!directory && gitlinks.length > 0) {
+      const root = await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--show-toplevel"],
+        repository,
+        { trim: false },
+      );
+      const prefix = await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--show-prefix"],
+        repository,
+        { trim: false },
+      );
+      directoryRoot = join(
+        root.replace(/\n$/u, ""),
+        prefix.replace(/\n$/u, ""),
+      );
+    }
+    for (const entry of gitlinks) {
       const path = entry.slice(entry.indexOf("\t") + 1);
-      if (existsSync(join(checkout, path, ".git")))
+      if (existsSync(join(directoryRoot, directory, path, ".git")))
         await visit(directory ? `${directory}/${path}` : path);
     }
   };
   await visit("");
-  return { trees };
+  return { trees, directory: directoryRoot };
 }
 
 async function configuredPatchObjectDirectory(

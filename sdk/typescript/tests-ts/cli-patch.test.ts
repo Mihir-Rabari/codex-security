@@ -4304,6 +4304,79 @@ describe("patch publication integrity", () => {
       files: [path],
     });
   });
+  test.each(["ordinary", "environment", "config"])(
+    "snapshots nested patches in the effective %s Git worktree",
+    async (kind) => {
+      const root = await fixtures.create("patch-effective-worktree-");
+      const invocation = join(root, "invocation");
+      const nested = join(invocation, "nested");
+      const selected =
+        kind === "ordinary" ? invocation : join(root, "selected");
+      await mkdir(nested, { recursive: true });
+      const git = repositoryGit(invocation);
+      const inner = repositoryGit(nested);
+      for (const run of [git, inner]) {
+        run("init", "--initial-branch=main");
+        run("config", "user.name", "Synthetic User");
+        run("config", "user.email", "synthetic@example.test");
+      }
+      await writeFile(join(nested, "app.ts"), "original\n");
+      inner("add", ".");
+      inner("commit", "-m", "Synthetic nested baseline");
+      await writeFile(join(invocation, "app.ts"), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent baseline");
+      if (selected !== invocation) {
+        await mkdir(selected);
+        await copyFile(join(invocation, "app.ts"), join(selected, "app.ts"));
+        inner("config", "core.worktree", join(selected, "nested"));
+        await cp(nested, join(selected, "nested"), { recursive: true });
+        if (kind === "config") git("config", "core.worktree", selected);
+      }
+      const gitEnvironment =
+        kind === "environment" ? { GIT_WORK_TREE: selected } : {};
+      const parentIndex = await readFile(join(invocation, ".git", "index"));
+      const nestedIndex = await readFile(join(nested, ".git", "index"));
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: invocation,
+          environment: { ...process.env, ...gitEnvironment },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...gitEnvironment, ...options?.environment },
+            }),
+          onCodex: async (_args, output) => {
+            await writeFile(join(selected, "app.ts"), "fixed\n");
+            await writeFile(join(selected, "nested", "app.ts"), "fixed\n");
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        applied: true,
+        files: ["app.ts", "nested/app.ts"],
+      });
+      expect(await readFile(join(invocation, ".git", "index"))).toEqual(
+        parentIndex,
+      );
+      expect(await readFile(join(nested, ".git", "index"))).toEqual(
+        nestedIndex,
+      );
+      if (selected !== invocation) {
+        expect(await readFile(join(invocation, "app.ts"), "utf8")).toBe(
+          "original\n",
+        );
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe(
+          "original\n",
+        );
+      }
+    },
+  );
+
   test("keeps the outer executable boundary for nested patch snapshots", async () => {
     const repository = await fixtures.create("patch-nested-executable-");
     const nested = join(repository, "dependency");
