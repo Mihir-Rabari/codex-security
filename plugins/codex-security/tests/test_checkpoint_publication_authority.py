@@ -1035,3 +1035,164 @@ def test_unreadable_heads_preserve_legacy_accepted_results(
     )["scan"]
     assert recovered["findingCount"] == 2
     assert recovered["resultsRecoveryNeeded"] is False
+
+
+@pytest.mark.parametrize("invalid_model", [False, True], ids=["valid", "invalid"])
+def test_invalid_explicit_recovery_does_not_freeze_unpublishable_selection(
+    workbench_api, workbench_db, publication_scan, invalid_model
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    original = save_disposition(scan, result.parent, "reported")
+    result.write_text(json.dumps(original))
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+    prior = tuple(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json, retained_checkpoint_heads_json FROM scans WHERE id = ?",
+            (scan.scan_id,),
+        ).fetchone()
+    )
+    candidate = {
+        **original,
+        "threatModel": {"summary": "" if invalid_model else "Valid first model."},
+    }
+    checkpoint = write_checkpoint(result.parent / "checkpoints", candidate)
+    head = result.parent / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    args = Namespace(scan_id=scan.scan_id)
+    if invalid_model:
+        with pytest.raises(workbench_api["saved_results"].ContractError, match="summary"):
+            workbench_api["recover_scan_results"](workbench_db, args)
+        retained = tuple(
+            workbench_db.execute(
+                "SELECT retained_source_digests_json, retained_checkpoint_heads_json FROM scans WHERE id = ?",
+                (scan.scan_id,),
+            ).fetchone()
+        )
+        assert retained == prior
+    else:
+        workbench_api["recover_scan_results"](workbench_db, args)
+    corrected = write_checkpoint(
+        result.parent / "checkpoints",
+        {**original, "threatModel": {"summary": "Corrected selected model."}},
+    )
+    head.write_text(json.dumps({"checkpoint": corrected.name}))
+    recovered = workbench_api["recover_scan_results"](workbench_db, args)["scan"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"]["summary"] == "Corrected selected model."
+
+
+@pytest.mark.parametrize("selected_model", [False, True], ids=["omitted", "replacement"])
+def test_model_less_selected_head_keeps_latest_accepted_model(
+    workbench_api, workbench_db, publication_scan, selected_model
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    original = save_disposition(scan, result.parent, "reported")
+    modeled = {}
+    for summary in ("First synthetic accepted model.", "Second synthetic accepted model."):
+        draft = {**original, "threatModel": {"summary": summary}}
+        checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+        modeled[checkpoint] = summary
+    older, newer = sorted(modeled)
+    head = result.parent / "checkpoint-head.json"
+    saved = workbench_api["saved_results"]
+    for checkpoint, observed in ((older, 100), (newer, 200)):
+        os.utime(checkpoint, ns=(observed, observed))
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        saved._capture_saved_source(
+            scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+        )
+    selected = {
+        **original,
+        **({"threatModel": {"summary": "Selected replacement model."}} if selected_model else {}),
+    }
+    checkpoint = write_checkpoint(result.parent / "checkpoints", selected)
+    os.utime(checkpoint, ns=(300, 300))
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    os.utime(head, ns=(300, 300))
+    result.write_text(json.dumps(original))
+    os.utime(result, ns=(400, 400))
+    originals = {path: path.read_bytes() for path in [result, older, newer, checkpoint, head]}
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+    expected = "Selected replacement model." if selected_model else modeled[newer]
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"]["summary"] == expected
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert (
+        json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"][
+            "summary"
+        ]
+        == expected
+    )
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize(
+    "checkpoint_result", [False, True], ids=["ordinary-result", "registered-checkpoint"]
+)
+def test_registered_checkpoint_result_keeps_newer_accepted_outcome(
+    workbench_api, workbench_db, publication_scan, checkpoint_result
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    reported = save_disposition(scan, result.parent, "reported")
+    head = result.parent / "checkpoint-head.json"
+    accepted = result.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    os.utime(accepted, ns=(300, 300))
+    os.utime(head, ns=(300, 300))
+    workbench_api["saved_results"]._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    if checkpoint_result:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+                (str(accepted), result.parent.name),
+            )
+    else:
+        result.write_text(json.dumps(reported))
+        os.utime(result, ns=(300, 300))
+    save_disposition(scan, result.parent, "rejected")
+    os.utime(head, ns=(200, 200))
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    assert stopped["resultsRecoveryNeeded"] is False
+
+
+@pytest.mark.parametrize("valid_rejection", [False, True], ids=["malformed", "valid"])
+def test_tied_rejection_requires_valid_surface_before_removing_finding(
+    workbench_api, workbench_db, publication_scan, valid_rejection
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(300, 300))
+    rejected = save_disposition(scan, result.parent, "rejected")
+    if not valid_rejection:
+        rejected["coverage"]["surfaces"][0].pop("label")
+        checkpoint = write_checkpoint(result.parent / "checkpoints", rejected)
+        (result.parent / "checkpoint-head.json").write_text(
+            json.dumps({"checkpoint": checkpoint.name})
+        )
+    os.utime(result.parent / "checkpoint-head.json", ns=(300, 300))
+    original = result.read_bytes()
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == (0 if valid_rejection else 1)
+    assert result.read_bytes() == original

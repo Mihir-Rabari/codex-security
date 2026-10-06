@@ -1610,6 +1610,16 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"rejected", "not_applicable"}
                 ):
+                    normalized = dict(item)
+                    if field == "surfaces":
+                        normalized.setdefault("id", _saved_coverage_id(item))
+                        normalized.setdefault("receiptRefs", [])
+                    try:
+                        _validate_schema_node(
+                            normalized, coverage_schema[field]["items"], f"coverage.{field}"
+                        )
+                    except ContractError:
+                        continue
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
         (owner, candidate_id)
@@ -1626,6 +1636,7 @@ def merge_saved_results(
         if (
             relative in selected_observations
             and relative not in authoritative_heads
+            and relative not in current_results
             and (Path(relative).parent, candidate_id) in selected_head_candidates
         ):
             continue
@@ -1874,12 +1885,16 @@ def merge_saved_results(
                 selected_models = [
                     path
                     for path in selected_observations
-                    if path in authoritative_heads
-                    and Path(path).parent == checkpoint_dir
+                    if Path(path).parent == checkpoint_dir
                     and isinstance(drafts_by_path[path].get("threatModel"), dict)
                 ]
                 if selected_models:
-                    head_path = max(selected_models, key=source_order.__getitem__)
+                    authoritative_models = [
+                        path for path in selected_models if path in authoritative_heads
+                    ]
+                    head_path = max(
+                        authoritative_models or selected_models, key=source_order.__getitem__
+                    )
                     current = drafts_by_path[head_path]
                     # A terminal checkpoint is committed before result.json is replaced.
                     # Use the admitted observation, including its frozen ordering on retries.
@@ -2406,6 +2421,7 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
+    retained_state = None
     if (
         frozen_source_digests is None
         or recovery_source_digests is not None
@@ -2421,18 +2437,12 @@ def preserve_scan_results_locked(
                 "heads": retained_heads,
                 "recoveryBaseDigest": scan["seal_manifest_digest"],
             }
-        with connection:
-            connection.execute(
-                "UPDATE scans SET retained_source_digests_json = ?, "
-                "retained_checkpoint_heads_json = ? "
-                "WHERE id = ? AND retained_source_digests_json IS ?",
-                (
-                    _encode_retained_sources(retained_sources, model_source),
-                    json.dumps(retained_heads, sort_keys=True),
-                    scan_id,
-                    raw_frozen_sources,
-                ),
-            )
+        retained_state = (
+            _encode_retained_sources(retained_sources, model_source),
+            json.dumps(retained_heads, sort_keys=True),
+            scan_id,
+            raw_frozen_sources,
+        )
     prepared = _prepare_scan_finalization(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
@@ -2440,6 +2450,14 @@ def preserve_scan_results_locked(
         completion_warnings=warnings,
         draft_documents=documents,
     )
+    if retained_state is not None:
+        with connection:
+            connection.execute(
+                "UPDATE scans SET retained_source_digests_json = ?, "
+                "retained_checkpoint_heads_json = ? "
+                "WHERE id = ? AND retained_source_digests_json IS ?",
+                retained_state,
+            )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(
