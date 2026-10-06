@@ -6951,7 +6951,13 @@ async function preparePatchPublication(
   const root = await patchRepositoryRoot(repository, dependencies);
   const status = await dependencies.runRepositoryCommand(
     "git",
-    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--ignored=traditional",
+    ],
     repository,
     { trim: false, maxBuffer: Infinity },
   );

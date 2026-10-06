@@ -4444,6 +4444,105 @@ describe("patch change tracking", () => {
       }
     },
   );
+  for (const mode of ["saved", "supplied"]) {
+    test.each(["file", "directory", "info", "global", "unchanged", "new"])(
+      `preserves pre-existing ignored paths during ${mode} publication (%s)`,
+      async (kind) => {
+        const { directory: root, git, remote } = await publicationRepository();
+        const file =
+          kind === "directory" ? "cache/nested/local.txt" : "local.env";
+        const pattern = kind === "directory" ? "cache/\n" : "local.env\n";
+        const rule =
+          kind === "info"
+            ? join(root, ".git", "info", "exclude")
+            : kind === "global"
+              ? join(remote, "excludes")
+              : join(root, ".gitignore");
+        await writeFile(
+          join(root, ".gitignore"),
+          rule === join(root, ".gitignore") ? pattern : "",
+        );
+        git("add", ".gitignore");
+        git("commit", "-m", "Synthetic ignore rule");
+        await writeFile(rule, pattern);
+        if (kind === "global") git("config", "core.excludesFile", rule);
+        if (kind !== "new") {
+          await mkdir(dirname(join(root, file)), { recursive: true });
+          await writeFile(join(root, file), "synthetic local data\n");
+        }
+        const head = git("rev-parse", "HEAD");
+        const index = git("write-tree");
+        const result = resultWithFindings(["high"]);
+        result.findings.findings[0]!.locations[0]!.path = file;
+        const blocked = kind !== "unchanged" && kind !== "new";
+        const outcome = await runWorkflow(
+          [
+            "patch",
+            ...(mode === "saved"
+              ? ["--scan", "scan-1"]
+              : ["Synthetic ignore update"]),
+            "--create-pr",
+            "--json",
+          ],
+          {
+            currentDirectory: root,
+            onWorkbench: () => savedScan(result, "scan-1", root),
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, options)
+                : args[1] === "list"
+                  ? "[]"
+                  : "https://github.example.test/example/repository/pull/1",
+            onCodex: async (_args, output) => {
+              if (kind !== "unchanged") await writeFile(rule, "");
+              if (kind === "new")
+                await writeFile(join(root, file), "synthetic generated data\n");
+              if (kind === "unchanged")
+                await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
+              output?.stdout.write(
+                JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files:
+                        kind === "unchanged"
+                          ? ["src/finding-1.ts"]
+                          : [".gitignore", file],
+                      verification: "Synthetic verification.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+        if (blocked) {
+          expect(outcome.stderr).toContain(
+            "uncommitted changes before patching",
+          );
+          expect(git("rev-parse", "HEAD")).toBe(head);
+          expect(git("write-tree")).toBe(index);
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(await readFile(rule, "utf8")).toBe("");
+        } else {
+          expect(git("ls-remote", "origin")).toContain(
+            git("rev-parse", "HEAD"),
+          );
+          expect(
+            git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
+          ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
+        }
+        expect(await readFile(join(root, file), "utf8")).toBe(
+          kind === "new"
+            ? "synthetic generated data\n"
+            : "synthetic local data\n",
+        );
+      },
+    );
+  }
   test.each([
     "regular",
     ...(process.platform === "win32" ? [] : ["dangling-link"]),
