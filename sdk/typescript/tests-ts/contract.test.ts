@@ -1592,7 +1592,7 @@ for (const sourceWorkerId of [
     const pythonPending = runPythonJsonProbe(
       "import json,sys; sys.path.insert(0,sys.argv[1]); from candidate_identity import unresolved_candidates; value=json.loads(sys.argv[2]); print(json.dumps(unresolved_candidates(value['coverage'],value['findings'])))",
       { coverage: loaded.coverage, findings: loaded.findings.findings },
-    );
+    ) as typeof loaded.coverage.deferred;
     const result = new ScanResult({
       ...loaded,
       scanDir,
