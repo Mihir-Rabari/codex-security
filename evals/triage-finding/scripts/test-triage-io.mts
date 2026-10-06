@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from "assert";
 import triageIo from "../assertions/triage-io.mts";
+import type { TriageFinding } from "../types.ts";
 
 function outputFor({ inputId, verdict }: { inputId: string; verdict: string }) {
   const stackRank = {
@@ -118,6 +119,67 @@ assertFails(
   /fixed.*not_actionable|negative/,
 );
 
+function findingFor(
+  inputId: string,
+  verdict: string,
+  rank: number | null,
+  rankQueue: string | null = verdict,
+) {
+  const finding: TriageFinding = JSON.parse(
+    outputFor({ inputId, verdict }).split("```json")[1].split("```")[0],
+  ).findings[0];
+  finding.exploitability_stack_rank = {
+    ...finding.exploitability_stack_rank,
+    rank,
+    rank_queue: rankQueue,
+  };
+  return finding;
+}
+
+const queueFindings = [
+  findingFor("confirmed-1", "confirmed", 1),
+  findingFor("review-1", "needs_review", 1),
+  findingFor("confirmed-2", "confirmed", 2),
+  findingFor("closed", "not_actionable", null, null),
+];
+const contextFor = (findings: TriageFinding[]) => ({
+  vars: {
+    expected_ids: findings.map((finding) => finding.input_id),
+    expected_source_types: findings.map((finding) => finding.source_type),
+    expected_verdicts: findings.map((finding) => finding.verdict),
+  },
+});
+const queueContext = contextFor(queueFindings);
+const queueOutput = (findings: TriageFinding[]) =>
+  JSON.stringify({ schema_version: "triage-finding/v0", findings });
+assertPasses(
+  "independent verdict queues",
+  queueOutput(queueFindings),
+  queueContext,
+);
+for (const [verdict, wrongQueue] of [
+  ["confirmed", "needs_review"],
+  ["needs_review", "confirmed"],
+  ["confirmed", null],
+] as const) {
+  const findings = [findingFor("mismatch", verdict, 1, wrongQueue)];
+  assertFails(
+    "queue matches verdict",
+    queueOutput(findings),
+    contextFor(findings),
+    /rank_queue must match verdict/,
+  );
+}
+for (const rank of [1, 3]) {
+  const findings = structuredClone(queueFindings);
+  findings[2].exploitability_stack_rank!.rank = rank;
+  assertFails(
+    "ranks remain unique and contiguous",
+    queueOutput(findings),
+    queueContext,
+    /ranks must be contiguous/,
+  );
+}
 assert.throws(() => triageIo("no json", { vars: {} }), {
   message: "Could not find a parseable triage-finding/v0 JSON block.",
 });
