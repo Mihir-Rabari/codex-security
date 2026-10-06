@@ -1188,6 +1188,7 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+    parent_requires_scope_filter = not parent_is_canonical
     if parent is not None:
         # Publisher-created copies retain the canonical coverage envelope on replay.
         parent_is_canonical |= parent["coverage"].get("documentType") == "codex-security.coverage"
@@ -1988,7 +1989,15 @@ def merge_saved_results(
                 ):
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
-                if recovered_finding(finding):
+                if recovered := recovered_finding(finding):
+                    if parent_requires_scope_filter and not any(
+                        path_within_scope(location["path"], included)
+                        for location in recovered["locations"]
+                        for included in binding["scope"]["includePaths"]
+                    ):
+                        warnings.append(f"Skipped out-of-scope finding from {relative}.")
+                        coverage["completeness"] = "partial"
+                        continue
                     key = _finding_key(finding)
                     position = candidate_position_key(finding, key)
                     finding_positions.setdefault(position, len(findings))
