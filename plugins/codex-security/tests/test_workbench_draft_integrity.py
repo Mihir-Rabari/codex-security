@@ -607,6 +607,45 @@ def test_worker_update_preserves_structured_historical_identity(
     assert retained["provenance"]["preservedIdentity"] == alias
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_exact_worker_location_precedes_a_canonical_candidate_alias(
+    tmp_path: Path, reverse: bool, retry: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
+    finding_path = scan_dir / "findings.json"
+    parent = json.loads(finding_path.read_text())
+    worker_id, result_path = accepted_standard_worker(state, home, scan_dir, scan_id)
+    original = parent["findings"][0]
+    original.update(identity={"anchor": "shared"}, summary="First independent location.")
+    original["severity"]["level"] = "low"
+    original["locations"][0].update(startLine=1, endLine=1)
+    original["provenance"].update(candidateId="shared-candidate", workerId=worker_id)
+    reduced = copy.deepcopy(original)
+    reduced["identity"] = {"anchor": "reviewed-first"}
+    reduced["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": original}]
+    second = copy.deepcopy(original)
+    second["locations"][0].update(startLine=2, endLine=2)
+    second["summary"] = "Second independent location."
+    parent["findings"] = [second, reduced] if reverse else [reduced, second]
+    finding_path.write_text(json.dumps(parent))
+    current = copy.deepcopy(second)
+    current["severity"]["level"] = "high"
+    current["summary"] = "Stronger second location."
+    worker = json.loads(result_path.read_text())
+    worker["findings"] = [current]
+    result_path.write_text(json.dumps(worker))
+
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+
+    findings = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"]
+    assert len(findings) == 2
+    assert {row["locations"][0]["startLine"]: row["summary"] for row in findings} == {
+        1: original["summary"],
+        2: current["summary"],
+    }
+
+
 @pytest.mark.parametrize("renamed", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize("history", ["sourceFindings", "previousFindings"])

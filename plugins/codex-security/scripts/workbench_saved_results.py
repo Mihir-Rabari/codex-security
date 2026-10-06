@@ -1953,6 +1953,7 @@ def merge_saved_results(
             if (
                 candidate_key in canonical_candidates
                 and represented_candidates[candidate_key] is not None
+                and represented.get(key) is None
             ):
                 mapped_key = represented_candidates[candidate_key]
                 historical_contents = represented_candidate_history.get(candidate_key, set())
