@@ -1254,11 +1254,28 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "retains model permission advice from the %s child",
-    async (command) => {
-      const detail =
-        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP";
+  test.each([
+    ...(["validate", "patch", "verify-fix"] as const).map(
+      (command) =>
+        [
+          command,
+          "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP",
+          "The selected model is unavailable for the current credentials.",
+        ] as const,
+    ),
+    [
+      "validate",
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "Authentication failed.",
+    ],
+    [
+      "validate",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      null,
+    ],
+  ] as const)(
+    "retains failure advice and diagnostics from the %s child: %s",
+    async (command, detail, advice) => {
       const stdout = capture();
       const stderr = capture();
       const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
@@ -1270,9 +1287,13 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        "The selected model is unavailable for the current credentials.",
-      );
+      if (advice === null) {
+        expect(stderr.text()).toBe(
+          `codex-security: ${command} failed with exit code 7.\n${detail}\n`,
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
       expect(stderr.text()).toContain(detail);
     },
   );
