@@ -867,6 +867,11 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        42,
+        "version local finding embedding inputs",
+        "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;",
+    ),
 )
 
 

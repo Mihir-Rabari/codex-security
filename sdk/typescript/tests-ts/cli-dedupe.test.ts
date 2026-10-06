@@ -200,15 +200,11 @@ test("dedupe help and schema expose concurrency and its default", async () => {
   });
 });
 
-test("dedupe requires both explicit inputs and reports SDK failures", async () => {
+test("dedupe requires a scan selector and reports SDK failures", async () => {
   const deps = dependencies();
   const deduplicateScan = mock(rejecting("Finding has not been indexed"));
   deps.deduplicateScan = deduplicateScan;
-  for (const flags of [
-    [],
-    ["--scan", "latest"],
-    ["--findings-url", "http://127.0.0.1:3000"],
-  ]) {
+  for (const flags of [[], ["--findings-url", "http://127.0.0.1:3000"]]) {
     expect(await runCapturedCli(main, ["dedupe", ...flags], deps)).not.toBe(0);
   }
   expect(deduplicateScan).not.toHaveBeenCalled();
@@ -217,6 +213,23 @@ test("dedupe requires both explicit inputs and reports SDK failures", async () =
   expect(await runCli(args, deps)).toBe(2);
   expect(stdout.text()).toBe("");
   expect(stderr.text()).toBe("codex-security: Finding has not been indexed\n");
+});
+
+test("dedupe defaults to local storage without a findings URL", async () => {
+  const deps = dependencies();
+  deps.deduplicateScan = async (scanId, options) => {
+    expect(scanId).toBe("latest");
+    expect(options.findingsUrl).toBeUndefined();
+    return {
+      scanId,
+      uniqueFindingIds: [],
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    };
+  };
+  expect(
+    await runCapturedCli(main, ["dedupe", "--scan", "latest", "--json"], deps),
+  ).toBe(0);
 });
 
 test("dedupe forwards cancellation and removes signal handlers", async () => {

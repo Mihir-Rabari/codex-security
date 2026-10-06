@@ -93,6 +93,7 @@ from workbench_findings import (
     store_dedupe_groups,
     store_findings,
 )
+from workbench_local_dedupe import local_dedupe
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
@@ -3531,6 +3532,8 @@ def main() -> None:
             result = store_findings(
                 connection, payload["entries"], now(), payload.get("repositoryId")
             )
+        elif args.command == "local-dedupe":
+            result = local_dedupe(connection, json.load(sys.stdin), now())
         elif args.command == "find-potential-duplicates":
             result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
         elif args.command == "store-dedupe-groups":

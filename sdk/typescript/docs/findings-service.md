@@ -274,23 +274,54 @@ order. The dashboard uses the same unauthenticated endpoint as the API.
 
 ## Deduplicate a scan
 
-Publish the scan first, or import its findings with `repositoryId`. Then run:
+Saved-scan deduplication uses local SQLite by default. No findings service or
+publication step is required:
+
+```bash
+codex-security dedupe --scan SCAN_ID --json
+```
+
+The CLI prepares missing or stale embeddings for the local repository's stored
+findings, searches them, and saves reviewed duplicate groups in the workbench
+database. Repeated runs reuse compatible vectors. Ordinary scans do not generate
+embeddings automatically. New embeddings still send complete finding JSON to
+the configured embeddings endpoint and require `OPENAI_API_KEY` or `CODEX_API_KEY`
+on the CLI host; ChatGPT login alone is insufficient. Cached vectors avoid those
+requests, but fresh duplicate reviews still need the configured model provider.
+
+Local scope uses the scan's `targetId`, which identifies its local checkout;
+separate clones are not automatically combined. `--all-repositories` searches
+the selected local database, including untagged imports. Historical scan IDs
+select logical findings using their current stored bodies; dedupe does not
+replace newer bodies with old scan artifacts. A local database does not include
+findings stored only in a separate Docker volume or remote service.
+
+To retain a centralized findings corpus, publish the scan first, or import its
+findings with `repositoryId`, and explicitly select the service:
 
 ```bash
 codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 ```
 
-Both `--findings-url` and a scan or workflow selector are required. `--scan`
+A scan or workflow selector is required. `--scan`
 accepts a full ID, unique prefix, or `latest` for the current repository. The
 scan must be complete, with sealed artifacts and a local checkout available.
 By default, candidates come from its manifest's `scan.target.targetId`. Use
-`--all-repositories` to search the whole service.
+`--all-repositories` to search the whole selected database or service. Explicit
+`--findings-url` retains the existing remote lookup and publication behavior.
+
+`--workflow-id` also works locally and saves review checkpoints and group-write
+retries without running a publication stage. A workflow remains bound to its
+original local database or remote URL; use a new workflow ID to switch backends
+or review changed inputs. Completed workflow results describe that run, not
+findings added afterward. Cancellation can retain completed embedding preparation
+for retry; it does not change sealed scan artifacts.
 
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";
 
 const result = await deduplicateScan("scan_example_001", {
-  findingsUrl: "http://127.0.0.1:3000",
+  // findingsUrl: "http://127.0.0.1:3000", // Optional remote corpus.
   concurrency: 8,
   // allRepositories: true,
   // signal: controller.signal,

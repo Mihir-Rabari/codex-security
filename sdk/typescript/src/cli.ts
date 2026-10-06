@@ -3958,7 +3958,7 @@ export async function main(
           .url()
           .optional()
           .describe(
-            "Findings API base URL; the scan's findings must already be indexed.",
+            "Optional Findings API base URL; omit to prepare embeddings and deduplicate in local SQLite.",
           ),
       }),
       output: z
@@ -3986,10 +3986,6 @@ export async function main(
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
-          if (options.findingsUrl === undefined)
-            throw new CodexSecurityError(
-              "Saved-scan deduplication requires --findings-url.",
-            );
           const scanId =
             options.scan ??
             (options.workflowId === undefined

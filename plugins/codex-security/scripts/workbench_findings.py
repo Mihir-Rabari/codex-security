@@ -46,7 +46,8 @@ def store_findings(
                     INSERT INTO finding_embeddings (finding_id, model, vector_json)
                     VALUES (?, ?, ?)
                     ON CONFLICT(finding_id) DO UPDATE SET
-                        model = excluded.model, vector_json = excluded.vector_json
+                        model = excluded.model, vector_json = excluded.vector_json,
+                        cache_key = NULL
                     """,
                     (
                         finding["findingId"],
@@ -85,11 +86,18 @@ def list_stored_findings(
 
 
 def find_potential_duplicates(
-    connection: sqlite3.Connection, finding_id: str, repository_id: str | None
+    connection: sqlite3.Connection,
+    finding_id: str,
+    repository_id: str | None,
+    expected_cache_keys: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Rank IDs and vectors in the requested scope before loading finding documents."""
     connection.execute("BEGIN")
     with connection:
+        if expected_cache_keys is not None and not embeddings_match(
+            connection, expected_cache_keys
+        ):
+            return {"error": "finding_changed"}
         if repository_id is None:
             source = "finding_embeddings AS embeddings"
             predicate = ""
@@ -119,6 +127,8 @@ def find_potential_duplicates(
         try:
             vector = normalized_vector(json.loads(anchor["vector_json"]))
             for row in rows:
+                if expected_cache_keys is not None and row["finding_id"] not in expected_cache_keys:
+                    continue
                 candidate = json.loads(row["vector_json"])
                 if len(candidate) != len(vector):
                     continue
@@ -147,13 +157,20 @@ def find_potential_duplicates(
 
 
 def store_dedupe_groups(
-    connection: sqlite3.Connection, groups: list[list[str]], timestamp: str
+    connection: sqlite3.Connection,
+    groups: list[list[str]],
+    timestamp: str,
+    expected_cache_keys: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Persist reviewed sets independently, including overlapping groups, in one transaction."""
     stored: dict[str, dict[str, Any]] = {}
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            if expected_cache_keys is not None and not embeddings_match(
+                connection, expected_cache_keys
+            ):
+                return {"error": "finding_changed"}
             for group in groups:
                 members = sorted(set(group))
                 # Membership, not input order, identifies a group on retries.
@@ -215,6 +232,19 @@ def normalized_vector(vector: list[float]) -> list[float]:
     if norm == 0 or not math.isfinite(norm):
         raise ValueError("A stored embedding cannot be compared.")
     return [value / norm for value in vector]
+
+
+def embeddings_match(connection: sqlite3.Connection, expected: dict[str, str]) -> bool:
+    return all(
+        (
+            row := connection.execute(
+                "SELECT cache_key FROM finding_embeddings WHERE finding_id = ?", (finding_id,)
+            ).fetchone()
+        )
+        is not None
+        and row["cache_key"] == cache_key
+        for finding_id, cache_key in expected.items()
+    )
 
 
 if __name__ == "__main__":

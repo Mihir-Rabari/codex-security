@@ -4,6 +4,7 @@ import {
   workbenchEnvironment,
   resolvePluginPython,
   runWorkbench,
+  codexSecurityStateDirectory,
 } from "../runtime.js";
 import {
   resolveCompletedScan,
@@ -32,12 +33,15 @@ import {
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
 import { normalizeRepository } from "../targets.js";
+import { LocalDeduplication } from "./local.js";
+import type { FindingEmbedder } from "../server/embeddings.js";
+import { CodexSecurityError } from "../errors.js";
 
 export interface DeduplicateScanOptions {
-  /** Resume the named local findings workflow, including custom publication. */
+  /** Resume the named findings workflow; remote mode includes custom publication. */
   workflowId?: string;
-  /** Findings API base URL. The scan's findings must already be indexed there. */
-  findingsUrl: string;
+  /** Optional Findings API. Omit to prepare and deduplicate findings in local SQLite. */
+  findingsUrl?: string;
   /** Search all repositories instead of the scan's targetId. Defaults to false. */
   allRepositories?: boolean;
   /** Shared concurrency limit for deduplication jobs. Defaults to 8. */
@@ -77,6 +81,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   fetch?: FindingsRequest;
+  embedder?: FindingEmbedder;
 };
 
 /** @internal */
@@ -158,26 +163,39 @@ async function deduplicateResolvedScan(
     },
   );
   const scanId = contract.manifest.scan.id;
-  const client = new FindingsClient(
-    options.findingsUrl,
-    options.signal,
-    dependencies.fetch,
-  );
   const scope: FindingSearchScope =
     options.allRepositories === true
       ? { allRepositories: true }
       : { repositoryId: contract.manifest.scan.target.targetId };
+  const workbench =
+    dependencies.runWorkbench === undefined
+      ? undefined
+      : (
+          _options: Parameters<typeof runWorkbench>[0],
+          args: readonly string[],
+          input?: string,
+        ) => dependencies.runWorkbench!(args, input);
+  const local =
+    options.findingsUrl === undefined
+      ? new LocalDeduplication(
+          environment,
+          scope,
+          options.signal,
+          workbench,
+          dependencies.embedder,
+        )
+      : undefined;
+  const client =
+    local ??
+    new FindingsClient(
+      options.findingsUrl!,
+      options.signal,
+      dependencies.fetch,
+    );
   const workflow =
     options.workflowId === undefined
       ? undefined
-      : new FindingWorkflow(
-          options.workflowId,
-          environment,
-          dependencies.runWorkbench === undefined
-            ? undefined
-            : (_options, args, input) =>
-                dependencies.runWorkbench!(args, input),
-        );
+      : new FindingWorkflow(options.workflowId, environment, workbench);
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
     await workflow.bind({
@@ -185,32 +203,50 @@ async function deduplicateResolvedScan(
       scanId,
       scanDir: scanDirectory,
       artifactDigest: workflowDigest(contract),
-      destination: workflowDestination(options.findingsUrl),
+      destination: local
+        ? `sqlite:${codexSecurityStateDirectory(environment)}`
+        : workflowDestination(options.findingsUrl!),
       scope,
     });
     await workflow.complete("scan", null);
-    await publishScanToCustomInternal(
-      scanDirectory,
-      {
-        findingsUrl: options.findingsUrl,
-        workflowId: options.workflowId,
-        expectedScanId: scanId,
-        signal: options.signal,
-      },
-      {
-        environment,
-        fetch: dependencies.fetch,
-        runWorkbench:
-          dependencies.runWorkbench === undefined
-            ? undefined
-            : (_options, args, input) =>
-                dependencies.runWorkbench!(args, input),
-      },
-    );
+    if (!local)
+      await publishScanToCustomInternal(
+        scanDirectory,
+        {
+          findingsUrl: options.findingsUrl!,
+          workflowId: options.workflowId,
+          expectedScanId: scanId,
+          signal: options.signal,
+        },
+        {
+          environment,
+          fetch: dependencies.fetch,
+          runWorkbench: workbench,
+        },
+      );
   }
   const dedupe = async (): Promise<DeduplicateScanResult> => {
+    if (local) {
+      await (
+        workflow ?? new FindingWorkflow(scanId, environment)
+      ).protectArtifacts(scanDirectory);
+      await local.prepare(
+        contract.findings.findings,
+        contract.manifest.scan.target.targetId,
+      );
+    }
     const saved = (await workflow?.get())?.stages.dedupe;
     if (saved?.pendingWrite) {
+      if (
+        local &&
+        (saved.pendingWrite.local?.inputDigest !== local.inputDigest ||
+          workflowDigest(saved.pendingWrite.local.source) !==
+            workflowDigest(await workflow!.sourceSnapshot(repositoryPath)))
+      ) {
+        throw new CodexSecurityError(
+          "Local deduplication inputs changed. Use a new workflow ID to review them.",
+        );
+      }
       await client.storeDedupeGroups(saved.pendingWrite.groups);
       return saved.result as DeduplicateScanResult;
     }
@@ -222,11 +258,14 @@ async function deduplicateResolvedScan(
         options.signal,
         repositoryPath,
       );
+    const source = workflow
+      ? await workflow.sourceSnapshot(repositoryPath)
+      : undefined;
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(
           workflow,
           runner,
-          await workflow.sourceSnapshot(repositoryPath),
+          source!,
           scope,
           await reviewSettingsDigest(environment),
         )
@@ -234,7 +273,9 @@ async function deduplicateResolvedScan(
     const deduplicator = new FindingDeduplicator(
       {
         potentialDuplicates: (findingId) =>
-          client.potentialDuplicates(findingId, scope),
+          local
+            ? local.potentialDuplicates(findingId)
+            : (client as FindingsClient).potentialDuplicates(findingId, scope),
       },
       dependencies.reviewer ??
         new CodexDeduplicationReviewer(checkpoints ?? runner),
@@ -247,7 +288,12 @@ async function deduplicateResolvedScan(
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
     const result: DeduplicateScanResult = { scanId, ...reviewed };
-    await workflow?.prepareDedupe(result, { groups: result.duplicateGroups });
+    await workflow?.prepareDedupe(result, {
+      groups: result.duplicateGroups,
+      ...(local
+        ? { local: { inputDigest: local.inputDigest, source: source! } }
+        : {}),
+    });
     await client.storeDedupeGroups(result.duplicateGroups);
     return result;
   };

@@ -493,6 +493,13 @@ verification, owner suggestions, severity classification, and scan matching.
 Matching and severity classification default to Codex's configured model and
 `medium` effort. `dedupe` has separate screening and review models.
 
+`codex-security dedupe --scan SCAN_ID --json` prepares embeddings and deduplicates
+directly in local SQLite. An optional `--findings-url URL` selects an existing
+findings service instead. Local mode needs an embedding API key for missing or
+stale vectors and a model provider for fresh reviews; it does not publish to
+Cloud. See [deduplication](findings-service.md#deduplicate-a-scan) for scope,
+credentials, and workflow resume behavior.
+
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
 rejected, including a `--model` or `--effort` flag plus its native equivalent.
@@ -542,7 +549,7 @@ For filesystem and approval behavior, see the
 | `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.          |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default publication destination.                                   |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Linear personal API key.                                           |
-| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Findings service embeddings endpoint.                              |
+| `CODEX_SECURITY_EMBEDDINGS_URL`                                             | Local dedupe and findings service embeddings endpoint.             |
 | `GH_HOST`                                                                   | GitHub Enterprise host for bulk discovery.                         |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices.                                |
 | `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Update registry, in precedence order.                              |

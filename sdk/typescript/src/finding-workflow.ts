@@ -31,9 +31,14 @@ export interface WorkflowState extends WorkflowBinding {
       status: "pending" | "running" | "failed" | "completed";
       result?: unknown;
       error?: string;
-      pendingWrite?: { groups: string[][] };
+      pendingWrite?: DedupePendingWrite;
     }
   >;
+}
+
+export interface DedupePendingWrite {
+  groups: string[][];
+  local?: { inputDigest: string; source: JsonObject };
 }
 
 export function workflowDigest(value: unknown): string {
@@ -152,7 +157,7 @@ export class FindingWorkflow {
 
   async prepareDedupe(
     result: unknown,
-    pendingWrite: { groups: string[][] },
+    pendingWrite: DedupePendingWrite,
   ): Promise<void> {
     await this.command({
       action: "prepare-dedupe",
