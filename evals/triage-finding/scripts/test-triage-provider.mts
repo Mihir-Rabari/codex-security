@@ -59,7 +59,9 @@ test(
   "provider preserves proxies and rebinds saved evaluations to fresh runtimes",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-"));
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-")),
+    );
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const capture = path.join(root, "captures.jsonl");
     const fakeCodex = path.join(root, "codex");
@@ -427,8 +429,8 @@ test(
   "provider resolves each call's Node template without leaking sibling configuration",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), "triage-provider-vars-"),
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "triage-provider-vars-")),
     );
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const nodes = [
@@ -614,8 +616,8 @@ test(
   "SAST provider survives persisted retry, resume, and viewer replay",
   { skip: process.platform === "win32", timeout: 120000 },
   async (t) => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), "sast-provider-replay-"),
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
     );
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const capture = path.join(root, "captures.jsonl");
