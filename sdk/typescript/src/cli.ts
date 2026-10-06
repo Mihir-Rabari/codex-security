@@ -7167,6 +7167,28 @@ async function patchCommandContext(
     if (dependencies.environment[name] !== undefined)
       environment[name] = await gitPath(["--path-format=absolute", ...args]);
   }
+  if (
+    environmentValue(
+      dependencies.environment,
+      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ) !== undefined
+  ) {
+    const objects = await dependencies.runRepositoryCommand(
+      "git",
+      ["count-objects", "-v"],
+      repository,
+      { trim: false, directory },
+    );
+    // Git resolves and C-quotes alternate paths in the original command context.
+    environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = objects
+      .split("\n")
+      .filter((line) => line.startsWith("alternate: "))
+      .map((line) => {
+        const path = line.slice("alternate: ".length);
+        return path.startsWith('"') ? path : JSON.stringify(path);
+      })
+      .join(delimiter);
+  }
   const physicalDirectory = await realpath(directory);
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
