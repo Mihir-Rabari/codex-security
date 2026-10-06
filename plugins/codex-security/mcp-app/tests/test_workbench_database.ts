@@ -13,6 +13,17 @@ import type * as Migrations from "../src/workbench/migrations.ts";
 
 const { openWorkbenchDatabase, databaseInfo } = (await importSource(
   "src/workbench/database.ts",
+  {
+    define: {
+      // Native bindings are installed beside the generated server bundle.
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
 )) as typeof Database;
 const { applyMigrations, migrations } = (await importSource(
   "src/workbench/migrations.ts",
@@ -598,20 +609,44 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       promptDigest: "prompt",
       contractDigest: "contract",
     };
-    const stateJson = JSON.stringify(state).replace(
-      '"findings":2',
-      '"findings":2,"opaqueId":9007199254740993',
+    const workflowIds = ["workflow", "workflow\0one", "workflow\0two"];
+    const reviewKeys = ["review", "review\0one", "review\0two"];
+    const states = workflowIds.map((_, index) =>
+      JSON.stringify({
+        ...state,
+        repositoryPath: `${state.repositoryPath}/${index}`,
+        stages: {
+          ...state.stages,
+          scan: { ...state.stages.scan, result: { findings: index } },
+        },
+      }).replace(
+        `"findings":${index}`,
+        `"findings":${index},"opaqueId":9007199254740993`,
+      ),
     );
-    database
-      .prepare(
-        "INSERT INTO finding_workflows VALUES ('workflow', ?, 'created', 'updated')",
-      )
-      .run(stateJson);
-    database
-      .prepare(
-        "INSERT INTO finding_workflow_reviews VALUES ('workflow', 'review', ?, '{\"retained\":true}', 'created')",
-      )
-      .run(JSON.stringify(binding));
+    for (const [index, id] of workflowIds.entries()) {
+      database
+        .prepare(
+          "INSERT INTO finding_workflows (rowid, id, state_json, created_at, updated_at) VALUES (?, ?, ?, 'created', 'updated')",
+        )
+        .run(9007199254740993n + BigInt(index), id, states[index]);
+      for (const [keyIndex, key] of reviewKeys.entries()) {
+        database
+          .prepare(
+            "INSERT INTO finding_workflow_reviews (rowid, workflow_id, review_key, binding_json, result_json, created_at) VALUES (?, ?, ?, ?, ?, 'created')",
+          )
+          .run(
+            9007199254740993n + BigInt(index * reviewKeys.length + keyIndex),
+            id,
+            key,
+            JSON.stringify({
+              ...binding,
+              promptDigest: `prompt-${index}-${keyIndex}`,
+            }),
+            JSON.stringify({ retained: `${index}-${keyIndex}` }),
+          );
+      }
+    }
     const before = schema(database);
     assert.throws(
       () =>
@@ -626,35 +661,52 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
       /missing_table/u,
     );
     assert.deepEqual(schema(database), before);
-    assert.equal(
-      database.prepare("SELECT state_json FROM finding_workflows").get()
-        ?.state_json,
-      stateJson,
-    );
+    for (const [index, id] of workflowIds.entries()) {
+      assert.equal(
+        database
+          .prepare("SELECT state_json FROM finding_workflows WHERE id = ?")
+          .get(id)?.state_json,
+        states[index],
+      );
+    }
     applyMigrations(database);
-    const workflow = database.prepare("SELECT * FROM finding_workflows").get()!;
-    assert.equal(workflow.repository_path, state.repositoryPath);
-    assert.equal(workflow.scope_all_repositories, 1);
-    assert.equal(workflow.publish_error, "diagnostic");
-    const resultsJson = String(workflow.results_json);
-    assert.match(resultsJson, /"opaqueId":\s*9007199254740993/u);
-    assert.deepEqual(
-      JSON.parse(
-        resultsJson.replace(/,\s*"opaqueId":\s*9007199254740993/u, ""),
-      ),
-      {
-        scan: { findings: 2 },
-        dedupePendingWrite: { digest: "pending" },
-      },
-    );
-    const review = database
-      .prepare("SELECT * FROM finding_workflow_reviews")
-      .get()!;
-    assert.equal(review.settings_digest, "settings");
-    assert.equal(review.prompt_digest, "prompt");
-    assert.equal(review.source_revision, "revision");
-    assert.equal(review.scope_all_repositories, 0);
-    assert.equal(review.result_json, '{"retained":true}');
+    for (const [index, id] of workflowIds.entries()) {
+      const workflow = database
+        .prepare("SELECT * FROM finding_workflows WHERE id = ?")
+        .get(id)!;
+      assert.equal(
+        workflow.repository_path,
+        `${state.repositoryPath}/${index}`,
+      );
+      assert.equal(workflow.scope_all_repositories, 1);
+      assert.equal(workflow.publish_error, "diagnostic");
+      const resultsJson = String(workflow.results_json);
+      assert.match(resultsJson, /"opaqueId":\s*9007199254740993/u);
+      assert.deepEqual(
+        JSON.parse(
+          resultsJson.replace(/,\s*"opaqueId":\s*9007199254740993/u, ""),
+        ),
+        {
+          scan: { findings: index },
+          dedupePendingWrite: { digest: "pending" },
+        },
+      );
+      for (const [keyIndex, key] of reviewKeys.entries()) {
+        const review = database
+          .prepare(
+            "SELECT * FROM finding_workflow_reviews WHERE workflow_id = ? AND review_key = ?",
+          )
+          .get(id, key)!;
+        assert.equal(review.settings_digest, "settings");
+        assert.equal(review.prompt_digest, `prompt-${index}-${keyIndex}`);
+        assert.equal(review.source_revision, "revision");
+        assert.equal(review.scope_all_repositories, 0);
+        assert.equal(
+          review.result_json,
+          JSON.stringify({ retained: `${index}-${keyIndex}` }),
+        );
+      }
+    }
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   } finally {
     database.close();

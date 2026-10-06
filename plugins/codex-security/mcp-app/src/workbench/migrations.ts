@@ -371,10 +371,12 @@ function migrateWorkflowColumns(database: DatabaseSync): void {
     repository_path = ?, scan_request_digest = ?, scan_id = ?, scan_dir = ?,
     artifact_digest = ?, destination = ?, scope_repository_id = ?, scope_all_repositories = ?,
     scan_status = ?, scan_error = ?, publish_status = ?, publish_error = ?,
-    dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE id = ?`);
-  for (const row of database
-    .prepare("SELECT id, results_json FROM finding_workflows")
-    .all()) {
+    dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE rowid = ?`);
+  const rows = database.prepare(
+    "SELECT rowid, results_json FROM finding_workflows",
+  );
+  rows.setReadBigInts(true);
+  for (const row of rows.all()) {
     const state = parseJson(String(row.results_json)) as {
       repositoryPath?: string;
       scanRequestDigest?: string;
@@ -417,7 +419,7 @@ function migrateWorkflowColumns(database: DatabaseSync): void {
       stages.dedupe.status,
       stages.dedupe.error ?? null,
       stringifyJson(results),
-      row.id,
+      row.rowid,
     );
   }
 }
@@ -427,12 +429,12 @@ function migrateReviewColumns(database: DatabaseSync): void {
     database.prepare(`UPDATE finding_workflow_reviews SET review_contract_version = ?, codex_version = ?,
     source_repository_path = ?, source_revision = ?, source_refs_digest = ?, source_content_digest = ?,
     scope_repository_id = ?, scope_all_repositories = ?, model = ?, effort = ?, settings_digest = ?,
-    prompt_digest = ?, contract_digest = ? WHERE workflow_id = ? AND review_key = ?`);
-  for (const row of database
-    .prepare(
-      "SELECT workflow_id, review_key, prompt_digest FROM finding_workflow_reviews",
-    )
-    .all()) {
+    prompt_digest = ?, contract_digest = ? WHERE rowid = ?`);
+  const rows = database.prepare(
+    "SELECT rowid, prompt_digest FROM finding_workflow_reviews",
+  );
+  rows.setReadBigInts(true);
+  for (const row of rows.all()) {
     const binding = parseJson(String(row.prompt_digest)) as {
       version: number;
       codexVersion: string;
@@ -465,8 +467,7 @@ function migrateReviewColumns(database: DatabaseSync): void {
       binding.settingsDigest ?? null,
       binding.promptDigest,
       binding.contractDigest,
-      row.workflow_id,
-      row.review_key,
+      row.rowid,
     );
   }
 }

@@ -140,8 +140,11 @@ export function windowsFileSystem(native: WindowsBinding) {
     }));
   }
 
-  function mkdir(path: Buffer): void {
-    check(native.createWindowsDirectories(operationPath(path)), path);
+  function mkdir(path: Buffer, privateAccess = false): void {
+    check(
+      native.createWindowsDirectories(operationPath(path), privateAccess),
+      path,
+    );
   }
 
   function readInto(path: Buffer, buffer: Buffer): number {

@@ -13,7 +13,14 @@ use std::{
     ptr::{copy_nonoverlapping, null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, SetLastError, ERROR_INVALID_HANDLE, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        GetLastError, LocalFree, SetLastError, ERROR_INVALID_HANDLE, ERROR_PATH_NOT_FOUND, HANDLE,
+        INVALID_HANDLE_VALUE,
+    },
+    Security::{
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        SECURITY_ATTRIBUTES,
+    },
     Storage::FileSystem::*,
 };
 
@@ -271,8 +278,63 @@ pub fn open_windows_file(
 }
 
 #[napi]
-pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
-    Ok(io_status(fs::create_dir_all(os_string(path)?)))
+pub fn create_windows_directories(path: Buffer, private_access: Option<bool>) -> napi::Result<u32> {
+    let path = os_string(path)?;
+    if private_access != Some(true) {
+        return Ok(io_status(fs::create_dir_all(path)));
+    }
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        ..Default::default()
+    };
+    // Protect new directories from inherited grants while retaining owner, SYSTEM and admin access.
+    let descriptor = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let error = status(unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor.as_ptr(),
+            SDDL_REVISION_1,
+            &mut attributes.lpSecurityDescriptor,
+            null_mut(),
+        )
+    });
+    if error != 0 {
+        return Ok(error);
+    }
+    let error = create_private_directories(std::path::Path::new(&path), &attributes);
+    unsafe { LocalFree(attributes.lpSecurityDescriptor) };
+    Ok(error)
+}
+
+fn create_private_directories(path: &std::path::Path, attributes: &SECURITY_ATTRIBUTES) -> u32 {
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let create = || status(unsafe { CreateDirectoryW(wide.as_ptr(), attributes) });
+    let error = create();
+    if error == 0 || path.is_dir() {
+        return 0;
+    }
+    if error != ERROR_PATH_NOT_FOUND {
+        return error;
+    }
+    let Some(parent) = path.parent().filter(|parent| *parent != path) else {
+        return error;
+    };
+    let error = create_private_directories(parent, attributes);
+    if error != 0 {
+        return error;
+    }
+    let error = create();
+    if error != 0 && path.is_dir() {
+        0
+    } else {
+        error
+    }
 }
 
 #[napi]

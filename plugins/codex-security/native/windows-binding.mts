@@ -36,7 +36,7 @@ export interface WindowsBinding {
     disposition: number,
     flags: number,
   ): { error: number; handle?: WindowsHandle | null };
-  createWindowsDirectories(path: Buffer): number;
+  createWindowsDirectories(path: Buffer, privateAccess?: boolean): number;
 }
 
 export { windowsFlags } from "./windows-flags.mjs";
