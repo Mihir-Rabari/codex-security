@@ -5,6 +5,7 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -4106,6 +4107,8 @@ describe("patch publication integrity", () => {
     "nested shared primary objects",
     "nested relative primary objects",
     "nested quoted primary objects",
+    "nested missing local primary objects",
+    "nested missing local relative primary objects",
     "nested alternate objects",
     "nested common",
     "nested relative alternates",
@@ -4174,7 +4177,8 @@ describe("patch publication integrity", () => {
         primaryObjects = join(pool, "objects");
         const gitDirectory = inner("rev-parse", "--absolute-git-dir");
         await rename(join(gitDirectory, "objects"), primaryObjects);
-        await mkdir(join(gitDirectory, "objects"));
+        if (!kind.includes("missing local"))
+          await mkdir(join(gitDirectory, "objects"));
         await cp(join(directory, ".git", "objects"), primaryObjects, {
           recursive: true,
           force: false,
@@ -4244,6 +4248,10 @@ describe("patch publication integrity", () => {
         },
       },
     );
+    if (kind.includes("missing local"))
+      expect(
+        existsSync(join(selectedDirectory, "nested", ".git", "objects")),
+      ).toBe(false);
     if (primaryObjects !== undefined) {
       expect(
         hash("sha256", await readFile(join(directory, ".git", "index")), "hex"),

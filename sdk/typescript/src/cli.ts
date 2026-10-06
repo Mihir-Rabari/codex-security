@@ -7287,7 +7287,11 @@ async function changedPatchFiles(
     const head = heads.get(directory);
     if (head === undefined) continue;
     const gitDependencies = directory
-      ? await nestedPatchGitDependencies(repository, dependencies)
+      ? await nestedPatchGitDependencies(
+          repository,
+          dependencies,
+          join(repository, directory),
+        )
       : dependencies;
     const output = await gitDependencies.runRepositoryCommand(
       "git",
@@ -7355,10 +7359,14 @@ async function snapshotGitPatchState(
       }
       await enclosingGitWorktreeRoot(checkout, undefined, {
         requireIfPresent: true,
+        objectDirectory: await configuredPatchObjectDirectory(
+          repository,
+          dependencies,
+        ),
       });
     }
     const gitDependencies = directory
-      ? await nestedPatchGitDependencies(repository, dependencies)
+      ? await nestedPatchGitDependencies(repository, dependencies, checkout)
       : dependencies;
     const tree = await snapshotPatchTree(checkout, gitDependencies);
     trees.set(directory, tree);
@@ -7379,26 +7387,36 @@ async function snapshotGitPatchState(
   return { trees };
 }
 
+async function configuredPatchObjectDirectory(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  return environmentValue(dependencies.environment, "GIT_OBJECT_DIRECTORY") ===
+    undefined
+    ? undefined
+    : (
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+          repository,
+          { trim: false },
+        )
+      ).replace(/\n$/u, "");
+}
+
 async function nestedPatchGitDependencies(
   repository: string,
   dependencies: CliDependencies,
+  checkout: string,
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
   // Keep relative alternate-object paths in the selected repository's Git context.
   const directory = await patchRepositoryRoot(repository, dependencies);
-  const objectDirectory =
-    environmentValue(dependencies.environment, "GIT_OBJECT_DIRECTORY") ===
-    undefined
-      ? undefined
-      : (
-          await dependencies.runRepositoryCommand(
-            "git",
-            ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-            repository,
-            { trim: false },
-          )
-        ).replace(/\n$/u, "");
+  const objectDirectory = await configuredPatchObjectDirectory(
+    repository,
+    dependencies,
+  );
   const alternateObjects =
     objectDirectory === undefined
       ? undefined
@@ -7421,7 +7439,8 @@ async function nestedPatchGitDependencies(
                 )!,
               ]),
         ].join(delimiter);
-  return {
+  let nestedObjectDirectory: string | undefined;
+  const nested: CliDependencies = {
     ...dependencies,
     runRepositoryCommand: (command, args, checkout, options) =>
       dependencies.runRepositoryCommand(
@@ -7449,6 +7468,7 @@ async function nestedPatchGitDependencies(
                 )
                 .map((name) => [name, undefined]),
             ),
+            GIT_OBJECT_DIRECTORY: nestedObjectDirectory,
             ...(alternateObjects === undefined
               ? {}
               : { GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjects }),
@@ -7457,6 +7477,20 @@ async function nestedPatchGitDependencies(
         },
       ),
   };
+  if (objectDirectory !== undefined) {
+    const commonDirectory = (
+      await nested.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        checkout,
+        { trim: false, environment: { GIT_OBJECT_DIRECTORY: objectDirectory } },
+      )
+    ).replace(/\n$/u, "");
+    // Git accepts configured primary storage even without a local objects directory.
+    if (!existsSync(join(commonDirectory, "objects")))
+      nestedObjectDirectory = objectDirectory;
+  }
+  return nested;
 }
 
 // Literal patch inputs also work in directories without Git metadata.
