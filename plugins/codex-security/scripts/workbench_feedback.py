@@ -17,7 +17,7 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
 )
 from workbench_native_indexes import _indexed_findings
-from workbench_target_state import RepositoryIdentityCache, scan_repository_group
+from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
 
@@ -28,9 +28,9 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
 
     indexed_findings = {
-        (scan_repository_group(finding), finding_id): finding
+        occurrence_id: finding
         for finding in _indexed_findings(connection, identities=identities, scan_scope=scope)
-        for finding_id in finding["matched_finding_ids"]
+        for occurrence_id in finding["matched_occurrence_ids"]
     }
     source_filter, source_values = scope.sql(
         "source_scans", supports_generation=identities.supports_generation
@@ -41,7 +41,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     rows = connection.execute(
         f"""
         WITH ranked_decisions AS (
-            SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
+            SELECT occurrences.id AS occurrence_id, findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
                 occurrences.summary, COALESCE(triage.status, 'open') AS triage_status,
                 triage.close_reason, triage.note,
@@ -88,7 +88,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     false_positives = []
     reviewed_components: set[str] = set()
     for row in rows:
-        finding = indexed_findings.get((scan_repository_group(row), row["finding_id"]))
+        finding = indexed_findings.get(row["occurrence_id"])
         if (
             finding is None
             or finding["status"] != "closed"

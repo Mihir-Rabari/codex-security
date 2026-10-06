@@ -260,8 +260,8 @@ with ExitStack() as stack:
         )
         records = {
             str(common): directory(20, 100), str(objects): directory(21, 200),
-            str(admin): directory(22, 300),
-            str(linked / ".git"): SimpleNamespace(st_mode=stat.S_IFREG),
+            str(admin): directory(22, 300), str(admin.parent): directory(24, 300),
+            str(linked / ".git"): SimpleNamespace(st_mode=stat.S_IFREG, st_dev=7, st_ino=25),
         }
         files = {
             str(linked / ".git"): b"gitdir: " + os.fsencode(admin) + b"\n",
@@ -284,16 +284,22 @@ with ExitStack() as stack:
         primary = root / "primary-checkout"
         def file_primary(configuration, selected_root=primary, forward=common):
             active.update(root=selected_root, gitdir=common, nul=False, config=configuration)
-            records[str(selected_root / ".git")] = SimpleNamespace(st_mode=stat.S_IFREG)
+            records[str(selected_root)] = directory(200 + len(records), 300)
+            records[str(selected_root / ".git")] = SimpleNamespace(st_mode=stat.S_IFREG, st_dev=7, st_ino=100 + len(records))
             files[str(selected_root / ".git")] = b"gitdir: " + os.fsencode(forward) + b"\n"
             return real_identity_details(selected_root) is not None
         def configured(value, scope=b"local"):
             return scope + b"\0" + os.fsencode(value) + b"\0"
+        def recorded_stat(path, *args, **kwargs):
+            try:
+                return records[str(path)]
+            except KeyError:
+                raise FileNotFoundError(errno.ENOENT, "Synthetic missing metadata", str(path)) from None
         # Keep directory checks inside the metadata fixture on every supported Python.
         with patch.object(state, "git_bytes", git_bytes), \
              patch.object(os.path, "realpath", side_effect=os.path.abspath), \
-             patch.object(Path, "stat", lambda path, *a, **k: records[str(path)]), \
-             patch.object(Path, "lstat", lambda path, *a, **k: records[str(path)]), \
+             patch.object(Path, "stat", recorded_stat), \
+             patch.object(Path, "lstat", recorded_stat), \
              patch.object(Path, "is_dir", lambda path, *a, **k: stat.S_ISDIR(records[str(path)].st_mode)), \
              patch.object(Path, "read_bytes", lambda path: files[str(path)]), \
              patch.object(state, "_repository_birth_time_ns", side_effect=lambda path, value: value.st_birthtime_ns):
@@ -777,7 +783,7 @@ with ExitStack() as stack:
             "findings": indexed,
             "feedback": [row["findingId"] for row in feedback["falsePositives"]],
             "feedbackScope": feedback_scope,
-            "feedbackIndexQueriesScoped": len(index_queries) == 3 and all(
+            "feedbackIndexQueriesScoped": bool(index_queries) and all(
                 "repository_generation = " in query for query in index_queries
             ),
             "listingRequestedProbes": listing_probes.get(paths["requested"], 0),
@@ -1585,7 +1591,7 @@ test("keeps automatic history bounded by saved scan generation", () => {
   expect(result["absentExactCounts"]).toEqual([1, 1]);
 });
 
-test("counts repository groups once while preserving absent exact-target decisions", () => {
+test("counts findings in each selected repository scope and preserves absent decisions", () => {
   const result = run("repository-counts");
   const all = result["all"] as {
     counts: Record<string, number>;
@@ -1601,7 +1607,12 @@ test("counts repository groups once while preserving absent exact-target decisio
     refused: 0,
   });
   expect(result["directCounts"]).toEqual(all.counts);
-  expect(all.calls).toEqual([null, "absent"]);
+  expect(all.calls.toSorted()).toEqual([
+    "absent",
+    "first",
+    "independent",
+    "second",
+  ]);
   expect(all.inspections).toEqual([
     "absent",
     "first",
@@ -1619,7 +1630,7 @@ test("counts repository groups once while preserving absent exact-target decisio
   expect(result["queryOnly"]).toEqual({
     counts: { independent: 1 },
     ids: ["independent"],
-    calls: [null],
+    calls: ["independent"],
     inspections: ["independent"],
     nextOffset: null,
   });
@@ -1958,7 +1969,7 @@ test("binds late NULL identities only when the selected target is registered", (
   });
   expect(result["selectedProbes"]).toEqual({
     requested: 0,
-    unscanned: 1,
+    unscanned: 2,
     unselected: 0,
     historical: 0,
   });

@@ -1484,7 +1484,10 @@ def test_history_repair_matches_legacy_generation_in_owned_checkout(tmp_path: Pa
     assert pending["batches"][0]["beforeScans"][0]["scanId"] == first["scanId"]
 
 
-def test_history_repair_keeps_triage_across_legacy_match(tmp_path: Path) -> None:
+@pytest.mark.parametrize("remove_checkout", (False, True))
+def test_history_repair_keeps_triage_across_legacy_match(
+    tmp_path: Path, remove_checkout: bool
+) -> None:
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
@@ -1522,6 +1525,17 @@ def test_history_repair_keeps_triage_across_legacy_match(tmp_path: Path) -> None
         "--note",
         "The synthetic finding is already prevented by its checked guard.",
     )
+    current = create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, finding=False
+    )
+    feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])
+    assert len(feedback["falsePositives"]) == 1
+    assert (
+        feedback["falsePositives"][0]["reason"]
+        == "The synthetic finding is already prevented by its checked guard."
+    )
+    if remove_checkout:
+        repository.rename(tmp_path / "archived-checkout")
     rows = run_workbench(state, "list-global-findings", "--repository", str(repository))["findings"]
     assert len(rows) == 1
     assert rows[0]["status"] == "closed"
@@ -1617,3 +1631,71 @@ def test_history_repair_rebinds_only_unscanned_workspace(tmp_path: Path) -> None
     assert new[0] == old[0]
     assert new[1] != old[1]
     assert created["targetMetadata"]["isGit"] is True
+
+
+def test_history_repair_counts_only_each_worktrees_legacy_findings(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    legacy = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (legacy["scanId"],)
+        )
+    create_cli_scan(state, tmp_path / "results", linked, target_revision=revision, finding=False)
+    counts = {
+        row["targetPath"]: row["openFindingsCount"]
+        for row in run_workbench(state, "list-repositories")["repositories"]
+    }
+    assert (
+        counts[str(repository)]
+        == len(
+            run_workbench(state, "list-global-findings", "--repository", str(repository))[
+                "findings"
+            ]
+        )
+        == 1
+    )
+    assert (
+        counts[str(linked)]
+        == len(
+            run_workbench(state, "list-global-findings", "--repository", str(linked))["findings"]
+        )
+        == 0
+    )
+
+
+def test_history_repair_rebinds_unscanned_directory(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    workspace = str(uuid.uuid4())
+    run_workbench(
+        state, "create-workspace", "--workspace-id", workspace, "--target-path", str(repository)
+    )
+    (repository / ".git").rename(tmp_path / "previous-git")
+    run_workbench(
+        state,
+        "save-workspace",
+        "--workspace-id",
+        workspace,
+        "--target-path",
+        str(repository),
+        "--scope",
+        ".",
+        "--mode",
+        "standard",
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT repository_identity FROM security_targets WHERE current_path = ?",
+                (str(repository),),
+            ).fetchone()[0]
+            is None
+        )
+    create_cli_scan(state, tmp_path / "results", repository)

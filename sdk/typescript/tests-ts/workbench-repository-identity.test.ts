@@ -803,9 +803,7 @@ describe("durable workbench repository identities", () => {
       "refusing to reuse its target",
     );
     expect(result["matchingError"]).toContain("refusing to reuse its target");
-    expect(result["emptyTargetError"]).toContain(
-      "refusing to reuse its target",
-    );
+    expect(result["emptyTargetError"]).toBeNull();
     expect(result["replacementScanCreated"]).toBe(false);
     expect(result["explicitCloneError"]).toContain(
       "refusing to reuse its target",

@@ -626,13 +626,6 @@ class RepositoryIdentityCache:
     def scope_for_path(self, target_path: str) -> RepositoryScanScope:
         return self._scope_for_state(self.for_path(target_path))
 
-    def group_for_scan(self, scan: sqlite3.Row | dict) -> tuple[str, str]:
-        if scan_repository_generation(scan) is None:
-            scope = self.scope(scan["target_id"])
-            if scope.available and scope.generation is not None and scope.contains(scan):
-                return ("repository", scope.generation)
-        return scan_repository_group(scan)
-
     def scope_for_scan(self, scan: sqlite3.Row | dict) -> RepositoryScanScope:
         requested = self.for_row(scan)
         generation = scan_repository_generation(scan)
@@ -766,7 +759,7 @@ def _bind_unscanned_repository_identity(
     connection: sqlite3.Connection,
     target_id: str,
     target_path: str,
-    identity: str,
+    identity: str | None,
     *,
     previous_identity: str | None = None,
 ) -> bool:
@@ -871,11 +864,7 @@ def register_security_target(
     state = _inspect_repository_target(
         connection, target_id, target_path, existing["repository_identity"]
     )
-    if (
-        not state.has_historical_scans
-        and state.live_identity is not None
-        and state.live_identity != existing["repository_identity"]
-    ):
+    if not state.has_historical_scans and state.live_identity != existing["repository_identity"]:
         _bind_unscanned_repository_identity(
             connection,
             target_id,
