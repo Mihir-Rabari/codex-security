@@ -382,7 +382,10 @@ function validateCanonicalContract(
 ): void {
   const requireText = (values: Record<string, string | undefined>) => {
     for (const [context, value] of Object.entries(values)) {
-      if (value !== undefined && !value.trim())
+      if (
+        value !== undefined &&
+        /^[\p{White_Space}\u001c-\u001f]*$/u.test(value)
+      )
         throw new ContractValidationError(
           `${context}: expected a non-empty string.`,
         );
@@ -480,24 +483,22 @@ function validateCanonicalContract(
     });
     if (occurrenceIds.has(finding.occurrenceId))
       throw new ContractValidationError(
-        `${context}: duplicate occurrence identity; use identity.instance to split siblings.`,
+        `${context}: duplicate finding occurrence identity; use identity.instance to split siblings.`,
       );
     occurrenceIds.add(finding.occurrenceId);
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
-      if (
-        location.endLine !== undefined &&
-        location.endLine < location.startLine
-      )
-        throw new ContractValidationError(
-          `${locationContext}.endLine: expected an integer >= startLine.`,
-        );
       try {
         safeRelativePath(location.path, `${locationContext}.path`);
       } catch (error) {
         throw new ContractValidationError(
           `${locationContext}.path: expected a safe repository-relative POSIX path.`,
           { cause: error },
+        );
+      }
+      if ((location.endLine ?? location.startLine) < location.startLine) {
+        throw new ContractValidationError(
+          `${locationContext}.endLine: expected an integer >= startLine.`,
         );
       }
     }
@@ -971,9 +972,7 @@ async function readJson(
 function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-      bytes,
-    );
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
     throw new ContractValidationError(`${path}: unreadable JSON document.`, {
       cause: error,

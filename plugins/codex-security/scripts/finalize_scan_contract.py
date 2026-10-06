@@ -702,7 +702,7 @@ def _read_scan_local_json_with_metadata(
             raw = handle.read()
             metadata = os.fstat(handle.fileno())
         try:
-            payload = _loads_json(raw.decode("utf-8"))
+            payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise ContractError(f"{context}: invalid JSON: {exc}") from exc
         if not isinstance(payload, dict):
