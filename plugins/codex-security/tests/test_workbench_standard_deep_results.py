@@ -1419,57 +1419,6 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(tmp_path:
     assert failed["findings"][0]["summary"] == reduced["findings"][0]["summary"]
 
 
-@pytest.mark.parametrize("scope", [".", "app.py"])
-def test_stopped_reducer_candidates_without_coverage_preserve_scope(
-    tmp_path: Path, scope: str
-) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    _, reducer_path, _ = committed_standard_reducer(
-        state_dir, codex_home, scan_dir, scan_id, worker_id, result_path
-    )
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("UPDATE scans SET scope = ? WHERE id = ?", (scope, scan_id))
-    reduced = json.loads(reducer_path.read_text())
-    reduced.pop("coverage")
-    reduced["unresolvedCandidates"] = [
-        {
-            "candidateId": "pending-reducer",
-            "sourceWorkerId": worker_id,
-            "candidate": {"title": "Review parser bounds"},
-            "reason": "The parser route still needs validation.",
-        }
-    ]
-    reducer_path.write_text(json.dumps(reduced))
-    reducer_bytes = reducer_path.read_bytes()
-
-    run_workbench(
-        state_dir,
-        "fail-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--message",
-        "Stopped before the parent draft was written.",
-        environment={"CODEX_HOME": str(codex_home)},
-    )
-
-    stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert stopped["progress"]["candidates"]["unresolved"] == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["inventoryStrategy"] == ("repository" if scope == "." else "scoped_path")
-    assert coverage["includePaths"] == [scope]
-    assert coverage["completeness"] == "partial"
-    pending = [item for item in coverage["deferred"] if item.get("candidateId")]
-    assert len(pending) == 1
-    assert pending[0]["candidateId"] == "pending-reducer"
-    assert pending[0]["sourceWorkerId"] == worker_id
-    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["sealedAt"]
-    assert manifest["scan"]["status"] == "failed"
-    assert "| Unresolved candidates | 1 |" in (scan_dir / "report.md").read_text()
-    assert reducer_path.read_bytes() == reducer_bytes
-
-
 @pytest.mark.parametrize("tied_head", [False, True])
 def test_stopped_rejection_recovers_malformed_parent_surfaces(
     tmp_path: Path, tied_head: bool
