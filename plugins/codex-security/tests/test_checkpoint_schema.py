@@ -52,7 +52,8 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         for original, updated in zip(before, after, strict=True):
-            assert updated.pop("retained_checkpoint_heads_json") is None
+            retained_heads = updated.pop("retained_checkpoint_heads_json")
+            assert retained_heads is None
             original.pop("retained_checkpoint_heads_json", None)
             assert updated == original
 

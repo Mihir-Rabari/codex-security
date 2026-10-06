@@ -230,13 +230,21 @@ def _capture_saved_source(
     kind: str | None = None,
     snapshot_head: bool = True,
     write: bool = True,
+    checkpoint_heads: dict[str, str | None] | None = None,
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return {relative: (digest, observed)}
+    directory = Path(relative).parent
+    if checkpoint_heads is not None and directory != Path("."):
+        try:
+            (scan_dir / relative).lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            checkpoint_heads[directory.as_posix()] = None
     head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
-    directory = Path(relative).parent
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
     _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
     digest = _digest(observation)
@@ -244,6 +252,8 @@ def _capture_saved_source(
     # Capture the selected file even if the worker created it after directory enumeration.
     if write and not (scan_dir / snapshot).exists():
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+    if checkpoint_heads is not None and directory != Path("."):
+        checkpoint_heads[directory.as_posix()] = selected
     return {
         snapshot: (digest, int(observation["observedAtNs"])),
         selected: (selected_digest, selected_time),
@@ -352,46 +362,6 @@ def _parent_scan_draft(
     return parent
 
 
-def _worker_checkpoint_head(scan_dir: Path, directory: str, scan_id: str) -> str | None:
-    relative = f"{directory}/checkpoint-head.json"
-    try:
-        (scan_dir / relative).lstat()
-    except FileNotFoundError:
-        return None
-    head = _read_scan_local_json(scan_dir, relative, "Saved worker checkpoint head")
-    name = head.get("checkpoint")
-    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name):
-        raise ContractError("Saved worker checkpoint head is invalid.")
-    checkpoint = f"{directory}/checkpoints/{name}"
-    # A committed head precedes replacement of result.json. Do not fall back to
-    # that older result if the selected checkpoint cannot be read.
-    _read_saved_result(scan_dir, checkpoint, scan_id)
-    return checkpoint
-
-
-def _worker_checkpoint_heads(scan_dir: Path, workers: list[Any], scan_id: str) -> dict[str, str]:
-    heads: dict[str, str] = {}
-    for worker in workers:
-        if worker["kind"] != "discovery":
-            continue
-        try:
-            output = Path(worker["artifact_dir"]).relative_to(scan_dir)
-        except (TypeError, ValueError):
-            continue
-        attempts = (output.parent if output.name == "output" else output) / "attempts"
-        directories = [output] + [
-            attempts / name
-            for name in _children(scan_dir, attempts.as_posix())
-            if re.fullmatch(r"attempt-\d+", name)
-        ]
-        for directory in directories:
-            relative = directory.as_posix()
-            head = _worker_checkpoint_head(scan_dir, relative, scan_id)
-            if head is not None:
-                heads[relative] = head
-    return heads
-
-
 def _read_saved_parent_result(
     scan_dir: Path, scan_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -433,6 +403,38 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
 def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
     state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
     return json.dumps(state, sort_keys=True)
+
+
+def _frozen_checkpoint_heads(
+    scan_dir: Path, scan_id: str, sources: dict[str, str]
+) -> dict[str, str]:
+    times = _frozen_source_times(scan_dir, scan_id, sources)
+    heads: dict[str, tuple[int, str]] = {}
+    for relative, expected_digest in sources.items():
+        directory = _checkpoint_head_directory(relative)
+        if directory is None or directory == Path("."):
+            continue
+        head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
+        if digest != expected_digest:
+            raise ContractError("checkpoint changed after the scan stopped")
+        selected = (directory / "checkpoints" / head["checkpoint"]).as_posix()
+        observation = (times.get(relative, observed), selected)
+        key = directory.as_posix()
+        if key not in heads or observation[0] > heads[key][0]:
+            heads[key] = observation
+    return {directory: selected for directory, (_, selected) in heads.items()}
+
+
+def _retained_checkpoint_state(scan: Any) -> tuple[dict[str, str | None] | None, bool]:
+    raw = scan["retained_checkpoint_heads_json"]
+    if raw is None:
+        return None, False
+    saved = json.loads(raw)
+    if "recoveryBaseDigest" not in saved:
+        return saved, False
+    if saved["recoveryBaseDigest"] != scan["seal_manifest_digest"]:
+        raise ContractError("Stopped scan recovery publication changed after selection.")
+    return saved["heads"], True
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
@@ -479,10 +481,10 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             manifest_scan.get("preservedSources", {}),
             "Published scan source digests are malformed.",
         )
-        if _worker_checkpoint_heads(scan_dir, workers, scan["id"]) != manifest_scan.get(
-            "preservedCheckpointHeads", {}
-        ):
+        _, pending_recovery = _retained_checkpoint_state(scan)
+        if pending_recovery:
             return True
+        checkpoint_heads: dict[str, str | None] = {}
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
         for path in paths:
@@ -494,18 +496,22 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                     kind=paths[path],
                     snapshot_head=path not in published_sources,
                     write=False,
+                    checkpoint_heads=checkpoint_heads,
                 )
                 current_sources.update({path: value[0] for path, value in captured.items()})
             except (ContractError, OSError, ValueError):
                 continue
-        return current_sources != published_sources
+        published_heads = manifest_scan.get("preservedCheckpointHeads")
+        if published_heads is None:
+            published_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], published_sources)
+        return current_sources != published_sources or checkpoint_heads != published_heads
     except (ContractError, OSError, SystemExit, ValueError):
         return False
 
 
 def _recovery_source_digests(
     db: Any, connection: Any, scan: Any
-) -> tuple[dict[str, str], bool, dict[str, str]]:
+) -> tuple[dict[str, str], bool, dict[str, str | None]]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     frozen_sources: dict[str, str] | None = None
     include_parent = True
@@ -513,6 +519,9 @@ def _recovery_source_digests(
     if raw_frozen_sources is not None:
         frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
         include_parent = False
+    checkpoint_heads, pending_recovery = _retained_checkpoint_state(scan)
+    if pending_recovery:
+        return frozen_sources, False, checkpoint_heads
 
     manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     if manifest_path is not None:
@@ -549,7 +558,10 @@ def _recovery_source_digests(
         "FROM deep_scan_workers WHERE scan_id = ?",
         (scan["id"],),
     ).fetchall()
-    checkpoint_heads = _worker_checkpoint_heads(scan_dir, workers, scan["id"])
+    previous_heads = checkpoint_heads
+    if previous_heads is None:
+        previous_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], frozen_sources or {})
+    checkpoint_heads = {}
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
     source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources)
@@ -567,8 +579,17 @@ def _recovery_source_digests(
 
     for relative in paths.keys() - recovery_sources.keys():
         try:
-            captured = _capture_saved_source(scan_dir, relative, scan["id"], kind=paths[relative])
+            captured = _capture_saved_source(
+                scan_dir,
+                relative,
+                scan["id"],
+                kind=paths[relative],
+                checkpoint_heads=checkpoint_heads,
+            )
         except (ContractError, OSError, ValueError):
+            directory = Path(relative).parent.as_posix()
+            if Path(relative).name == "checkpoint-head.json" and directory in previous_heads:
+                checkpoint_heads[directory] = previous_heads[directory]
             continue
         for path, (digest, observed) in captured.items():
             if path in recovery_sources and recovery_sources[path] != digest:
@@ -964,15 +985,15 @@ def merge_saved_results(
     stopped: bool,
     reason: str,
     frozen_source_digests: dict[str, str] | None = None,
-    checkpoint_heads: dict[str, str] | None = None,
+    checkpoint_heads: dict[str, str | None] | None = None,
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
-    if checkpoint_heads is None:
-        checkpoint_heads = _worker_checkpoint_heads(scan_dir, workers, scan_id)
+    if frozen_source_digests is None:
+        checkpoint_heads = {}
     try:
         source_times = _frozen_source_times(scan_dir, scan_id, frozen_source_digests or {})
     except (ContractError, OSError, ValueError) as exc:
@@ -1121,7 +1142,9 @@ def merge_saved_results(
                 continue
             del paths[relative]
             try:
-                captured = _capture_saved_source(scan_dir, relative, scan_id)
+                captured = _capture_saved_source(
+                    scan_dir, relative, scan_id, checkpoint_heads=checkpoint_heads
+                )
                 paths.update({path: worker_id for path in captured})
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
@@ -1154,9 +1177,15 @@ def merge_saved_results(
             source_digests[relative] = digest
             source_times.setdefault(relative, observed)
             source_order[relative] = (0, source_times[relative])
+            directory = Path(relative).parent
+            if directory.name in {"checkpoints", "checkpoint-heads"}:
+                directory = directory.parent
             if _checkpoint_head_directory(relative) is not None:
                 saved_heads[relative] = draft["checkpoint"]
                 continue
+            if checkpoint_heads is not None and directory.as_posix() in checkpoint_heads:
+                if checkpoint_heads[directory.as_posix()] is None:
+                    continue
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
@@ -1167,12 +1196,9 @@ def merge_saved_results(
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
-    # Frozen observations retain checkpoint selection even if a worker moves its head.
-    headed_workers = {
-        worker_attempts[_checkpoint_head_directory(head).as_posix()][0]
-        for head in saved_heads
-        if _checkpoint_head_directory(head) != Path(".")
-    }
+    if checkpoint_heads is None:
+        checkpoint_heads = _frozen_checkpoint_heads(scan_dir, scan_id, source_digests)
+    headed_workers = {worker_attempts[directory][0] for directory in checkpoint_heads}
     for relative, _, worker_id in sources:
         if worker_id not in headed_workers:
             continue
@@ -1181,6 +1207,15 @@ def merge_saved_results(
             directory = directory.parent
         _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
+    other_head_times: dict[str, int] = {}
+    for head, checkpoint in saved_heads.items():
+        directory = _checkpoint_head_directory(head)
+        key = directory.as_posix()
+        selected = (directory / "checkpoints" / checkpoint).as_posix()
+        if key in checkpoint_heads and checkpoint_heads[key] != selected:
+            other_head_times[key] = max(
+                other_head_times.get(key, source_order[head][1]), source_order[head][1]
+            )
     selected_observations: dict[str, tuple[int, int]] = {}
     parent_heads: list[tuple[int, str]] = []
     for head, checkpoint in saved_heads.items():
@@ -1193,7 +1228,13 @@ def merge_saved_results(
             order = (0, max(source_order[selected][1], observed))
             parent_heads.append((observed, selected))
         else:
-            _, attempt = worker_attempts[directory.as_posix()]
+            key = directory.as_posix()
+            if key in checkpoint_heads and checkpoint_heads[key] is None:
+                continue
+            _, attempt = worker_attempts[key]
+            # Reselection supersedes older head observations, not newer pending evidence.
+            if checkpoint_heads.get(key) == selected and key in other_head_times:
+                observed = max(observed, other_head_times[key] + 1)
             order = (attempt, observed)
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
     source_order.update(selected_observations)
@@ -2140,7 +2181,7 @@ def preserve_scan_results_locked(
     scan_id: str,
     *,
     recovery_source_digests: dict[str, str] | None = None,
-    recovery_checkpoint_heads: dict[str, str] | None = None,
+    recovery_checkpoint_heads: dict[str, str | None] | None = None,
     include_parent_with_recovery: bool = False,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
@@ -2148,7 +2189,7 @@ def preserve_scan_results_locked(
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
-    checkpoint_heads = recovery_checkpoint_heads
+    checkpoint_heads, pending_recovery = _retained_checkpoint_state(scan)
     model_source: list[str] = []
     saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
@@ -2160,8 +2201,7 @@ def preserve_scan_results_locked(
             model_source.append(saved_model_source)
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
-    elif raw_frozen_sources is not None:
-        checkpoint_heads = json.loads(scan["retained_checkpoint_heads_json"] or "{}")
+        checkpoint_heads = recovery_checkpoint_heads
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -2251,13 +2291,20 @@ def preserve_scan_results_locked(
         db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
-            existing_heads = existing_scan.get("preservedCheckpointHeads", {})
+            existing_heads = existing_scan.get("preservedCheckpointHeads")
             if frozen_source_digests is None:
                 frozen_source_digests = _source_digests(
                     existing_sources, "Stopped scan source digests could not be frozen."
                 )
                 checkpoint_heads = existing_heads
-            if existing_sources == frozen_source_digests and existing_heads == checkpoint_heads:
+            if existing_sources == frozen_source_digests and (
+                existing_heads == checkpoint_heads
+                or (
+                    "preservedCheckpointHeads" not in existing_scan
+                    and recovery_source_digests is None
+                    and not pending_recovery
+                )
+            ):
                 if (
                     raw_frozen_sources is not None
                     and scan["seal_manifest_digest"] is not None
@@ -2267,7 +2314,7 @@ def preserve_scan_results_locked(
                     return True
                 record_publication(existing, existing_findings)
                 return True
-            if recovery_source_digests is None:
+            if recovery_source_digests is None and not pending_recovery:
                 raise ContractError("Stopped scan sources changed after terminal publication.")
     binding = {
         **db.workbench_completion_binding(scan, scan["completed_at"], existing),
@@ -2314,13 +2361,21 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None or (
-        recovery_source_digests is None and saved_model_source is None and model_source
+    if (
+        frozen_source_digests is None
+        or recovery_source_digests is not None
+        or (saved_model_source is None and model_source)
     ):
         retained_sources = _source_digests(
             documents[0].get("scan", {}).get("preservedSources"),
             "Stopped scan source digests could not be frozen.",
         )
+        retained_heads = documents[0]["scan"]["preservedCheckpointHeads"]
+        if recovery_source_digests is not None or pending_recovery:
+            retained_heads = {
+                "heads": retained_heads,
+                "recoveryBaseDigest": scan["seal_manifest_digest"],
+            }
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ?, "
@@ -2328,9 +2383,7 @@ def preserve_scan_results_locked(
                 "WHERE id = ? AND retained_source_digests_json IS ?",
                 (
                     _encode_retained_sources(retained_sources, model_source),
-                    json.dumps(
-                        documents[0]["scan"].get("preservedCheckpointHeads", {}), sort_keys=True
-                    ),
+                    json.dumps(retained_heads, sort_keys=True),
                     scan_id,
                     raw_frozen_sources,
                 ),
