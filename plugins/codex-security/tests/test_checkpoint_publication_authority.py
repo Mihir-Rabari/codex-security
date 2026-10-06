@@ -824,15 +824,24 @@ def test_failed_head_snapshot_does_not_claim_uncaptured_authority(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
             ),
         )["scan"]
-    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
-    assert manifest["preservedCheckpointHeads"][directory] is None
-    assert stopped["findingCount"] == 0
+    row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    assert row["seal_manifest_digest"] is None
+    assert row["retained_checkpoint_heads_json"] is None
+    assert stopped["resultsRecoveryNeeded"] is True
     warnings = json.loads(
         workbench_db.execute(
             "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
         ).fetchone()[0]
     )
     assert any("Synthetic snapshot write failure" in warning for warning in warnings)
+    replayed = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == 0
 
 
 def test_legacy_recovery_can_reselect_an_already_frozen_head(
@@ -1196,3 +1205,103 @@ def test_tied_rejection_requires_valid_surface_before_removing_finding(
     )["scan"]
     assert stopped["findingCount"] == (0 if valid_rejection else 1)
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("receipt_state", ["missing", "present", "optional"])
+@pytest.mark.parametrize("head_time", [300, 400], ids=["tied", "newer"])
+def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
+    workbench_api, workbench_db, publication_scan, receipt_state, head_time
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(300, 300))
+    rejected = save_disposition(scan, result.parent, "rejected")
+    if receipt_state != "optional":
+        rejected["coverage"]["surfaces"][0]["receiptRefs"] = ["artifacts/review.txt"]
+        if receipt_state == "present":
+            receipt = scan.scan_dir / "artifacts" / "review.txt"
+            receipt.parent.mkdir(exist_ok=True)
+            receipt.write_text("Synthetic rejected candidate review.")
+        checkpoint = write_checkpoint(result.parent / "checkpoints", rejected)
+        (result.parent / "checkpoint-head.json").write_text(
+            json.dumps({"checkpoint": checkpoint.name})
+        )
+    os.utime(result.parent / "checkpoint-head.json", ns=(head_time, head_time))
+    originals = {
+        path: path.read_bytes() for path in (result, result.parent / "checkpoint-head.json")
+    }
+    stopped = workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == (1 if receipt_state == "missing" else 0)
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == stopped["findingCount"]
+    assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory write permission fixture")
+@pytest.mark.parametrize("writable", [False, True], ids=["blocked-snapshot", "writable-snapshot"])
+@pytest.mark.parametrize("disposition", ["reported", "rejected"])
+def test_snapshot_write_failure_keeps_stopped_publication_pending(
+    workbench_api, workbench_db, publication_scan, writable, disposition
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    if disposition == "rejected":
+        save_disposition(scan, result.parent, disposition)
+    snapshots = result.parent / "checkpoint-heads"
+    snapshots.mkdir()
+    original_outputs = {
+        name: (scan.scan_dir / name).read_bytes()
+        for name in ("findings.json", "coverage.json", "scan-manifest.json")
+    }
+    originals = {
+        path: path.read_bytes() for path in (result, result.parent / "checkpoint-head.json")
+    }
+    try:
+        if not writable:
+            snapshots.chmod(0o500)
+            assert not os.access(snapshots, os.W_OK)
+        workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
+            ),
+        )
+        row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+        assert row["status"] == "failed"
+        if not writable:
+            assert row["seal_manifest_digest"] is None
+            assert row["retained_source_digests_json"] is None
+            assert any(
+                "result publication needs follow-up" in warning
+                for warning in json.loads(row["completion_warnings_json"])
+            )
+            assert all(
+                (scan.scan_dir / name).read_bytes() == value
+                for name, value in original_outputs.items()
+            )
+        else:
+            assert row["seal_manifest_digest"]
+    finally:
+        snapshots.chmod(0o700)
+    replayed = workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert replayed["findingCount"] == (1 if disposition == "reported" else 0)
+    assert all(path.read_bytes() == value for path, value in originals.items())

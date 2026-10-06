@@ -29,6 +29,7 @@ from finalize_scan_contract import (
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
+    _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
@@ -60,6 +61,10 @@ _PUBLICATION_FOLLOW_UP_WARNING = (
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
+
+
+class _CheckpointSnapshotError(ContractError):
+    """A verified head could not be persisted for publication replay."""
 
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
@@ -251,7 +256,10 @@ def _capture_saved_source(
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
     if write and not (scan_dir / snapshot).exists():
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        try:
+            write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        except (ContractError, OSError) as exc:
+            raise _CheckpointSnapshotError(str(exc)) from exc
     if checkpoint_heads is not None and directory != Path("."):
         checkpoint_heads[directory.as_posix()] = selected
     return {
@@ -614,6 +622,8 @@ def _recovery_source_digests(
                 kind=paths[relative],
                 checkpoint_heads=checkpoint_heads,
             )
+        except _CheckpointSnapshotError:
+            raise
         except (ContractError, OSError, ValueError):
             _restore_checkpoint_head(
                 checkpoint_heads, previous_heads, frozen_sources or {}, relative
@@ -1174,6 +1184,8 @@ def merge_saved_results(
                     scan_dir, relative, scan_id, checkpoint_heads=checkpoint_heads
                 )
                 paths.update({path: worker_id for path in captured})
+            except _CheckpointSnapshotError:
+                raise
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
                     warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -1620,6 +1632,25 @@ def merge_saved_results(
                         )
                     except ContractError:
                         continue
+                    if field == "surfaces":
+                        verified = {
+                            "completeness": "partial",
+                            "surfaces": [normalized],
+                            "explicitExclusions": [],
+                            "deferred": [],
+                        }
+                        _recover_unsealed_coverage(
+                            verified,
+                            Path(__file__).resolve().parent.parent / "schemas",
+                            scan_dir,
+                            [],
+                            [],
+                        )
+                        if (
+                            not verified["surfaces"]
+                            or verified["surfaces"][0]["disposition"] != item["disposition"]
+                        ):
+                            continue
                     outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
     ordered_candidates.update(
         (owner, candidate_id)
