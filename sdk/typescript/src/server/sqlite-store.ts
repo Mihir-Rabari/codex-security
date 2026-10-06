@@ -27,7 +27,7 @@ export class SqliteFindingsStore implements FindingsStore {
     await runWorkbench(
       {
         pluginRoot: await bundledPluginRoot(),
-        environment: workbenchEnvironment(this.environment),
+        environment: this.environment,
         failureMessage: "Could not access the findings database",
       },
       ["database-info"],

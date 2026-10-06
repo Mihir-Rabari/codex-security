@@ -112,6 +112,24 @@ test("initializes the shared database concurrently without Python", async () => 
   });
 });
 
+test.skipIf(process.platform === "win32")(
+  "database initialization and Python operations share the configured state directory",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "database-info-location-"));
+    directories.push(directory);
+    const store = new SqliteFindingsStore({
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(directory, "state ") + "/",
+    });
+    await store.insert([embedded(1)], "repository-a");
+    await store.initialize();
+    expect(await readdir(directory)).toEqual(["state "]);
+    expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
+      finding(1),
+    ]);
+  },
+);
+
 test("escapes terminal controls in database helper diagnostics", async () => {
   const directory = await mkdtemp(join(tmpdir(), "database-info-"));
   directories.push(directory);
