@@ -59,6 +59,7 @@ from workbench_budget_candidates import (
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
     archive_candidate_payloads,
+    archive_resolved_diff_payloads,
     recover_candidate_receipts,
 )
 from workbench_budget_candidates import (
@@ -826,9 +827,7 @@ def _stopped_diff_candidate_decisions(
             for retained in demoted_findings.get(finding_candidate_key(finding), [])
         )
 
-    # Publication can stop after checkpointing an explicit finding override but
-    # before replacing the parent. Its phase snapshot still establishes ordering.
-    # Current coverage retaining that finding records a later demotion.
+    # Checkpoint phase snapshots order overrides; retained coverage records later demotion.
     findings.extend(
         finding
         for finding in checkpoint_findings
@@ -867,9 +866,7 @@ def _stopped_diff_candidate_decisions(
         if candidate_id not in authoritative
     }
     pending = {
-        candidate_id: item
-        for candidate_id, item in pending.items()
-        if candidate_id not in authoritative and candidate_id not in generated
+        key: rows for key, rows in pending.items() if key not in authoritative | generated.keys()
     }
     relative = "artifacts/02_discovery/candidate_ledger.jsonl"
     try:
@@ -987,6 +984,7 @@ def _stopped_diff_candidate_decisions(
         if candidate_id in current_pending_ids
         for item in rows
     )
+    archive_resolved_diff_payloads(coverage, findings, current_coverage)
     return {
         "scanId": scan_id,
         "complete": False,

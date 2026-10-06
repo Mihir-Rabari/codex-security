@@ -26,7 +26,8 @@ def recover_candidate_receipts(
         isinstance(row, dict)
         and row.get("disposition") in ("rejected", "not_applicable")
         and (
-            row.get("receiptRefs")
+            not isinstance(row.get("label"), str)
+            or row.get("receiptRefs")
             or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
         )
         for row in surfaces
@@ -60,6 +61,22 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
             for value in values:
                 if value not in destination[archive]:
                     destination[archive].append(copy.deepcopy(value))
+
+
+def archive_resolved_diff_payloads(
+    coverage: dict[str, Any], findings: list[dict[str, Any]], submitted_coverage: dict[str, Any]
+) -> None:
+    submitted: dict[str, list[dict[str, Any]]] = {}
+    rows = submitted_coverage.get("deferred")
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and (key := coverage_candidate_key(row)) and key[0] is None:
+            submitted.setdefault(key[1], []).append(row)
+    for item in coverage["surfaces"] + coverage["explicitExclusions"]:
+        if (key := coverage_candidate_key(item)) is not None:
+            archive_candidate_payloads(item, submitted.get(key[1], []))
+    for finding in findings:
+        if (key := finding_candidate_key(finding)) is not None:
+            archive_candidate_payloads(finding["provenance"], submitted.get(key[1], []))
 
 
 def _generated_budget_candidate_surface(item: dict[str, Any]) -> bool:

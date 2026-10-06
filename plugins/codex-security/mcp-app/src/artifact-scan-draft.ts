@@ -725,6 +725,9 @@ async function preserveScanDraft(
       ...(source.coverage.surfaces as JsonObject[]).filter(
         isTerminalCandidateDecision,
       ),
+      ...(source.coverage.explicitExclusions as JsonObject[]).filter(
+        isTerminalCandidateDecision,
+      ),
     ]) {
       const candidateId = coverageKey(pending);
       if (typeof candidateId !== "string") continue;
@@ -755,6 +758,16 @@ async function preserveScanDraft(
             !keepsGenericWork(item) && coverageKey(item) === candidateId,
         );
         if (candidateRow) {
+          if (
+            pending.candidate !== undefined &&
+            candidateRow.candidate !== undefined
+          )
+            candidateRow.originalCandidates = exactUnion(
+              Array.isArray(candidateRow.originalCandidates)
+                ? candidateRow.originalCandidates
+                : [],
+              [pending.candidate],
+            );
           for (const field of ["candidate", "finding"] as const) {
             if (pending[field] !== undefined)
               candidateRow[field] ??= structuredClone(pending[field]);

@@ -3247,3 +3247,118 @@ for (const outcome of [
     );
   });
 }
+
+for (const outcome of ["finding", "not_applicable"] as const) {
+  test(`terminal exclusion evidence survives reassessment to ${outcome}`, async (t) => {
+    const reviewed = candidate("exclusion-archive", "deferred");
+    const context = await fixture(t, [reviewed]);
+    const evidence = {
+      ...reviewed,
+      annotation: "Earlier exclusion-only candidate evidence.",
+    };
+    const old = draft();
+    old.complete = false;
+    old.coverage.completeness = "partial";
+    old.coverage.explicitExclusions = [
+      {
+        candidateId: reviewed.candidate_id,
+        pattern: "src/**",
+        reason: "Earlier authored exclusion.",
+        disposition: "rejected",
+        candidate: evidence,
+      },
+    ];
+    await recordCodexSecurityScanDraft(context, old);
+    const next = draft();
+    next.complete = true;
+    if (outcome === "finding") {
+      await writeLedger(context, [
+        candidate(reviewed.candidate_id, "reportable", "reportable"),
+      ]);
+      next.findings = [finding(reviewed.candidate_id)];
+    } else {
+      await writeLedger(context, [
+        candidate(reviewed.candidate_id, "not_applicable"),
+      ]);
+      next.coverage.surfaces = [
+        {
+          id: "new-authored-decision",
+          candidateId: reviewed.candidate_id,
+          label: "Current authored decision",
+          disposition: outcome,
+          receiptRefs: [],
+        },
+      ];
+    }
+    await recordCodexSecurityScanDraft(context, next);
+    const saved =
+      outcome === "finding"
+        ? JSON.parse(
+            await readFile(path.join(context.root, "findings.json"), "utf8"),
+          )
+        : await readCoverage(context);
+    const contains = (value: unknown): boolean =>
+      isDeepStrictEqual(value, evidence) ||
+      (Array.isArray(value)
+        ? value.some(contains)
+        : value !== null &&
+          typeof value === "object" &&
+          Object.values(value).some(contains));
+    assert.ok(
+      contains(saved),
+      "reassessment retains evidence unique to the prior terminal exclusion",
+    );
+  });
+}
+for (const decision of ["suppressed", "not_applicable"] as const) {
+  test(`ledger-only ${decision} preserves historical candidate annotations`, async (t) => {
+    const reviewed = candidate("ledger-history-archive", "deferred");
+    const context = await fixture(t, [reviewed]);
+    const evidence = {
+      ...reviewed,
+      annotation: "Additional saved candidate evidence.",
+    };
+    const old = draft([
+      {
+        id: "authored-gap",
+        candidateId: reviewed.candidate_id,
+        candidate: evidence,
+        reason: "Saved authored proof gap.",
+      },
+    ]);
+    old.complete = false;
+    old.coverage.completeness = "partial";
+    old.coverage.surfaces = [
+      {
+        id: "authored-followup",
+        candidateId: reviewed.candidate_id,
+        label: "Saved authored review",
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      },
+    ];
+    await recordCodexSecurityScanDraft(context, old);
+    await writeLedger(context, [candidate(reviewed.candidate_id, decision)]);
+    const next = draft();
+    next.complete = true;
+    await recordCodexSecurityScanDraft(context, next);
+    const saved = await readCoverage(context);
+    const contains = (value: unknown): boolean =>
+      isDeepStrictEqual(value, evidence) ||
+      (Array.isArray(value)
+        ? value.some(contains)
+        : value !== null &&
+          typeof value === "object" &&
+          Object.values(value).some(contains));
+    assert.ok(
+      contains(saved),
+      "ledger dismissal archives the saved candidate beyond its current ledger payload",
+    );
+    assert.equal(
+      saved.deferred.some(
+        (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+      ),
+      false,
+    );
+  });
+}

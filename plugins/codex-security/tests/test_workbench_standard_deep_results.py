@@ -3655,3 +3655,39 @@ def test_stopped_reducer_projects_candidates_around_nonarray_saved_deferred(
     tmp_path: Path, deferred: object
 ) -> None:
     _canceled_reducer_checkpoint_case(tmp_path, True, deferred)
+
+
+@pytest.mark.parametrize("valid_label", [False, True])
+def test_stopped_parent_validates_terminal_before_removing_saved_gap(
+    tmp_path: Path, valid_label: bool
+) -> None:
+    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    manifest = json.loads((contract / "scan-manifest.json").read_text())
+    manifest["scan"]["complete"] = False
+    coverage = json.loads((contract / "coverage.json").read_text())
+    coverage["completeness"] = "partial"
+    surface = {
+        "id": "saved-terminal",
+        "candidateId": "saved-candidate",
+        "disposition": "rejected",
+        "receiptRefs": [],
+    }
+    if valid_label:
+        surface["label"] = "Valid authored terminal review"
+    coverage["surfaces"] = [surface]
+    pending = {
+        "id": "saved-gap",
+        "candidateId": "saved-candidate",
+        "reason": "Original saved proof gap.",
+    }
+    coverage["deferred"] = [pending, {"id": "other-review", "reason": "Independent review."}]
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": []}))
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
+    saved = json.loads((scan_dir / "coverage.json").read_text())
+    assert (pending in saved["deferred"]) is not valid_label
+    assert any(row.get("id") == "other-review" for row in saved["deferred"])

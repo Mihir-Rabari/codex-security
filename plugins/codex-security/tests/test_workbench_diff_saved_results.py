@@ -1736,3 +1736,78 @@ def test_stopped_diff_archives_every_deferred_payload_before_resolution(
         run_workbench(state, "get-scan", "--scan-id", scan_id)
     assert_retained()
     assert all(path.read_bytes() == content for path, content in frozen.items())
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("outcome", ["finding", "rejected"])
+def test_stopped_diff_archives_deferred_evidence_on_authored_resolution(
+    tmp_path: Path, termination: str, outcome: str
+) -> None:
+    state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    original = next(row for row in coverage["deferred"] if row.get("candidateId"))
+    payloads = []
+    for index in range(2):
+        row = copy.deepcopy(original)
+        row.update(
+            id=f"authored-history-{index}",
+            candidate={**candidate, "annotation": f"Saved deferred evidence {index}."},
+            finding={"title": f"Saved compact finding {index}."},
+            previousFindings=[{**finding, "summary": f"Saved full history {index}."}],
+        )
+        payloads.append(row)
+    coverage["deferred"] = [*payloads, {"id": "other-review", "reason": "Independent review."}]
+    if outcome == "rejected":
+        coverage["surfaces"] = [
+            {
+                "id": "authored-terminal",
+                "candidateId": candidate["candidate_id"],
+                "label": "Authored terminal review",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ]
+    else:
+        coverage["surfaces"] = []
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": [finding] if outcome == "finding" else []},
+                "coverage": coverage,
+            }
+        )
+    )
+    run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
+    run_workbench(state, termination, "--scan-id", scan_id, *arguments)
+
+    def contains(value: object, expected: object) -> bool:
+        if value == expected:
+            return True
+        if isinstance(value, list):
+            return any(contains(item, expected) for item in value)
+        return isinstance(value, dict) and any(contains(item, expected) for item in value.values())
+
+    def assert_retained() -> None:
+        saved = json.loads(coverage_path.read_text())
+        values = [saved, json.loads((scan_dir / "findings.json").read_text())]
+        for row in payloads:
+            for expected in [row["candidate"], row["finding"], *row["previousFindings"]]:
+                assert contains(values, expected)
+        assert not any(
+            row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"]
+        )
+        assert any(row.get("id") == "other-review" for row in saved["deferred"])
+
+    assert_retained()
+    ledger.unlink()
+    if termination == "fail-scan":
+        run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    else:
+        run_workbench(state, "get-scan", "--scan-id", scan_id)
+    assert_retained()
