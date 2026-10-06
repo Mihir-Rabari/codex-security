@@ -5511,9 +5511,11 @@ describe("patch change tracking", () => {
         "object-directory",
         "custom-objects",
         "common-directory",
+        "alternate-index",
       ].flatMap((settings) =>
         [
           "modify",
+          ...(settings === "alternate-index" ? ["ignored", "new-ignored"] : []),
           ...(scope !== "package-space" && settings === "relative"
             ? ["replace", "remove"]
             : []),
@@ -5540,6 +5542,13 @@ describe("patch change tracking", () => {
       inner("config", "user.name", "Synthetic User");
       inner("config", "user.email", "synthetic@example.test");
       await writeFile(join(nested, "app.ts"), "unsafe\n");
+      if (settings === "alternate-index") {
+        await writeFile(
+          join(nested, ".gitignore"),
+          "build.log\ngenerated.txt\n",
+        );
+        await writeFile(join(root, "build.log"), "outer tracked log\n");
+      }
       inner("add", ".");
       inner("commit", "-m", "Synthetic inner baseline");
       await writeFile(join(directory, "app.ts"), "unsafe\n");
@@ -5551,7 +5560,11 @@ describe("patch change tracking", () => {
           join(root, ".git", "custom-objects"),
         );
       const target = scope === "root" ? root : directory;
+      const alternateIndex = join(parent, "parent-index");
       const gitEnvironment = {
+        ...(settings === "alternate-index"
+          ? { GIT_INDEX_FILE: alternateIndex }
+          : {}),
         ...(settings !== "absolute" && settings !== "relative"
           ? {}
           : {
@@ -5579,12 +5592,16 @@ describe("patch change tracking", () => {
         GIT_CONFIG_VALUE_0: "false",
         SYNTHETIC_GIT_SETTING: "preserved",
       };
-      if (operation !== "modify") {
+      if (operation === "replace" || operation === "remove") {
         await writeFile(join(root, "local.txt"), "staged user content\n");
         git("add", "local.txt");
       }
       const parentIndex = await readFile(join(root, ".git", "index"));
       let childIndex = await readFile(join(nested, ".git", "index"));
+      if (settings === "alternate-index") {
+        await writeFile(alternateIndex, parentIndex);
+        await writeFile(join(nested, "build.log"), "ignored baseline\n");
+      }
       const snapshots = new Map<string, Set<string>>();
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--json"],
@@ -5612,6 +5629,10 @@ describe("patch change tracking", () => {
               expect(environment["GIT_OBJECT_DIRECTORY"]).toBeUndefined();
               expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
             } else {
+              if (index === undefined)
+                expect(environment["GIT_INDEX_FILE"]).toBe(
+                  gitEnvironment.GIT_INDEX_FILE,
+                );
               expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
                 gitEnvironment.GIT_OBJECT_DIRECTORY,
               );
@@ -5648,6 +5669,18 @@ describe("patch change tracking", () => {
           },
           onCodex: async (_args, output) => {
             expect(output?.appServer?.directory).toBe(target);
+            if (operation === "ignored") {
+              await writeFile(join(nested, "build.log"), "ignored changed\n");
+              output?.stdout.write("No source change needed.");
+              return 0;
+            }
+            if (operation === "new-ignored") {
+              await writeFile(join(nested, "generated.txt"), "generated fix\n");
+              inner("add", "-f", "generated.txt");
+              childIndex = await readFile(join(nested, ".git", "index"));
+              output?.stdout.write("Fixed and checked.");
+              return 0;
+            }
             await writeFile(join(directory, "app.ts"), "fixed\n");
             if (operation !== "modify") await rm(nested, { recursive: true });
             if (operation === "replace") {
@@ -5673,13 +5706,27 @@ describe("patch change tracking", () => {
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(JSON.parse(outcome.stdout).files).toEqual([
-        "package/app.ts",
-        ...(operation !== "modify" ? ["package/nested"] : []),
-        "package/nested/app.ts",
-        ...(operation === "replace" ? ["package/nested/staged-child.txt"] : []),
-      ]);
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        operation === "ignored" ? 2 : 0,
+      );
+      expect(JSON.parse(outcome.stdout).files).toEqual(
+        operation === "ignored"
+          ? []
+          : operation === "new-ignored"
+            ? ["package/nested/generated.txt"]
+            : [
+                "package/app.ts",
+                ...(operation !== "modify" ? ["package/nested"] : []),
+                "package/nested/app.ts",
+                ...(operation === "replace"
+                  ? ["package/nested/staged-child.txt"]
+                  : []),
+              ],
+      );
+      if (operation === "ignored")
+        expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
+      if (settings === "alternate-index")
+        expect(await readFile(alternateIndex)).toEqual(parentIndex);
       expect([...snapshots.keys()].sort()).toEqual([root, nested].sort());
       expect(snapshots.get(root)!.size).toBe(2);
       expect(snapshots.get(nested)!.size).toBe(operation === "remove" ? 1 : 2);
@@ -5694,14 +5741,18 @@ describe("patch change tracking", () => {
         );
       expect(await readFile(join(root, ".git", "index"))).toEqual(parentIndex);
       expect(git("diff", "--cached", "--name-only")).toBe(
-        operation === "modify" ? "" : "local.txt",
+        operation === "replace" || operation === "remove" ? "local.txt" : "",
       );
       if (operation !== "remove") {
         expect(await readFile(join(nested, ".git", "index"))).toEqual(
           childIndex,
         );
         expect(inner("diff", "--cached", "--name-only")).toBe(
-          operation === "replace" ? "staged-child.txt" : "",
+          operation === "replace"
+            ? "staged-child.txt"
+            : operation === "new-ignored"
+              ? "generated.txt"
+              : "",
         );
       }
     },

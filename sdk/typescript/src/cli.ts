@@ -8259,7 +8259,9 @@ async function snapshotPatchTree(
       {
         trim: false,
         environment:
-          commandRoot === repository ? {} : NESTED_PATCH_GIT_ENVIRONMENT,
+          commandRoot === repository
+            ? {}
+            : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined },
       },
     );
     await run(["update-index", "-z", "--index-info"], entries);
