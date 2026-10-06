@@ -14,6 +14,7 @@ import { windowsBinding } from "../native";
 import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
 
 function createStateDirectory(path: string): void {
+  if (process.platform !== "win32") path = path.replace(/\/+$/u, "") || "/";
   const nativePath =
     process.platform === "win32" ? path : encodePosixPath(path);
   const create = () => {

@@ -185,6 +185,17 @@ test("configured directory links create missing destinations privately", async (
     if (process.platform !== "win32")
       assert.equal((await stat(destination)).mode & 0o777, 0o700);
   }
+  if (process.platform !== "win32") {
+    const state = join(directory, "trailing-state");
+    const alias = join(directory, "trailing-alias");
+    const destination = join(directory, "trailing-destination");
+    await symlink("trailing-alias/", state);
+    await symlink("trailing-destination", alias);
+    const result = await databaseInfo(state);
+    assert.equal(result.databasePath, join(destination, "workbench.sqlite3"));
+    assert.equal((await stat(result.databasePath)).isFile(), true);
+    assert.equal((await stat(destination)).mode & 0o777, 0o700);
+  }
 });
 
 test(
