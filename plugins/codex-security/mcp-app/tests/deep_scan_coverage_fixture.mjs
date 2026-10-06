@@ -43,6 +43,7 @@ export async function publishCoverageFixture(
     linkedRetry = false,
     missingProjection = false,
     changedRetry = false,
+    interruptReducer,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -61,8 +62,9 @@ export async function publishCoverageFixture(
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
   const threadId = "coverage-fixture-owner";
-  const statuses =
-    completeness === "partial"
+  const statuses = interruptReducer
+    ? ["partial", "partial", "partial"]
+    : completeness === "partial"
       ? ["partial", "complete", "unknown"]
       : completeness === "unknown"
         ? ["unknown", "complete"]
@@ -168,6 +170,15 @@ export async function publishCoverageFixture(
         ? [{ question: `Deployment question ${index + 1}.` }]
         : [],
     };
+    if (interruptReducer) {
+      coverage.surfaces[0].id = `surface-${index}`;
+      coverage.surfaces[0].label = `Archive route ${index}`;
+      for (const deferred of coverage.deferred) {
+        deferred.id = `follow-up-${index}`;
+        deferred.surfaceIds = [`surface-${index}`];
+        delete deferred.candidateId;
+      }
+    }
     if (namedRetry) {
       coverage.surfaces[0].receiptRefs = [];
       for (const deferred of coverage.deferred) {
@@ -175,7 +186,7 @@ export async function publishCoverageFixture(
         if (!linkedRetry) delete deferred.surfaceIds;
       }
     }
-    if (omitCoverageIds && !archived) {
+    if (omitCoverageIds && !archived && (!interruptReducer || index === 0)) {
       for (const surface of coverage.surfaces) delete surface.id;
       for (const deferred of coverage.deferred) {
         delete deferred.id;
@@ -343,11 +354,137 @@ export async function publishCoverageFixture(
     await store.claimDedup({
       id,
       scanId: run.scanId,
-      workerIds: workers.map((worker) => worker.id),
+      workerIds: (interruptReducer ? workers.slice(0, 2) : workers).map(
+        (worker) => worker.id,
+      ),
       artifactDir,
       promptPath,
     });
     const resultManifestPath = path.join(artifactDir, "result.json");
+    if (interruptReducer) {
+      const reducer = {
+        id,
+        scanId: run.scanId,
+        kind: "dedup",
+        promptPath,
+        artifactDir,
+        attempt: 1,
+      };
+      await store.updateWorker({ ...reducer, status: "running" });
+      await recordCodexSecurityDeepReduction(
+        {
+          root: artifactDir,
+          layout: "reducer",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+          deepReducer: {
+            scanRoot: run.scanDir,
+            persistSourceCoverage: true,
+            claimedWorkers: workers.slice(0, 2).map((worker) => ({
+              id: worker.id,
+              resultPath: path.join(worker.artifactDir, "result.json"),
+              attempt: worker.attempt,
+            })),
+          },
+        },
+        { scanId: run.scanId, findings: [] },
+      );
+      const result = JSON.parse(await readFile(resultManifestPath, "utf8"));
+      const checkpoints = await readdir(path.join(artifactDir, "checkpoints"));
+      assert.equal(checkpoints.length, 1);
+      const selected = path.join(artifactDir, "checkpoints", checkpoints[0]);
+      assert.deepEqual(JSON.parse(await readFile(selected, "utf8")), result);
+      for (const file of [resultManifestPath, selected])
+        rawSources.set(file, await readFile(file, "utf8"));
+      for (const worker of workers) {
+        const receipt = path.join(worker.artifactDir, "artifacts", "review.md");
+        rawSources.set(receipt, await readFile(receipt, "utf8"));
+      }
+      const represented = result.sourceCoverage;
+      for (const worker of workers.slice(0, 2)) {
+        const surfaces = represented.surfaces.filter(
+          (row) => row.provenance.workerId === worker.id,
+        );
+        const deferred = represented.deferred.filter(
+          (row) => row.provenance.workerId === worker.id,
+        );
+        assert.ok(surfaces.length > 0);
+        assert.ok(deferred.length > 0);
+        for (const surface of surfaces)
+          assert.match(surface.id, /-attempt-\d+-surface-\d+$/);
+        for (const row of deferred)
+          assert.ok(
+            row.surfaceIds.every((id) =>
+              surfaces.some((surface) => surface.id === id),
+            ),
+          );
+      }
+      if (interruptReducer === "buffered")
+        await store.updateWorker({
+          ...reducer,
+          status: "failed",
+          error: "Synthetic interruption before commit.",
+        });
+      const stopped = await store.get(run.scanId, threadId);
+      for (const worker of workers.slice(0, 2))
+        assert.equal(
+          stopped.persistedWorkers.find((row) => row.id === worker.id)
+            .mergeState,
+          interruptReducer,
+        );
+      assert.equal(
+        stopped.persistedWorkers.find((row) => row.id === workers[2].id)
+          .mergeState,
+        "buffered",
+      );
+      assert.equal(
+        stopped.persistedWorkers.find((row) => row.id === id)
+          .resultManifestPath,
+        undefined,
+      );
+      await runWorkbench([
+        "fail-scan",
+        "--scan-id",
+        run.scanId,
+        "--message",
+        "Synthetic interruption before commit.",
+      ]);
+      const coveragePath = path.join(run.scanDir, "coverage.json");
+      const recovered = JSON.parse(await readFile(coveragePath, "utf8"));
+      for (const field of ["surfaces", "deferred"]) {
+        const rows = recovered[field].filter(
+          (row) => row.id !== "scan-stopped",
+        );
+        assert.equal(rows.length, represented[field].length + 1);
+        for (const projected of represented[field])
+          assert.ok(rows.some((row) => isDeepStrictEqual(row, projected)));
+        const unrepresented = JSON.parse(
+          await readFile(
+            path.join(workers[2].artifactDir, "result.json"),
+            "utf8",
+          ),
+        ).coverage[field][0];
+        const retained = rows.find((row) => row.id === unrepresented.id);
+        assert.ok(
+          retained,
+          "unrepresented buffered work keeps its saved identity",
+        );
+        assert.deepEqual(retained.provenance, unrepresented.provenance);
+        if (field === "deferred")
+          assert.deepEqual(retained.surfaceIds, unrepresented.surfaceIds);
+      }
+      const frozen = await readFile(coveragePath, "utf8");
+      const replay = await runWorkbench([
+        "recover-scan-results",
+        "--scan-id",
+        run.scanId,
+      ]);
+      assert.equal(replay.scan.resultsRecoveryNeeded, false);
+      assert.equal(await readFile(coveragePath, "utf8"), frozen);
+      for (const [file, bytes] of rawSources)
+        assert.equal(await readFile(file, "utf8"), bytes);
+      return { scanDir: run.scanDir, threadId };
+    }
     // Legacy accepted reducers omitted coverage entirely.
     await writeFile(
       resultManifestPath,

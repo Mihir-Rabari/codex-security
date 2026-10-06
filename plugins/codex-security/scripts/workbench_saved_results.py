@@ -1376,7 +1376,7 @@ def merge_saved_results(
                 parent_is_canonical = False
     parent_uses_source_coverage = False
     if parent is None and latest_reducer is not None:
-        parent = drafts_by_path[latest_reducer]
+        parent = copy.deepcopy(drafts_by_path[latest_reducer])
         parent_uses_source_coverage = "sourceCoverage" in parent
 
     projected_coverages = [
@@ -1874,7 +1874,12 @@ def merge_saved_results(
             return
         if field == "surfaces" and isinstance(item, dict):
             item = {**item, "receiptRefs": item.get("receiptRefs", [])}
-        if reviewed and isinstance(item, dict) and field != "reviews":
+        if (
+            reviewed
+            and worker["merge_state"] == "merged"
+            and isinstance(item, dict)
+            and field != "reviews"
+        ):
             item = project_missing_record(field, item, index, worker, source, relative)
         if field == "surfaces" and worker is not None and isinstance(item, dict):
             item = copy.deepcopy(item)
@@ -1896,7 +1901,6 @@ def merge_saved_results(
             reviewed = (
                 worker is not None
                 and worker["status"] == "succeeded"
-                and worker["merge_state"] == "merged"
                 and (owner, worker["attempt"]) in reviewed_attempts
             )
             source = (
@@ -1936,7 +1940,6 @@ def merge_saved_results(
         reviewed = (
             worker is not None
             and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
             and (owner, worker["attempt"]) in reviewed_attempts
         )
         if reviewed and retained_coverage_record("deferred", item, worker, relative):
@@ -2236,7 +2239,6 @@ def merge_saved_results(
         reviewed = (
             worker is not None
             and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
             and (worker_id, worker["attempt"]) in reviewed_attempts
         )
         if (

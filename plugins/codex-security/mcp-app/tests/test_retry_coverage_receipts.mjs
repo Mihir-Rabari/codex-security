@@ -491,3 +491,28 @@ for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
     });
   }
 }
+
+for (const interruptReducer of ["merging", "buffered"]) {
+  for (const directFile of [false, true]) {
+    for (const omitCoverageIds of [false, true]) {
+      test(`uncommitted reducer preserves represented and pending coverage (${interruptReducer}, ${directFile ? "direct" : "writer"}, ${omitCoverageIds ? "omitted" : "explicit"} IDs)`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "uncommitted-coverage-"),
+        );
+        try {
+          await publishCoverageFixture(root, "partial", {
+            resume: true,
+            workflowVersion: "deep-security-scan/v2",
+            interruptReducer,
+            directFile,
+            omitCoverageIds,
+            namedRetry: true,
+            linkedRetry: true,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}

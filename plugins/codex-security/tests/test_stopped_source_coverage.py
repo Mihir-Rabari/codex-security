@@ -261,7 +261,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
 
 @pytest.mark.parametrize("review_source", ["reducer", "parent"])
 @pytest.mark.parametrize(
-    "pending_state", ["canceled", "unreviewed", "new-attempt", "unmerged", "merged"]
+    "pending_state",
+    ["canceled", "unreviewed", "new-attempt", "unmerged", "merging", "buffered", "merged"],
 )
 def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
     workbench_api, workbench_db, publication_scan, review_source, pending_state
@@ -287,14 +288,18 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
     )
     if pending_state != "unreviewed":
         reviews.append({"workerId": pending.parent.name, "attempt": 1, "completeness": "partial"})
-    if pending_state in {"new-attempt", "unmerged"}:
+    if pending_state in {"new-attempt", "unmerged", "merging", "buffered"}:
         with workbench_db:
             workbench_db.execute(
                 "UPDATE deep_scan_workers SET attempt = ?, merge_state = ? "
                 "WHERE result_manifest_path = ?",
                 (
                     2 if pending_state == "new-attempt" else 1,
-                    "none" if pending_state == "unmerged" else "merged",
+                    "none"
+                    if pending_state == "unmerged"
+                    else "merged"
+                    if pending_state == "new-attempt"
+                    else pending_state,
                     str(pending),
                 ),
             )
@@ -307,6 +312,23 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
         )
     reducer.write_text(json.dumps(aggregate))
     deferred = {"id": "pending-review", "reason": "The independent review remains unresolved."}
+    if pending_state == "new-attempt":
+        old_projection = {
+            **deferred,
+            "id": f"{pending.parent.name}-attempt-1-deferred-1",
+            "provenance": {
+                "workerId": pending.parent.name,
+                "attempt": 1,
+                "sourceId": deferred["id"],
+            },
+        }
+        if review_source == "reducer":
+            aggregate["sourceCoverage"]["deferred"] = [old_projection]
+            reducer.write_text(json.dumps(aggregate))
+        else:
+            (scan.scan_dir / "coverage.json").write_text(
+                json.dumps({**scan.coverage, "reviews": reviews, "deferred": [old_projection]})
+            )
     pending.write_text(
         json.dumps(
             {
@@ -694,15 +716,28 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
     assert result.read_bytes() == original
 
 
-@pytest.mark.parametrize("prior_receipt", [False, "carried", "omitted"])
+@pytest.mark.parametrize(
+    "prior_receipt,merge_state",
+    [
+        (False, "merged"),
+        ("carried", "merged"),
+        ("omitted", "merged"),
+        (False, "merging"),
+        (False, "buffered"),
+    ],
+)
 @pytest.mark.parametrize("projection_source", ["parent", "reducer"])
 def test_generic_closeout_preserves_projected_surface_receipts(
-    workbench_api, workbench_db, publication_scan, projection_source, prior_receipt
+    workbench_api, workbench_db, publication_scan, projection_source, prior_receipt, merge_state
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = ? WHERE id = ?", (merge_state, worker_id)
+        )
     output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
     output.mkdir(parents=True)
     result = output / "result.json"
@@ -818,17 +853,41 @@ def test_generic_closeout_preserves_projected_surface_receipts(
 
 @pytest.mark.parametrize("projection_source", ["parent", "reducer"])
 @pytest.mark.parametrize(
-    "retained",
-    [False, True, "changed", "changed-surface"],
-    ids=["missing-projection", "retained-projection", "changed-projection", "changed-surface"],
+    "retained,merge_state",
+    [
+        (False, "merged"),
+        (True, "merged"),
+        ("changed", "merged"),
+        ("changed-surface", "merged"),
+        (True, "merging"),
+        (True, "buffered"),
+    ],
+    ids=[
+        "missing-projection",
+        "retained-projection",
+        "changed-projection",
+        "changed-surface",
+        "merging-projection",
+        "buffered-projection",
+    ],
 )
 def test_reopened_generic_work_uses_worker_projection(
-    workbench_api, workbench_db, publication_scan, projection_source, retained, monkeypatch
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    projection_source,
+    retained,
+    merge_state,
+    monkeypatch,
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = ? WHERE id = ?", (merge_state, worker_id)
+        )
     surface = {
         "id": "surface",
         "label": "Reopened review",
