@@ -1274,7 +1274,7 @@ GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
 Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
-requires a clean tree. Saved-scan publication refuses any patched file that had
+requires a clean tree. Saved-scan publication also refuses patched files that had
 staged, unstaged, or untracked changes before patching; local edits and generated
 patches remain available for review. Existing patch branches and pull requests
 are checked before patching, including closed or merged requests. Review and
@@ -1282,8 +1282,8 @@ publish further patches from the same scan separately.
 
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit and refuses changed branches or an existing request that points to a
-different commit. Retain the GitLab host setting on resume.
+commit without rerunning Codex, but refuses changed branches or an existing
+request pointing to a different commit. Retain the GitLab host setting on resume.
 
 ### Patch Linear issues
 
