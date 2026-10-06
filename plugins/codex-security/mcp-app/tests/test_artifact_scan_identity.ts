@@ -2851,3 +2851,58 @@ for (const layout of ["standard", "diff", "deep", "worker"] as const) {
     });
   }
 }
+
+for (const evidence of ["identical", "distinct", "reordered"] as const) {
+  for (const includeResult of [false, true]) {
+    test(`unchanged worker batch retains ${evidence} provenance (result=${includeResult})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const workerRoot = path.join(recovered.root, "reviewer");
+      await mkdir(workerRoot);
+      const worker = draftFixture(workerRoot, "worker");
+      const findings = ["first", "second"].map((id) =>
+        finding("Synthetic saved review", {
+          provenance: {
+            source: "local_plugin",
+            candidateId: "candidate-1",
+            originalCandidates: [
+              { id: evidence === "identical" ? "same" : id },
+            ],
+          },
+        }),
+      );
+      await worker.write({ ...worker.draft({}, true), findings });
+      if (evidence === "reordered")
+        await worker.write({
+          ...worker.draft({}, true),
+          findings: [...findings].reverse(),
+        });
+      const saved = JSON.parse(
+        await readFile(path.join(workerRoot, "result.json"), "utf8"),
+      );
+      assert.equal(saved.findings.length, 2);
+      await normal.write({
+        ...normal.draft({}, true),
+        findings: saved.findings.map((row: FixtureFinding) => ({
+          ...row,
+          provenance: { ...row.provenance, workerId: "reviewer" },
+        })),
+      });
+      if (!includeResult) await rm(path.join(workerRoot, "result.json"));
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [savedWorker(workerRoot)],
+        true,
+        true,
+        true,
+      );
+      const ordered = (rows: RecoveredFinding[]) =>
+        [...rows].sort((a, b) => a.findingId.localeCompare(b.findingId));
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, 2);
+      assert.deepEqual(ordered(result.recovered), ordered(result.normal));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}

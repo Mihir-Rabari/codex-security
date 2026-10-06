@@ -1924,6 +1924,16 @@ def merge_saved_results(
             pending.append((index, value, owner, scopes, ranked))
         assigned = {}
         claimed = set()
+        for index, value, owner, _, matches in pending:
+            for group, _ in matches:
+                if (
+                    group["key"] not in claimed
+                    and owner == group["owner"]
+                    and value == group["latest"]
+                ):
+                    assigned[index] = group
+                    claimed.add(group["key"])
+                    break
         for rank in (3, 2, 1, 0):
             options = {
                 index: [group for group, score in matches if score >= rank]
@@ -2237,6 +2247,11 @@ def merge_saved_results(
             if key in finding_positions:
                 position, retained_group = finding_positions[key]
                 retained = findings[position]
+                for field in ("anchor", "instance"):
+                    if field in retained["identity"]:
+                        finding["identity"][field] = retained["identity"][field]
+                    else:
+                        finding["identity"].pop(field, None)
                 if finding != retained:
                     if not represented_by_parent and (
                         value is group["latest"]
@@ -2245,11 +2260,6 @@ def merge_saved_results(
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
-                        for field in ("anchor", "instance"):
-                            if field in retained["identity"]:
-                                finding["identity"][field] = retained["identity"][field]
-                            else:
-                                finding["identity"].pop(field, None)
                         if "preservedIdentity" in retained["provenance"]:
                             finding["provenance"]["preservedIdentity"] = copy.deepcopy(
                                 retained["provenance"]["preservedIdentity"]
