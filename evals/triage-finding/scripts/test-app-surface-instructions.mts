@@ -122,7 +122,8 @@ for (const transport of ["rest", "github_connector_read_only", "other"]) {
   );
 }
 assert.equal(
-  githubIntake('{"transport":"rest"}\n{"transport":"other"}', defaultContext).pass,
+  githubIntake('{"transport":"rest"}\n{"transport":"other"}', defaultContext)
+    .pass,
   false,
 );
 

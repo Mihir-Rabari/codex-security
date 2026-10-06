@@ -1,4 +1,8 @@
-import { outputText as textFor, hasTriageJson } from "./output.mts";
+import {
+  outputText as textFor,
+  hasTriageJson,
+  extractJson,
+} from "./output.mts";
 import type { AssertionContext } from "../types.ts";
 
 function repositoryName(value: string) {
