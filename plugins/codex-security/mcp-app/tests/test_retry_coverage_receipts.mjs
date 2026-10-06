@@ -35,7 +35,18 @@ const { recordCodexSecurityWorkerScanDraft } = await (
 );
 const { workerDraft, scanId } = await import("./scan-draft-fixture.ts");
 
-for (const history of ["valid", "unreadable", "mixed"]) {
+for (const history of [
+  "valid",
+  "unreadable",
+  "mixed",
+  "malformed-head",
+  "missing-selected",
+  "malformed-selected",
+  "invalid-head",
+  "invalid-selected",
+  "wrong-scan-selected",
+  "wrong-scan-result",
+]) {
   const malformedHistory = history !== "valid";
   const readableHistory = history !== "unreadable";
   test(`accepted retry coverage preserves available history (${history})`, async () => {
@@ -106,16 +117,46 @@ for (const history of ["valid", "unreadable", "mixed"]) {
         workerDraft([], { complete: true, coverage: current }),
       );
       if (malformedHistory) {
-        const broken = path.join(
-          workerRoot,
-          "attempts",
-          "attempt-02",
-          "checkpoints",
-          "broken.json",
-        );
-        await mkdir(path.dirname(broken), { recursive: true });
-        await writeFile(broken, "{");
-        files.set(broken, "{");
+        const attempt = path.join(workerRoot, "attempts", "attempt-02");
+        const checkpoint = "a".repeat(64) + ".json";
+        if (history === "malformed-head") {
+          await mkdir(attempt, { recursive: true });
+          const headPath = path.join(attempt, "checkpoint-head.json");
+          await writeFile(headPath, "{");
+          files.set(headPath, "{");
+        } else if (history === "invalid-head") {
+          await save(path.join(attempt, "checkpoint-head.json"), {
+            checkpoint: "../unrelated.json",
+          });
+        } else if (history.endsWith("selected")) {
+          await save(path.join(attempt, "checkpoint-head.json"), {
+            checkpoint,
+          });
+          if (history === "malformed-selected") {
+            const selected = path.join(attempt, "checkpoints", checkpoint);
+            await mkdir(path.dirname(selected), { recursive: true });
+            await writeFile(selected, "{");
+            files.set(selected, "{");
+          } else if (
+            history === "invalid-selected" ||
+            history === "wrong-scan-selected"
+          ) {
+            await save(
+              path.join(attempt, "checkpoints", checkpoint),
+              history === "invalid-selected"
+                ? { scanId }
+                : {
+                    ...workerDraft([], { complete: false, coverage: retained }),
+                    scanId: "22222222-2222-4222-8222-222222222222",
+                  },
+            );
+          }
+        } else if (history !== "wrong-scan-result") {
+          const broken = path.join(attempt, "checkpoints", "broken.json");
+          await mkdir(path.dirname(broken), { recursive: true });
+          await writeFile(broken, "{");
+          files.set(broken, "{");
+        }
       }
       if (readableHistory) {
         const old = structuredClone(retained);
@@ -132,6 +173,15 @@ for (const history of ["valid", "unreadable", "mixed"]) {
         await save(
           path.join(workerRoot, "attempts", "attempt-02", "result.json"),
           workerDraft([], { complete: false, coverage: carried }),
+        );
+      }
+      if (history === "wrong-scan-result") {
+        await save(
+          path.join(workerRoot, "attempts", "attempt-02", "result.json"),
+          {
+            ...workerDraft([], { complete: false, coverage: carried }),
+            scanId: "22222222-2222-4222-8222-222222222222",
+          },
         );
       }
       const sources = await readDeepReductionSources({
@@ -177,7 +227,14 @@ for (const history of ["valid", "unreadable", "mixed"]) {
             { root: output, repoRoot: root, scanId, layout: "worker" },
             workerDraft([], { complete: true, coverage: current }),
           ),
-          /archived scan checkpoint: stored JSON is malformed/,
+          history === "invalid-head"
+            ? /archived checkpoint head is invalid/
+            : history === "wrong-scan-selected" ||
+                history === "wrong-scan-result"
+              ? /scanId does not match the authoritative workbench scan/
+              : history === "invalid-selected"
+                ? /Invalid input: expected array, received undefined/
+                : /archived scan checkpoint.*(?:stored JSON is malformed|requested artifact is unavailable)/,
         );
       for (const [file, bytes] of files)
         assert.equal(await readFile(file, "utf8"), bytes);
@@ -185,4 +242,21 @@ for (const history of ["valid", "unreadable", "mixed"]) {
       await rm(root, { recursive: true, force: true });
     }
   });
+}
+
+for (const workflowVersion of ["deep-scan-mcp/v1", "deep-security-scan/v2"]) {
+  for (const resume of [false, true]) {
+    test(`workbench version reaches reducer persistence (${workflowVersion}, resume: ${resume})`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "coverage-version-"));
+      try {
+        await publishCoverageFixture(root, "partial", {
+          workflowVersion,
+          resume,
+          continueAfterResume: resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 }

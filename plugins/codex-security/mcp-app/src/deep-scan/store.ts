@@ -689,6 +689,7 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
   };
   return {
     scanId: requiredString(value.scanId, "deepScan.scanId"),
+    workflowVersion: optionalString(value.workflowVersion),
     status,
     phase: deepScanPhase(value.phase),
     coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),

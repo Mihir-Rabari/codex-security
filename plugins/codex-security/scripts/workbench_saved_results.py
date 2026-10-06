@@ -12,7 +12,7 @@ import re
 import sqlite3
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -760,7 +760,8 @@ def _generic_surface_updates(
     surface_schema: dict[str, Any],
     deferred_rows: dict[str, list[Any]],
     ambiguous_deferred: set[tuple[str | None, str]],
-) -> tuple[set[int], list[dict[str, Any]]]:
+    receipt_refs: Callable[[dict[str, Any], str | None, str, str], Any],
+) -> tuple[set[int], list[tuple[str, str | None, int, dict[str, Any]]]]:
     if not closed_deferred and not reopened_generic:
         return set(), []
 
@@ -771,13 +772,15 @@ def _generic_surface_updates(
         )
 
     saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
+    positions: dict[int, int] = {}
     for relative, draft, owner in sources:
         rows = draft["coverage"].get("surfaces", [])
-        for row in rows if isinstance(rows, list) else []:
+        for index, row in enumerate(rows if isinstance(rows, list) else [], 1):
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
+                positions[id(row)] = index
     replaced: set[int] = set()
-    updates: list[dict[str, Any]] = []
+    updates: list[tuple[str, str | None, int, dict[str, Any]]] = []
     for relative, draft, owner in sources:
         closed_ids = {
             identity
@@ -849,12 +852,12 @@ def _generic_surface_updates(
                 continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
-            latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
+            latest_relative, latest_surface = max(matches, key=lambda match: source_order[match[0]])
             update = copy.deepcopy(latest_surface)
             refs = update.setdefault("receiptRefs", [])
             if isinstance(refs, list):
-                for _, row in matches:
-                    previous_refs = row.get("receiptRefs", [])
+                for saved_path, row in matches:
+                    previous_refs = receipt_refs(row, owner, saved_path, latest_relative)
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             refs.append(ref)
@@ -868,8 +871,9 @@ def _generic_surface_updates(
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
             )
-            if update not in updates:
-                updates.append(update)
+            projected = (latest_relative, owner, positions[id(latest_surface)], update)
+            if projected not in updates:
+                updates.append(projected)
     return replaced, updates
 
 
@@ -1204,9 +1208,11 @@ def merge_saved_results(
             for ref in refs
         ]
 
-    def coverage_record_retained(field: str, item: Any, worker: Any, relative: str) -> bool:
+    def retained_coverage_record(
+        field: str, item: Any, worker: Any, relative: str
+    ) -> dict[str, Any] | None:
         if not isinstance(item, dict):
-            return False
+            return None
         source = {key: value for key, value in item.items() if key != "provenance"}
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
@@ -1244,8 +1250,8 @@ def merge_saved_results(
                         for value in original["surfaceIds"]
                     ]
                 if original == source:
-                    return True
-        return False
+                    return record
+        return None
 
     def coverage_source_attempt(relative: str, worker: Any) -> int:
         directory = Path(relative).parent
@@ -1712,9 +1718,9 @@ def merge_saved_results(
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                     and (candidate := coverage_candidate(owner, item)) is not None
                     and (
-                        candidate[0] is None
-                        or item["disposition"] != "reported"
+                        item["disposition"] != "reported"
                         or candidate[1] in reported_candidates
+                        or (candidate[0] is None and None in reported_candidates)
                     )
                 ):
                     outcomes.append((relative, candidate[0], candidate[1], item["disposition"]))
@@ -1786,6 +1792,22 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
+
+    def relative_surface_receipts(
+        item: dict[str, Any], owner: str | None, relative: str, target: str
+    ) -> Any:
+        worker = workers_by_id.get(owner)
+        if worker is None:
+            return item.get("receiptRefs", [])
+        refs = coverage_receipts(item, worker, relative)
+        if not isinstance(refs, list):
+            return refs
+        directory = Path(target).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        prefix = directory.as_posix() + "/"
+        return [ref.removeprefix(prefix) if isinstance(ref, str) else ref for ref in refs]
+
     replaced_surfaces, surface_updates = _generic_surface_updates(
         all_sources,
         source_order,
@@ -1796,6 +1818,7 @@ def merge_saved_results(
         coverage_schema["surfaces"]["items"],
         deferred_rows,
         ambiguous_deferred,
+        relative_surface_receipts,
     )
     replaced_rows = {
         "surfaces": replaced_surfaces,
@@ -1817,10 +1840,67 @@ def merge_saved_results(
             if isinstance(previous, list):
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
+
+    def append_coverage_record(
+        field: str,
+        item: Any,
+        index: int,
+        worker: Any,
+        source: dict[str, Any],
+        relative: str,
+        reviewed: bool,
+    ) -> None:
+        output = coverage.setdefault(field, [])
+        if not isinstance(output, list):
+            return
+        if field == "surfaces" and isinstance(item, dict):
+            item = {**item, "receiptRefs": item.get("receiptRefs", [])}
+        if reviewed and isinstance(item, dict) and field != "reviews":
+            item = project_missing_record(field, item, index, worker, source, relative)
+        if field == "surfaces" and worker is not None and isinstance(item, dict):
+            item = copy.deepcopy(item)
+            item["receiptRefs"] = coverage_receipts(item, worker, relative)
+        if isinstance(item, dict) and "id" not in item:
+            semantic_item = dict(item)
+            if any(
+                isinstance(existing, dict)
+                and {key: value for key, value in existing.items() if key != "id"} == semantic_item
+                for existing in output
+            ):
+                return
+        if item not in output:
+            output.append(copy.deepcopy(item))
+
     if isinstance(coverage.get("surfaces"), list):
-        for surface in surface_updates:
-            if surface not in coverage["surfaces"]:
-                coverage["surfaces"].append(surface)
+        for relative, owner, index, surface in surface_updates:
+            worker = workers_by_id.get(owner)
+            reviewed = (
+                worker is not None
+                and worker["status"] == "succeeded"
+                and worker["merge_state"] == "merged"
+                and (owner, worker["attempt"]) in reviewed_attempts
+            )
+            source = (
+                parent["coverage"] if relative == "parent" else drafts_by_path[relative]["coverage"]
+            )
+            retained = (
+                retained_coverage_record(
+                    "surfaces", source["surfaces"][index - 1], worker, relative
+                )
+                if reviewed
+                else None
+            )
+            if retained is not None:
+                surface = {**retained, "receiptRefs": coverage_receipts(surface, worker, relative)}
+                for projection in projected_coverages:
+                    rows = projection.get("surfaces", [])
+                    if isinstance(rows, list):
+                        replaced_surfaces.update(id(row) for row in rows if row == retained)
+                for position, row in enumerate(coverage["surfaces"]):
+                    if row == retained:
+                        coverage["surfaces"][position] = copy.deepcopy(surface)
+                worker, reviewed = None, False
+            append_coverage_record("surfaces", surface, index, worker, source, relative, reviewed)
         for surface in coverage["surfaces"]:
             if isinstance(surface, dict):
                 surface.setdefault("receiptRefs", [])
@@ -2201,7 +2281,7 @@ def merge_saved_results(
                     continue
                 if field == "openQuestions" and isinstance(item, str):
                     item = {"question": item.strip()}
-                if reviewed and coverage_record_retained(field, item, worker, relative):
+                if reviewed and retained_coverage_record(field, item, worker, relative):
                     continue
                 if (
                     field == "surfaces"
@@ -2230,33 +2310,13 @@ def merge_saved_results(
                         else item.get("candidateId"),
                         str,
                     )
-                    and (
-                        (coverage_candidate(worker_id, item) in resolved)
-                        or ((worker_id, identity) in resolved)
-                    )
+                    and ((coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved)
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
-                if field == "surfaces" and isinstance(item, dict):
-                    item = {**item, "receiptRefs": item.get("receiptRefs", [])}
-                if reviewed and isinstance(item, dict) and field != "reviews":
-                    item = project_missing_record(
-                        field, item, index, worker, draft["coverage"], relative
-                    )
-                if field == "surfaces" and worker is not None and isinstance(item, dict):
-                    item = copy.deepcopy(item)
-                    item["receiptRefs"] = coverage_receipts(item, worker, relative)
-                if isinstance(item, dict) and "id" not in item:
-                    semantic_item = dict(item)
-                    if any(
-                        isinstance(existing, dict)
-                        and {key: value for key, value in existing.items() if key != "id"}
-                        == semantic_item
-                        for existing in output
-                    ):
-                        continue
-                if item not in output:
-                    output.append(copy.deepcopy(item))
+                append_coverage_record(
+                    field, item, index, worker, draft["coverage"], relative, reviewed
+                )
 
     identities: dict[str, str] = {}
     for finding in findings:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from argparse import Namespace
 
 import pytest
@@ -10,6 +11,7 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.mark.parametrize("other_outcome", ["rejected", "reported"])
 @pytest.mark.parametrize("host_coverage", [True, False], ids=["accepted-projection", "legacy"])
 @pytest.mark.parametrize("retry_publication", [False, True], ids=["publish", "retry-publication"])
 @pytest.mark.parametrize(
@@ -22,6 +24,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     workbench_db,
     publication_scan,
     host_coverage,
+    other_outcome,
     parent_draft,
     retry_publication,
     monkeypatch,
@@ -36,7 +39,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
         "reviews": [],
     }
     source_files = []
-    for disposition in ("needs_follow_up", "rejected"):
+    aggregate_findings = []
+    for disposition in ("needs_follow_up", other_outcome):
         result = add_worker(workbench_db, scan)
         worker_id = result.parent.name
         if parent_draft == "projected":
@@ -69,9 +73,21 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
             "deferred": [deferred] if disposition == "needs_follow_up" else [],
             "reviews": [{"workerId": "other-worker", "attempt": 99, "completeness": "complete"}],
         }
+        findings = []
+        if disposition == "reported":
+            finding = copy.deepcopy(scan.findings[0])
+            finding["provenance"]["candidateId"] = "candidate-1"
+            finding["provenance"]["workerId"] = worker_id
+            findings.append(finding)
+            aggregate_findings.extend(findings)
         result.write_text(
             json.dumps(
-                {"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": coverage}
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": findings,
+                    "coverage": coverage,
+                }
             )
         )
         source_files.append(result)
@@ -107,7 +123,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
             "WHERE result_manifest_path = ?",
             (str(reducer),),
         )
-    aggregate = {"scanId": scan.scan_id, "complete": True, "findings": []}
+    aggregate = {"scanId": scan.scan_id, "complete": True, "findings": aggregate_findings}
     if host_coverage:
         aggregate["sourceCoverage"] = copy.deepcopy(source_coverage)
     reducer.write_text(json.dumps(aggregate))
@@ -316,6 +332,7 @@ def test_standard_publication_preserves_uninterpreted_coverage_provenance(
     assert (scan.scan_dir / "report.md").is_file()
 
 
+@pytest.mark.parametrize("finding_state", ["valid", "empty", "invalid"])
 @pytest.mark.parametrize(
     "provenance, pending",
     [
@@ -326,9 +343,16 @@ def test_standard_publication_preserves_uninterpreted_coverage_provenance(
     ids=["local-candidate", "local-worker", "descriptive-worker"],
 )
 def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenance(
-    workbench_api, workbench_db, publication_scan, provenance, pending
+    workbench_api, workbench_db, publication_scan, provenance, pending, finding_state
 ):
     scan = publication_scan(mode="standard")
+    if finding_state != "valid":
+        (scan.scan_dir / "findings.json").write_text(
+            json.dumps(
+                {"findings": [] if finding_state == "empty" else [{"candidateId": "candidate-1"}]}
+            )
+        )
+        pending = True
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["scan"]["complete"] = False
@@ -609,3 +633,125 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
     assert pending[0]["provenance"]["candidateId"] == "candidate-B"
     assert pending[0]["provenance"]["workerId"] == worker_id
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("prior_receipt", [False, "carried", "omitted"])
+@pytest.mark.parametrize("projection_source", ["parent", "reducer"])
+def test_generic_closeout_preserves_projected_surface_receipts(
+    workbench_api, workbench_db, publication_scan, projection_source, prior_receipt
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    receipt = result.parent / "artifacts" / "review.txt"
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic completed review.\n")
+    surface = {
+        "id": "reviewed-surface",
+        "label": "Independent review",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    prior_surface = {**surface, "disposition": "needs_follow_up"}
+    checkpoint_root = result.parent / "checkpoints"
+    attempt = 1
+    if prior_receipt:
+        attempt = 2
+        archive = output.parent / "attempts" / "attempt-01"
+        checkpoint_root = archive / "checkpoints"
+        previous_receipt = archive / "artifacts" / "prior.txt"
+        previous_receipt.parent.mkdir(parents=True)
+        previous_receipt.write_text("Prior synthetic review.\n")
+        prior_surface["receiptRefs"] = ["artifacts/prior.txt"]
+        if prior_receipt == "carried":
+            surface["receiptRefs"].append(previous_receipt.relative_to(scan.scan_dir).as_posix())
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,)
+            )
+    pending_checkpoint = write_checkpoint(
+        checkpoint_root,
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "surfaces": [prior_surface],
+                "deferred": [
+                    {"id": "review", "reason": "Review remains.", "surfaceIds": [surface["id"]]}
+                ],
+            },
+        },
+    )
+    os.utime(pending_checkpoint, ns=(100, 100))
+    source = {
+        "completeness": "complete",
+        "surfaces": [surface],
+        "explicitExclusions": [],
+        "deferred": [],
+        "resolvedDeferred": [{"id": "review", "reason": "Review completed."}],
+    }
+    result.write_text(
+        json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": source})
+    )
+    os.utime(result, ns=(200, 200))
+    projected = {
+        **surface,
+        "id": f"{worker_id}-attempt-{attempt}-surface-1",
+        "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix(), *surface["receiptRefs"][1:]],
+        "provenance": {"workerId": worker_id, "attempt": attempt, "sourceId": surface["id"]},
+    }
+    projection = {
+        "completeness": "complete",
+        "surfaces": [projected],
+        "explicitExclusions": [],
+        "deferred": [],
+        "reviews": [{"workerId": worker_id, "attempt": attempt, "completeness": "complete"}],
+    }
+    if projection_source == "parent":
+        (scan.scan_dir / "coverage.json").write_text(json.dumps(projection))
+    else:
+        reducer = add_worker(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE result_manifest_path = ?",
+                (str(reducer),),
+            )
+        reducer.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "sourceCoverage": projection,
+                }
+            )
+        )
+    if prior_receipt == "omitted":
+        projected["receiptRefs"].append(previous_receipt.relative_to(scan.scan_dir).as_posix())
+    saved = {file: file.read_bytes() for file in (scan.scan_dir / "artifacts").rglob("*.json")}
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+    for replay in (False, True):
+        if replay:
+            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert coverage["surfaces"] == [projected]
+        assert len(coverage["deferred"]) == 1
+        assert coverage["deferred"][0]["id"] == "scan-stopped"
+        assert (
+            scan.scan_dir / coverage["surfaces"][0]["receiptRefs"][0]
+        ).read_text() == "Synthetic completed review.\n"
+        assert all(file.read_bytes() == contents for file, contents in saved.items())

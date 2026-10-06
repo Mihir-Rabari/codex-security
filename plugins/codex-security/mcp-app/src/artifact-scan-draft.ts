@@ -1172,7 +1172,17 @@ async function readSavedCheckpoints(
       context,
       ["checkpoints", entry.name],
       label,
-    );
+    ).catch((error) => {
+      if (
+        skipInvalid &&
+        error instanceof Error &&
+        (error.message === `${label}: the requested artifact is unavailable.` ||
+          error.message === `${label}: the requested artifact cannot be read.`)
+      )
+        return undefined;
+      throw error;
+    });
+    if (contents === undefined) continue;
     let input: ScanDraftInput;
     try {
       const draft = parseJsonObject(contents, label);
@@ -1371,7 +1381,10 @@ export async function readArchivedWorkerCheckpoints(
     const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
       [];
     const attemptContext = { ...context, root: attemptRoot };
-    const head = await readCheckpointHead(attemptContext, "archived");
+    // Origin matching needs readable snapshots, not checkpoint selection order.
+    const head = skipInvalid
+      ? undefined
+      : await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
       checkpointHead = parsePersistedScanDraft(
@@ -1407,13 +1420,17 @@ export async function readArchivedWorkerCheckpoints(
         // A failed attempt may leave an invalid replaceable result after valid checkpoints.
       }
       if (result !== undefined) {
-        requireMatchingScan(context, result);
-        drafts.push({
-          input: result,
-          modifiedMs: saved.modifiedMs,
-          result: true,
-          name: "result.json",
-        });
+        try {
+          requireMatchingScan(context, result);
+          drafts.push({
+            input: result,
+            modifiedMs: saved.modifiedMs,
+            result: true,
+            name: "result.json",
+          });
+        } catch (error) {
+          if (!skipInvalid) throw error;
+        }
       }
     }
     drafts.push(

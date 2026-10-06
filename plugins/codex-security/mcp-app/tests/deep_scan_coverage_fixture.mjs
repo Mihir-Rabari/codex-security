@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { build } from "esbuild";
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -35,6 +35,7 @@ export async function publishCoverageFixture(
     continueAfterResume = false,
     stopAfterDraft = false,
     receiptRetry = false,
+    workflowVersion,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -68,6 +69,11 @@ export async function publishCoverageFixture(
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
   const runWorkbench = async (args) => {
+    if (workflowVersion && args[0] === "begin-deep-scan") {
+      // Exercise the existing persisted-version boundary without changing launch defaults.
+      args = [...args];
+      args[args.indexOf("--workflow-version") + 1] = workflowVersion;
+    }
     const { stdout } = await exec(
       process.env.PYTHON || "python3",
       [path.join(pluginRoot, "scripts", "workbench_db.py"), ...args],
@@ -83,6 +89,7 @@ export async function publishCoverageFixture(
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let run = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
+  if (workflowVersion) assert.equal(run.workflowVersion, workflowVersion);
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
@@ -303,6 +310,17 @@ export async function publishCoverageFixture(
     });
     run = await store.get(run.scanId, threadId);
   }
+  if (workflowVersion) {
+    run = await store.get(run.scanId, threadId);
+    assert.equal(run.workflowVersion, workflowVersion);
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    assert.equal(claim.acquired, true);
+    run = claim.run;
+    assert.equal(run.workflowVersion, workflowVersion);
+  }
   let discoveryCalls = 0;
   const executor = {
     async run(request) {
@@ -379,12 +397,13 @@ export async function publishCoverageFixture(
     const result = JSON.parse(
       await readFile(worker.resultManifestPath, "utf8"),
     );
-    assert.equal(
-      Object.hasOwn(result, "sourceCoverage"),
-      false,
-      "v1 reducers remain readable by earlier binaries",
-    );
+    const persisted =
+      workflowVersion === "deep-security-scan/v2" &&
+      !rawSources.has(worker.resultManifestPath);
+    assert.equal(Object.hasOwn(result, "sourceCoverage"), persisted);
+    if (persisted) assert.ok(result.sourceCoverage.reviews.length > 0);
     if (!rawSources.has(worker.resultManifestPath)) {
+      const checkpoints = [];
       for (const name of await readdir(
         path.join(worker.artifactDir, "checkpoints"),
       )) {
@@ -394,10 +413,15 @@ export async function publishCoverageFixture(
             "utf8",
           ),
         );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          false,
-          "v1 checkpoints remain readable by earlier binaries",
+        assert.equal(Object.hasOwn(checkpoint, "sourceCoverage"), persisted);
+        checkpoints.push(checkpoint);
+      }
+      if (persisted) {
+        assert.ok(
+          checkpoints.some((checkpoint) =>
+            isDeepStrictEqual(checkpoint.sourceCoverage, result.sourceCoverage),
+          ),
+          "final coverage must have an immutable checkpoint",
         );
       }
     }
