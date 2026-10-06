@@ -2618,70 +2618,75 @@ describe("patch publication integrity", () => {
     },
   );
 
-  test.each(["staged", "unstaged", "assume-unchanged"])(
-    "keeps %s same-file edits out of saved patch publication",
-    async (dirty) => {
-      for (const command of ["patch", "scan"]) {
-        const directory = await fixtures.create("patch-publication-");
-        const git = repositoryGit(directory);
-        const result = resultWithFindings(["high"]);
-        await mkdir(join(directory, "src"));
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
-        await writeFile(
-          join(directory, "src/finding-1.ts"),
-          "unsafe\noriginal\n",
-        );
-        git("add", ".");
-        git("commit", "-m", "Synthetic baseline");
-        const originalHead = git("rev-parse", "HEAD");
-        await writeFile(
-          join(directory, "src/finding-1.ts"),
-          "unsafe\nlocal edit\n",
-        );
-        if (dirty === "staged") git("add", ".");
-        if (dirty === "assume-unchanged")
-          git("update-index", "--assume-unchanged", "src/finding-1.ts");
-        const originalIndex = git("write-tree");
-        const remote = await fixtures.create("patch-publication-remote-");
-        git("init", "--bare", remote);
-        git("remote", "add", "origin", remote);
-        const outcome = await runWorkflow(
-          command === "patch"
-            ? ["patch", "--scan", "scan-1", "--create-pr", "--json"]
-            : ["scan", directory, "--patch", "--create-pr", "--json"],
-          {
-            currentDirectory: directory,
-            result,
-            onWorkbench: () => savedScan(result, "scan-1", directory),
-            onRepositoryCommand: (command, args, cwd, options) =>
-              command === "git"
-                ? runGitRepositoryCommand(command, args, cwd, options)
-                : args[1] === "list"
-                  ? ""
-                  : "https://github.example.test/example/repository/pull/1",
-            onCodex: async (args, output) => {
-              await writeFile(
-                join(directory, "src/finding-1.ts"),
-                "fixed\nlocal edit\n",
-              );
-              completePatches(args, output);
-              return 0;
-            },
+  test.each([
+    ["staged", "src/finding-1.ts"],
+    ["staged", "src"],
+    ["unstaged", "src/finding-1.ts"],
+    ["unstaged", "src"],
+    ["assume-unchanged", "src/finding-1.ts"],
+    ["assume-unchanged", "src"],
+  ])("keeps %s edits out of publication of %s", async (dirty, reportedPath) => {
+    for (const command of ["patch", "scan"]) {
+      const directory = await fixtures.create("patch-publication-");
+      const git = repositoryGit(directory);
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = reportedPath;
+      await mkdir(join(directory, "src"));
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(
+        join(directory, "src/finding-1.ts"),
+        "unsafe\noriginal\n",
+      );
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      const originalHead = git("rev-parse", "HEAD");
+      await writeFile(
+        join(directory, "src/finding-1.ts"),
+        "unsafe\nlocal edit\n",
+      );
+      if (dirty === "staged") git("add", ".");
+      if (dirty === "assume-unchanged")
+        git("update-index", "--assume-unchanged", "src/finding-1.ts");
+      const originalIndex = git("write-tree");
+      const remote = await fixtures.create("patch-publication-remote-");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const outcome = await runWorkflow(
+        command === "patch"
+          ? ["patch", "--scan", "scan-1", "--create-pr", "--json"]
+          : ["scan", directory, "--patch", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? ""
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (args, output) => {
+            await writeFile(
+              join(directory, "src/finding-1.ts"),
+              "fixed\nlocal edit\n",
+            );
+            completePatches(args, output);
+            return 0;
           },
-        );
-        expect(outcome.exitCode, outcome.stderr).toBe(2);
-        expect(outcome.stderr).toContain("uncommitted changes before patching");
-        expect(git("rev-parse", "HEAD")).toBe(originalHead);
-        expect(git("write-tree")).toBe(originalIndex);
-        expect(git("ls-remote", "origin")).toBe("");
-        expect(
-          await readFile(join(directory, "src/finding-1.ts"), "utf8"),
-        ).toBe("fixed\nlocal edit\n");
-      }
-    },
-  );
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(git("rev-parse", "HEAD")).toBe(originalHead);
+      expect(git("write-tree")).toBe(originalIndex);
+      expect(git("ls-remote", "origin")).toBe("");
+      expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+        "fixed\nlocal edit\n",
+      );
+    }
+  });
 
   test.each(["local", "remote", "push remote", "OPEN", "CLOSED", "MERGED"])(
     "checks an existing %s patch publication before starting the model",
@@ -3185,6 +3190,14 @@ describe("patch change tracking", () => {
       "ssh-failed",
       "ssh-host",
       "ssh-empty",
+      "scp-core",
+      "ssh-uri-core",
+      "scp-command",
+      "ssh-uri-command",
+      "scp-executable",
+      "ssh-uri-executable",
+      "scp-core-executable",
+      "ssh-uri-core-executable",
     ].flatMap((transport) =>
       [false, true].flatMap((resume) =>
         [false, true].map((ownIncluded) => ({
@@ -3198,6 +3211,21 @@ describe("patch change tracking", () => {
     "uses the push repository for $transport: resume=$resume, own PR=$ownIncluded",
     async ({ transport, resume, ownIncluded }) => {
       const { directory, git, remote } = await publicationRepository();
+      const configuredCommand = 'ssh -F "synthetic config"';
+      const coreCommand = transport.includes("core")
+        ? configuredCommand
+        : transport.endsWith("command")
+          ? "ignored-ssh"
+          : undefined;
+      const environment: NodeJS.ProcessEnv = transport.endsWith("command")
+        ? { GIT_SSH_COMMAND: configuredCommand, GIT_SSH: "ignored-ssh" }
+        : transport.endsWith("executable")
+          ? { GIT_SSH: "synthetic path/ssh" }
+          : {};
+      const effectiveCommand =
+        environment["GIT_SSH_COMMAND"] ??
+        coreCommand ??
+        (environment["GIT_SSH"] === undefined ? undefined : '"$GIT_SSH"');
       const alias = transport.endsWith("-mixed")
         ? "GitHub-Work"
         : "github-work";
@@ -3251,9 +3279,26 @@ describe("patch change tracking", () => {
           : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
+          environment,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
+              if (args.join(" ") === "config --get core.sshCommand") {
+                if (coreCommand !== undefined) return coreCommand;
+                throw Object.assign(new Error("Synthetic missing Git config"), {
+                  code: 1,
+                });
+              }
+              if (args[0] === "-c") {
+                expect(effectiveCommand).toBeDefined();
+                expect(args).toEqual([
+                  "-c",
+                  `alias.codex-security-ssh-config=!${effectiveCommand} -G`,
+                  "codex-security-ssh-config",
+                  alias,
+                ]);
+                return "hostname github.com";
+              }
               if (args[0] === "push") {
                 pushes++;
                 expect(args).toEqual([
@@ -3286,6 +3331,7 @@ describe("patch change tracking", () => {
               return runGitRepositoryCommand(command, args, cwd, options);
             }
             if (command === "ssh") {
+              expect(effectiveCommand).toBeUndefined();
               expect(args).toEqual([
                 "-G",
                 transport.startsWith("scp") || transport.startsWith("ssh-uri")

@@ -4215,3 +4215,18 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
     )
     assert preview == patch.decode()
     assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}
+
+
+def test_patch_preview_tolerates_integer_conversion_failure(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    count = b"0" * 5000 + b"1"
+    patch = (
+        b"--- a/file.txt\n+++ b/file.txt\n@@ -1," + count + b" +1," + count + b" @@\n-old\n+new\n"
+    )
+    (tmp_path / "file.txt").write_bytes(b"old\n")
+    (tmp_path / "patch.diff").write_bytes(patch)
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "apply", "--check", "patch.diff"], cwd=tmp_path, check=True)
+    assert namespace["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    ) == (None, None)

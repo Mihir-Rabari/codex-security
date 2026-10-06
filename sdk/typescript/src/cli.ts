@@ -6740,11 +6740,26 @@ async function patchPublicationDestination(
     const url = new URL(
       remote.includes("://") ? remote : `ssh://${remote.replace(":", "/")}`,
     );
-    const settings = await run("ssh", ["-G", url.hostname]).catch(
-      (error: unknown) =>
-        isJsonObject(error) && typeof error["code"] === "number"
-          ? ""
-          : undefined,
+    const sshCommand =
+      dependencies.environment["GIT_SSH_COMMAND"] ??
+      (await run("git", ["config", "--get", "core.sshCommand"]).catch(
+        (error: unknown) => {
+          if (isJsonObject(error) && error["code"] === 1) return undefined;
+          throw error;
+        },
+      ));
+    const settings = await (
+      sshCommand !== undefined ||
+      dependencies.environment["GIT_SSH"] !== undefined
+        ? run("git", [
+            "-c",
+            `alias.codex-security-ssh-config=!${sshCommand ?? '"$GIT_SSH"'} -G`,
+            "codex-security-ssh-config",
+            url.hostname,
+          ])
+        : run("ssh", ["-G", url.hostname])
+    ).catch((error: unknown) =>
+      isJsonObject(error) && typeof error["code"] === "number" ? "" : undefined,
     );
     if (settings !== undefined) {
       const hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
@@ -7072,7 +7087,9 @@ async function createPatchPullRequest(
         })
         .map((file) => relative(repository, resolve(root, file))),
     ]),
-  ].filter((file) => dirtyFiles.has(file));
+  ].filter((file) =>
+    [...dirtyFiles].some((dirty) => !isOutsidePath(relative(file, dirty))),
+  );
   if (dirty.length > 0) {
     throw new CodexSecurityError(
       `Cannot publish files with uncommitted changes before patching: ${dirty.join(", ")}. Local edits and patches were kept; review and publish them separately.`,

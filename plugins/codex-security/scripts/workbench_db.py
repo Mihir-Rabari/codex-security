@@ -3195,7 +3195,7 @@ def patch_artifact_preview(
                     elif chunk.startswith((b" ", b"\n")):
                         hunk_lines = max(0, hunk_lines - 2)
                 at_line_start = chunk.endswith(b"\n")
-    except SystemExit:
+    except (SystemExit, ValueError):
         return None, None
     if f"sha256:{digest.hexdigest()}" != expected_digest:
         return None, None
