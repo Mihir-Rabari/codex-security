@@ -553,6 +553,60 @@ test.each(["bundled", "legacy"])(
   },
 );
 
+test.each(["root", "child", "linked"])(
+  "legacy archive preserves the active workbench at a %s state path",
+  async (layout) => {
+    const context = await fixture();
+    const outputDir = join(context.root, "results");
+    await mkdir(outputDir, { mode: 0o700 });
+    const stateDirectory =
+      layout === "root" ? outputDir : join(outputDir, "state");
+    if (layout === "linked") {
+      await mkdir(context.stateDirectory, { mode: 0o700 });
+      await symlink(
+        context.stateDirectory,
+        stateDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    context.dependencies.environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+    const first = completed(
+      await importScan(
+        {
+          ...context.options,
+          outputDir: join(context.root, "previous"),
+        },
+        context.dependencies,
+      ),
+    );
+    await expect(
+      importScan(
+        {
+          ...context.options,
+          config: {
+            ...context.options.config,
+            pluginPath: await legacyArchivePlugin(context),
+          },
+          outputDir,
+          archiveExisting: true,
+        },
+        context.dependencies,
+      ),
+    ).rejects.toThrow();
+    const saved = await runWorkbench(context.workbenchOptions, [
+      "get-scan",
+      "--scan-id",
+      first.manifest.scan.id,
+    ]);
+    expect((saved["scan"] as { scanId: string }).scanId).toBe(
+      first.manifest.scan.id,
+    );
+    expect(await readFile(first.manifestPath, "utf8")).toContain(
+      first.manifest.scan.id,
+    );
+  },
+);
+
 test.each(["active scan", "missing parent"])(
   "legacy registration restores output after rejecting %s",
   async (reason) => {

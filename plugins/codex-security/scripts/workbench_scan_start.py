@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
+from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -135,7 +136,9 @@ def archive_scan(
     try:
         if archived_scan_dir is None:
             database_path = connection.execute("PRAGMA database_list").fetchone()[2]
-            if database_path and scan_dir in Path(database_path).resolve().parents:
+            if state_dir(canonical=False).is_relative_to(scan_dir) or (
+                database_path and scan_dir in Path(database_path).resolve().parents
+            ):
                 raise SystemExit(
                     "The scan artifact directory cannot contain the active workbench database."
                 )

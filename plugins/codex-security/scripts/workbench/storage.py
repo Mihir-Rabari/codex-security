@@ -6,12 +6,14 @@ import os
 from pathlib import Path
 
 
-def state_dir() -> Path:
+def state_dir(*, canonical: bool = True) -> Path:
     state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+        path = Path(state_dir).expanduser()
+    else:
+        codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+        path = codex_home / "state" / "plugins" / "codex-security"
+    return path.resolve() if canonical else Path(os.path.abspath(path))
 
 
 def resolve_scan_root(scan_root: str | None) -> Path:
