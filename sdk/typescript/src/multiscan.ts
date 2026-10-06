@@ -94,6 +94,7 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  warnings?: string[];
   policyFailed?: boolean;
 }
 
@@ -136,6 +137,7 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
+  warnings?: { repository: string; warnings: string[] }[];
   policyFailed?: boolean;
 }
 
@@ -333,6 +335,7 @@ async function runCampaign(
   let completed = 0;
   let incomplete = 0;
   let policyFailed = false;
+  const warnings: NonNullable<MultiscanResult["warnings"]> = [];
   const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
     (settings) => settings.failureSeverity !== undefined,
   );
@@ -381,6 +384,17 @@ async function runCampaign(
       if (canonicalArtifactOutput === undefined) {
         pending.push(task);
         continue;
+      }
+      if (receipt.status !== "failed" && receipt.warnings?.length) {
+        warnings.push({ repository: task.id, warnings: receipt.warnings });
+        for (const warning of receipt.warnings) {
+          notifyProgress(options, {
+            repository: task.id,
+            status: receipt.status,
+            attempt: receipt.attempt,
+            warning,
+          });
+        }
       }
       if (
         relative(
@@ -437,6 +451,7 @@ async function runCampaign(
       failed: 0,
       skipped,
       resultsPath: ledger,
+      ...(warnings.length === 0 ? {} : { warnings }),
       ...(hasPolicy ? { policyFailed } : {}),
     };
   }
@@ -468,6 +483,7 @@ async function runCampaign(
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
+        const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let targetId: string | undefined;
         let resolvedScope: string | undefined;
@@ -576,13 +592,15 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
-              onWarning: (warning) =>
+              onWarning: (warning) => {
+                runWarnings.push(warning);
                 notifyProgress(options, {
                   repository: task.id,
                   attempt,
                   status: "started",
                   warning,
-                }),
+                });
+              },
               ...(options.signal === undefined
                 ? {}
                 : { signal: options.signal }),
@@ -649,6 +667,7 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
             ...(attemptPolicyFailed === undefined
               ? {}
               : { policyFailed: attemptPolicyFailed }),
@@ -670,6 +689,9 @@ async function runCampaign(
         });
         if (failure === undefined) {
           policyFailed ||= attemptPolicyFailed === true;
+          if (runWarnings.length > 0) {
+            warnings.push({ repository: task.id, warnings: runWarnings });
+          }
           if (warning === undefined) completed += 1;
           else incomplete += 1;
           break;
@@ -704,6 +726,7 @@ async function runCampaign(
     failed,
     skipped,
     resultsPath: ledger,
+    ...(warnings.length === 0 ? {} : { warnings }),
     ...(hasPolicy ? { policyFailed } : {}),
   };
 }
