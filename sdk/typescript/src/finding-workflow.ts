@@ -134,10 +134,22 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
-  async sourceSnapshot(repository: string): Promise<JsonObject> {
-    return (await this.request({ action: "source", repository }))[
-      "source"
-    ] as JsonObject;
+  async sourceSnapshot(repository: string): Promise<JsonObject>;
+  async sourceSnapshot(
+    repository: string,
+    optional: true,
+  ): Promise<JsonObject | null>;
+  async sourceSnapshot(
+    repository: string,
+    optional?: true,
+  ): Promise<JsonObject | null> {
+    return (
+      await this.request({
+        action: "source",
+        repository,
+        ...(optional ? { optional: true } : {}),
+      })
+    )["source"] as JsonObject | null;
   }
 
   async getReview(key: string): Promise<unknown> {

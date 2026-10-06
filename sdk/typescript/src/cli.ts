@@ -8650,6 +8650,7 @@ async function executeScan(
                   repositoryPath: repository,
                   scanId: result.manifest.scan.id,
                   workflowId: arguments_.workflowId,
+                  knowledgeBasePaths: options.knowledgeBasePaths,
                   finding,
                   auth,
                   cyberAccessProgram: arguments_.cyberAccessProgram,

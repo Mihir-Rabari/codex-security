@@ -146,6 +146,8 @@ describe("CLI", () => {
     try {
       const result = scanResultAt(scanDir, ["high", "low"]);
       const repository = await realpath(tmpdir());
+      const knowledgePath = join(scanDir, "synthetic-policy.md");
+      await writeFile(knowledgePath, "Synthetic validation policy.");
       const stdout = capture();
       const lifecycle: string[] = [];
       const validated: unknown[] = [];
@@ -156,6 +158,8 @@ describe("CLI", () => {
             "scan",
             ".",
             "--validate",
+            "--knowledge-base",
+            knowledgePath,
             "--safety-identifier",
             "synthetic-user",
             "--fail-on-severity",
@@ -178,6 +182,7 @@ describe("CLI", () => {
                 repositoryPath: repository,
                 scanId: "scan",
                 safetyIdentifier: "synthetic-user",
+                knowledgeBasePaths: [knowledgePath],
                 signal: scanSignal,
               });
               expect(options.outputDir).toBeUndefined();

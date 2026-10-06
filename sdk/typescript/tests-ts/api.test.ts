@@ -940,6 +940,108 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
+  test.each([false, true])(
+    "retains supplied knowledge context for workflow validation; changed=%p",
+    async (changed) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      const normalizedPaths: string[] = [];
+      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      async function* events() {
+        modelCalls += 1;
+        const path =
+          fixture.captured.codex?.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"];
+        expect(path).toBeDefined();
+        normalizedPaths.push(path!);
+        const files = await readdir(path!);
+        const context = await readFile(join(path!, files[0]!), "utf8");
+        yield* validationEvents(
+          JSON.stringify({ ...assessment, report: context }),
+        );
+      }
+      fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      const document = join(fixture.root, "policy.md");
+      await writeFile(document, "Original synthetic policy.");
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "knowledge-validation",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+        knowledgeBasePaths: [document],
+      };
+      const first = await client.validate(request);
+      expect(first.report).toBe("Original synthetic policy.");
+      expect(fixture.captured.prompt).toContain(
+        shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE"),
+      );
+      expect(fixture.captured.prompt).not.toContain(
+        "Original synthetic policy.",
+      );
+      if (changed) await writeFile(document, "Updated synthetic policy.");
+      const second = await client.validate(request);
+      expect(modelCalls).toBe(changed ? 2 : 1);
+      expect(second.report).toBe(
+        changed ? "Updated synthetic policy." : first.report,
+      );
+      expect(normalizedPaths.every((path) => !existsSync(path))).toBe(true);
+      expect(await readFile(document, "utf8")).toBe(second.report);
+    },
+  );
+
+  test
+    .skipIf(process.platform === "win32")
+    .each(["workflow", "file-backed workflow", "no workflow"] as const)(
+    "validates an ignored FIFO without requiring a cache snapshot: %s",
+    async (mode) => {
+      const python = await resolvePluginPython();
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls += 1;
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events, PLUGIN_ROOT, python);
+      await using client = fixture.client;
+      const repository = fixture.options.repositoryPath;
+      execFileSync("git", ["init", "-q", repository]);
+      await writeFile(join(repository, ".gitignore"), "ignored-pipe\n");
+      execFileSync(python, [
+        "-c",
+        "import os,sys; os.mkfifo(sys.argv[1])",
+        join(repository, "ignored-pipe"),
+      ]);
+      fixture.workbench.mockImplementation(runWorkbench);
+      const workflow = new FindingWorkflow(
+        "unsupported-validation-snapshot",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: repository });
+      if (mode === "file-backed workflow") {
+        const instructions = join(fixture.root, "instructions.md");
+        await writeFile(instructions, "Synthetic validation instructions.");
+        client.config.codexOverrides!["model_instructions_file"] = instructions;
+      }
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        ...(mode === "no workflow" ? {} : { workflowId: workflow.id }),
+      };
+      await client.validate(request);
+      await client.validate(request);
+      expect(modelCalls).toBe(2);
+      expect(fixture.captured.prompt).toContain("Candidate finding");
+    },
+  );
+
   test.each([
     "unchanged",
     "source contents",

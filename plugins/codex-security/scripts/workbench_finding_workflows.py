@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import directory_content_digest, git_output, git_revision
+from workbench_target import (
+    UnsupportedLocalFileType,
+    directory_content_digest,
+    git_output,
+    git_revision,
+)
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -124,6 +129,12 @@ def finding_workflow(
         return {"workflow": read_workflow(connection, workflow_id)}
     if payload["action"] == "source":
         target = Path(payload["repository"]).resolve(strict=True)
+        try:
+            content = directory_content_digest(target, include_ignored=True)
+        except UnsupportedLocalFileType:
+            if payload.get("optional") is True:
+                return {"source": None}
+            raise
         return {
             "source": {
                 "repository": str(target),
@@ -131,7 +142,7 @@ def finding_workflow(
                 "refsDigest": hashlib.sha256(
                     (git_output(target, "show-ref") or "").encode()
                 ).hexdigest(),
-                "content": directory_content_digest(target, include_ignored=True),
+                "content": content,
             }
         }
     if payload["action"] == "get-review":

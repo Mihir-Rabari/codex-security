@@ -20,6 +20,10 @@ from filesystem_identity import stored_filesystem_identity_matches
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 
+class UnsupportedLocalFileType(SystemExit):
+    """An entry cannot be read as source content for a review cache."""
+
+
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
     digest = hashlib.sha256(
         f"codex-security-diff/v1\0{kind}\0{base_revision}\0{head_revision}".encode()
@@ -670,7 +674,7 @@ def directory_content_digest(
             update_digest_field(digest, b"size", str(content_size).encode())
             update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
-            raise SystemExit(f"Unsupported local file type: {relative_path}")
+            raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
 import pytest
@@ -303,3 +304,38 @@ def test_workflow_column_migration_is_atomic_and_preserves_resume_state(workbenc
         }
     finally:
         connection.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require a Unix filesystem")
+def test_optional_review_snapshot_disables_cache_for_unsupported_file_types(
+    workbench_api, workbench_db, tmp_path
+):
+    target = tmp_path / "repository"
+    target.mkdir()
+    source = target / "source.ts"
+    source.write_text("export const value = 1;\n", encoding="utf-8")
+    first = workflow(workbench_api, workbench_db, "source", repository=str(target))
+    assert first["source"]["content"].startswith("codex-security-snapshot/v1:")
+    pipe = target / "pipe"
+    os.mkfifo(pipe)
+    with pytest.raises(SystemExit, match="Unsupported local file type: pipe"):
+        workflow(workbench_api, workbench_db, "source", repository=str(target))
+    assert workflow(
+        workbench_api, workbench_db, "source", repository=str(target), optional=True
+    ) == {"source": None}
+    pipe.unlink()
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)
+        == first
+    )
+    source.write_text("export const value = 2;\n", encoding="utf-8")
+    assert (
+        workflow(workbench_api, workbench_db, "source", repository=str(target), optional=True)[
+            "source"
+        ]["content"]
+        != first["source"]["content"]
+    )
+    with pytest.raises(FileNotFoundError):
+        workflow(
+            workbench_api, workbench_db, "source", repository=str(target / "missing"), optional=True
+        )
