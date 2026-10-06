@@ -7534,10 +7534,18 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
   commandRoot = repository,
 ): Promise<string> {
-  if (commandRoot !== repository)
-    await enclosingGitWorktreeRoot(repository, undefined, {
+  if (commandRoot !== repository) {
+    const worktree = await enclosingGitWorktreeRoot(repository, undefined, {
       requireIfPresent: true,
     });
+    if (
+      worktree !== null &&
+      isOutsidePath(relative(await realpath(commandRoot), worktree))
+    )
+      throw new Error(
+        "Nested Git checkout resolves outside the selected repository.",
+      );
+  }
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const environment = {
     GIT_INDEX_FILE: join(root, "index"),

@@ -3719,7 +3719,12 @@ describe("patch change tracking", () => {
     },
   );
 
-  test.each(["gitfile", "configured-worktree"])(
+  test.each([
+    "gitfile",
+    "configured-worktree",
+    "sparse-link-before",
+    "sparse-link-during",
+  ])(
     "does not snapshot another worktree through nested %s metadata",
     async (kind) => {
       const parent = await fixtures.create("synthetic-nested-binding-");
@@ -3738,7 +3743,10 @@ describe("patch change tracking", () => {
       }
       const git = repositoryGit(root);
       const outside = repositoryGit(external);
-      const metadata = repositoryGit(kind === "gitfile" ? external : nested);
+      const sparseLink = kind.startsWith("sparse-link");
+      const metadata = repositoryGit(
+        kind === "gitfile" || sparseLink ? external : nested,
+      );
       if (kind === "gitfile") {
         await rm(join(nested, ".git"), { recursive: true });
         await writeFile(
@@ -3746,9 +3754,20 @@ describe("patch change tracking", () => {
           `gitdir: ${join(external, ".git")}\n`,
         );
       }
-      metadata("config", "core.worktree", external);
+      if (!sparseLink) metadata("config", "core.worktree", external);
       git("add", "nested");
       git("commit", "-m", "Synthetic nested dependency");
+      const linkExternal = () =>
+        symlink(
+          external,
+          nested,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      if (sparseLink) {
+        await rm(nested, { recursive: true });
+        git("sparse-checkout", "set", "--no-cone", "/app.ts");
+        if (kind === "sparse-link-before") await linkExternal();
+      }
       await writeFile(
         join(external, "app.ts"),
         "outside uncommitted content\n",
@@ -3765,6 +3784,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: runGitRepositoryCommand,
           onCodex: async (_args, output) => {
             modelCalls += 1;
+            if (kind === "sparse-link-during") await linkExternal();
             await writeFile(join(root, "app.ts"), "fixed\n");
             output?.stdout.write("Fixed and checked.");
             return 0;
@@ -3772,8 +3792,12 @@ describe("patch change tracking", () => {
         },
       );
       expect(outcome.exitCode).toBe(2);
-      expect(outcome.stderr).toContain("worktree root does not match");
-      expect(modelCalls).toBe(0);
+      expect(outcome.stderr).toContain(
+        sparseLink
+          ? "outside the selected repository"
+          : "worktree root does not match",
+      );
+      expect(modelCalls).toBe(kind === "sparse-link-during" ? 1 : 0);
       expect(() => metadata("cat-file", "-e", blob)).toThrow();
       expect(await readFile(join(root, ".git", "index"))).toEqual(rootIndex);
       expect(await readFile(join(external, ".git", "index"))).toEqual(
