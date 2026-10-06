@@ -171,7 +171,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     else:
         assert coverage["deferred"][0]["candidateId"] == "candidate-1"
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
-    workbench_api["preserve_scan_results"](
+    workbench_api["saved_results"].preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
