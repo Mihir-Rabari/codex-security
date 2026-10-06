@@ -8063,18 +8063,23 @@ async function runPatchRiskAssessment(
       ),
     ),
   };
-  if (
-    (await dependencies
-      .runRepositoryCommand(
-        "git",
-        ["rev-parse", "--absolute-git-dir"],
-        request.repository,
-        { directory: bound.directory, environment, trim: false },
-      )
-      .then((path) => realpath(path.replace(/\n$/u, "")))
-      .catch(() => undefined)) !== context.gitDirectory
-  )
-    environment["GIT_DIR"] = context.environment["GIT_DIR"];
+  for (const [name, argument, path] of [
+    ["GIT_DIR", "--absolute-git-dir", context.gitDirectory],
+    ["GIT_WORK_TREE", "--show-toplevel", context.root],
+  ] as const) {
+    if (
+      (await dependencies
+        .runRepositoryCommand(
+          "git",
+          ["rev-parse", argument],
+          request.repository,
+          { directory: bound.directory, environment, trim: false },
+        )
+        .then((value) => realpath(value.replace(/\n$/u, "")))
+        .catch(() => undefined)) !== path
+    )
+      environment[name] = context.environment[name] ?? path;
+  }
   request = { ...request, directory: bound.directory, environment };
   dependencies = bound.dependencies;
   stderr.write("\nAssessing the completed patch...\n");
