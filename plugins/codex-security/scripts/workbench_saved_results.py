@@ -1197,7 +1197,6 @@ def merge_saved_results(
                 break
     projected_coverage = parent["coverage"] if parent else {}
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
-    reviews = projected_coverage.get("reviews")
 
     def coverage_receipts(item: dict[str, Any], worker: Any, relative: str) -> Any:
         refs = item.get("receiptRefs", [])
@@ -1210,13 +1209,25 @@ def merge_saved_results(
         worker_root = output.parent if output.name == "output" else output
         worker_prefix = worker_root.as_posix() + "/"
         return [
-            f"{directory.as_posix()}/{ref}"
+            Path(f"{directory.as_posix()}/{ref}").as_posix()
             if isinstance(ref, str) and not ref.startswith(worker_prefix)
+            else Path(ref).as_posix()
+            if isinstance(ref, str)
             else ref
             for ref in refs
         ]
 
+    def canonical_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any]:
+        refs = item.get("receiptRefs", [])
+        if field != "surfaces" or not isinstance(refs, list):
+            return item
+        return {
+            **item,
+            "receiptRefs": [Path(ref).as_posix() if isinstance(ref, str) else ref for ref in refs],
+        }
+
     def retained_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any] | None:
+        item = canonical_coverage_record(field, item)
         if field == "surfaces":
             # Canonical IDs can change while source content and ownership stay the same.
             item = {key: value for key, value in item.items() if key != "id"}
@@ -1224,7 +1235,7 @@ def merge_saved_results(
         for record in records if isinstance(records, list) else []:
             if not isinstance(record, dict):
                 continue
-            original = dict(record)
+            original = dict(canonical_coverage_record(field, record))
             if "id" not in item:
                 original.pop("id", None)  # Canonical publication can assign an ID.
             if field == "openQuestions":
@@ -1644,7 +1655,11 @@ def merge_saved_results(
     def projection_key(field: str, item: dict[str, Any]) -> tuple[str, str]:
         # Publication may rename canonical IDs and add retained finding history.
         ignored = {"id", "previousFindings"} if field == "surfaces" else {"id"}
-        content = {key: value for key, value in item.items() if key not in ignored}
+        content = {
+            key: value
+            for key, value in canonical_coverage_record(field, item).items()
+            if key not in ignored
+        }
         return field, _digest(content)
 
     projected_sources: dict[tuple[str, str], tuple[str, dict[str, Any], tuple[int, int]]] = {}

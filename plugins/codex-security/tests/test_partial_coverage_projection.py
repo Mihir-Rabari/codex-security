@@ -1723,10 +1723,15 @@ def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, re
     return json.loads(published)
 
 
+@pytest.mark.parametrize(
+    "receipt_ref",
+    ["artifacts/review.txt", "artifacts/./review.txt"],
+    ids=["canonical", "equivalent"],
+)
 @pytest.mark.parametrize("closure", [False, True], ids=["unchanged", "generic-closure"])
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
 def test_generic_surface_receipt_union_keeps_each_source_directory(
-    workbench_api, workbench_db, publication_scan, monkeypatch, closure, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, closure, retry, receipt_ref
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -1746,7 +1751,7 @@ def test_generic_surface_receipt_union_keeps_each_source_directory(
         "id": "review",
         "label": "Completed source review",
         "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/review.txt"],
+        "receiptRefs": [receipt_ref],
     }
     source = {**scan.coverage, "surfaces": [surface], "deferred": []}
     if closure:
