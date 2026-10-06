@@ -73,6 +73,7 @@ export function codexSecurityPrivatePaths(
     codexSecurityCredentialHome(environment),
     join(homedir(), ".ssh"),
     join(expandHome("~", environment), ".ssh"),
+    join(homedir(), ".config", "gh"),
     githubConfigDirectory || join(homedir(), ".config", "gh"),
     githubConfigDirectory ||
       join(expandHome("~", environment), ".config", "gh"),

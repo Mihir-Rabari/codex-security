@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
@@ -1585,6 +1586,9 @@ test.each(["xdg", "explicit"] as const)(
         ? f.environment.GH_CONFIG_DIR!
         : join(f.environment.XDG_CONFIG_HOME!, "gh");
     expect(filesystem[directory]).toEqual({ ".": "deny" });
+    expect(filesystem[join(homedir(), ".config", "gh")]).toEqual({
+      ".": "deny",
+    });
     expect(options.env!["XDG_CONFIG_HOME"]).toBe(f.environment.XDG_CONFIG_HOME);
     expect(options.env!["GH_CONFIG_DIR"]).toBe(f.environment.GH_CONFIG_DIR);
   },
