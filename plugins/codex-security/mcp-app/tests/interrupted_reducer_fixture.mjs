@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const { validateReducerArtifacts, projectDiscoveryCoverage } =
   await importSource(
-    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-      .pathname,
+    fileURLToPath(new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)),
   );
 const { createDeepScanArtifacts: artifactsForScan } = await importSource(
-  new URL("../src/deep-scan/artifacts.ts", import.meta.url).pathname,
+  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
 );
 const [scanDir, discoveryPath, reducerPath, interrupted] =
   process.argv.slice(2);

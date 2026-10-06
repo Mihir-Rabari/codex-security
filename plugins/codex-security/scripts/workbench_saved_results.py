@@ -1840,7 +1840,7 @@ def merge_saved_results(
     # Reopened work and selected checkpoint outcomes follow the saved source order.
     for relative, owner, candidate_id, disposition in outcomes:
         key = (owner, candidate_id)
-        if relative == "parent" and owner is not None:
+        if relative == "parent" and owner is not None and key not in ordered_candidates:
             # An accepted parent review names a worker candidate in its source
             # namespace; the raw worker checkpoint has not absorbed that review.
             resolved.setdefault(key, disposition)
