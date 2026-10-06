@@ -144,7 +144,7 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
-test("configured state paths resolve symlinks before parent traversal", async () => {
+test("configured state paths use native parent traversal semantics", async () => {
   const directory = await temporary.create("workbench-symlink-");
   const actual = join(directory, "actual");
   const child = join(actual, "child");
@@ -155,14 +155,15 @@ test("configured state paths resolve symlinks before parent traversal", async ()
     alias,
     process.platform === "win32" ? "junction" : "dir",
   );
+  const parent = process.platform === "win32" ? directory : actual;
   assert.equal(
     (await databaseInfo(alias + "/../state")).databasePath,
-    join(actual, "state", "workbench.sqlite3"),
+    join(parent, "state", "workbench.sqlite3"),
   );
   assert.equal(
     (await databaseInfo(alias + "/../state/plugins/codex-security"))
       .databasePath,
-    join(actual, "state/plugins/codex-security/workbench.sqlite3"),
+    join(parent, "state/plugins/codex-security/workbench.sqlite3"),
   );
 });
 
