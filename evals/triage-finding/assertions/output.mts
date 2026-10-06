@@ -65,26 +65,30 @@ export function extractJson(
     const inFence = (index: number) =>
       fences.some((fence) => index >= fence.start && index < fence.end);
     const references = new Set(
-      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*\S+/gm)]
+      [...text.matchAll(/^ {0,3}\[(\d+)\]:[ \t]*(?:\r?\n[ \t]*)?\S+/gm)]
         .filter((match) => !inFence(match.index))
         .map((match) => match[1]),
     );
     let citationEnd = 0;
     let depth = 0;
     let start = 0;
-    for (const match of text.matchAll(
-      /"(?:\\.|[^"\\])*"|\[\d+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\]|:[ \t]*\S+)|[{}\[\]]/gs,
-    )) {
+    for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}\[\]]/gs)) {
       if (match.index < citationEnd) continue;
-      if (depth === 0 && match[0] === "[") {
+      if (depth === 0 && match[0] === "[" && !inFence(match.index)) {
+        const citation =
+          /^\[\d+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\]|:[ \t]*(?:\r?\n[ \t]*)?\S+)/u.exec(
+            text.slice(match.index),
+          );
+        if (citation) {
+          citationEnd = match.index + citation[0].length;
+          continue;
+        }
         const shortcut = /^\[(\d+)\]/u.exec(text.slice(match.index));
-        if (shortcut && references.has(shortcut[1]) && !inFence(match.index)) {
+        if (shortcut && references.has(shortcut[1])) {
           citationEnd = match.index + shortcut[0].length;
           continue;
         }
       }
-      if (depth === 0 && match[0].startsWith("[") && match[0].length > 1)
-        continue;
       if (match[0] === "{" || match[0] === "[") {
         if (depth++ === 0) start = match.index;
       } else if (
