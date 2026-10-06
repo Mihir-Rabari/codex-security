@@ -405,7 +405,12 @@ async function preserveScanDraft(
   );
   let reconciled: ReturnType<typeof reconcileScanDraft>;
   try {
-    reconciled = reconcileScanDraft(input, [...current, ...archived]);
+    reconciled = reconcileScanDraft(
+      input,
+      [...current, ...archived],
+      undefined,
+      context.mode === "deep" && context.layout !== "worker",
+    );
   } catch (error) {
     return preserveInputOnError(error);
   }
@@ -424,6 +429,7 @@ function reconcileScanDraft(
   input: ScanDraftInput,
   savedSources: SavedScanDraft[],
   requestedClosures = resolvedDeferred(input.coverage),
+  terminalReplacesHistory = false,
 ): { input: ScanDraftInput; acceptProgress: boolean } {
   let result = structuredClone(input);
   const sources = savedSources.map(({ input }) => input);
@@ -498,14 +504,17 @@ function reconcileScanDraft(
   const retainedIndex = retainedFinal
     ? savedSources.indexOf(retainedFinal)
     : -1;
-  // A raw terminal checkpoint may still omit unresolved work from saved sources.
-  if (retainedFinal)
-    // Saved closures are history, not new commands against later reopenings.
-    result = reconcileScanDraft(
-      retainedFinal.input,
-      savedSources.slice(retainedIndex),
-      [],
-    ).input;
+  if (retainedFinal) {
+    // Deep parent terminals replace history; worker terminals can still omit saved work.
+    if (terminalReplacesHistory) result = structuredClone(retainedFinal.input);
+    else
+      // Saved closures are history, not commands against later reopenings.
+      result = reconcileScanDraft(
+        retainedFinal.input,
+        savedSources.slice(retainedIndex),
+        [],
+      ).input;
+  }
   const metadata = retainedFinal?.input ?? result;
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
