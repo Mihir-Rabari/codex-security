@@ -22,9 +22,17 @@ def migrate_finding_workflow_results(connection: sqlite3.Connection) -> None:
         results = {stage: value["result"] for stage, value in stages.items() if "result" in value}
         if "pendingWrite" in stages["dedupe"]:
             results["dedupePendingWrite"] = stages["dedupe"]["pendingWrite"]
+        # SQLite JSON extraction on older runtimes truncates embedded NULs in diagnostics.
         connection.execute(
-            "UPDATE finding_workflows SET results_json = ? WHERE id = ?",
-            (json.dumps(results, allow_nan=False), row["id"]),
+            "UPDATE finding_workflows SET scan_error = ?, publish_error = ?, dedupe_error = ?, "
+            "results_json = ? WHERE id = ?",
+            (
+                stages["scan"].get("error"),
+                stages["publish"].get("error"),
+                stages["dedupe"].get("error"),
+                json.dumps(results, allow_nan=False),
+                row["id"],
+            ),
         )
 
 
