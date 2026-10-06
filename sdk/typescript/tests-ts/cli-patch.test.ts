@@ -2872,6 +2872,7 @@ describe("patch publication integrity", () => {
     ["unstaged", "src"],
     ["assume-unchanged", "src/finding-1.ts"],
     ["assume-unchanged", "src"],
+    ["untracked-and-ignored", "src"],
   ])("keeps %s edits out of publication of %s", async (dirty, reportedPath) => {
     for (const command of ["patch", "scan"]) {
       const directory = await fixtures.create("patch-publication-");
@@ -2896,7 +2897,7 @@ describe("patch publication integrity", () => {
       if (dirty === "staged") git("add", ".");
       if (dirty === "assume-unchanged")
         git("update-index", "--assume-unchanged", "src/finding-1.ts");
-      const originalIndex = git("write-tree");
+      let expectedIndex = git("write-tree");
       const remote = await fixtures.create("patch-publication-remote-");
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
@@ -2919,6 +2920,14 @@ describe("patch publication integrity", () => {
               join(directory, "src/finding-1.ts"),
               "fixed\nlocal edit\n",
             );
+            if (dirty === "untracked-and-ignored") {
+              await writeFile(
+                join(directory, ".gitignore"),
+                "src/finding-1.ts\n",
+              );
+              git("rm", "--cached", "--force", "src/finding-1.ts");
+              expectedIndex = git("write-tree");
+            }
             completePatches(args, output);
             return 0;
           },
@@ -2927,7 +2936,7 @@ describe("patch publication integrity", () => {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain("uncommitted changes before patching");
       expect(git("rev-parse", "HEAD")).toBe(originalHead);
-      expect(git("write-tree")).toBe(originalIndex);
+      expect(git("write-tree")).toBe(expectedIndex);
       expect(git("ls-remote", "origin")).toBe("");
       expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
         "fixed\nlocal edit\n",
@@ -4445,13 +4454,27 @@ describe("patch change tracking", () => {
     },
   );
   for (const mode of ["saved", "supplied"]) {
-    test.each(["file", "directory", "info", "global", "unchanged", "new"])(
+    test.each([
+      "file",
+      "directory",
+      "info",
+      "global",
+      "unchanged",
+      "unchanged-directory",
+      "new",
+    ])(
       `preserves pre-existing ignored paths during ${mode} publication (%s)`,
       async (kind) => {
         const { directory: root, git, remote } = await publicationRepository();
         const file =
-          kind === "directory" ? "cache/nested/local.txt" : "local.env";
-        const pattern = kind === "directory" ? "cache/\n" : "local.env\n";
+          kind === "directory"
+            ? "cache/nested/local.txt"
+            : kind === "unchanged-directory"
+              ? "src/local.pyc"
+              : "local.env";
+        const pattern = `${kind === "directory" ? "cache/" : file}\n`;
+        const unchanged =
+          kind === "unchanged" || kind === "unchanged-directory";
         const rule =
           kind === "info"
             ? join(root, ".git", "info", "exclude")
@@ -4474,7 +4497,7 @@ describe("patch change tracking", () => {
         const index = git("write-tree");
         const result = resultWithFindings(["high"]);
         result.findings.findings[0]!.locations[0]!.path = file;
-        const blocked = kind !== "unchanged" && kind !== "new";
+        const blocked = !unchanged && kind !== "new";
         const outcome = await runWorkflow(
           [
             "patch",
@@ -4494,10 +4517,10 @@ describe("patch change tracking", () => {
                   ? "[]"
                   : "https://github.example.test/example/repository/pull/1",
             onCodex: async (_args, output) => {
-              if (kind !== "unchanged") await writeFile(rule, "");
+              if (!unchanged) await writeFile(rule, "");
               if (kind === "new")
                 await writeFile(join(root, file), "synthetic generated data\n");
-              if (kind === "unchanged")
+              if (unchanged)
                 await writeFile(join(root, "src/finding-1.ts"), "fixed\n");
               output?.stdout.write(
                 JSON.stringify({
@@ -4505,10 +4528,13 @@ describe("patch change tracking", () => {
                     {
                       occurrenceId: "occ_1",
                       status: "verified",
-                      files:
-                        kind === "unchanged"
-                          ? ["src/finding-1.ts"]
-                          : [".gitignore", file],
+                      files: unchanged
+                        ? [
+                            kind === "unchanged-directory"
+                              ? "src"
+                              : "src/finding-1.ts",
+                          ]
+                        : [".gitignore", file],
                       verification: "Synthetic verification.",
                     },
                   ],
@@ -4535,6 +4561,10 @@ describe("patch change tracking", () => {
             git("show", `HEAD:${kind === "new" ? file : "src/finding-1.ts"}`),
           ).toBe(kind === "new" ? "synthetic generated data" : "fixed");
         }
+        if (unchanged)
+          expect(
+            git("ls-tree", "-r", "--name-only", "HEAD").split("\n"),
+          ).not.toContain(file);
         expect(await readFile(join(root, file), "utf8")).toBe(
           kind === "new"
             ? "synthetic generated data\n"

@@ -6768,6 +6768,7 @@ function directPatchDigest(
 interface PatchPublication {
   branch: string;
   dirtyFiles: Set<string>;
+  ignoredFiles: Set<string>;
   tree: string;
   root: string;
 }
@@ -6970,6 +6971,7 @@ async function preparePatchPublication(
     { trim: false, maxBuffer: Infinity },
   );
   const paths = status.split("\0");
+  const ignoredFiles = new Set<string>();
   const dirtyFiles = new Set(
     worktreeChanges
       .split("\0")
@@ -6979,11 +6981,13 @@ async function preparePatchPublication(
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
-    dirtyFiles.add(relative(repository, resolve(root, entry.slice(3))));
+    (entry.startsWith("!! ") ? ignoredFiles : dirtyFiles).add(
+      relative(repository, resolve(root, entry.slice(3))),
+    );
     if (/[RC]/u.test(entry.slice(0, 2)))
       dirtyFiles.add(relative(repository, resolve(root, paths[++index]!)));
   }
-  return { branch, dirtyFiles, tree, root };
+  return { branch, dirtyFiles, ignoredFiles, tree, root };
 }
 
 async function publishPatchBranch(
@@ -7143,7 +7147,23 @@ async function createPatchPullRequest(
     return;
   }
 
-  const { branch, dirtyFiles, tree, root } = publication;
+  const { branch, dirtyFiles, ignoredFiles, tree, root } = publication;
+  if (ignoredFiles.size > 0) {
+    const ignored = await dependencies.runRepositoryCommand(
+      "git",
+      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+      root,
+      { trim: false, maxBuffer: Infinity },
+    );
+    const stillIgnored = new Set(
+      ignored
+        .split("\0")
+        .map((file) => relative(repository, resolve(root, file))),
+    );
+    for (const file of ignoredFiles) {
+      if (!stillIgnored.has(file)) dirtyFiles.add(file);
+    }
+  }
   const deleted =
     dirtyFiles.size === 0
       ? ""
