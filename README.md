@@ -143,28 +143,18 @@ which keeps results and authentication between runs. See the
 The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
 in containers and can connect to a separately deployed findings service.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
 Saved-scan deduplication works directly with local SQLite:
 `npx @openai/codex-security dedupe --scan SCAN_ID --json`. It prepares and caches
 embeddings without starting a findings service. Embedding and review APIs still
 require their provider credentials and network access when new work is needed.
 
-Store findings, browse them in a dashboard, and review potential duplicates.
-Start the local service with:
-
-```bash
-npx @openai/codex-security serve
-```
-
-Publish a completed scan with `publish scan --to custom`, then use `dedupe` to
-review potential duplicates and save accepted groups. Point both commands at the
-service with `--findings-url`. The [service guide](sdk/typescript/docs/findings-service.md)
-covers setup, publishing, deduplication, and Docker deployment.
-
-The API has no built-in authentication. Imports send complete finding JSON to
-the configured embeddings endpoint and need an embedding API key, even after
-ChatGPT login.
+The [findings guide](sdk/typescript/docs/findings-service.md) covers local
+storage, deduplication, and compatibility with independently operated endpoints
+through `publish scan --to custom` and explicit `--findings-url`. The local
+`serve` command and browser dashboard have been removed; existing databases and
+scan artifacts remain available.
 
 ## Other providers
 

@@ -39,7 +39,6 @@ import {
 import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
-  startFindingsServer,
 } from "@openai/codex-security/server";
 
 export async function classify(
@@ -74,17 +73,15 @@ export async function classify(
   return classification;
 }
 
-export async function findingsServer(getApiKey: () => Promise<string>) {
-  return await startFindingsServer({
+export function findingsStorage(getApiKey: () => Promise<string>) {
+  return {
     store: new SqliteFindingsStore(),
     embeddings: new OpenAiFindingEmbedder(
       getApiKey,
       fetch,
       process.env["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),
-    host: "127.0.0.1",
-    port: 0,
-  });
+  };
 }
 
 export async function publishCustom(
