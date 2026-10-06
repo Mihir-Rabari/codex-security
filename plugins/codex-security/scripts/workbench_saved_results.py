@@ -2427,7 +2427,7 @@ def merge_saved_results(
                     }
                 )
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
-            if worker_id is not None and field == "reviews":
+            if field == "reviews" and (worker_id is not None or field not in draft["coverage"]):
                 continue
             if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
                 continue
