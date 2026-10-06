@@ -3724,6 +3724,8 @@ describe("patch change tracking", () => {
     "configured-worktree",
     "sparse-link-before",
     "sparse-link-during",
+    "sparse-link-ancestor-before",
+    "sparse-link-ancestor-during",
   ])(
     "does not snapshot another worktree through nested %s metadata",
     async (kind) => {
@@ -3759,14 +3761,14 @@ describe("patch change tracking", () => {
       git("commit", "-m", "Synthetic nested dependency");
       const linkExternal = () =>
         symlink(
-          external,
+          kind.includes("ancestor") ? root : external,
           nested,
           process.platform === "win32" ? "junction" : "dir",
         );
       if (sparseLink) {
         await rm(nested, { recursive: true });
         git("sparse-checkout", "set", "--no-cone", "/app.ts");
-        if (kind === "sparse-link-before") await linkExternal();
+        if (kind.endsWith("before")) await linkExternal();
       }
       await writeFile(
         join(external, "app.ts"),
@@ -3784,7 +3786,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: runGitRepositoryCommand,
           onCodex: async (_args, output) => {
             modelCalls += 1;
-            if (kind === "sparse-link-during") await linkExternal();
+            if (kind.endsWith("during")) await linkExternal();
             await writeFile(join(root, "app.ts"), "fixed\n");
             output?.stdout.write("Fixed and checked.");
             return 0;
@@ -3793,11 +3795,13 @@ describe("patch change tracking", () => {
       );
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain(
-        sparseLink
-          ? "outside the selected repository"
-          : "worktree root does not match",
+        kind.includes("ancestor")
+          ? "ancestor worktree"
+          : sparseLink
+            ? "outside the selected repository"
+            : "worktree root does not match",
       );
-      expect(modelCalls).toBe(kind === "sparse-link-during" ? 1 : 0);
+      expect(modelCalls).toBe(kind.endsWith("during") ? 1 : 0);
       expect(() => metadata("cat-file", "-e", blob)).toThrow();
       expect(await readFile(join(root, ".git", "index"))).toEqual(rootIndex);
       expect(await readFile(join(external, ".git", "index"))).toEqual(

@@ -7319,7 +7319,12 @@ async function snapshotGitPatchState(
 ): Promise<GitPatchState> {
   const tree = await snapshotPatchTree(repository, dependencies);
   const files = new Map<string, string>();
-  const visit = async (directory: string, snapshot: string): Promise<void> => {
+  const repositoryRoot = await realpath(repository);
+  const visit = async (
+    directory: string,
+    snapshot: string,
+    ancestors: string[],
+  ): Promise<void> => {
     const checkout = join(repository, directory);
     const entries = await dependencies.runRepositoryCommand(
       "git",
@@ -7334,23 +7339,35 @@ async function snapshotGitPatchState(
     for (const entry of entries.split("\0").filter(Boolean)) {
       const separator = entry.indexOf("\t");
       const path = entry.slice(separator + 1);
-      const relative = directory ? `${directory}/${path}` : path;
-      if (directory) files.set(relative, entry.slice(0, separator));
+      const nestedPath = directory ? `${directory}/${path}` : path;
+      if (directory) files.set(nestedPath, entry.slice(0, separator));
       if (
         entry.startsWith("160000 ") &&
         existsSync(join(checkout, path, ".git"))
-      )
+      ) {
+        const nested = join(checkout, path);
+        const worktree = await enclosingGitWorktreeRoot(nested, undefined, {
+          requireIfPresent: true,
+        });
+        if (worktree !== null) {
+          if (isOutsidePath(relative(repositoryRoot, worktree)))
+            throw new Error(
+              "Nested Git checkout resolves outside the selected repository.",
+            );
+          if (ancestors.includes(worktree))
+            throw new Error(
+              "Nested Git checkout resolves to an ancestor worktree.",
+            );
+        }
         await visit(
-          relative,
-          await snapshotPatchTree(
-            join(checkout, path),
-            dependencies,
-            repository,
-          ),
+          nestedPath,
+          await snapshotPatchTree(nested, dependencies, repository),
+          worktree === null ? ancestors : [...ancestors, worktree],
         );
+      }
     }
   };
-  await visit("", tree);
+  await visit("", tree, [repositoryRoot]);
   return { root: repository, tree, files };
 }
 
@@ -7536,18 +7553,6 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
   commandRoot = repository,
 ): Promise<string> {
-  if (commandRoot !== repository) {
-    const worktree = await enclosingGitWorktreeRoot(repository, undefined, {
-      requireIfPresent: true,
-    });
-    if (
-      worktree !== null &&
-      isOutsidePath(relative(await realpath(commandRoot), worktree))
-    )
-      throw new Error(
-        "Nested Git checkout resolves outside the selected repository.",
-      );
-  }
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const environment = {
     GIT_INDEX_FILE: join(root, "index"),
