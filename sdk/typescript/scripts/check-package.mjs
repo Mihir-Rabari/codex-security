@@ -235,6 +235,7 @@ function extractedArchiveFiles() {
           invalidTarEntry();
         }
         expandedBytes += stats.size;
+        chmodSync(extractedPath, 0o600);
         archiveFiles.set(path, readFileSync(extractedPath));
       }
     }

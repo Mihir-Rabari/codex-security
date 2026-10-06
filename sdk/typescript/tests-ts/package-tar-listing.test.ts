@@ -35,12 +35,14 @@ function packageTar({
   type = 0x30,
   compatibleLayout = false,
   rootDirectoryMode = 0o755,
+  readmeMode = 0o644,
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
   type?: number;
   compatibleLayout?: boolean;
   rootDirectoryMode?: number;
+  readmeMode?: number;
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -73,7 +75,11 @@ function packageTar({
     const record = tarRecord(contents, {
       name: path,
       type,
-      mode: executablePaths.includes(path) ? 0o755 : 0o644,
+      mode: executablePaths.includes(path)
+        ? 0o755
+        : path === "package/README.md"
+          ? readmeMode
+          : 0o644,
       sizeField: octal(contents.length, 12, sizeTerminator),
       ...(compatibleLayout ? { magic: "ustar ", version: " \0" } : {}),
     });
@@ -146,6 +152,7 @@ describe("npm package tar listings", () => {
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
         ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
+        ["unreadable-readme", gzipSync(packageTar({ readmeMode: 0 }))],
         ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
         [
           "compatible-tar-layout",
@@ -216,6 +223,7 @@ describe("npm package tar listings", () => {
       const tarBytes = packageTar({
         compatibleLayout: true,
         rootDirectoryMode: 0o555,
+        readmeMode: 0,
       });
       const archiveContents = gzipSync(tarBytes, { level: 0 });
       writeFileSync(archivePath, archiveContents);
