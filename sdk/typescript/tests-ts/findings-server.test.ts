@@ -160,9 +160,9 @@ test("invalid findings pagination is rejected before database creation", async (
   ]) {
     const result = await runCodexCommand(
       { command: "node" },
-      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings"],
+      [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "list-stored-findings", ...args],
       process.env,
-      JSON.stringify({ stateDirectory, args }),
+      JSON.stringify({ stateDirectory }),
     );
     expect(result.success).toBe(false);
     expect(result.stderr).toContain("--limit must be a positive integer");
