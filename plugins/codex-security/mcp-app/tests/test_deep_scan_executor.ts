@@ -1333,6 +1333,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
+              sqlite_home: sqliteHomes[index],
             });
             assert.deepEqual(
               invocation.argv.filter((arg: string) =>

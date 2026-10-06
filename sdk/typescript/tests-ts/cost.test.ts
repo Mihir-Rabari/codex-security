@@ -2691,7 +2691,35 @@ describe("live scan cost tracking", () => {
       copiedHistory?: boolean;
       forkOnly?: boolean;
       limit?: number;
+      cacheWritesReported?: boolean;
     }> = [
+      {
+        samples: [
+          { input_tokens: 100, output_tokens: 0 },
+          { input_tokens: 120, output_tokens: 0, cache_write_input_tokens: 50 },
+          { input_tokens: 0, output_tokens: 0, cache_write_input_tokens: 0 },
+          { input_tokens: 100, output_tokens: 0, cache_write_input_tokens: 0 },
+        ],
+        expected: {
+          input_tokens: 220,
+          output_tokens: 0,
+          cache_write_input_tokens: 50,
+        },
+        limit: 0.00046,
+        cacheWritesReported: true,
+      },
+      {
+        samples: [
+          { input_tokens: 100, output_tokens: 0 },
+          { input_tokens: 100, output_tokens: 0, cache_write_input_tokens: 50 },
+        ],
+        expected: {
+          input_tokens: 100,
+          output_tokens: 0,
+          cache_write_input_tokens: 50,
+        },
+        cacheWritesReported: true,
+      },
       {
         samples: [
           { input_tokens: 100, cached_input_tokens: 100, output_tokens: 100 },
@@ -2865,9 +2893,11 @@ describe("live scan cost tracking", () => {
       forkOnly,
       expected: counters,
       limit,
+      cacheWritesReported,
     } of cases) {
       const expected = {
-        ...(samples.some(
+        ...(!cacheWritesReported &&
+        samples.some(
           (sample) => sample["cache_write_input_tokens"] === undefined,
         )
           ? { cache_write_input_tokens_reported: false }
@@ -6172,3 +6202,14 @@ test.each([undefined, 100, 1_000, 1_500])(
     );
   },
 );
+
+test("keeps discovery accounting unavailable when only worker usage exists", async () => {
+  const { tracker } = await workerScan({ rootUsage: null });
+  try {
+    const snapshot = await tracker.stop(null);
+    expect(snapshot.usage).toBeNull();
+    expect(snapshot.cost).toBeNull();
+  } finally {
+    await tracker.stop();
+  }
+});

@@ -118,6 +118,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
+          ...(childEnv.CODEX_SQLITE_HOME === undefined
+            ? {}
+            : { sqlite_home: childEnv.CODEX_SQLITE_HOME }),
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),

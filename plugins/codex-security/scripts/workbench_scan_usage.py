@@ -395,6 +395,7 @@ def _read_rollout_usage(
     total = _empty_token_usage()
     warnings: set[str] = set()
     previous = _empty_token_usage()
+    previous_cache_writes_reported = True
     boundary_reached = False
 
     with session.path.open("rb") as source:
@@ -462,6 +463,18 @@ def _read_rollout_usage(
                 warnings.add("token_record_invalid")
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
+            raw_usage = payload.get("info", {}).get("total_token_usage", {})
+            cache_writes_reported = (
+                "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
+            )
+            fills_cache_writes = (
+                not previous_cache_writes_reported
+                and cache_writes_reported
+                and not reset
+                and snapshot["inputTokens"] >= previous["inputTokens"]
+                and snapshot["outputTokens"] >= previous["outputTokens"]
+            )
+            previous_cache_writes_reported = cache_writes_reported
             delta = {
                 key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
@@ -472,14 +485,22 @@ def _read_rollout_usage(
             if completed_at is not None and timestamp > completed_at:
                 continue
             delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
-            if delta["totalTokens"] <= 0:
+            if delta["totalTokens"] <= 0 and not fills_cache_writes:
                 continue
+            cache_write_capacity = (
+                total["inputTokens"]
+                + delta["inputTokens"]
+                - total["cachedInputTokens"]
+                - total["cacheWriteInputTokens"]
+                if fills_cache_writes
+                else delta["inputTokens"]
+            )
             delta["cacheWriteInputTokens"] = min(
-                delta["cacheWriteInputTokens"], delta["inputTokens"]
+                delta["cacheWriteInputTokens"], cache_write_capacity
             )
             delta["cachedInputTokens"] = min(
                 delta["cachedInputTokens"],
-                delta["inputTokens"] - delta["cacheWriteInputTokens"],
+                max(0, delta["inputTokens"] - delta["cacheWriteInputTokens"]),
             )
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]

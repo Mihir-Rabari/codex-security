@@ -997,9 +997,16 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const policyConfig = policyCodexConfig(session.sessionConfig);
+      const policySqliteEnvironment = sqliteHomeEnvironment(
+        policyConfig,
+        outputDir,
+        runtime.environment,
+      );
       const { codex } = this.#createSessionCodex(
         session,
         {
+          ...policySqliteEnvironment,
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
           CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
@@ -1010,7 +1017,7 @@ export class CodexSecurity {
         },
         options.auth,
         undefined,
-        policyCodexConfig(session.sessionConfig),
+        policyConfig,
         inputs.gitMetadataPaths.length === 0
           ? []
           : [
@@ -1071,15 +1078,7 @@ export class CodexSecurity {
                       environment: {
                         ...session.scanEnvironment,
                         CODEX_HOME: runtime.codexHome,
-                        ...(typeof session.sessionConfig["sqlite_home"] ===
-                        "string"
-                          ? {
-                              CODEX_SQLITE_HOME: resolve(
-                                outputDir,
-                                session.sessionConfig["sqlite_home"],
-                              ),
-                            }
-                          : {}),
+                        ...policySqliteEnvironment,
                       },
                       signal,
                     },
@@ -1643,14 +1642,11 @@ export class CodexSecurity {
         environment: {
           ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
-          ...(typeof session.sessionConfig["sqlite_home"] === "string"
-            ? {
-                CODEX_SQLITE_HOME: resolve(
-                  scanDir,
-                  session.sessionConfig["sqlite_home"],
-                ),
-              }
-            : {}),
+          ...sqliteHomeEnvironment(
+            session.sessionConfig,
+            scanDir,
+            runtime.environment,
+          ),
         },
         signal,
         failureMessage: "Could not save the Codex Security scan",
@@ -1911,6 +1907,11 @@ export class CodexSecurity {
             )
           : null;
       const runtimePaths = {
+        ...sqliteHomeEnvironment(
+          session.sessionConfig,
+          scanDir,
+          runtime.environment,
+        ),
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT:
           options.resumeScanId !== undefined &&
@@ -4959,4 +4960,24 @@ export function environmentValue(
     }
   }
   return undefined;
+}
+
+function sqliteHomeEnvironment(
+  config: JsonObject,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  const configured = resolveCodexProfile(config)["sqlite_home"];
+  const sqliteHome =
+    typeof configured === "string"
+      ? configured
+      : environmentValue(environment, "CODEX_SQLITE_HOME");
+  return sqliteHome === undefined
+    ? {}
+    : {
+        CODEX_SQLITE_HOME: resolve(
+          workingDirectory,
+          expandHome(sqliteHome, environment),
+        ),
+      };
 }

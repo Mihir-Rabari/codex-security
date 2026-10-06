@@ -325,14 +325,16 @@ export class ScanCostTracker {
         )
       );
     }
-    const unknownCompletedUsage = [...this.#completedThreadUsage].some(
-      ([threadId, usage]) =>
-        usage === null &&
-        ![...this.#sessions.values()].some(
-          (session) =>
-            session.threadId === threadId && session.accounting !== null,
-        ),
-    );
+    const unknownCompletedUsage =
+      (finalizing && fallbackUsage === null && rootUsage === null) ||
+      [...this.#completedThreadUsage].some(
+        ([threadId, usage]) =>
+          usage === null &&
+          ![...this.#sessions.values()].some(
+            (session) =>
+              session.threadId === threadId && session.accounting !== null,
+          ),
+      );
     const result =
       this.#options.maxCostUsd === undefined && unknownCompletedUsage
         ? { usage: null, cost: null }
@@ -1249,7 +1251,14 @@ function accumulateTokenUsage(
         accumulated.total_tokens !== previousRaw?.total_tokens)) ||
     (accumulated === null &&
       previousRaw?.cache_write_input_tokens_reported === false);
+  const fillsCacheWrites =
+    previousRaw?.cache_write_input_tokens_reported === false &&
+    next.cache_write_input_tokens_reported !== false &&
+    !reset &&
+    next.input_tokens >= previousRaw.input_tokens &&
+    next.output_tokens >= previousRaw.output_tokens;
   if (
+    !fillsCacheWrites &&
     next.input_tokens === (previousRaw?.input_tokens ?? 0) &&
     next.output_tokens === (previousRaw?.output_tokens ?? 0)
   ) {
@@ -1274,9 +1283,18 @@ function accumulateTokenUsage(
   const inputDelta = fieldDelta("input_tokens");
   const outputDelta = fieldDelta("output_tokens");
   const cacheWriteRaw = fieldDelta("cache_write_input_tokens");
+  // A late reported cache-write count can classify input already counted in
+  // this epoch. Keep the existing bounds across independent field resets.
+  const cacheWriteCapacity = fillsCacheWrites
+    ? BigInt(accumulated?.input_tokens ?? 0) +
+      inputDelta -
+      BigInt(accumulated?.cached_input_tokens ?? 0) -
+      BigInt(accumulated?.cache_write_input_tokens ?? 0)
+    : inputDelta;
   const cacheWriteDelta =
-    cacheWriteRaw > inputDelta ? inputDelta : cacheWriteRaw;
-  const remainingInputDelta = inputDelta - cacheWriteDelta;
+    cacheWriteRaw > cacheWriteCapacity ? cacheWriteCapacity : cacheWriteRaw;
+  const remainingInputDelta =
+    inputDelta > cacheWriteDelta ? inputDelta - cacheWriteDelta : 0n;
   const cachedRaw = fieldDelta("cached_input_tokens");
   const cachedDelta =
     cachedRaw > remainingInputDelta ? remainingInputDelta : cachedRaw;

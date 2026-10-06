@@ -159,7 +159,7 @@ test("drains completed bundled Deep Scan workers during coordinator cancellation
       "coordinator canceled its remaining workers during cleanup",
     );
     expect(workerSignal).not.toBe(parentController.signal);
-    expect(workerSignal?.aborted).toBe(false);
+    expect(workerSignal?.aborted).toBe(true);
     releaseDrain.resolve();
     expect(await outcome).toEqual({
       threadId: "fixture-worker-thread",

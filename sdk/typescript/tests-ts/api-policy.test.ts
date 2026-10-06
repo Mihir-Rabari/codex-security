@@ -1555,10 +1555,25 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
-  test.each([false, true])(
-    "policy accounting ignores unrelated empty sessions with budget=%s",
-    async (limited) => {
+  test.each(
+    ["default", "profile", "tilde", "inherited-relative"].flatMap((location) =>
+      [false, true].map((limited) => ({ location, limited })),
+    ),
+  )(
+    "policy accounting ignores unrelated empty sessions at the $location SQLite home with budget=$limited",
+    async ({ location, limited }) => {
       const f = await setup({
+        config:
+          location === "profile"
+            ? {
+                codexOverrides: {
+                  profile: "review",
+                  profiles: { review: { sqlite_home: "../selected-state" } },
+                },
+              }
+            : location === "tilde"
+              ? { codexOverrides: { sqlite_home: "~/selected-state" } }
+              : {},
         resolveOwnedSessions: runtime.resolveScanSessionPaths,
         stream: async function* (stage) {
           const id = `policy-${stage}`;
@@ -1588,13 +1603,24 @@ describe("CodexSecurity policy API", () => {
             "-B",
             "-c",
             "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)'); c.execute('CREATE TABLE IF NOT EXISTS thread_spawn_edges (parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)'); c.execute('INSERT INTO threads VALUES (?,?)',(sys.argv[2],sys.argv[3])); c.commit(); c.close()",
-            join(f.runtime.codexHome, "state_7.sqlite"),
+            join(sqliteHome, "state_7.sqlite"),
             id,
             rollout,
           ]);
           yield* events(stage);
         },
       });
+      const sqliteHome =
+        location === "profile" || location === "inherited-relative"
+          ? join(f.root, "selected-state")
+          : location === "tilde"
+            ? join(f.root, "selected-state")
+            : f.runtime.codexHome;
+      await mkdir(sqliteHome, { recursive: true });
+      f.runtime.environment["HOME"] = f.root;
+      f.runtime.environment["USERPROFILE"] = f.root;
+      if (location === "inherited-relative")
+        f.runtime.environment["CODEX_SQLITE_HOME"] = "../selected-state";
       await mkdir(join(f.runtime.codexHome, "sessions"), { recursive: true });
       await writeFile(
         join(f.runtime.codexHome, "sessions", "unrelated-empty.jsonl"),
