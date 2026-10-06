@@ -246,3 +246,35 @@ with sqlite3.connect(sys.argv[2]) as db:
     1,
   );
 });
+
+test("duplicate retrieval and group listing preserve NUL-bearing IDs and model scope", (t) => {
+  const database = open(t);
+  const anchor = finding(
+    database,
+    "finding\0anchor",
+    [1, 0],
+    "repository",
+    "model\0suffix",
+  );
+  const duplicate = finding(
+    database,
+    "finding\0duplicate",
+    [1, 0],
+    "repository",
+    "model\0suffix",
+  );
+  finding(database, "different-model", [1, 0], "repository", "model");
+  assert.deepEqual(
+    findPotentialDuplicates(database, anchor.findingId, "repository"),
+    {
+      finding: anchor,
+      potentialDuplicates: [duplicate],
+    },
+  );
+  const stored = storeDedupeGroups(
+    database,
+    [[duplicate.findingId, anchor.findingId]],
+    "created",
+  );
+  assert.deepEqual(listDedupeGroups(database, duplicate.findingId), stored);
+});

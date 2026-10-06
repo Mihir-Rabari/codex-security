@@ -41,22 +41,23 @@ export function findPotentialDuplicates(
     const scope = repositoryId === undefined ? [] : [repositoryId];
     const anchor = database
       .prepare(
-        `SELECT embeddings.model, embeddings.vector_json FROM ${source}
+        `SELECT embeddings.vector_json FROM ${source}
        WHERE ${predicate}embeddings.finding_id = ?`,
       )
       .get(...scope, findingId);
     if (!anchor) return { error: "finding_not_indexed" as const };
 
     const rows = database.prepare(
-      `SELECT embeddings.finding_id, embeddings.vector_json FROM ${source}
+      `SELECT json_quote(embeddings.finding_id) AS finding_id_json, embeddings.vector_json FROM ${source}
        JOIN findings ON findings.id = embeddings.finding_id
-       WHERE ${predicate}embeddings.model = ? AND embeddings.finding_id != ?
+       WHERE ${predicate}embeddings.model = (SELECT model FROM finding_embeddings WHERE finding_id = ?)
+       AND embeddings.finding_id != ?
        ORDER BY findings.created_at, findings.id`,
     );
     const ranked: { id: string; similarity: number }[] = [];
     try {
       const vector = normalizedVector(JSON.parse(anchor.vector_json as string));
-      for (const row of rows.iterate(...scope, anchor.model, findingId)) {
+      for (const row of rows.iterate(...scope, findingId, findingId)) {
         const candidate: number[] = JSON.parse(row.vector_json as string);
         if (candidate.length !== vector.length) continue;
         const other = normalizedVector(candidate);
@@ -65,7 +66,10 @@ export function findPotentialDuplicates(
           0,
         );
         if (similarity >= 0.55)
-          ranked.push({ id: row.finding_id as string, similarity });
+          ranked.push({
+            id: JSON.parse(row.finding_id_json as string),
+            similarity,
+          });
       }
     } catch (error) {
       if (error instanceof SyntaxError || error instanceof RangeError)
@@ -78,11 +82,11 @@ export function findPotentialDuplicates(
     const documents = new Map(
       database
         .prepare(
-          `SELECT id, details_json FROM findings WHERE id IN (${selected.map(() => "?").join(",")})`,
+          `SELECT json_quote(id) AS id_json, details_json FROM findings WHERE id IN (${selected.map(() => "?").join(",")})`,
         )
         .all(...selected)
         .map((row) => [
-          row.id as string,
+          JSON.parse(row.id_json as string) as string,
           parseJson(row.details_json as string),
         ]),
     );
@@ -147,7 +151,7 @@ export function storeDedupeGroups(
 export function listDedupeGroups(database: DatabaseSync, findingId: string) {
   const groups = new Map<string, DedupeGroup>();
   const rows = database.prepare(`
-    SELECT groups.id, groups.created_at, members.finding_id
+    SELECT groups.id, groups.created_at, json_quote(members.finding_id) AS finding_id_json
     FROM finding_dedupe_group_members AS matched
     JOIN finding_dedupe_groups AS groups ON groups.id = matched.group_id
     JOIN finding_dedupe_group_members AS members ON members.group_id = groups.id
@@ -162,7 +166,7 @@ export function listDedupeGroups(database: DatabaseSync, findingId: string) {
         findingIds: [],
         createdAt: row.created_at as string,
       });
-    groups.get(id)!.findingIds.push(row.finding_id as string);
+    groups.get(id)!.findingIds.push(JSON.parse(row.finding_id_json as string));
   }
   return { groups: [...groups.values()] };
 }
