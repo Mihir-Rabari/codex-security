@@ -1880,6 +1880,11 @@ def merge_saved_results(
     # Publication chronology spans workers; attempt numbers only order one worker's revisions.
     for source in sorted(all_sources, key=lambda item: finding_source_order(item)[2:]):
         relative, draft, source_owner = source
+        explicit_identity_counts = Counter(
+            _semantic_identity_key(sibling, _finding_identity(sibling))
+            for sibling in draft["findings"]
+            if isinstance(sibling, dict) and isinstance(sibling.get("identity"), dict)
+        )
         pending = []
         for index, value in enumerate(draft["findings"]):
             if not isinstance(value, dict) or not valid_finding(value):
@@ -1910,13 +1915,9 @@ def merge_saved_results(
                 latest = group["latest"]
                 if (
                     isinstance(value.get("identity"), dict)
-                    and sum(
-                        isinstance(sibling, dict)
-                        and isinstance(sibling.get("identity"), dict)
-                        and _semantic_identity_key(sibling, _finding_identity(sibling))
-                        == _semantic_identity_key(value, _finding_identity(value))
-                        for sibling in draft["findings"]
-                    )
+                    and explicit_identity_counts[
+                        _semantic_identity_key(value, _finding_identity(value))
+                    ]
                     == 1
                     and group["identity"] is not None
                     and _semantic_identity_key(value, _finding_identity(value))
