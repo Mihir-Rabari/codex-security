@@ -18,37 +18,29 @@ function createStateDirectory(path: string): void {
   if (process.platform !== "win32") path = path.replace(/\/+$/u, "") || "/";
   const nativePath =
     process.platform === "win32" ? path : encodePosixPath(path);
-  const create = () => {
+  if (statSync(nativePath, { throwIfNoEntry: false })?.isDirectory()) return;
+  const entry = lstatSync(nativePath, { throwIfNoEntry: false });
+  if (entry?.isSymbolicLink()) {
+    const target =
+      process.platform === "win32"
+        ? readlinkSync(nativePath)
+        : decodePosixBytes(readlinkSync(nativePath, { encoding: "buffer" }));
+    createStateDirectory(
+      isAbsolute(target) ? target : `${dirname(path)}${sep}${target}`,
+    );
+    return;
+  }
+  if (!entry) {
+    const parent = dirname(path);
+    if (parent !== path) createStateDirectory(parent);
+  }
+  try {
     if (process.platform === "win32")
       windowsFileSystem(windowsBinding()).mkdirPrivate(widePath(path));
     else mkdirSync(nativePath, { mode: 0o700 });
-  };
-  try {
-    create();
   } catch (error) {
-    if (
-      !["ENOENT", "EEXIST"].includes(
-        (error as NodeJS.ErrnoException).code ?? "",
-      ) &&
-      (error as { winerror?: number }).winerror !== 183
-    )
+    if (!statSync(nativePath, { throwIfNoEntry: false })?.isDirectory())
       throw error;
-    if (statSync(nativePath, { throwIfNoEntry: false })?.isDirectory()) return;
-    const entry = lstatSync(nativePath, { throwIfNoEntry: false });
-    if (entry?.isSymbolicLink()) {
-      const target =
-        process.platform === "win32"
-          ? readlinkSync(nativePath)
-          : decodePosixBytes(readlinkSync(nativePath, { encoding: "buffer" }));
-      createStateDirectory(
-        isAbsolute(target) ? target : `${dirname(path)}${sep}${target}`,
-      );
-      return;
-    }
-    const parent = dirname(path);
-    if (entry || parent === path) throw error;
-    createStateDirectory(parent);
-    createStateDirectory(path);
   }
 }
 

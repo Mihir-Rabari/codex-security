@@ -528,7 +528,7 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
     scope: { allRepositories: true },
     stages: {
       scan: { status: "complete", result: { findings: 2 } },
-      publish: { status: "failed", error: "diagnostic" },
+      publish: { status: "failed", error: "diagnostic\0retained tail" },
       dedupe: { status: "running", pendingWrite: { digest: "pending" } },
     },
   };
@@ -611,11 +611,16 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
   applyMigrations(database);
   for (const [index, id] of workflowIds.entries()) {
     const workflow = database
-      .prepare("SELECT * FROM finding_workflows WHERE id = ?")
+      .prepare(
+        "SELECT *, json_quote(publish_error) AS publish_error_json FROM finding_workflows WHERE id = ?",
+      )
       .get(id)!;
     assert.equal(workflow.repository_path, `${state.repositoryPath}/${index}`);
     assert.equal(workflow.scope_all_repositories, 1);
-    assert.equal(workflow.publish_error, "diagnostic");
+    assert.equal(
+      JSON.parse(String(workflow.publish_error_json)),
+      state.stages.publish.error,
+    );
     const resultsJson = String(workflow.results_json);
     assert.match(resultsJson, /"opaqueId":\s*9007199254740993/u);
     assert.deepEqual(
@@ -644,6 +649,37 @@ test("workflow and review checkpoints upgrade atomically with their preserved re
     }
   }
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a storage failure preserves its error and the original migration state", (t) => {
+  const database = memory(t, 37);
+  const state = JSON.stringify({
+    stages: {
+      scan: { status: "completed", result: { data: Array(3000).fill("x") } },
+      publish: { status: "pending" },
+      dedupe: { status: "pending" },
+    },
+  });
+  database
+    .prepare(
+      "INSERT INTO finding_workflows (id, state_json, created_at, updated_at) VALUES ('workflow', ?, 'created', 'updated')",
+    )
+    .run(state);
+  const pages = Number(database.prepare("PRAGMA page_count").get()!.page_count);
+  database.exec(`PRAGMA max_page_count = ${pages + 5}`);
+  assert.throws(() => applyMigrations(database), { errcode: 13 });
+  assert.equal(
+    database
+      .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get()!.version,
+    37,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT state_json FROM finding_workflows WHERE id = 'workflow'")
+      .get()!.state_json,
+    state,
+  );
 });
 
 test("an up-to-date database-info reader does not wait for a writer", async () => {

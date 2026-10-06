@@ -361,7 +361,8 @@ function backfillTargets(database: DatabaseSync): void {
 
 function migrateWorkflowResults(database: DatabaseSync): void {
   const update = database.prepare(
-    "UPDATE finding_workflows SET results_json = ? WHERE rowid = ?",
+    `UPDATE finding_workflows SET scan_error = ?, publish_error = ?, dedupe_error = ?,
+    results_json = ? WHERE rowid = ?`,
   );
   const rows = database.prepare(
     "SELECT rowid, results_json FROM finding_workflows",
@@ -369,7 +370,10 @@ function migrateWorkflowResults(database: DatabaseSync): void {
   rows.setReadBigInts(true);
   for (const row of rows.all()) {
     const { stages } = parseJson(String(row.results_json)) as {
-      stages: Record<string, { result?: unknown; pendingWrite?: unknown }>;
+      stages: Record<
+        string,
+        { error?: string; result?: unknown; pendingWrite?: unknown }
+      >;
     };
     const results: Record<string, unknown> = {};
     for (const [stage, value] of Object.entries(stages)) {
@@ -377,7 +381,14 @@ function migrateWorkflowResults(database: DatabaseSync): void {
     }
     if ("pendingWrite" in stages.dedupe)
       results.dedupePendingWrite = stages.dedupe.pendingWrite;
-    update.run(stringifyJson(results), row.rowid);
+    // Keep diagnostic strings intact on older SQLite runtimes.
+    update.run(
+      stages.scan.error ?? null,
+      stages.publish.error ?? null,
+      stages.dedupe.error ?? null,
+      stringifyJson(results),
+      row.rowid,
+    );
   }
 }
 
@@ -440,7 +451,11 @@ export function applyMigrations(
     if (backfill) backfillTargets(database);
     database.exec("COMMIT");
   } catch (error) {
-    database.exec("ROLLBACK");
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // SQLite may have rolled back automatically after a storage failure.
+    }
     throw error;
   }
 }

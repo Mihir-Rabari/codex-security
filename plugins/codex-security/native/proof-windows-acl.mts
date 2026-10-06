@@ -14,11 +14,12 @@ $acl = if ([System.IO.Directory]::Exists($path)) {
     [System.IO.File]::GetAccessControl($path)
 }
 $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 $principals = @($rules | ForEach-Object { $_.IdentityReference.Value } | Select-Object -Unique)
 $privateRules = @($rules | Where-Object {
     $_.AccessControlType -eq 'Allow' -and
-    $_.IdentityReference.Value -in @('S-1-3-4', 'S-1-5-18', 'S-1-5-32-544') -and
+    $_.IdentityReference.Value -in @($identity, 'S-1-5-18', 'S-1-5-32-544') -and
     ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl
 })
 $hash = [System.Security.Cryptography.SHA256]::Create()
