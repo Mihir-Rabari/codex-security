@@ -1249,17 +1249,20 @@ def merge_saved_results(
         # Match projectDiscoveryCoverage so recovered holes retain source ownership.
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
 
+        def accepted_positions(surface: dict[str, Any]) -> list[int]:
+            return [
+                position
+                for position, accepted in accepted_surfaces.get((worker["id"], surface["id"]), [])
+                if accepted == surface
+            ]
+
         def surface_id(surface: dict[str, Any], offset: int) -> str:
             source_id = surface.get("id")
             if id(source) not in accepted_coverage_sources and isinstance(source_id, str):
-                positions = [
-                    position
-                    for position, accepted in accepted_surfaces.get((worker["id"], source_id), [])
-                    if accepted == surface
-                ]
+                positions = accepted_positions(surface)
                 if len(positions) == 1:
                     offset = positions[0]
-                else:
+                elif not positions:
                     return f"{prefix}-surface-{offset}-{_digest(surface)[:16]}"
             return f"{prefix}-surface-{offset}"
 
@@ -1305,11 +1308,22 @@ def merge_saved_results(
                     ):
                         surface_ids.setdefault(provenance["sourceId"], surface["id"])
                 surfaces = source.get("surfaces", [])
-                source_surface_ids: dict[str, str] = {}
+                source_surface_ids: dict[str, tuple[str, bool]] = {}
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-                        source_surface_ids.setdefault(surface["id"], surface_id(surface, offset))
-                surface_ids.update(source_surface_ids)
+                        source_surface_ids.setdefault(
+                            surface["id"],
+                            (
+                                surface_id(surface, offset),
+                                id(source) in accepted_coverage_sources
+                                or bool(accepted_positions(surface)),
+                            ),
+                        )
+                for source_id, (projected_id, retained) in source_surface_ids.items():
+                    if retained:
+                        surface_ids.setdefault(source_id, projected_id)
+                    else:
+                        surface_ids[source_id] = projected_id
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]

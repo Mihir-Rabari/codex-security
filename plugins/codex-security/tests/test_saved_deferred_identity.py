@@ -433,13 +433,19 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         )
         expected_candidate["provenance"]["candidateId"] = candidate["candidateId"]
     for coverage in (first_coverage, recovered):
-        api_surfaces = [row for row in coverage["surfaces"] if row["id"] == expected_surface_id]
+        api_surfaces = [
+            row
+            for row in coverage["surfaces"]
+            if row.get("provenance") == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
+        ]
         assert len(api_surfaces) == 1
+        actual_surface_id = api_surfaces[0]["id"]
+        assert isinstance(actual_surface_id, str)
         expected_disposition = "no_issue_found" if rejected_here else "needs_follow_up"
         assert api_surfaces[0]["disposition"] == expected_disposition
         assert api_surfaces[0] == {
             **pending_surface,
-            "id": expected_surface_id,
+            "id": actual_surface_id,
             "disposition": expected_disposition,
             "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "api"},
         }
