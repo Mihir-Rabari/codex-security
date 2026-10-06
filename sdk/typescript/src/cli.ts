@@ -7257,9 +7257,10 @@ function patchChangeSources(
   root: string,
   repository: string,
   files: readonly string[],
-): { files: string[]; transferred: Set<string> } {
+): { files: string[]; transferred: Set<string>; deleted: Set<string> } {
   const selected = new Set(files);
   const transferred = new Set<string>();
+  const deleted = new Set<string>();
   for (let index = 0; index < changes.length - 1;) {
     const status = changes[index++]!;
     const source = relative(repository, resolve(root, changes[index++]!));
@@ -7276,12 +7277,14 @@ function patchChangeSources(
           );
         if (
           ![...selected].some((file) => !isOutsidePath(relative(source, file)))
-        )
+        ) {
           selected.add(source);
+          deleted.add(source);
+        }
       }
     }
   }
-  return { files: [...selected], transferred };
+  return { files: [...selected], transferred, deleted };
 }
 
 async function createPatchPullRequest(
@@ -7414,7 +7417,8 @@ async function createPatchPullRequest(
   const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
-  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...files]);
+  const stageFiles = files.filter((file) => !sources.deleted.has(file));
+  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...stageFiles]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
@@ -7436,20 +7440,37 @@ async function createPatchPullRequest(
     index === undefined
       ? rm(indexPath, { force: true })
       : writeFile(indexPath, index);
+  const temporaryIndex = await mkdtemp(
+    join(tmpdir(), "codex-security-patch-index-"),
+  );
+  const stage = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository, {
+      environment: { GIT_INDEX_FILE: join(temporaryIndex, "index") },
+    });
+  const removeSources = (command: typeof run) =>
+    sources.deleted.size
+      ? command(["update-index", "--force-remove", "--", ...sources.deleted])
+      : Promise.resolve("");
+  const syncIndex = async () => {
+    await run([
+      "--literal-pathspecs",
+      "reset",
+      "-q",
+      "HEAD",
+      "--",
+      ...stageFiles,
+    ]);
+    await removeSources(run);
+  };
   let committed = false;
   try {
     await run(["switch", "-c", branch]);
-    await run(["--literal-pathspecs", "add", "--", ...files]);
-    await run([
-      "--literal-pathspecs",
-      "commit",
-      "--only",
-      "-m",
-      PATCH_PR_TITLE,
-      "--",
-      ...files,
-    ]);
+    await stage(["read-tree", "HEAD"]);
+    await stage(["--literal-pathspecs", "add", "--", ...stageFiles]);
+    await removeSources(stage);
+    await stage(["commit", "-m", PATCH_PR_TITLE]);
     committed = true;
+    await syncIndex();
     const commit = await run(["rev-parse", "HEAD"]);
     await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
     await run(["config", "--local", patchCommitKey(branch), commit]);
@@ -7460,7 +7481,8 @@ async function createPatchPullRequest(
     ) {
       try {
         committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
-        if (!committed) {
+        if (committed) await syncIndex();
+        else {
           await restoreIndex();
           try {
             await run(
@@ -7493,6 +7515,8 @@ async function createPatchPullRequest(
       );
     }
     throw error;
+  } finally {
+    await rm(temporaryIndex, { recursive: true, force: true });
   }
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }

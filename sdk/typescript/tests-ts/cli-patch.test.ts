@@ -2723,15 +2723,17 @@ describe("patch publication integrity", () => {
   );
 
   test.each(
-    [
-      "staged",
-      "unstaged",
-      "assume-unchanged",
-      "clean",
-      "deleted-before",
-    ].flatMap((dirty) =>
-      ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
-    ),
+    ["staged", "unstaged", "assume-unchanged", "clean", "deleted-before"]
+      .flatMap((dirty) =>
+        ["new.ts", "old.ts/new.ts"].map((file) => [dirty, file] as const),
+      )
+      .concat(
+        [
+          "clean-staged-rename",
+          "clean-source-directory",
+          "clean-ignored-directory",
+        ].map((state) => [state, "new.ts"] as const),
+      ),
   )("handles a renamed %s file at %s", async (dirty, file) => {
     const directory = await fixtures.create("patch-renamed-local-edits-");
     const git = repositoryGit(directory);
@@ -2741,7 +2743,8 @@ describe("patch publication integrity", () => {
     await writeFile(join(directory, "old.ts"), "unsafe\noriginal\n");
     git("add", ".");
     git("commit", "-m", "Synthetic baseline");
-    const hasLocalEdits = dirty !== "clean" && dirty !== "deleted-before";
+    const hasLocalEdits =
+      !dirty.startsWith("clean") && dirty !== "deleted-before";
     const content = hasLocalEdits ? "synthetic local edit" : "original";
     if (hasLocalEdits)
       await writeFile(join(directory, "old.ts"), `unsafe\n${content}\n`);
@@ -2749,6 +2752,33 @@ describe("patch publication integrity", () => {
     if (dirty === "staged") git("add", ".");
     if (dirty === "assume-unchanged")
       git("update-index", "--assume-unchanged", "old.ts");
+    await writeFile(join(directory, "unrelated.ts"), "original\n");
+    await writeFile(join(directory, "hidden.ts"), "hidden\n");
+    git("add", "unrelated.ts", "hidden.ts");
+    git(
+      "commit",
+      "--only",
+      "-m",
+      "Unrelated baseline",
+      "--",
+      "unrelated.ts",
+      "hidden.ts",
+    );
+    await writeFile(join(directory, "unrelated.ts"), "staged work\n");
+    git("add", "unrelated.ts");
+    await writeFile(join(directory, "unrelated.ts"), "working work\n");
+    git("update-index", "--skip-worktree", "hidden.ts");
+    await writeFile(join(directory, "intent.ts"), "intent\n");
+    git("add", "--intent-to-add", "intent.ts");
+    const unrelated = git(
+      "ls-files",
+      "--stage",
+      "--debug",
+      "--",
+      "unrelated.ts",
+      "hidden.ts",
+      "intent.ts",
+    );
     const head = git("rev-parse", "HEAD");
     const index = git("write-tree");
     const remote = await fixtures.create("patch-renamed-local-remote-");
@@ -2768,7 +2798,23 @@ describe("patch publication integrity", () => {
               ? "[]"
               : "https://github.example.test/example/repository/pull/1",
         onCodex: async (_args, output) => {
-          await rm(join(directory, "old.ts"), { force: true });
+          if (dirty === "clean-staged-rename") git("mv", "old.ts", file);
+          else await rm(join(directory, "old.ts"), { force: true });
+          if (
+            dirty === "clean-source-directory" ||
+            dirty === "clean-ignored-directory"
+          ) {
+            await mkdir(join(directory, "old.ts"));
+            await writeFile(
+              join(directory, "old.ts/unverified.txt"),
+              "unverified\n",
+            );
+            if (dirty === "clean-ignored-directory")
+              await writeFile(
+                join(directory, ".git/info/exclude"),
+                "old.ts/\n",
+              );
+          }
           await mkdir(dirname(join(directory, file)), { recursive: true });
           await writeFile(join(directory, file), `fixed\n${content}\n`);
           output?.stdout.write(
@@ -2795,11 +2841,36 @@ describe("patch publication integrity", () => {
       expect(git("ls-remote", "origin")).toBe("");
     } else {
       expect(git("show", `HEAD:${file}`)).toBe(`fixed\n${content}`);
-      if (dirty === "clean")
+      if (dirty.startsWith("clean"))
         expect(
           git("diff", "--name-status", "--no-renames", "HEAD^", "HEAD"),
         ).toContain("D\told.ts");
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    }
+    expect(
+      git(
+        "ls-files",
+        "--stage",
+        "--debug",
+        "--",
+        "unrelated.ts",
+        "hidden.ts",
+        "intent.ts",
+      ),
+    ).toBe(unrelated);
+    expect(await readFile(join(directory, "unrelated.ts"), "utf8")).toBe(
+      "working work\n",
+    );
+    if (
+      dirty === "clean-source-directory" ||
+      dirty === "clean-ignored-directory"
+    ) {
+      expect(
+        await readFile(join(directory, "old.ts/unverified.txt"), "utf8"),
+      ).toBe("unverified\n");
+      expect(git("ls-tree", "-r", "--name-only", "HEAD")).not.toContain(
+        "unverified.txt",
+      );
     }
     expect(await readFile(join(directory, file), "utf8")).toBe(
       `fixed\n${content}\n`,
