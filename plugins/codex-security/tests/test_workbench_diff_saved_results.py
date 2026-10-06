@@ -214,9 +214,9 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
     snapshots = [
         json.loads((scan_dir / path).read_text())
         for path in manifest["scan"]["preservedSources"]
-        if json.loads((scan_dir / path).read_text())["coverage"].get(
-            "stoppedDiffCandidateDecisions"
-        )
+        if json.loads((scan_dir / path).read_text())
+        .get("coverage", {})
+        .get("stoppedDiffCandidateDecisions")
     ]
     assert len(snapshots) == 1
     assert len(snapshots[0]["coverage"]["surfaces"]) == (0 if expected_count else 1)
@@ -1028,7 +1028,8 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
     assert stopped["progress"]["candidates"]["unresolved"] == 0
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert any(
-        imported_surface in json.loads((scan_dir / path).read_text())["coverage"]["surfaces"]
+        imported_surface
+        in json.loads((scan_dir / path).read_text()).get("coverage", {}).get("surfaces", [])
         for path in sources
     )
     assert any("Skipped malformed coverage surface" in warning for warning in stopped["warnings"])
