@@ -1514,11 +1514,9 @@ def complete_scan_locked(
         )
     except ContractError as exc:
         # Only a coordinator-selected parent is fenced for output-write replay.
-        selected_deep_parent = (
-            scan["mode"] == "deep"
-            and deep_scan.require_deep_scan_run(connection, scan_id)["manifest_path"]
-            == str(scan_dir / ARTIFACTS["manifest"])
-        )
+        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
+            connection, scan_id
+        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
         if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
             and not wrote
