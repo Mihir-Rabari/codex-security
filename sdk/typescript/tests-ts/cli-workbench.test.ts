@@ -267,9 +267,16 @@ describe("CLI workbench", () => {
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
+      const unsavedAlias = join(root, "selected-checkout");
+      await symlink(
+        repository,
+        unsavedAlias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
       for (const [requested, first, exact] of [
         [repository, alias, repository],
         [alias, repository, alias],
+        [unsavedAlias, alias, repository],
       ]) {
         for (const args of [[], [requested!]]) {
           const calls: Array<readonly string[]> = [];
