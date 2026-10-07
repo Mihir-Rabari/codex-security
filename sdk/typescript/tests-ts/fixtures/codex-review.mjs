@@ -227,7 +227,9 @@ for await (const line of createInterface({ input: process.stdin })) {
               ? "Request refusal due to the safety policy."
               : scenario === "required-source-error-policy-file"
                 ? "Connection refused while fetching content-policy.ts"
-                : "Required source revision could not be read.",
+                : scenario === "required-source-error-upload-policy"
+                  ? "Artifact upload was blocked by the content policy."
+                  : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );
