@@ -6759,6 +6759,94 @@ describe("patch change tracking", () => {
     return { directory, git, remote };
   }
 
+  test.each(["patch", "scan"])(
+    "keeps dirty rename destinations out of %s publication across findings",
+    async (command) => {
+      const { directory, git } = await publicationRepository();
+      const source = "src/finding-1.ts";
+      const destination = "src/new.ts";
+      const original = await readFile(join(directory, source), "utf8");
+      const dirty = original + "synthetic pre-existing local edit\n";
+      const rewritten =
+        dirty +
+        Array.from(
+          { length: 60 },
+          (_, index) => `new patch line ${index}\n`,
+        ).join("");
+      await writeFile(join(directory, source), dirty);
+      const head = git("rev-parse", "HEAD");
+      const index = git("write-tree");
+      const result = resultWithFindings(["high", "high"]);
+      result.findings.findings[1]!.locations[0]!.path = source;
+      let modelCalls = 0;
+      let createCalls = 0;
+      let publicationDiff: string[] = [];
+      const outcome = await runWorkflow(
+        command === "patch"
+          ? ["patch", "--scan", "scan-1", "--create-pr", "--json"]
+          : ["scan", directory, "--patch", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git") {
+              const output = runGitRepositoryCommand(
+                command,
+                args,
+                cwd,
+                options,
+              );
+              if (args.includes("--find-copies-harder"))
+                publicationDiff = output.split("\0").filter(Boolean);
+              return output;
+            }
+            if (args[1] === "list") return "[]";
+            createCalls++;
+            return "https://github.example.test/example/repository/pull/1";
+          },
+          onCodex: async (_args, output) => {
+            modelCalls++;
+            if (modelCalls === 1)
+              await rename(
+                join(directory, source),
+                join(directory, destination),
+              );
+            else {
+              await writeFile(join(directory, source), original);
+              await writeFile(join(directory, destination), rewritten);
+            }
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: `occ_${modelCalls}`,
+                    status: "verified",
+                    files: [destination],
+                    verification: "The focused regression passed.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+      );
+      expect(modelCalls).toBe(2);
+      expect(publicationDiff).toEqual(["M", source, "A", destination]);
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("uncommitted changes before patching");
+      expect(createCalls).toBe(0);
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(git("write-tree")).toBe(index);
+      expect(git("ls-remote", "origin")).toBe("");
+      expect(await readFile(join(directory, source), "utf8")).toBe(original);
+      expect(await readFile(join(directory, destination), "utf8")).toBe(
+        rewritten,
+      );
+    },
+  );
+
   test.each(["required", "empty"] as const)(
     "preserves the %s origin proxy during publication preflight",
     async (kind) => {
