@@ -1833,6 +1833,18 @@ def merge_saved_results(
             )
         )
 
+    def distinct_reports(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+        return (
+            left is not None
+            and right is not None
+            and any(
+                a is not None and b is not None and a != b
+                for a, b in zip(
+                    identifiers(left["latest"]), identifiers(right["latest"]), strict=True
+                )
+            )
+        )
+
     def raw_owner(value: dict[str, Any], source_owner: str | None) -> str | None:
         if source_owner is not None:
             return source_owner
@@ -2276,6 +2288,9 @@ def merge_saved_results(
             )
             if group is not None:
                 key = group.setdefault("merge_key", key)
+                # Distinct reconciled reports may share an anchor and source location.
+                if key in finding_positions and distinct_reports(group, finding_positions[key][1]):
+                    key = group["merge_key"] = group["key"]
                 key = group.get("parent_key", key)
             represented_by_parent = False
             if relative != "parent":
@@ -2490,10 +2505,13 @@ def merge_saved_results(
     identity_order = [finding for finding in identity_order if valid_finding(finding)]
     _ensure_finding_identities(identity_order)
 
-    identities: dict[bytes, str] = {}
+    identities: dict[bytes, tuple[str, dict[str, Any] | None]] = {}
     identity_owners: dict[bytes, Any] = {}
+    retained_groups = {
+        position: group for position, group in finding_positions.values() if group is not None
+    }
     reserved_identities = {_semantic_identity_key(finding) for finding in identity_order}
-    for finding in findings:
+    for position, finding in enumerate(findings):
         if not valid_finding(finding):
             continue
         identity = finding.get("identity")
@@ -2501,11 +2519,16 @@ def merge_saved_results(
             continue
         key = _semantic_identity_key(finding)
         variant = _finding_key(finding)
-        if key in identities and identities[key] != variant:
+        group = retained_groups.get(position)
+        previous_variant, previous_group = identities.get(key, (None, None))
+        if key in identities and (
+            previous_variant != variant or distinct_reports(group, previous_group)
+        ):
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
-            if _identity_candidate(finding) and finding["provenance"].get(
-                "workerId"
-            ) != identity_owners.get(key):
+            if previous_variant == variant or (
+                _identity_candidate(finding)
+                and finding["provenance"].get("workerId") != identity_owners.get(key)
+            ):
                 base_instance = identity.get("instance", "saved")
                 suffix = 2
                 while True:
@@ -2517,7 +2540,7 @@ def merge_saved_results(
                     suffix += 1
             else:
                 identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
-        identities[key] = variant
+        identities[key] = (variant, group)
         identity_owners[key] = finding["provenance"].get("workerId")
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()

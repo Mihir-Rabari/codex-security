@@ -794,6 +794,124 @@ def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
     assert documents[1] == replay[1]
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("revised", [False, True])
+def test_recovery_finalization_coalesces_repeated_authored_reports(
+    tmp_path, saved_results, revised
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Existing report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "shared"},
+        "extensions": {"reportId": "report-1"},
+    }
+    latest = (
+        {
+            **first,
+            "summary": "Synthetic evidence with additional detail.",
+            "severity": {"level": "high"},
+        }
+        if revised
+        else first
+    )
+    draft = saved_draft("identity-scan", findings=[first, latest])
+    worker = save_worker(tmp_path, saved_results, "reviewer", [draft], draft)
+    manifest, findings, _ = recover(tmp_path, saved_results, [worker])
+    manifest["scan"]["id"] = "identity-scan"
+    findings["scanId"] = "identity-scan"
+    _recover_unsealed_findings(
+        manifest, findings, Path(__file__).resolve().parents[1] / "schemas", tmp_path, []
+    )
+    assert len(findings["findings"]) == 1
+    assert findings["findings"][0]["identity"] == first["identity"]
+    assert findings["findings"][0]["summary"] == latest["summary"]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+@pytest.mark.parametrize("saved_result", [False, True])
+def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
+    tmp_path, saved_results, identifier, saved_result
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Existing report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 2}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "shared"},
+    }
+    independent = {
+        **first,
+        "title": "Independent report",
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-2"},
+    }
+    revised = {
+        **first,
+        "locations": independent["locations"],
+        "extensions": {identifier: "report-1"},
+    }
+    del revised["identity"]
+    drafts = [
+        saved_draft("identity-scan", findings=[first]),
+        saved_draft("identity-scan", findings=[independent, revised]),
+    ]
+    output = tmp_path / "reviewer"
+    for sequence, draft in enumerate(drafts, 1):
+        path = write_checkpoint(output / "checkpoints", draft)
+        os.utime(path, ns=(sequence * 1_000_000_000, sequence * 1_000_000_000))
+    if saved_result:
+        result = output / "result.json"
+        result.write_text(json.dumps(drafts[-1]))
+        os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+    worker = saved_discovery_worker(output, "reviewer")
+    sources = {path: path.read_bytes() for path in output.rglob("*.json")}
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for manifest, findings, _ in (documents, replay):
+        # The moved checkpoint revises the existing report without adding a third row.
+        assert len(findings["findings"]) == 2
+        manifest["scan"]["id"] = "identity-scan"
+        findings["scanId"] = "identity-scan"
+        warnings = []
+        _recover_unsealed_findings(
+            manifest,
+            findings,
+            Path(__file__).resolve().parents[1] / "schemas",
+            tmp_path,
+            warnings,
+        )
+        rows = findings["findings"]
+        assert {row["extensions"][identifier] for row in rows} == {"report-1", "report-2"}, warnings
+        assert len(rows) == 2
+        assert all(row["locations"] == independent["locations"] for row in rows)
+        assert len({json.dumps(row["identity"], sort_keys=True) for row in rows}) == 2
+        existing = next(row for row in rows if row["extensions"][identifier] == "report-1")
+        assert any(
+            previous["locations"] == first["locations"]
+            for previous in existing["provenance"]["previousFindings"]
+        )
+    assert documents[1] == replay[1]
+    assert all(path.read_bytes() == original for path, original in sources.items())
+
+
 @pytest.mark.parametrize("metadata", ["extensions", "provenance"])
 @pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
 def test_worker_report_metadata_enrichment_matches_published_identity(
