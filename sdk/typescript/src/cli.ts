@@ -7762,6 +7762,7 @@ async function createPatchPullRequest(
       { trim: false, maxBuffer: Infinity },
     )
   ).split("\0");
+  const reportedFiles = files;
   const sources = patchChangeSources(changes, root, directory, files);
   files = sources.files;
   if (ignoredFiles.size > 0) {
@@ -7883,7 +7884,14 @@ async function createPatchPullRequest(
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
   const isDeleted = (file: string) =>
-    [...sources.deleted].some((source) => relative(source, file) === "");
+    [...sources.deleted].some((source) => relative(source, file) === "") &&
+    !(
+      reportedFiles.some((selected) => relative(selected, file) === "") &&
+      existsSync(resolve(directory, file)) &&
+      lstatSync(resolve(directory, file), {
+        throwIfNoEntry: false,
+      })?.isDirectory()
+    );
   const stageFiles = files.filter(
     (file) =>
       !isDeleted(file) &&
