@@ -257,7 +257,7 @@ test("initialized stores retain their environment across findings operations", a
   expect(await readdir(directory)).toEqual(["state with spaces"]);
 });
 
-test.each(["explicit", "PATH", "Path"])(
+test.each(["explicit", "PATH", "Path", "XDG_CACHE_HOME", "xdg_cache_home"])(
   "findings stores retain relative Python paths before and after first use (%s)",
   async (configuration) => {
     const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
@@ -266,8 +266,26 @@ test.each(["explicit", "PATH", "Path"])(
     const second = join(directory, "second", "nested");
     await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
     const python = await resolvePluginPython();
+    const managedCache = configuration.toUpperCase() === "XDG_CACHE_HOME";
+    const cacheDirectory = join(directory, "managed cache");
+    if (managedCache) {
+      const managedPython = join(
+        cacheDirectory,
+        "codex-runtimes/codex-primary-runtime/dependencies/python",
+      );
+      await mkdir(dirname(managedPython), { recursive: true });
+      if (process.platform === "win32") {
+        await symlink(dirname(python), managedPython, "junction");
+      } else {
+        await mkdir(join(managedPython, "bin"), { recursive: true });
+        await symlink(python, join(managedPython, "bin", "python3"));
+      }
+    }
     let pythonDirectory = relative(first, dirname(python));
-    if (process.platform !== "win32" && configuration !== "explicit") {
+    if (
+      process.platform !== "win32" &&
+      ["PATH", "Path"].includes(configuration)
+    ) {
       const link = join(directory, "python-link");
       await symlink(dirname(python), link, "dir");
       pythonDirectory = `${configuration === "PATH" ? link : relative(first, link)}/../${basename(dirname(python))}`;
@@ -302,11 +320,15 @@ test.each(["explicit", "PATH", "Path"])(
         `const assert = await import("node:assert/strict");
 const { SqliteFindingsStore } = await import(${JSON.stringify(pathToFileURL(storeModule).href)});
 const environment = { ...process.env };
-if (${JSON.stringify(configuration)} !== "explicit") {
+if (${managedCache}) {
+  for (const key of Object.keys(environment)) if (["PATH", "PYTHON", "XDG_CACHE_HOME"].includes(key.toUpperCase())) delete environment[key];
+  environment.PATH = "";
+  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(relative(first, cacheDirectory))};
+} else if (${JSON.stringify(configuration)} !== "explicit") {
   for (const key of Object.keys(environment)) if (key.toUpperCase() === "PATH") delete environment[key];
   environment[${JSON.stringify(configuration)}] = ${JSON.stringify(searchPath)};
 }
-const original = ["PATH", "Path", "PYTHON", "CODEX_SECURITY_STATE_DIR"].map((key) => [key, environment[key], process.env[key]]);
+const original = ["PATH", "Path", "PYTHON", "XDG_CACHE_HOME", "xdg_cache_home", "CODEX_SECURITY_STATE_DIR"].map((key) => [key, environment[key], process.env[key]]);
 const store = new SqliteFindingsStore(environment);
 await store.initialize();
 process.chdir(${JSON.stringify(second)});

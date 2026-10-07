@@ -122,7 +122,10 @@ export class SqliteFindingsStore implements FindingsStore {
       this.environment,
     );
     for (const [name, value] of Object.entries(environment)) {
-      if (name.toUpperCase() !== "PATH" || value === undefined) continue;
+      if (value === undefined) continue;
+      if (name.toUpperCase() === "XDG_CACHE_HOME" && value.trim())
+        environment[name] = resolve(value);
+      if (name.toUpperCase() !== "PATH") continue;
       environment[name] = value
         .split(delimiter)
         .map((entry) => {
