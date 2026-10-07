@@ -3244,6 +3244,7 @@ export async function main(
     },
   });
   const cli = Cli.create("codex-security", {
+    aliases: ["cs"],
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {

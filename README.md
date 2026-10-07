@@ -25,28 +25,37 @@ Install the CLI globally and sign in:
 
 ```bash
 npm install --global @openai/codex-security
-codex-security login
+cs login
 ```
 
-This installs `codex-security` in npm's global executable directory, which must
-be on your `PATH`. To run without a global installation, replace `codex-security`
-in these examples with `npx @openai/codex-security`.
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
 
 From your repository, optionally [draft a `SECURITY.md`](#generate-securitymd)
 that explains what counts as a security issue in your project:
 
 ```bash
-codex-security policy .
+cs policy .
 ```
 
 The draft is saved outside your repository. Review the diff and notes, edit the
 draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
 to keep your current policy or scan without one.
 
-Run a scan:
+Run your scan from the repository directory:
 
 ```bash
-codex-security scan .
+cs scan .
+```
+
+To run without a global installation, replace `cs` in these examples with
+`npx @openai/codex-security`, for example:
+
+```bash
+npx @openai/codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -62,16 +71,16 @@ Choose a scope and scan mode:
 
 ```bash
 # Scan selected paths.
-codex-security scan . --path src --path tests
+cs scan . --path src --path tests
 
 # Scan committed changes from a base revision to HEAD.
-codex-security scan . --diff origin/main
+cs scan . --diff origin/main
 
 # Run a deep scan of the repository.
-codex-security scan . --mode deep
+cs scan . --mode deep
 ```
 
-Use `codex-security --help` to browse commands, or `codex-security scan --help`
+Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
 ## TypeScript SDK
@@ -81,6 +90,8 @@ Install the package locally in your TypeScript project:
 ```bash
 npm install @openai/codex-security
 ```
+
+Then import it:
 
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
@@ -104,8 +115,8 @@ Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path
 to select a component:
 
 ```bash
-codex-security policy .
-codex-security policy . --path services/api --knowledge-base architecture.md
+cs policy .
+cs policy . --path services/api --knowledge-base architecture.md
 ```
 
 The command saves its draft outside the repository and leaves existing files
@@ -130,7 +141,7 @@ Scans and policy generation save threat models with their results. Export a save
 model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 Omit `--scan` to use the current repository's latest completed scan. The
@@ -195,7 +206,7 @@ Store findings, browse them in a dashboard, and review potential duplicates.
 Start the local service with:
 
 ```bash
-npx @openai/codex-security serve
+cs serve
 ```
 
 Publish a completed scan with `publish scan --to custom`, then use `dedupe` to

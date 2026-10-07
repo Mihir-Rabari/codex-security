@@ -21,43 +21,61 @@ Before version `1.0.0`, minor releases may change the public API.
 
 ## Install
 
-Install the CLI globally:
-
-```bash
-npm install --global @openai/codex-security
-codex-security --version
-```
-
-This installs `codex-security` in npm's global executable directory, which must
-be on your `PATH`. To run without a global installation, replace `codex-security`
-in CLI examples with `npx @openai/codex-security`.
-
-For the TypeScript SDK, install the package locally in your project:
-
-```bash
-npm install @openai/codex-security
-```
-
 Supported runtimes:
 
 - Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, on macOS, Linux, or Windows.
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
   findings. Python 3.10 also needs `tomli`.
 
+### Install the CLI
+
+Install the CLI globally:
+
+```bash
+npm install --global @openai/codex-security
+cs --version
+```
+
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
+
+Continue with the [CLI walkthrough](#cli). To run without a global installation,
+replace `cs` in the CLI examples with `npx @openai/codex-security`.
+
+### Install the TypeScript SDK
+
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
 ## Authentication
 
 Sign in with ChatGPT:
 
 ```bash
-codex-security login
+cs login
 ```
+
+If you installed only the SDK locally, sign in from your project directory:
+
+```bash
+npx @openai/codex-security login
+```
+
+In the following CLI examples, replace `cs` with `npx @openai/codex-security`
+when using a local SDK installation, including the API-key login example below.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
 These keys apply to the current command without replacing your saved login.
 To save an API key instead, pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | codex-security login --with-api-key
+printenv OPENAI_API_KEY | cs login --with-api-key
 ```
 
 SDK calls accept `auth: "auto" | "chatgpt" | "api-key"`. The default, `"auto"`,
@@ -79,7 +97,7 @@ allows it. Otherwise, open an SSH tunnel from your local machine:
 ssh -L 1455:localhost:1455 user@remote-host
 ```
 
-Run `codex-security login` in that SSH session, then open its sign-in
+Run `cs login` in that SSH session, then open its sign-in
 URL in your local browser. Keep SSH connected until login finishes.
 
 ### Amazon Bedrock
@@ -358,24 +376,35 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
+After [installing the CLI](#install-the-cli), sign in if needed:
+
+```bash
+cs login
+```
+
 From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
 that explains what counts as a security issue in your project:
 
 ```bash
-codex-security policy .
+cs policy .
 ```
 
 The draft is saved outside your repository. Review the diff and notes, edit the
 draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
 to keep your current policy or scan without one.
 
-Run a scan:
+Then scan the repository:
 
 ```bash
-codex-security scan .
-codex-security scan . --path src --path tests
-codex-security scan . --diff origin/main --json
-codex-security scan . --dry-run
+cs scan .
+```
+
+To narrow the scan scope or check the configuration before scanning:
+
+```bash
+cs scan . --path src --path tests
+cs scan . --diff origin/main --json
+cs scan . --dry-run
 ```
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
@@ -387,15 +416,16 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
+Use `policy` to draft a new `SECURITY.md` or update an existing one. To select a
+component:
+
 ```bash
-codex-security policy .
-codex-security policy . --path services/api
+cs policy . --path services/api
 ```
 
-`policy` drafts a new or updated `SECURITY.md` outside the repository and leaves
-existing files unchanged. Review the diff and notes, edit the draft, then copy
-only `SECURITY.md` to the displayed **Policy target**. Scans already use root and
-component policies; you can keep them without generating new ones.
+Existing files stay unchanged until you review and copy the draft to the
+**Policy target** shown. Scans already use root and component policies; you can
+keep them without generating new ones.
 
 The SDK provides `generatePolicy()`, `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
@@ -406,8 +436,8 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 Export saved findings or a threat model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --export-format sarif --output results.sarif
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --export-format sarif --output results.sarif
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 The SDK provides `exportArtifact()` for the same offline operations. See
@@ -454,7 +484,7 @@ system, see [SDK records deduplication](docs/dedupe-records.md).
 ### Running without Docker
 
 ```bash
-npx @openai/codex-security serve --port 3000
+cs serve --port 3000
 ```
 
 Open `http://127.0.0.1:3000/dashboard`. Startup and listing need no API key;
