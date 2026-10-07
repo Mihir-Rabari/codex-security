@@ -54,11 +54,10 @@ def preserve_sealed_completion(
 
 
 def cli_scan_resume(
+    wb: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     *,
-    parse_scan_recipe: Callable[..., dict[str, Any]],
-    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
     sealed_producer_version: Callable[[sqlite3.Row], str | None],
     claim_token: str | None = None,
 ) -> dict[str, Any]:
@@ -95,10 +94,10 @@ def cli_scan_resume(
                 raise SystemExit(
                     "Cannot resume: the original checkout revision or contents changed."
                 )
-    recipe = parse_scan_recipe(
+    recipe = wb.parse_scan_recipe(
         scan["recipe_json"], repository, require_existing_paths=producer_version is None
     )
-    result = scan_registration(connection, scan, scan_contract)
+    result = scan_registration(connection, scan, wb.scan_contract)
     result["recipe"] = recipe
     if producer_version is not None:
         result["sealedProducerVersion"] = producer_version

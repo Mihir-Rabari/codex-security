@@ -1410,7 +1410,7 @@ def complete_scan_locked(
         completion_cost_json = parse_scan_cost(json.dumps({**cost_fields, "usage": measured_usage}))
     cost_json = completion_cost_json
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = manifest["scan"]["completedAt"]
         scan = require_scan(connection, scan["id"])
         if scan["status"] == "complete":
@@ -1463,10 +1463,6 @@ def complete_scan_locked(
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     context = scan_context(connection, scan["id"])
     context["targetWarnings"] = target_warnings
     return context
@@ -1504,10 +1500,9 @@ def cli_scan_resume(
     sealed_producer_version: Callable[[sqlite3.Row], str | None] | None = None,
 ) -> dict[str, Any]:
     result = scan_history.cli_scan_resume(
+        SimpleNamespace(**globals()),
         connection,
         scan,
-        parse_scan_recipe=parse_scan_recipe,
-        scan_contract=scan_contract,
         sealed_producer_version=sealed_producer_version or sealed_scan_producer_version,
         claim_token=claim_token,
     )
@@ -3304,6 +3299,10 @@ def main() -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
+    command_context = SimpleNamespace(
+        **globals(),
+        preserve_stopped_results=preserve_stopped_results_after_transition,
+    )
     if args.command == "resolve-scan-root":
         print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
         return
@@ -3409,10 +3408,10 @@ def main() -> None:
             result = native_indexes.list_repositories(connection, args)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
-        elif args.command in {"update-progress", "update-scan-context"}:
-            result = progress.update(
-                connection, args, now, require_scan, require_workspace, scan_context
-            )
+        elif args.command == "update-progress":
+            result = progress.update_progress(command_context, connection, args)
+        elif args.command == "update-scan-context":
+            result = progress.update_context(command_context, connection, args)
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
                 connection, args, prepare_only=args.command == "prepare-scan-completion"
@@ -3432,39 +3431,13 @@ def main() -> None:
         elif args.command == "save-scan-artifact":
             result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
-            result = handoff.mark_handoff_delivered(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                require_workspace=require_workspace,
-                workspace_state=workspace_state,
-            )
+            result = handoff.mark_handoff_delivered(command_context, connection, args)
         elif args.command == "claim-handoff-delivery":
-            result = handoff.claim_handoff_delivery(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                stale_claim_before=stale_claim_before,
-                workspace_state=workspace_state,
-            )
+            result = handoff.claim_handoff_delivery(command_context, connection, args)
         elif args.command == "release-handoff-delivery":
-            result = handoff.release_handoff_delivery(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                workspace_state=workspace_state,
-            )
+            result = handoff.release_handoff_delivery(command_context, connection, args)
         elif args.command == "attach-scan-continuation-thread":
-            result = handoff.attach_scan_continuation_thread(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                workspace_state=workspace_state,
-            )
+            result = handoff.attach_scan_continuation_thread(command_context, connection, args)
         elif args.command == "set-finding-triage":
             result = set_finding_triage(connection, args)
         elif args.command == "request-finding-remediation":
