@@ -1,8 +1,6 @@
 import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
-  workbenchEnvironment,
-  resolvePluginPython,
   runWorkbench,
   codexSecurityStateDirectory,
 } from "../runtime.js";
@@ -10,6 +8,7 @@ import {
   resolveCompletedScan,
   type SavedScanDependencies,
 } from "../saved-scan.js";
+import { savedScanWorkbench } from "../saved-scan-bootstrap.js";
 import { CodexReviewRunner } from "./codex-review.js";
 import {
   FindingDeduplicator,
@@ -120,21 +119,12 @@ export async function deduplicateScanInternal(
       (dependencies.runWorkbench &&
         ((args, input) =>
           dependencies.runWorkbench!(args, input, options.signal))) ??
-      (async (args) => {
-        const stateEnvironment = workbenchEnvironment(environment);
-        return await runWorkbench(
-          {
-            environment: stateEnvironment,
-            pluginRoot,
-            python: await resolvePluginPython({
-              environment: stateEnvironment,
-            }),
-            signal: options.signal,
-            failureMessage: "Could not read Codex Security scan history",
-          },
-          args,
-        );
-      }),
+      (await savedScanWorkbench(scanId, {
+        environment,
+        pluginRoot,
+        currentDirectory: dependencies.currentDirectory?.() ?? process.cwd(),
+        signal: options.signal,
+      })),
   });
   return await deduplicateResolvedScan(
     scan.scanDir,

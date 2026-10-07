@@ -869,6 +869,13 @@ MIGRATIONS = (
     ),
     (
         42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
+        43,
         "version local finding embedding inputs",
         "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;",
     ),

@@ -152,7 +152,7 @@ def test_embedding_cache_migration_preserves_existing_vectors(workbench_api, tmp
         connection.row_factory = sqlite3.Row
         workbench_api["apply_schema_migrations"](
             connection,
-            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 42),
+            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 43),
             lambda: TIMESTAMP,
             workbench_api["backfill_security_targets"],
         )
