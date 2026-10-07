@@ -2004,7 +2004,7 @@ def test_workbench_preserves_both_installed_migration_42_histories(
     ]
     with sqlite3.connect(database) as connection:
         create_migration_history(connection)
-        apply_historical_migrations(connection, namespace, installed, timestamp)
+        apply_historical_migrations(connection, installed, timestamp)
         original = dict(connection.execute("SELECT name, applied_at FROM schema_migrations"))
 
     run_workbench(state_dir, "database-info")
