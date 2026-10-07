@@ -2263,15 +2263,24 @@ describe("CodexSecurity orchestration", () => {
       const scenarios: [JsonObject, string, string | undefined][] = [
         [{}, "none", undefined],
         [
-          { model_reasoning_summary: "auto", service_tier: "flex" },
+          {
+            model_reasoning_summary: "auto",
+            service_tier: "flex",
+            model_context_window: 64_000,
+            model_auto_compact_token_limit: 48_000,
+          },
           "auto",
           "flex",
         ],
         [
           {
             profile: "cloud",
+            model_context_window: 64_000,
+            model_auto_compact_token_limit: 48_000,
             profiles: {
               cloud: {
+                model_context_window: 96_000,
+                model_auto_compact_token_limit: 72_000,
                 model_reasoning_summary: "concise",
                 service_tier: "fast",
               },
@@ -2283,8 +2292,11 @@ describe("CodexSecurity orchestration", () => {
         [
           {
             profile: "cloud.production",
+            model_context_window: 128_000,
+            model_auto_compact_token_limit: 96_000,
             profiles: {
               "cloud.production": {
+                model_auto_compact_token_limit: 112_000,
                 model_reasoning_summary: "concise",
                 service_tier: "fast",
               },
@@ -2344,6 +2356,14 @@ describe("CodexSecurity orchestration", () => {
             expect(resolveCodexProfile(config)["service_tier"]).toBe(
               expectedTier,
             );
+            for (const key of [
+              "model_context_window",
+              "model_auto_compact_token_limit",
+            ]) {
+              const value = resolveCodexProfile(overrides)[key];
+              expect(options.config?.[key]).toBe(value);
+              expect(resolveCodexProfile(config)[key]).toBe(value);
+            }
             expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
               `synthetic-bedrock-key-${index}`,
             );

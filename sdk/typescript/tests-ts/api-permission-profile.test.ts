@@ -142,7 +142,7 @@ async function fixture(
       "  };",
       '  if (args.includes("--profile")) merge(config, parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8")));',
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
+      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, modelContextWindow: config.model_context_window, autoCompactTokenLimit: config.model_auto_compact_token_limit, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
       ...(replaceSelectedPlugin
         ? [
             'const servers = JSON.parse(require("node:child_process").execFileSync(' +
@@ -359,6 +359,8 @@ async function fixture(
       pluginPath: PLUGIN_ROOT,
       codexOverrides: {
         "synthetic.setting": "literal-top-level-value",
+        model_context_window: 128_000,
+        model_auto_compact_token_limit: 96_000,
         projects,
         mcp_servers: {
           "codex-security": { command: "synthetic-workbench", enabled: true },
@@ -379,6 +381,8 @@ async function fixture(
                   model_provider: "synthetic.selected",
                   model: "gpt-6-astra",
                   model_reasoning_effort: "high",
+                  model_context_window: 96_000,
+                  model_auto_compact_token_limit: 72_000,
                 },
               },
               model_providers: {
@@ -1202,6 +1206,8 @@ test("selected profile launch survives shared-home settings for fresh and resume
             },
             model: "gpt-6-astra",
             effort: "high",
+            modelContextWindow: 96_000,
+            autoCompactTokenLimit: 72_000,
             forcedLogin: null,
             forcedWorkspace: null,
           });
@@ -1235,7 +1241,12 @@ test.each([
       );
       expect(launches).toHaveLength(2);
       for (const launch of launches)
-        expect(launch).toMatchObject({ workerLimit: 1, snapshotLimit: 1 });
+        expect(launch).toMatchObject({
+          workerLimit: 1,
+          snapshotLimit: 1,
+          modelContextWindow: 128_000,
+          autoCompactTokenLimit: 96_000,
+        });
       for (const recipe of h.recipes)
         expect(recipe).toMatchObject({
           config: {
