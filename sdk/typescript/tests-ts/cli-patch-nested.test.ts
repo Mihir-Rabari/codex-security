@@ -150,7 +150,7 @@ describe("patch change tracking", () => {
           "update",
           "--init",
         );
-        expect(await readFile(join(checkout, "nested/app.ts"), "utf8")).toBe(
+        expect(await readAppliedText(join(checkout, "nested/app.ts"))).toBe(
           "fixed\n",
         );
       }

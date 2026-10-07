@@ -7011,11 +7011,7 @@ async function hashPublicationFile(
     constants.O_RDONLY |
       (constants.O_NOFOLLOW ?? 0) |
       (constants.O_NONBLOCK ?? 0),
-  ).catch((error: unknown) => {
-    if (isJsonObject(error) && error["code"] === "EACCES") return undefined;
-    throw error;
-  });
-  if (file === undefined) return undefined;
+  );
   try {
     const opened = await file.stat();
     if (
@@ -7157,7 +7153,13 @@ async function preparePatchPublication(
       { trim: false, maxBuffer: Infinity },
     );
     for (const path of ignored.split("\0").filter(Boolean)) {
-      const digest = await hashPublicationFile(root, path);
+      const digest = await hashPublicationFile(root, path).catch(
+        (error: unknown) => {
+          if (isJsonObject(error) && error["code"] === "EACCES")
+            return undefined;
+          throw error;
+        },
+      );
       if (digest !== undefined) ignoredDigests.add(digest);
     }
   }
