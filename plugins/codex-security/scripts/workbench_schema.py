@@ -868,6 +868,13 @@ MIGRATIONS = (
         """,
     ),
     (
+        42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
         47,
         "freeze stopped scan checkpoint selections",
         """
