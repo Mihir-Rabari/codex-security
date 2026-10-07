@@ -37,7 +37,7 @@ function paxAttributes(contents) {
   return attributes;
 }
 
-export function plainTarEntries(archiveBytes) {
+export function plainTarEntries(archiveBytes, validateEntries = () => {}) {
   const entries = [];
   const archiveFiles = new Map();
   const archiveMetadata = [];
@@ -127,6 +127,7 @@ export function plainTarEntries(archiveBytes) {
 
   if (archiveBytes.subarray(offset).some((byte) => byte !== 0))
     invalidTarEntry();
+  validateEntries(entries);
   assertPublicPackageContents(archiveFiles, Buffer.concat(archiveMetadata));
   return entries;
 }

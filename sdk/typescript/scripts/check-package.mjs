@@ -48,7 +48,9 @@ const compressedArchive = readFileSync(archivePath);
 const archiveBytes = gunzipSync(compressedArchive, {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
 });
-const rawEntries = plainTarEntries(archiveBytes);
+const rawEntries = plainTarEntries(archiveBytes, (entries) =>
+  validatePackagePaths(entries.map(({ path }) => path)),
+);
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
 const characterLocale =
@@ -83,6 +85,67 @@ function invalidTarEntry() {
   throw new Error("npm tarball contains an invalid tar entry.");
 }
 
+function validatePackagePaths(entries) {
+  const files = new Set(entries);
+  if (files.size !== entries.length)
+    throw new Error("npm tarball contains duplicate paths.");
+  const required = [
+    "package/package.json",
+    "package/README.md",
+    "package/docs/cli.md",
+    "package/docs/findings-service.md",
+    "package/docs/dedupe-records.md",
+    "package/LICENSE",
+    "package/bin/codex-security.mjs",
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/dist/cli.js",
+    "package/schemas/project-config.schema.json",
+    "package/_bundled_plugin/.codex-plugin/plugin.json",
+  ];
+
+  for (const file of required) {
+    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  }
+
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  const pluginPaths = pluginContractFiles(contract);
+  if (new Set(pluginPaths).size !== pluginPaths.length) {
+    throw new Error("Plugin projection contract contains duplicate paths.");
+  }
+
+  const pluginEntries = new Set();
+  for (const file of pluginPaths) {
+    const pluginArchivePath = `package/_bundled_plugin/${file}`;
+    pluginEntries.add(pluginArchivePath);
+    if (!files.has(pluginArchivePath)) {
+      throw new Error(`npm tarball is missing ${pluginArchivePath}.`);
+    }
+  }
+
+  const distFiles = new Set(packageDistFiles);
+  for (const file of distFiles) {
+    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  }
+  const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
+  for (const file of [...allowedFiles]) {
+    const parts = file.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
+    }
+  }
+  const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
+  for (const file of files) {
+    if (
+      !allowedFiles.has(file) ||
+      unsafePath.test(file) ||
+      file.includes("\\")
+    ) {
+      throw new Error(`npm tarball contains an unexpected file: ${file}.`);
+    }
+  }
+}
+
 const entries = tar(["-tzf", "-"], "utf8").split(/\r?\n/u).filter(Boolean);
 const files = new Set(entries);
 if (files.size !== entries.length) {
@@ -93,57 +156,6 @@ if (
   rawEntries.some(({ path }, index) => path !== entries[index])
 ) {
   invalidTarEntry();
-}
-const required = [
-  "package/package.json",
-  "package/README.md",
-  "package/docs/cli.md",
-  "package/docs/findings-service.md",
-  "package/docs/dedupe-records.md",
-  "package/LICENSE",
-  "package/bin/codex-security.mjs",
-  "package/dist/index.js",
-  "package/dist/index.d.ts",
-  "package/dist/cli.js",
-  "package/schemas/project-config.schema.json",
-  "package/_bundled_plugin/.codex-plugin/plugin.json",
-];
-
-for (const file of required) {
-  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-}
-
-const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-const pluginPaths = pluginContractFiles(contract);
-if (new Set(pluginPaths).size !== pluginPaths.length) {
-  throw new Error("Plugin projection contract contains duplicate paths.");
-}
-
-const pluginEntries = new Set();
-for (const file of pluginPaths) {
-  const pluginArchivePath = `package/_bundled_plugin/${file}`;
-  pluginEntries.add(pluginArchivePath);
-  if (!files.has(pluginArchivePath)) {
-    throw new Error(`npm tarball is missing ${pluginArchivePath}.`);
-  }
-}
-
-const distFiles = new Set(packageDistFiles);
-for (const file of distFiles) {
-  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-}
-const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
-for (const file of [...allowedFiles]) {
-  const parts = file.split("/");
-  for (let index = 1; index < parts.length; index++) {
-    allowedFiles.add(`${parts.slice(0, index).join("/")}/`);
-  }
-}
-const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
-for (const file of files) {
-  if (!allowedFiles.has(file) || unsafePath.test(file) || file.includes("\\")) {
-    throw new Error(`npm tarball contains an unexpected file: ${file}.`);
-  }
 }
 
 const listing = tar(["--numeric-owner", "-tvzf", "-"], "utf8");

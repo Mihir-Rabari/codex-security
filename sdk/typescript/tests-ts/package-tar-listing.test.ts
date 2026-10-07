@@ -216,6 +216,48 @@ describe("npm package tar listings", () => {
     ).toThrow("npm tarball contains a non-regular entry");
   });
 
+  test.each([false, true])(
+    "rejects invalid package paths before Brotli expansion, complete=%p",
+    (complete) => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-path-order-"));
+      try {
+        const archivePath = join(root, "unexpected-brotli.tgz");
+        writeFileSync(
+          archivePath,
+          gzipSync(
+            Buffer.concat([
+              ...(complete ? [packageTar()] : []),
+              tarRecord(Buffer.from("Malformed compressed bytes."), {
+                name: "package/unexpected.br",
+              }),
+            ]),
+          ),
+        );
+        const contractPath = join(root, "plugin contract.json");
+        writeFileSync(contractPath, JSON.stringify(pluginContract));
+        const result = spawnSync(
+          commandPath("node"),
+          [
+            fileURLToPath(
+              new URL("../scripts/check-package.mjs", import.meta.url),
+            ),
+            archivePath,
+            contractPath,
+          ],
+          { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          complete
+            ? "unexpected file: package/unexpected.br"
+            : "missing package/package.json",
+        );
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
   test("accepts equivalent bounded gzip representations", () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
     try {
