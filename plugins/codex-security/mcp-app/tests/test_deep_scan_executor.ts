@@ -2196,7 +2196,9 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                     .permissions,
                 ),
               ),
-              { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
+              {
+                codex_security_deep_scan_worker: deniedWorkerPermissionProfile,
+              },
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
