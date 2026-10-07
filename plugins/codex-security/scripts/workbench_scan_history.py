@@ -213,7 +213,7 @@ def list_scans(
     clauses: list[str] = []
     values: list[Any] = []
     if args is not None and args.repository:
-        repository = Path(args.repository).expanduser().resolve()
+        repository = Path(args.repository).expanduser().absolute()
         identities = RepositoryIdentityCache(connection)
         clause, scope_values = identities.scope_for_path(str(repository)).sql(
             supports_generation=identities.supports_generation
@@ -361,12 +361,13 @@ def list_unmatched_scan_pairs(
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    repository = Path(args.repository).expanduser().resolve()
+    requested_repository = Path(args.repository).expanduser().absolute()
+    repository = requested_repository.resolve()
     identities = RepositoryIdentityCache(connection)
-    requested = identities.for_path(str(repository))
+    requested = identities.for_path(str(requested_repository))
     if identities.supports_identity:
         requested.require_owner()
-    clause, values = identities.scope_for_path(str(repository)).sql(
+    clause, values = identities.scope_for_path(str(requested_repository)).sql(
         supports_generation=identities.supports_generation
     )
     selected = connection.execute(

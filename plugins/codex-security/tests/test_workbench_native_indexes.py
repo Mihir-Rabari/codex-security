@@ -488,6 +488,11 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     scoped_b = next(
         row for row in scoped_rows if later_finding["findingId"] in row["matchedFindingIds"]
     )
+    local_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    local_current = next(row for row in local_rows if current["scanId"] in row["knownScanIds"])
+    assert local_current["status"] == "closed"
     expected = "closed" if saved_current_match and not legacy_first else "open"
     assert scoped_b["status"] == expected
     assert global_b["status"] == expected

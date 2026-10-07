@@ -242,18 +242,18 @@ def test_scan_root_filter_matches_windows_path_aliases(
 def test_scan_list_probes_requested_repository_once(
     workbench_api, indexed_collections, monkeypatch
 ):
-    import workbench_target_state as target_state
+    import workbench_target as target_module
 
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_bytes = target_state.git_bytes
+    git_command = target_module.git_command
 
-    def record_git_bytes(target, *arguments):
+    def record_git_command(target, *arguments, **kwargs):
         probes.append((target, arguments))
-        return git_bytes(target, *arguments)
+        return git_command(target, *arguments, **kwargs)
 
-    monkeypatch.setattr(target_state, "git_bytes", record_git_bytes)
+    monkeypatch.setattr(target_module, "git_command", record_git_command)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
@@ -298,3 +298,40 @@ def test_repository_findings_match_directory_aliases_after_exact_paths(
     assert [item["scanId"] for item in result["findings"]] == (
         [] if stale_exact else [SCAN_IDS[selected]]
     )
+
+
+@pytest.mark.parametrize("operation", ["list", "matching"])
+@pytest.mark.parametrize("requested_kind", ["saved_alias", "canonical", "unsaved_alias"])
+def test_requested_alias_keeps_its_own_legacy_scan_history(
+    workbench_api, indexed_collections, tmp_path, operation, requested_kind
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "saved-alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    unsaved_alias = tmp_path / "unsaved-alias"
+    unsaved_alias.symlink_to(targets[0], target_is_directory=True)
+    connection.execute(
+        "UPDATE security_targets SET current_path = ? WHERE id = ?",
+        (str(alias), stable_target_id(targets[1])),
+    )
+    connection.execute("UPDATE scans SET target_path = ? WHERE id = ?", (str(alias), SCAN_IDS[1]))
+    selected, requested = {
+        "saved_alias": (SCAN_IDS[1], alias),
+        "canonical": (SCAN_IDS[0], targets[0]),
+        "unsaved_alias": (SCAN_IDS[0], unsaved_alias),
+    }[requested_kind]
+    history = workbench_api["scan_history"]
+    args = query_args(repository=str(requested), limit=None, force=False, after_scan_id=selected)
+    if operation == "list":
+        assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
+            selected
+        ]
+    else:
+        result = history.list_unmatched_scan_pairs(
+            connection,
+            args,
+            backfill_finding_details=lambda *args: None,
+            read_coverage=lambda *args: {},
+        )
+        assert result["scanCount"] == 1
+        assert result["repository"] == str(targets[0])

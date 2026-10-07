@@ -87,6 +87,46 @@ test("findings list preserves exact saved aliases and rejects their stale owners
             ),
           ).toEqual([requested === alias ? "alias" : "canonical"]);
         }
+        const scanOutput = capture();
+        expect(
+          await main(
+            ["scans", "list", requested, "--json"],
+            scanOutput.stream,
+            capture().stream,
+            dependencies({ onWorkbench: workbenchCommand(python!, state) }),
+          ),
+        ).toBe(0);
+        expect(
+          JSON.parse(scanOutput.text()).scans.map(
+            (scan: { scanId: string }) => scan.scanId,
+          ),
+        ).toEqual(
+          stale && requested === alias
+            ? []
+            : [requested === alias ? "alias" : "canonical"],
+        );
+
+        const matchingOutput = capture();
+        const matchingErrors = capture();
+        const matchingStatus = await main(
+          ["scans", "match", "--all", "--json"],
+          matchingOutput.stream,
+          matchingErrors.stream,
+          dependencies({
+            currentDirectory: requested,
+            onWorkbench: workbenchCommand(python!, state),
+          }),
+        );
+        if (stale && requested === alias) {
+          expect(matchingStatus).toBe(2);
+          expect(matchingErrors.text()).toContain("no longer matches");
+        } else {
+          expect(matchingStatus).toBe(0);
+          expect(JSON.parse(matchingOutput.text()).scanCount).toBe(1);
+          expect(JSON.parse(matchingOutput.text()).repository).toBe(
+            await realpath(repository),
+          );
+        }
       }
     }
   } finally {

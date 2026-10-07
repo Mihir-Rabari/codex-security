@@ -276,12 +276,13 @@ def _indexed_findings(
             [],
         ).append(row)
 
-    # A saved comparison between current targets does not bind their legacy history.
+    # Global comparisons do not bind legacy history across current targets. A scoped
+    # projection already admits only its own target's legacy rows and decisions.
     for identity, occurrences in list(grouped.items()):
         current_targets = {
             row["target_id"] for row in occurrences if row["repository_generation"] is not None
         }
-        if len(current_targets) <= 1:
+        if len(current_targets) <= 1 or scan_scope is not None:
             continue
         current = []
         for row in occurrences:
