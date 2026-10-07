@@ -1521,3 +1521,82 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
     assert gap["surfaceIds"] == [retained["id"]]
     assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("count", [20, 40])
+def test_dense_retained_projection_keeps_every_linked_record(
+    workbench_api, workbench_db, publication_scan, count
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surfaces = [
+        {
+            "id": f"surface-{index}",
+            "label": f"Synthetic surface {index}",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+        for index in range(count)
+    ]
+    deferred = [
+        {
+            "id": f"gap-{index}",
+            "reason": f"Synthetic remaining review {index}",
+            "surfaceIds": [surfaces[index]["id"]],
+        }
+        for index in range(count)
+    ]
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "surfaces": surfaces, "deferred": deferred},
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected_surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-1-surface-{index + 1}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate(surfaces)
+    ]
+    projected_deferred = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-1-deferred-{index + 1}",
+            "surfaceIds": [projected_surfaces[index]["id"]],
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate(deferred)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": projected_surfaces,
+            "deferred": projected_deferred,
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["surfaces"] == projected_surfaces
+    assert [
+        row for row in coverage["deferred"] if row.get("id") != "scan-stopped"
+    ] == projected_deferred
+    assert result.read_bytes() == original

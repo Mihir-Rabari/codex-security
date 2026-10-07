@@ -1210,6 +1210,8 @@ def merge_saved_results(
             for ref in refs
         ]
 
+    retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
+
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
     ) -> dict[str, Any] | None:
@@ -1238,23 +1240,31 @@ def merge_saved_results(
                 if "candidateId" in provenance:
                     original["candidateId"] = provenance["candidateId"]
                 if field == "deferred" and isinstance(original.get("surfaceIds"), list):
-                    surfaces = projection.get("surfaces", [])
-                    surface_ids = {
-                        surface.get("id"): surface["provenance"].get("sourceId")
-                        for surface in (surfaces if isinstance(surfaces, list) else [])
-                        if isinstance(surface, dict)
-                        and isinstance(surface.get("id"), str)
-                        and isinstance(surface.get("provenance"), dict)
-                    }
-                    source_surfaces = (
-                        drafts_by_path.get(relative, {}).get("coverage", {}).get("surfaces", [])
-                    )
-                    for surface in source_surfaces if isinstance(source_surfaces, list) else []:
-                        if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
-                            continue
-                        retained = retained_coverage_record("surfaces", surface, worker, relative)
-                        if retained is not None and isinstance(retained.get("id"), str):
-                            surface_ids[retained["id"]] = surface["id"]
+                    projection_key = (worker["id"], relative, id(projection))
+                    surface_ids = retained_surface_ids.get(projection_key)
+                    if surface_ids is None:
+                        surfaces = projection.get("surfaces", [])
+                        surface_ids = {
+                            surface.get("id"): surface["provenance"].get("sourceId")
+                            for surface in (surfaces if isinstance(surfaces, list) else [])
+                            if isinstance(surface, dict)
+                            and isinstance(surface.get("id"), str)
+                            and isinstance(surface.get("provenance"), dict)
+                        }
+                        source_surfaces = (
+                            drafts_by_path.get(relative, {}).get("coverage", {}).get("surfaces", [])
+                        )
+                        for surface in source_surfaces if isinstance(source_surfaces, list) else []:
+                            if not isinstance(surface, dict) or not isinstance(
+                                surface.get("id"), str
+                            ):
+                                continue
+                            retained = retained_coverage_record(
+                                "surfaces", surface, worker, relative
+                            )
+                            if retained is not None and isinstance(retained.get("id"), str):
+                                surface_ids[retained["id"]] = surface["id"]
+                        retained_surface_ids[projection_key] = surface_ids
                     original["surfaceIds"] = [
                         surface_ids.get(value, value) if isinstance(value, str) else value
                         for value in original["surfaceIds"]

@@ -147,7 +147,12 @@ export async function readDeepReductionSources(
                     ? bound.artifacts.scanDir
                     : dirname(worker.resultPath),
                 },
-                ref.split("/"),
+                ref
+                  .split("/")
+                  .filter(
+                    (component, index) =>
+                      component !== "." && (component !== "" || index === 0),
+                  ),
                 "Saved discovery receipt",
               );
               receiptDigests.set(
