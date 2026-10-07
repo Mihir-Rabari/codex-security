@@ -828,6 +828,70 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
     assert "recoveryBaseDigest" not in retained
 
 
+def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpoint(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    original = save_disposition(scan, result.parent, "reported")
+    result.write_text(json.dumps(original))
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
+    )
+    saved = workbench_api["saved_results"]
+    head = result.parent / "checkpoint-head.json"
+    unselected = write_checkpoint(
+        result.parent / "checkpoints",
+        {**original, "threatModel": {"summary": "Unselected worker model."}},
+    )
+    os.utime(unselected, ns=(400, 400))
+    accepted = write_checkpoint(
+        result.parent / "checkpoints",
+        {**original, "threatModel": {"summary": "Latest accepted model."}},
+    )
+    os.utime(accepted, ns=(200, 200))
+    head.write_text(json.dumps({"checkpoint": accepted.name}))
+    os.utime(head, ns=(200, 200))
+    saved._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    selected = write_checkpoint(result.parent / "checkpoints", original)
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    args = Namespace(scan_id=scan.scan_id)
+
+    def fail_publication(*args, **kwargs):
+        raise OSError("Synthetic publication interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        with pytest.raises(OSError, match="Synthetic publication interruption"):
+            workbench_api["recover_scan_results"](workbench_db, args)
+    retained = workbench_db.execute(
+        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+    ).fetchone()[0]
+    assert (
+        json.loads(retained)["threatModelSource"] == accepted.relative_to(scan.scan_dir).as_posix()
+    )
+
+    # A late worker update must not replace the model already selected for publication.
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE artifact_dir = ?",
+            (str(unselected), str(result.parent)),
+        )
+    workbench_api["recover_scan_results"](workbench_db, args)
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"]["summary"] == "Latest accepted model."
+    assert (
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+        == retained
+    )
+
+
 @pytest.mark.parametrize("bad_head", ["malformed", "missing-checkpoint", "missing-head"])
 @pytest.mark.parametrize("prior_disposition", ["reported", "rejected"])
 def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
