@@ -281,7 +281,9 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (run["scanId"],)).fetchone()
-        timestamp = datetime.fromisoformat(scan["started_at"]) + timedelta(microseconds=1)
+        timestamp = datetime.fromisoformat(scan["started_at"].replace("Z", "+00:00")) + timedelta(
+            microseconds=1
+        )
         context = _event(
             timestamp, "turn_context", {"turn_id": "fixture-turn", "model": "gpt-5.6-sol"}
         )
@@ -423,3 +425,190 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
         upsert_worker(state, home, **mutation, status="succeeded", result_path=result)
     assert "does not match its current checkpoint head" in failure.value.stderr
     assert checkpoint.read_bytes() == content
+
+
+@pytest.mark.parametrize("replacement", ["result", "checkpoint", "ordinary"])
+def test_accepted_result_does_not_reopen_replaced_path(
+    tmp_path, workbench_api, monkeypatch, replacement
+):
+    from finalize_scan_contract import ContractError
+
+    state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
+    target.mkdir()
+    run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
+    worker_id, prompt, artifacts, result = dispatch_discovery_worker(
+        state, home, scan_id=scan_id, scan_dir=scan_dir, name="discovery-1", succeed=False
+    )
+    payload = {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": [],
+        "coverage": {
+            "completeness": "complete",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        },
+    }
+    original_bytes = json.dumps(payload).encode()
+    result.write_bytes(original_bytes)
+    checkpoint = artifacts / "checkpoints" / "accepted.json"
+    if replacement == "checkpoint":
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(original_bytes)
+    external = tmp_path / "outside-scan.json"
+    external.write_text(json.dumps(payload, indent=2) + "\n")
+    deep = sys.modules["deep_scan_workbench"]
+    monkeypatch.setattr(
+        deep,
+        "_dependencies",
+        SimpleNamespace(
+            **workbench_api,
+            preserve_stopped_results=workbench_api["preserve_stopped_results_after_transition"],
+        ),
+    )
+    validate = deep.deep_scan_path
+    swapped = []
+
+    def validate_then_replace(scan, value, label, *, kind):
+        checked = validate(scan, value, label, kind=kind)
+        selected = (
+            "Accepted worker result" if replacement == "result" else "Accepted worker checkpoint"
+        )
+        if replacement != "ordinary" and label == selected:
+            path = Path(checked)
+            path.unlink()
+            path.symlink_to(external)
+            swapped.append(label)
+        return checked
+
+    monkeypatch.setattr(deep, "deep_scan_path", validate_then_replace)
+    args = SimpleNamespace(
+        scan_id=scan_id,
+        worker_id=worker_id,
+        kind="discovery",
+        status="succeeded",
+        prompt_path=str(prompt),
+        artifact_dir=str(artifacts),
+        result_manifest_path=str(result),
+        attempt=1,
+        sdk_thread_id="synthetic-worker",
+        error_message=None,
+        replaceable_failure_kind=None,
+        coordinator_generation=None,
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        if replacement == "ordinary":
+            accepted = deep.upsert_deep_scan_worker(connection, args)["deepScan"]
+            attempt = accepted["attempts"][-1]
+            assert Path(attempt["acceptedResultPath"]).read_bytes() == original_bytes
+            assert (
+                attempt["acceptedResultSha256"]
+                == __import__("hashlib").sha256(original_bytes).hexdigest()
+            )
+        else:
+            with pytest.raises(ContractError, match="inside the scan directory"):
+                deep.upsert_deep_scan_worker(connection, args)
+            assert swapped
+            assert (
+                connection.execute(
+                    "SELECT status FROM deep_scan_workers WHERE id = ?", (worker_id,)
+                ).fetchone()[0]
+                == "running"
+            )
+            assert (
+                connection.execute(
+                    "SELECT accepted_result_path FROM deep_scan_attempts WHERE worker_id = ?",
+                    (worker_id,),
+                ).fetchone()[0]
+                is None
+            )
+
+
+@pytest.mark.parametrize("heartbeat", ["absent", "ordinary", "released", "other-generation"])
+def test_artifact_release_does_not_override_current_persisted_lease(tmp_path, heartbeat):
+    from test_workbench_deep_scan import claim_deep_scan_coordinator
+
+    state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
+    target.mkdir()
+    initial = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    claimed = claim_deep_scan_coordinator(state, home, initial["scanId"])["deepScan"]
+    assert claimed["coordinatorGeneration"] == 2
+    if heartbeat != "absent":
+        record = {
+            "coordinatorGeneration": 3 if heartbeat == "other-generation" else 2,
+            "updatedAt": claimed["updatedAt"],
+        }
+        if heartbeat in {"released", "other-generation"}:
+            record["released"] = True
+        path = (
+            Path(claimed["scanDir"])
+            / "artifacts"
+            / "deep_discovery"
+            / "coordinator-heartbeat-2.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record))
+    rejoined = claim_deep_scan_coordinator(state, home, initial["scanId"])
+    assert rejoined["coordinatorDisposition"] == "observing"
+    assert rejoined["deepScan"]["coordinatorGeneration"] == 2
+
+
+@pytest.mark.parametrize("release", ["normal", "repeat", "wrong-owner", "stale-generation"])
+def test_host_release_preserves_lease_owner_and_generation(tmp_path, release):
+    import os
+
+    from test_workbench_deep_scan import claim_deep_scan_coordinator
+    from workbench_test_support import SCRIPT
+
+    state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
+    target.mkdir()
+    initial = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    scan_id = initial["scanId"]
+    claimed = claim_deep_scan_coordinator(state, home, scan_id)["deepScan"]
+    assert claimed["coordinatorGeneration"] == 2
+
+    def host_release(thread="thread-deep-scan", generation=2):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy,sys; script=sys.argv.pop(1); runpy.run_path(script)['main'](release_coordinator=True)",
+                str(SCRIPT),
+                "claim-deep-scan-coordinator",
+                "--scan-id",
+                scan_id,
+                "--thread-id",
+                thread,
+                "--coordinator-generation",
+                str(generation),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state), "CODEX_HOME": str(home)},
+        )
+
+    if release == "wrong-owner":
+        rejected = host_release("different-synthetic-owner")
+        assert rejected.returncode != 0
+        observed = claim_deep_scan_coordinator(state, home, scan_id)
+        assert observed["coordinatorDisposition"] == "observing"
+        assert observed["deepScan"]["coordinatorGeneration"] == 2
+        return
+    accepted = host_release()
+    assert accepted.returncode == 0, accepted.stderr
+    if release == "repeat":
+        repeated = host_release()
+        assert repeated.returncode == 0, repeated.stderr
+    adopted = claim_deep_scan_coordinator(state, home, scan_id)
+    assert adopted["coordinatorDisposition"] == "adopted"
+    assert adopted["deepScan"]["coordinatorGeneration"] == 3
+    if release == "stale-generation":
+        rejected = host_release()
+        assert rejected.returncode != 0
+        assert "newer generation" in rejected.stderr
+    observed = claim_deep_scan_coordinator(state, home, scan_id)
+    assert observed["coordinatorDisposition"] == "observing"
+    assert observed["deepScan"]["coordinatorGeneration"] == 3

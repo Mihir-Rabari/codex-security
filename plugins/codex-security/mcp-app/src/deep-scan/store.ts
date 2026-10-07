@@ -30,6 +30,8 @@ export type WorkbenchRunner = (
   input?: string,
   selectFinalization?: boolean,
   withExecutionSettings?: boolean,
+  signal?: AbortSignal,
+  releaseCoordinator?: boolean,
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-security-scan/v2";
@@ -275,13 +277,31 @@ export class WorkbenchDeepScanStore {
     const lease = this.coordinatorLeases.get(scanId);
     if (!lease) return;
     this.coordinatorLeases.delete(scanId);
-    await this.writeCoordinatorHeartbeat(lease, new Date().toISOString(), true);
+    await lease.heartbeatWrite;
+    await this.enqueueWrite(
+      [
+        "claim-deep-scan-coordinator",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        lease.input.threadId,
+        "--coordinator-generation",
+        String(lease.run.coordinatorGeneration),
+        ...(lease.input.handoffClaimToken
+          ? ["--claim-token", lease.input.handoffClaimToken]
+          : []),
+      ],
+      false,
+      undefined,
+      false,
+      false,
+      true,
+    );
   }
 
   private writeCoordinatorHeartbeat(
     lease: { run: DeepScanRunState; heartbeatWrite?: Promise<void> },
     updatedAt: string,
-    released = false,
   ): Promise<void> {
     // Heartbeats bypass SQLite writes; only writes to this lease file must settle in order.
     const { run } = lease;
@@ -296,7 +316,6 @@ export class WorkbenchDeepScanStore {
         {
           coordinatorGeneration: run.coordinatorGeneration,
           updatedAt,
-          ...(released ? { released: true } : {}),
         },
       ),
     );
@@ -591,6 +610,7 @@ export class WorkbenchDeepScanStore {
     input?: string,
     selectFinalization = false,
     withExecutionSettings = false,
+    releaseCoordinator = false,
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
@@ -601,6 +621,8 @@ export class WorkbenchDeepScanStore {
               input,
               selectFinalization,
               withExecutionSettings,
+              undefined,
+              releaseCoordinator,
             );
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");

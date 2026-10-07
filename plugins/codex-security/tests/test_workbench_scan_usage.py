@@ -766,7 +766,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             target,
             scan_id,
             scan_dir,
-            datetime.fromisoformat(deep["createdAt"]),
+            datetime.fromisoformat(deep["createdAt"].replace("Z", "+00:00")),
             environment,
             "deep",
         )

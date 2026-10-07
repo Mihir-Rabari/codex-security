@@ -3207,7 +3207,12 @@ def read_json_object(path: Path) -> dict[str, Any]:
 _WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
-def main(*, select_finalization: bool = False, with_execution_settings: bool = False) -> None:
+def main(
+    *,
+    select_finalization: bool = False,
+    with_execution_settings: bool = False,
+    release_coordinator: bool = False,
+) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__, execution_settings=with_execution_settings)
@@ -3278,7 +3283,11 @@ def main(*, select_finalization: bool = False, with_execution_settings: bool = F
         elif args.command == "get-deep-scan":
             result = deep_scan.get_deep_scan(connection, args)
         elif args.command == "claim-deep-scan-coordinator":
-            result = deep_scan.claim_deep_scan_coordinator(connection, args)
+            result = (
+                deep_scan.release_deep_scan_coordinator(connection, args)
+                if release_coordinator
+                else deep_scan.claim_deep_scan_coordinator(connection, args)
+            )
         elif args.command == "upsert-deep-scan-worker":
             result = deep_scan.upsert_deep_scan_worker(connection, args)
         elif args.command == "claim-deep-scan-dedup":

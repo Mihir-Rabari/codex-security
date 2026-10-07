@@ -2527,6 +2527,7 @@ async function runWorkbench(
   selectFinalization = false,
   withExecutionSettings = false,
   signal?: AbortSignal,
+  releaseCoordinator = false,
 ): Promise<JsonObject> {
   let pythonCommand: string | undefined;
   try {
@@ -2538,6 +2539,7 @@ async function runWorkbench(
       selectFinalization,
       withExecutionSettings,
       signal,
+      releaseCoordinator,
     );
   } catch (error) {
     const launchError = pythonCommand
@@ -2560,6 +2562,7 @@ async function executeWorkbenchWithStateSelection(
   selectFinalization = false,
   withExecutionSettings = false,
   signal?: AbortSignal,
+  releaseCoordinator = false,
 ): Promise<JsonObject> {
   if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
     return await executeWorkbench(
@@ -2570,6 +2573,7 @@ async function executeWorkbenchWithStateSelection(
       selectFinalization,
       withExecutionSettings,
       signal,
+      releaseCoordinator,
     );
   }
   if (CONFIGURED_WORKBENCH_STATE_DIR) {
@@ -2581,6 +2585,7 @@ async function executeWorkbenchWithStateSelection(
       selectFinalization,
       withExecutionSettings,
       signal,
+      releaseCoordinator,
     );
   }
   if (fallbackWorkbenchStateDir) {
@@ -2592,6 +2597,7 @@ async function executeWorkbenchWithStateSelection(
       selectFinalization,
       withExecutionSettings,
       signal,
+      releaseCoordinator,
     );
   }
   if (persistentWorkbenchStateSucceeded) {
@@ -2603,6 +2609,7 @@ async function executeWorkbenchWithStateSelection(
       selectFinalization,
       withExecutionSettings,
       signal,
+      releaseCoordinator,
     );
   }
   return await workbenchStateSelectionLock.run(async () => {
@@ -2615,6 +2622,7 @@ async function executeWorkbenchWithStateSelection(
         selectFinalization,
         withExecutionSettings,
         signal,
+        releaseCoordinator,
       );
     }
     if (persistentWorkbenchStateSucceeded) {
@@ -2626,6 +2634,7 @@ async function executeWorkbenchWithStateSelection(
         selectFinalization,
         withExecutionSettings,
         signal,
+        releaseCoordinator,
       );
     }
     try {
@@ -2637,6 +2646,7 @@ async function executeWorkbenchWithStateSelection(
         selectFinalization,
         withExecutionSettings,
         signal,
+        releaseCoordinator,
       );
       persistentWorkbenchStateSucceeded = true;
       return result;
@@ -2658,6 +2668,7 @@ async function executeWorkbenchWithStateSelection(
         selectFinalization,
         withExecutionSettings,
         signal,
+        releaseCoordinator,
       );
     }
   });
@@ -2671,6 +2682,7 @@ async function executeWorkbench(
   selectFinalization = false,
   withExecutionSettings = false,
   signal?: AbortSignal,
+  releaseCoordinator = false,
 ): Promise<JsonObject> {
   const userContextIndex = args.indexOf("--user-context");
   const userContext =
@@ -2680,11 +2692,13 @@ async function executeWorkbench(
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
   const workbenchInput = input ?? userContext;
-  const internalInvocation = selectFinalization
-    ? "select_finalization=True"
-    : withExecutionSettings
-      ? "with_execution_settings=True"
-      : undefined;
+  const internalInvocation = releaseCoordinator
+    ? "release_coordinator=True"
+    : selectFinalization
+      ? "select_finalization=True"
+      : withExecutionSettings
+        ? "with_execution_settings=True"
+        : undefined;
   const pythonArgs = internalInvocation
     ? [
         "-c",

@@ -1042,8 +1042,6 @@ def coordinator_lease_is_live(
     try:
         heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
-            if heartbeat.get("released") is True:
-                return False
             heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
         pass
@@ -1142,6 +1140,46 @@ def claim_deep_scan_coordinator_locked(
         **deep_scan_result(connection, scan_id),
         "coordinatorDisposition": disposition,
     }
+
+
+def release_deep_scan_coordinator(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    with dependencies().scan_completion_lock(scan_id):
+        connection.execute("BEGIN IMMEDIATE")
+        with connection:
+            scan, _ = require_owned_scan(connection, scan_id, args.thread_id)
+            require_current_continuation(
+                scan,
+                args.claim_token,
+                error_message="Deep Scan orchestration is owned by another continuation.",
+            )
+            run = require_deep_scan_run(connection, scan_id)
+            require_current_coordinator(run, args)
+            if scan["status"] != "running" or run["status"] not in {"running", "succeeded"}:
+                return deep_scan_result(connection, scan_id)
+            expired_at = (
+                _parse_timestamp(dependencies().now())
+                - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)
+            ).isoformat()
+            # The private host invocation retires its lease in the database;
+            # model-writable heartbeat fields cannot release a live owner.
+            write_scan_local_bytes(
+                Path(scan["scan_dir"]),
+                f"artifacts/deep_discovery/coordinator-heartbeat-{run['coordinator_generation']}.json",
+                json.dumps(
+                    {
+                        "coordinatorGeneration": run["coordinator_generation"],
+                        "updatedAt": expired_at,
+                    }
+                ).encode(),
+            )
+            connection.execute(
+                "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
+                (expired_at, scan_id),
+            )
+        return deep_scan_result(connection, scan_id)
 
 
 def recover_expired_coordinator(
@@ -1302,7 +1340,13 @@ def snapshot_accepted_result(scan: sqlite3.Row, worker: sqlite3.Row) -> tuple[st
         scan, worker["result_manifest_path"], "Accepted worker result", kind="file"
     )
     scan_dir = Path(scan["scan_dir"])
-    contents = Path(source).read_bytes()
+    with os.fdopen(
+        open_scan_local_file_descriptor(
+            scan_dir, Path(source).relative_to(scan_dir).as_posix(), "Accepted worker result"
+        ),
+        "rb",
+    ) as handle:
+        contents = handle.read()
     semantic = json.loads(contents)
     if isinstance(semantic, dict):
         semantic.pop("handoffClaimToken", None)
@@ -1317,7 +1361,13 @@ def snapshot_accepted_result(scan: sqlite3.Row, worker: sqlite3.Row) -> tuple[st
     candidates = [scan_dir / head] if head else sorted(directory.glob("*.json"))
     for checkpoint in candidates:
         safe = deep_scan_path(scan, str(checkpoint), "Accepted worker checkpoint", kind="file")
-        checkpoint_bytes = Path(safe).read_bytes()
+        with os.fdopen(
+            open_scan_local_file_descriptor(
+                scan_dir, Path(safe).relative_to(scan_dir).as_posix(), "Accepted worker checkpoint"
+            ),
+            "rb",
+        ) as handle:
+            checkpoint_bytes = handle.read()
         if json.loads(checkpoint_bytes) == semantic:
             return safe, hashlib.sha256(checkpoint_bytes).hexdigest()
         if head:

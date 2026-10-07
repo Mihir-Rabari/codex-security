@@ -23,6 +23,7 @@ testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
 await testHeartbeatBypassesBlockedWriteQueue();
+await testReleaseRetiresTheOwnedLeaseThroughWorkbench();
 await testOwnershipReadClearsStaleLease();
 await testWorkerResponseParsing();
 await testReplaceableDiscoveryFailureProtocol();
@@ -1089,4 +1090,76 @@ for (const version of [1, 99]) {
     finalizationInput,
     "inspection preserves finalization input and version before execution compatibility checks",
   );
+}
+
+async function testReleaseRetiresTheOwnedLeaseThroughWorkbench() {
+  const scanId = randomUUID();
+  const handoffClaimToken = randomUUID();
+  const scanDir = await mkdtemp(join(tmpdir(), "deep-scan-release-"));
+  const calls: { args: string[]; release: boolean }[] = [];
+  const store = new WorkbenchDeepScanStore(
+    async (
+      args: string[],
+      _input?: string,
+      _selectFinalization?: boolean,
+      _withExecutionSettings?: boolean,
+      _signal?: AbortSignal,
+      releaseCoordinator = false,
+    ) => {
+      calls.push({ args, release: releaseCoordinator });
+      return {
+        ...stateResult(scanId, {
+          deepScan: { coordinatorGeneration: 2, scanDir },
+        }),
+        coordinatorDisposition: "claimed",
+      };
+    },
+  );
+  try {
+    const input = { scanId, threadId: "thread-fixture", handoffClaimToken };
+    await store.claimCoordinator(input);
+    const heartbeat = store.heartbeatCoordinator(input);
+    await store.releaseCoordinator(scanId);
+    const renewed = await heartbeat;
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.release, false);
+    assert.equal(
+      calls[1]!.release,
+      true,
+      "release must reach the authoritative host mutation",
+    );
+    assert.deepEqual(calls[1]!.args, [
+      "claim-deep-scan-coordinator",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      input.threadId,
+      "--coordinator-generation",
+      "2",
+      "--claim-token",
+      handoffClaimToken,
+    ]);
+    assert.deepEqual(
+      await readJson(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        "coordinator-heartbeat-2.json",
+      ),
+      {
+        coordinatorGeneration: 2,
+        updatedAt: renewed.updatedAt,
+      },
+      "artifact heartbeat data must not retire a persisted lease",
+    );
+    assert.deepEqual(store.coordinatorLeaseArgs(scanId), []);
+    await store.releaseCoordinator(scanId);
+    assert.equal(
+      calls.length,
+      2,
+      "a retired local lease must not release a later owner",
+    );
+  } finally {
+    await rm(scanDir, { recursive: true, force: true });
+  }
 }

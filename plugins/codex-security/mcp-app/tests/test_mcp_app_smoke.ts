@@ -654,6 +654,8 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
   await writeFile(path.join(fixtureTarget, "app", "routes.py"), "route = 1\n");
 
   const fixtureEnvironment = {
+    // Keep the missing-executable fixture independent of ambient session history.
+    CODEX_HOME: path.join(fixtureRoot, "codex-home"),
     CODEX_CLI_PATH: path.join(fixtureRoot, "missing-deep-scan-codex"),
     CODEX_SECURITY_SCAN_ROOT: fixtureScanRoot,
     CODEX_SECURITY_STATE_DIR: fixtureState,

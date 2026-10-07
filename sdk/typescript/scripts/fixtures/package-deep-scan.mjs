@@ -14,6 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -21,6 +22,7 @@ import { startRpc } from "./package-rpc.mjs";
 import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
 
 const installedRoot = await realpath(process.argv[2]);
+const installedRequire = createRequire(join(installedRoot, "package.json"));
 const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
@@ -47,7 +49,9 @@ try {
         join(root, name),
         (await readFile(new URL(name, import.meta.url), "utf8")).replace(
           '"smol-toml"',
-          JSON.stringify(import.meta.resolve("smol-toml")),
+          JSON.stringify(
+            pathToFileURL(installedRequire.resolve("smol-toml")).href,
+          ),
         ),
       );
     } else {
