@@ -1889,6 +1889,18 @@ def merge_saved_results(
 
         return content(left) == content(right)
 
+    def contains_raw_value(current: Any, previous: Any) -> bool:
+        if isinstance(previous, dict):
+            return isinstance(current, dict) and all(
+                key in current and contains_raw_value(current[key], value)
+                for key, value in previous.items()
+            )
+        if isinstance(previous, list):
+            return isinstance(current, list) and all(
+                any(contains_raw_value(item, value) for item in current) for value in previous
+            )
+        return current == previous
+
     def finding_source_order(source, within_worker: bool = False):
         relative, draft, _ = source
         attempt, modified = source_order[relative]
@@ -2084,6 +2096,26 @@ def merge_saved_results(
                 group["identity"] = value["identity"]
             published_groups = ordered
 
+    # A later worker draft can collapse raw duplicates that it fully contains.
+    # Keep established identities and any evidence absent from the newer report.
+    contained_groups = set()
+    for group in {group["key"]: group for group in row_groups.values()}.values():
+        owner = group["owner"]
+        previous = group["observations"].get(owner)
+        if owner is None or group["identity"] is not None or previous is None:
+            continue
+        for current in logical_rows.get(raw_scope(group["latest"]), {}).values():
+            observed = current["observations"].get(owner)
+            if (
+                current["owner"] == owner
+                and observed is not None
+                and finding_source_order(observed[0], True)
+                > finding_source_order(previous[0], True)
+                and all(contains_raw_value(current["latest"], row) for row in group["rows"])
+            ):
+                contained_groups.add(group["key"])
+                break
+
     # An absorbed source represents every reconciled version of that worker report.
     for groups in logical_rows.values():
         for group in groups.values():
@@ -2205,6 +2237,9 @@ def merge_saved_results(
             zip(draft["findings"], normalized_findings, strict=True)
         ):
             _ensure_finding_identity(normalized)
+            group = row_groups.get((relative, index))
+            if group is not None and group["key"] in contained_groups:
+                continue
             if skip_superseded_findings and not (
                 isinstance(value, dict)
                 and (candidate_id := finding_candidate_id(value)) in selected_candidates

@@ -108,6 +108,111 @@ for (const layout of ["standard", "diff", "deep"] as const) {
   }
 }
 
+for (const variant of [
+  "candidate",
+  "report",
+  "ledger",
+  "metadata",
+  "moved",
+] as const) {
+  test(`worker: a newer terminal draft collapses contained ${variant} duplicates`, async (t) => {
+    const normal = await fixture(t, "deep");
+    const recovered = await fixture(t, "deep");
+    const workerRoot = path.join(normal.root, "worker");
+    const interruptedRoot = path.join(recovered.root, "worker");
+    await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
+    const worker = draftFixture(workerRoot, "worker");
+    const interrupted = draftFixture(interruptedRoot, "worker");
+    const plain = finding("Synthetic review");
+    const enriched = finding("Synthetic review", {
+      ...(variant === "candidate" || variant === "metadata"
+        ? { provenance: { source: "local_plugin", candidateId: "candidate-1" } }
+        : {}),
+      ...(variant === "candidate"
+        ? {}
+        : {
+            extensions: {
+              [variant === "ledger" ? "ledgerRowId" : "reportId"]: "report-1",
+            },
+          }),
+    });
+    const initial =
+      variant === "metadata" || variant === "moved"
+        ? [enriched, plain]
+        : [enriched, enriched];
+    const latest =
+      variant === "moved"
+        ? [
+            { ...plain, locations: [{ path: "src/example.py", startLine: 2 }] },
+            enriched,
+          ]
+        : [enriched];
+    for (const target of [worker, interrupted]) {
+      await target.write({ ...target.draft({}, true), findings: initial });
+      await dateDraftFiles(target.root, 100);
+    }
+    await worker.write({ ...worker.draft({}, true), findings: latest });
+    await draftApi.saveScanDraftCheckpoint(
+      interrupted.context,
+      { ...interrupted.draft({}, true), findings: latest },
+      false,
+    );
+    const published = JSON.parse(
+      await readFile(path.join(worker.root, "result.json"), "utf8"),
+    );
+    await normal.write({
+      ...normal.draft({}, true),
+      findings: published.findings.map((row: FixtureFinding) => ({
+        ...row,
+        provenance: { ...row.provenance, workerId: "worker" },
+      })),
+    });
+    const sourceBytes = new Map(
+      await Promise.all(
+        (await readdir(interrupted.root, { recursive: true }))
+          .filter((name) => name.endsWith(".json"))
+          .map(
+            async (name) =>
+              [
+                name,
+                await readFile(path.join(interrupted.root, name)),
+              ] as const,
+          ),
+      ),
+    );
+    const finalized = await recoverAndFinalize(
+      normal,
+      recovered,
+      [
+        {
+          id: "worker",
+          kind: "discovery",
+          artifact_dir: interrupted.root,
+          result_manifest_path: null,
+          attempt: 1,
+        },
+      ],
+      true,
+      true,
+    );
+    assert.equal(finalized.normal.length, latest.length);
+    assert.equal(finalized.recovered.length, latest.length);
+    const byId = (left: RecoveredFinding, right: RecoveredFinding) =>
+      left.findingId.localeCompare(right.findingId);
+    assert.deepEqual(
+      finalized.recovered.sort(byId),
+      finalized.normal.sort(byId),
+    );
+    assert.deepEqual(finalized.warnings, []);
+    for (const [name, bytes] of sourceBytes) {
+      assert.deepEqual(
+        await readFile(path.join(interrupted.root, name)),
+        bytes,
+      );
+    }
+  });
+}
+
 for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: adding candidate metadata preserves a report-backed finding`, async (t) => {
     const f = await fixture(t, layout);
