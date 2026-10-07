@@ -502,7 +502,7 @@ Use project-file `scan.deep` settings or legacy
 `$CODEX_HOME/codex-security/config.toml` defaults. Counts must be positive except
 that `subagents` can be zero. Time accepts positive fractional hours up to 96.
 `stopAfterConsecutiveErrors` is an SDK/project-file setting, with no CLI flag.
-`--codex` does not configure deep-scan settings. See
+`--codex` does not configure deep-scan settings.
 `--stop-after-no-new` counts consecutive runs without new issues. See
 [Deep settings and limits](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#deep-settings-and-limits).
 

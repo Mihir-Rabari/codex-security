@@ -30,7 +30,7 @@ const SCAN_GROUPS: readonly Group[] = [
   ["Configuration", ["config", "mode", "knowledge-base", "dry-run"]],
   ["Model and authentication", ["auth", "model", "effort", "provider"]],
   [
-    "Deep Scan (requires --mode deep)",
+    "Deep Scan (deep mode only)",
     DEEP_SCAN_SETTINGS.flatMap(([, , , flag]) =>
       flag === null ? [] : [flag.slice(2)],
     ),
