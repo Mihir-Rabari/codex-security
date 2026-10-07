@@ -3342,6 +3342,7 @@ async function testIsolatedReconstructedWorkers() {
       snapshot,
       providerKeys,
       expectedProvider,
+      expectedFilesystem: expectedProfile.filesystem,
       retainedCapture,
       accessProgram,
       apiFeatures,
@@ -3519,45 +3520,26 @@ async function testIsolatedReconstructedWorkers() {
               "--cyber-access-program",
               scan.accessProgram,
             );
-            const workerFeatures = parseToml(
-              child.argv
-                .filter((argument: string) => /^features[.=]/u.test(argument))
-                .join("\n"),
-            ).features as Record<string, unknown>;
-            for (const [feature, value] of Object.entries(scan.apiFeatures)) {
-              assert.equal(
-                workerFeatures[feature],
-                value,
-                `recorded ${feature}=${value}`,
-              );
-            }
-            for (const key of [
-              "model_provider",
-              "model_reasoning_summary",
-              "service_tier",
-            ]) {
-              const override = `${key}=${JSON.stringify(scan.config[key])}`;
-              assert.equal(child.argv.includes(override), true, override);
-              assert.equal(preflight.argv.includes(override), true, override);
-            }
-            assert.equal(
-              child.argv.includes('model_reasoning_effort="ultra"'),
-              true,
-            );
-            assert.equal(
-              preflight.argv.includes('model_reasoning_effort="ultra"'),
-              true,
-            );
-            assert.equal(
-              preflight.argv.includes(
-                `model=${JSON.stringify(scan.settings.model)}`,
+            assertConfigOverrides(
+              child.argv,
+              Object.fromEntries(
+                Object.entries(scan.apiFeatures).map(([key, value]) => [
+                  `features.${key}`,
+                  value,
+                ]),
               ),
-              true,
             );
-            const baseUrl = `openai_base_url=${JSON.stringify(scan.settings.codexOptions.baseUrl)}`;
-            assert.equal(child.argv.includes(baseUrl), true);
-            assert.equal(preflight.argv.includes(baseUrl), true);
+            assertConfigOverrides(preflight.argv, {
+              model: scan.settings.model,
+            });
             for (const launch of [child, preflight]) {
+              assertConfigOverrides(launch.argv, {
+                model_provider: scan.config["model_provider"],
+                model_reasoning_summary: scan.config["model_reasoning_summary"],
+                service_tier: scan.config["service_tier"],
+                model_reasoning_effort: "ultra",
+                openai_base_url: scan.settings.codexOptions.baseUrl,
+              });
               const provider = launch.argv.filter((argument: string) =>
                 /^model_providers[.=]/u.test(argument),
               );
@@ -3594,36 +3576,16 @@ async function testIsolatedReconstructedWorkers() {
                 { filesystem: Record<string, unknown> }
               >
             )["codex_security_deep_scan_worker"].filesystem;
-            for (const origin of ["original", "current"])
-              assert.deepEqual(
-                JSON.parse(
-                  JSON.stringify(filesystem[`/repo/${scan.name} [${origin}]`]),
-                ),
-                {
-                  ".": "deny",
-                },
-              );
-            const otherScan = scan.name === "first" ? "second" : "first";
-            for (const origin of ["original", "current"])
-              assert.equal(
-                filesystem[`/repo/${otherScan} [${origin}]`],
-                undefined,
-              );
+            assert.deepEqual(
+              JSON.parse(JSON.stringify(filesystem)),
+              scan.expectedFilesystem,
+            );
             assertReadOnlyWorkerPolicy(child.argv);
             assertWorkerSubagentPolicy(
               child.argv,
               scan.name === "first" ? 0 : 2,
             );
-            assert.equal(
-              (
-                parseToml(workerPermissionProfileOverride(child.argv))
-                  .permissions as Record<
-                  string,
-                  { filesystem: Record<string, unknown> }
-                >
-              )["codex_security_deep_scan_worker"].filesystem["/repo/.env"],
-              "deny",
-            );
+            assert.equal(filesystem["/repo/.env"], "deny");
             assert.equal(
               child.argv.includes("resume"),
               resumeThreadId !== undefined,
