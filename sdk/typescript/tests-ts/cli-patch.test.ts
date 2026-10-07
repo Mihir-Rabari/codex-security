@@ -8087,10 +8087,10 @@ describe("patch change tracking", () => {
               repositoryGit(verification)("apply", "--check", artifact.path);
               repositoryGit(verification)("apply", artifact.path);
               expect(
-                await readFile(join(verification, "generated.txt"), "utf8"),
+                await readAppliedText(join(verification, "generated.txt")),
               ).toBe("new generated fix\n");
               expect(
-                await readFile(join(verification, "src/finding-1.ts"), "utf8"),
+                await readAppliedText(join(verification, "src/finding-1.ts")),
               ).toBe("fixed\n");
               output.stdout.write(patchRiskAssessment().report);
               return 0;
