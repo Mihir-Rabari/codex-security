@@ -94,7 +94,7 @@ try {
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+  await testCompletedWorkerDrainPreservesCancellation();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -2392,16 +2392,16 @@ async function testAbortPropagation() {
   });
 }
 
-async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
-  await completedWorkerSettlesWithoutWaitingForProcessExit();
+async function testCompletedWorkerDrainPreservesCancellation() {
+  await completedWorkerDrainPreservesCancellation();
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
-      await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
+      await completedWorkerDrainPreservesCancellation(kind, resumed);
     }
   }
 }
 
-async function completedWorkerSettlesWithoutWaitingForProcessExit(
+async function completedWorkerDrainPreservesCancellation(
   kind?: DeepScanWorkerKind,
   resumed = false,
 ) {
@@ -2476,38 +2476,65 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
-      onThreadStarted: async () => {
+      onThreadStarted: async (threadId) => {
+        assert.equal(
+          threadId,
+          resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+        );
         childPid = (await readJson(fixture.markerPath)).pid;
       },
     });
 
-    const result = await Promise.race([
-      execution,
+    await Promise.race([
+      (async () => {
+        while (
+          (await readFile(fixture.completionMarkerPath, "utf8").catch(
+            () => "",
+          )) !== "completed\n"
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      })(),
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort("completed worker fixture timed out");
-          reject(
-            new Error("completed worker did not settle after turn.completed"),
-          );
+          reject(new Error("worker did not publish its completed turn"));
         }, 1_000);
       }),
     ]);
     clearTimeout(timeout);
-    assert.equal(
-      result.threadId,
-      resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
-    );
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
     assert.equal(invocation.argv.includes("resume"), resumed);
 
-    controller.abort("coordinator immediately canceled its remaining workers");
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    assert.deepEqual(unexpectedErrors, []);
-    if (kind === undefined) {
-      assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+    controller.abort("coordinator canceled its completed worker drain");
+    if (process.platform !== "win32") {
+      await Promise.race([
+        (async () => {
+          while (
+            (await readFile(fixture.completionMarkerPath, "utf8")) !==
+            "aborted\n"
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        })(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("completed worker ignored cancellation")),
+            1_000,
+          );
+        }),
+      ]);
+      clearTimeout(timeout);
+      if (kind !== undefined) {
+        // This fixture deliberately ignores SIGTERM; teardown owns its process.
+        process.kill(childPid, "SIGKILL");
+      }
     }
+    await assert.rejects(execution, /abort|SIGTERM|SIGKILL/i);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.deepEqual(unexpectedErrors, []);
+    assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");
@@ -2813,7 +2840,7 @@ const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(proce
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...((stdin.includes('COMPLETE_THEN_HANG') || stdin.includes('COMPLETE_THEN_FLUSH')) ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
-if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
+if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { writeFileSync(completionMarkerPath, 'aborted\\n'); if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }
 if (stdin.includes('MCP_STARTUP_TIMEOUT') || stdin.includes('CATALOG_AUTH_ONLY') || stdin.includes('SYNC_AUTH_ONLY')) {
