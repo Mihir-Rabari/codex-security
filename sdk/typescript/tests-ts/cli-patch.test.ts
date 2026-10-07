@@ -8475,6 +8475,7 @@ describe("verified patch caller identity", () => {
     ["saved", "inline"].flatMap((route) =>
       [
         "move",
+        "move-without-alias",
         "source-edit",
         "destination-overwrite",
         "source-replacement",
@@ -8489,12 +8490,15 @@ describe("verified patch caller identity", () => {
     const destination = join(repository, "destination");
     const alias = join(repository, "alias");
     const requested =
-      operation === "move" || operation === "removed-caller"
+      operation === "move" ||
+      operation === "move-without-alias" ||
+      operation === "removed-caller"
         ? component
         : alias;
     const remote = join(root, "remote.git");
     const redirected =
       operation !== "stable-alias" && operation !== "removed-caller";
+    const blocked = redirected || operation === "removed-caller";
     await mkdir(component, { recursive: true });
     await writeFile(join(component, "app.ts"), "unsafe\n");
     await writeFile(join(component, "sibling.ts"), "original sibling\n");
@@ -8564,18 +8568,20 @@ describe("verified patch caller identity", () => {
           } else {
             modelCalls++;
             if (redirected) {
-              if (operation === "move") await rename(component, destination);
+              if (operation === "move" || operation === "move-without-alias")
+                await rename(component, destination);
               else {
                 await (
                   await import("node:fs/promises")
                 ).cp(component, destination, { recursive: true });
                 await rm(alias, { recursive: true });
               }
-              await symlink(
-                destination,
-                requested,
-                process.platform === "win32" ? "junction" : "dir",
-              );
+              if (operation !== "move-without-alias")
+                await symlink(
+                  destination,
+                  requested,
+                  process.platform === "win32" ? "junction" : "dir",
+                );
               await writeFile(join(destination, "app.ts"), "fixed\n");
               if (operation === "source-edit")
                 await writeFile(
@@ -8606,18 +8612,26 @@ describe("verified patch caller identity", () => {
     expect(await readFile(join(repository, "unrelated.ts"), "utf8")).toBe(
       "unreported root edit\n",
     );
-    expect(assessments).toBe(route === "saved" && !redirected ? 1 : 0);
-    if (redirected) {
+    expect(assessments).toBe(route === "saved" && !blocked ? 1 : 0);
+    if (blocked) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain(
         "Patch directory changed during patching",
       );
-      expect(await readFile(join(destination, "app.ts"), "utf8")).toBe(
-        "fixed\n",
-      );
-      expect(await readFile(join(destination, "sibling.ts"), "utf8")).toBe(
-        "original sibling\n",
-      );
+      if (operation === "removed-caller")
+        await expect(readFile(join(component, "app.ts"))).rejects.toMatchObject(
+          {
+            code: "ENOENT",
+          },
+        );
+      else {
+        expect(await readFile(join(destination, "app.ts"), "utf8")).toBe(
+          "fixed\n",
+        );
+        expect(await readFile(join(destination, "sibling.ts"), "utf8")).toBe(
+          "original sibling\n",
+        );
+      }
       if (operation === "source-edit")
         expect(await readFile(join(component, "sibling.ts"), "utf8")).toBe(
           "unreported source edit\n",
@@ -8635,12 +8649,7 @@ describe("verified patch caller identity", () => {
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
       expect(requestsCreated).toBe(1);
-      if (operation === "removed-caller") {
-        expect(git("ls-tree", "HEAD", "component/app.ts")).toBe("");
-        await expect(readFile(join(component, "app.ts"))).rejects.toMatchObject(
-          { code: "ENOENT" },
-        );
-      } else expect(git("show", "HEAD:component/app.ts")).toBe("fixed");
+      expect(git("show", "HEAD:component/app.ts")).toBe("fixed");
       expect(git("show", "HEAD:component/sibling.ts")).toBe("original sibling");
       expect(git("show", "HEAD:unrelated.ts")).toBe("unrelated original");
     }

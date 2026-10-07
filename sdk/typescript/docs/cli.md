@@ -1240,8 +1240,8 @@ regular, is read before patching, and cannot combine with `--resume-pr`.
 output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 Saved-scan and inline patch flows stop automatic assessment or publication if the
-selected directory points to a different location after patching; local edits
-remain for review.
+selected directory is missing or points to a different location after patching;
+local edits remain for review.
 The assessment does not change the patch or merge state.
 
 Patching first checks that its sandbox can start. Failure reports
