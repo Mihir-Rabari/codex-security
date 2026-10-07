@@ -1019,28 +1019,29 @@ export class CodexSecurity {
         outputDir,
         runtime.environment,
       );
-      const { codex } = await this.#createSessionCodex(
-        session,
-        {
-          ...policySqliteEnvironment,
-          CODEX_SECURITY_REPOSITORY: target.repository,
-          CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
-          CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
-          CODEX_SECURITY_SURFACE: this.#surface,
-          ...(knowledgeBase === null
-            ? {}
-            : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
-        },
-        options.auth,
-        undefined,
-        policyConfig,
-        inputs.gitMetadataPaths.length === 0
-          ? []
-          : [
-              // CLI override keys split on dots, so keep paths inside the TOML value.
-              `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
-            ],
-      );
+      const { codex, environment: policyEnvironment } =
+        await this.#createSessionCodex(
+          session,
+          {
+            ...policySqliteEnvironment,
+            CODEX_SECURITY_REPOSITORY: target.repository,
+            CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+            CODEX_SECURITY_STATE_DIR: inputs.stateDirectory,
+            CODEX_SECURITY_SURFACE: this.#surface,
+            ...(knowledgeBase === null
+              ? {}
+              : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
+          },
+          options.auth,
+          undefined,
+          policyConfig,
+          inputs.gitMetadataPaths.length === 0
+            ? []
+            : [
+                // CLI override keys split on dots, so keep paths inside the TOML value.
+                `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
+              ],
+        );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
         if (completeCost) notifyObserver(options, "onCost")(total);
@@ -1090,11 +1091,7 @@ export class CodexSecurity {
                     {
                       python: session.python,
                       pluginRoot: runtime.plugin.pluginRoot,
-                      environment: {
-                        ...session.scanEnvironment,
-                        CODEX_HOME: runtime.codexHome,
-                        ...policySqliteEnvironment,
-                      },
+                      environment: policyEnvironment,
                       signal,
                     },
                     null,

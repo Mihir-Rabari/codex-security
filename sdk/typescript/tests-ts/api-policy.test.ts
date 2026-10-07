@@ -1597,6 +1597,12 @@ describe("CodexSecurity policy API", () => {
         resolveOwnedSessions: async (...args) => {
           expect(args[3]?.command.command.length).toBeGreaterThan(0);
           expect(args[3]?.workingDirectory).toBe(f.outputDir);
+          expect(args[0].environment?.["HOME"]).toBe(
+            f.configuration()?.env?.["HOME"],
+          );
+          expect(args[0].environment?.["CODEX_SQLITE_HOME"]).toBe(
+            f.configuration()?.env?.["CODEX_SQLITE_HOME"],
+          );
           return await runtime.resolveScanSessionPaths(...args);
         },
         stream: async function* (stage) {
