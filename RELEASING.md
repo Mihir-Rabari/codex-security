@@ -248,8 +248,10 @@ for that exact commit:
    so the checks also work for historical backfills.
 5. If the release source contains `action.yml`, the workflow prepares the
    Action from that exact source commit, pins its runtime to the verified npm
-   version and integrity, and builds and tests the distribution in a job with
-   read-only repository permissions. A fresh publisher checks out the same
+   version and integrity, and fetches the locked runtime through Socket Firewall
+   with an empty cache before executing it. The lock retains public npm URLs.
+   It builds and tests the distribution in a job with read-only repository
+   permissions. A fresh publisher checks out the same
    source, downloads only the tested runtime lock by artifact ID, and rebuilds
    and verifies the bundles without executing the CLI. It creates
    `action-vX.Y.Z` and uploads the Action release manifest and SBOM to the

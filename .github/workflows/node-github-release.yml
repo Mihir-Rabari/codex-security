@@ -741,6 +741,12 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Set up Socket Firewall
+        uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+          firewall-version: "1.15.0"
+
       - name: Set up the Ubuntu sandbox
         run: |
           sudo apt-get update
@@ -784,7 +790,10 @@ jobs:
         working-directory: release-source/github-action
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          npm ci --prefix runtime --ignore-scripts --include=optional --no-audit --no-fund
+          runtime_cache="$(mktemp -d "$RUNNER_TEMP/action-runtime-firewall-cache.XXXXXX")"
+          trap 'rm -rf "$runtime_cache"' EXIT
+          sfw npm ci --prefix runtime --ignore-scripts --include=optional --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ --cache="$runtime_cache"
 
       - name: Build Action distribution
         if: steps.distribution.outputs.existing != 'true'

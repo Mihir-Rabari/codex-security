@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -18,6 +19,8 @@ type Step = {
   run?: string;
   uses?: string;
   with?: Record<string, string | boolean>;
+  if?: string;
+  "continue-on-error"?: boolean;
 };
 type Job = {
   steps: Step[];
@@ -302,6 +305,93 @@ test("stages the verified runtime lock without copying verification workspace so
     readFileSync(join(publishedAction, "runtime/package-lock.json"), "utf8"),
   ).toBe(runtimeLock);
 });
+
+test.each([0, 42])(
+  "gates runtime verification through Socket with an empty cache (exit %s)",
+  (firewallExit) => {
+    const verification = workflow.jobs["action-verify"]!;
+    const install = step(
+      "action-verify",
+      "Install Action and CLI dependencies",
+    );
+    const validate = step("action-verify", "Validate the packaged Action");
+    const upload = step("action-verify", "Save verified CLI runtime lock");
+    expect(verification.steps.indexOf(install)).toBeLessThan(
+      verification.steps.indexOf(validate),
+    );
+    expect(verification.steps.indexOf(validate)).toBeLessThan(
+      verification.steps.indexOf(upload),
+    );
+    expect(install["continue-on-error"]).toBeUndefined();
+    expect(validate.if).toBeUndefined();
+    expect(upload.if).toBeUndefined();
+
+    const directory = mkdtempSync(join(tmpdir(), "action runtime firewall "));
+    directories.push(directory);
+    const runner = join(directory, "runner");
+    const existingCache = join(runner, "existing-cache");
+    mkdirSync(existingCache, { recursive: true });
+    writeFileSync(join(existingCache, "cached-package"), "cached bytes");
+    mkdirSync(join(directory, "runtime"));
+    const lockPath = join(directory, "runtime", "package-lock.json");
+    const runtimeLock = `${JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "node_modules/example-runtime": {
+          version: "1.2.3",
+          resolved:
+            "https://registry.npmjs.org/example-runtime/-/example-runtime-1.2.3.tgz",
+          integrity: "sha512-synthetic-integrity",
+        },
+      },
+    })}\n`;
+    writeFileSync(lockPath, runtimeLock);
+    const events = join(directory, "events");
+    const argumentsPath = join(directory, "sfw-arguments");
+    const result = runWorkflowScript(
+      directory,
+      `npm() { printf 'npm %s\\n' "$*" >> "$EVENTS"; }
+node() { printf 'node %s\\n' "$*" >> "$EVENTS"; }
+sfw() {
+  printf '%s\\0' "$@" > "$SFW_ARGUMENTS"
+  local argument cache
+  for argument in "$@"; do
+    case "$argument" in --cache=*) cache="\${argument#--cache=}" ;; esac
+  done
+  [[ -d "$cache" && -z "$(ls -A "$cache")" ]] || return 91
+  touch "$cache/downloaded-package"
+  printf 'sfw\\n' >> "$EVENTS"
+  return "$FIREWALL_EXIT"
+}
+${install.run}
+${validate.run}`,
+      {
+        RUNNER_TEMP: runner.replaceAll("\\", "/"),
+        npm_config_cache: existingCache.replaceAll("\\", "/"),
+        EVENTS: events.replaceAll("\\", "/"),
+        SFW_ARGUMENTS: argumentsPath.replaceAll("\\", "/"),
+        FIREWALL_EXIT: String(firewallExit),
+      },
+      ["-e", "-o", "pipefail"],
+    );
+    expect(result.status, result.stderr).toBe(firewallExit);
+    const args = readFileSync(argumentsPath, "utf8").split("\0").slice(0, -1);
+    expect(args.slice(0, 4)).toEqual(["npm", "ci", "--prefix", "runtime"]);
+    expect(args).toContain("--registry=https://registry.npmjs.org/");
+    expect(args).toContain("--ignore-scripts");
+    expect(readFileSync(lockPath, "utf8")).toBe(runtimeLock);
+    expect(readdirSync(runner)).toEqual(["existing-cache"]);
+    const commands = readFileSync(events, "utf8");
+    expect(commands).toContain("sfw\n");
+    if (firewallExit === 0) {
+      expect(commands).toContain("npm run test:cli\n");
+      expect(commands).toContain("node scripts/linux-smoke.mjs\n");
+    } else {
+      expect(commands).not.toContain("npm run");
+      expect(commands).not.toContain("node ");
+    }
+  },
+);
 
 test("reuses a generated Action commit derived from the exact CLI release", () => {
   const release = fixture();

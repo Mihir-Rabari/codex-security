@@ -276,9 +276,11 @@ Releases use the product version from `sdk/typescript/package.json`. Before npm
 publication, the release workflow exercises the Action's compatibility suite
 against the packed CLI candidate. After publication and provenance verification,
 the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, rebuilds the bundles, and runs the Action
-checks against the published package in a job with read-only repository
-permissions. A fresh publisher takes only the tested runtime lock, rebuilds
+the runtime pin and integrity lock, and fetches the locked runtime through
+Socket Firewall with an empty cache before running the CLI. The lock keeps
+public npm URLs for Action consumers. The workflow rebuilds the bundles and
+runs the Action checks in a job with read-only repository permissions.
+A fresh publisher takes only the tested runtime lock, rebuilds
 from the same source, and verifies the bundle hashes without executing the CLI.
 It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
 same version as `npm-vX.Y.Z`.
