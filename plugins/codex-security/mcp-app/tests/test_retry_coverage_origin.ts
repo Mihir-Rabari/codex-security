@@ -510,3 +510,70 @@ for (const nestedKeyOrder of [false, true]) {
     }
   });
 }
+
+test("a failed nonregular attempt preserves readable retry origin history", async () => {
+  const f = await fixture();
+  try {
+    const original = workerDraft([], {
+      complete: false,
+      coverage: {
+        completeness: "partial",
+        surfaces: [
+          {
+            id: "original",
+            label: "Retained review",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          },
+        ],
+        explicitExclusions: [],
+        deferred: [
+          {
+            id: "original-gap",
+            reason: "The first review still needs validation.",
+          },
+        ],
+      },
+    });
+    await writeFile(f.resultPath, JSON.stringify(original));
+    const first = path.join(f.workerRoot, "attempts", "attempt-01");
+    await archiveDirectory(f.output, first);
+    await mkdir(path.join(f.output, "result.json"), { recursive: true });
+    await archiveDirectory(
+      f.output,
+      path.join(f.workerRoot, "attempts", "attempt-02"),
+    );
+    await mkdir(f.output, { recursive: true });
+    await writeFile(
+      f.resultPath,
+      JSON.stringify({ ...original, complete: true }),
+    );
+    await validateDiscoveryArtifacts(
+      { workersRoot: path.dirname(f.workerRoot) },
+      f.resultPath,
+      scanId,
+    );
+    const bytes = await readFile(path.join(first, "result.json"));
+    await assert.rejects(
+      readArchivedWorkerCheckpoints({
+        root: f.output,
+        repoRoot: f.root,
+        scanId,
+        layout: "worker",
+      }),
+      /archived result is not a safe file/,
+    );
+    const coverage = (await readDeepReductionSources(f.context)).discoveries[0]
+      .coverage;
+    assert.equal(coverage.surfaces[0].provenance.attempt, 1);
+    assert.equal(coverage.deferred[0].provenance.attempt, 1);
+    assert.ok(
+      coverage.reviews.some(
+        (review: { attempt: number }) => review.attempt === 1,
+      ),
+    );
+    assert.deepEqual(await readFile(path.join(first, "result.json")), bytes);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});

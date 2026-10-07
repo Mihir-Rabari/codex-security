@@ -1877,9 +1877,6 @@ def merge_saved_results(
             )
             if len(owners) == 1:
                 return next(iter(owners))
-            retained = provenance.get("workerId")
-            if isinstance(retained, str) and retained in workers_by_id:
-                return retained
         return owner
 
     outcomes: list[tuple[str, str | None, str, str]] = []

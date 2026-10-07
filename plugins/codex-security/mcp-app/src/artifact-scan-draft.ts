@@ -1409,34 +1409,40 @@ export async function readArchivedWorkerCheckpoints(
       join(attemptRoot, "result.json"),
     );
     if (resultMetadata !== undefined) {
-      if (!resultMetadata.isFile()) {
-        throw new Error("scan checkpoint: archived result is not a safe file.");
-      }
-      const saved = await readArtifactTextWithMetadata(
-        attemptContext,
-        ["result.json"],
-        "archived scan result",
-      );
-      let result: ScanDraftInput | undefined;
       try {
-        result = parsePersistedScanDraft(
-          parseJsonObject(saved.contents, "archived scan result"),
-        );
-      } catch {
-        // A failed attempt may leave an invalid replaceable result after valid checkpoints.
-      }
-      if (result !== undefined) {
-        try {
-          requireMatchingScan(context, result);
-          drafts.push({
-            input: result,
-            modifiedMs: saved.modifiedMs,
-            result: true,
-            name: "result.json",
-          });
-        } catch (error) {
-          if (!skipInvalid) throw error;
+        if (!resultMetadata.isFile()) {
+          throw new Error(
+            "scan checkpoint: archived result is not a safe file.",
+          );
         }
+        const saved = await readArtifactTextWithMetadata(
+          attemptContext,
+          ["result.json"],
+          "archived scan result",
+        );
+        let result: ScanDraftInput | undefined;
+        try {
+          result = parsePersistedScanDraft(
+            parseJsonObject(saved.contents, "archived scan result"),
+          );
+        } catch {
+          // A failed attempt may leave an invalid replaceable result after valid checkpoints.
+        }
+        if (result !== undefined) {
+          try {
+            requireMatchingScan(context, result);
+            drafts.push({
+              input: result,
+              modifiedMs: saved.modifiedMs,
+              result: true,
+              name: "result.json",
+            });
+          } catch (error) {
+            if (!skipInvalid) throw error;
+          }
+        }
+      } catch (error) {
+        if (!skipInvalid) throw error;
       }
     }
     drafts.push(

@@ -1283,7 +1283,7 @@ def test_frozen_parent_projection_keeps_selected_surface_notes(
     assert all(path.read_bytes() == data for path, data in saved.items())
 
 
-@pytest.mark.parametrize("stale_owner", [False, True])
+@pytest.mark.parametrize("stale_owner", [False, True, "unmatched"])
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_retained_source_finding_owner_does_not_close_another_worker_gap(
     workbench_api, workbench_db, publication_scan, monkeypatch, stale_owner, retry_publication
@@ -1321,7 +1321,8 @@ def test_retained_source_finding_owner_does_not_close_another_worker_gap(
     )
     retained = copy.deepcopy(finding)
     retained["provenance"]["workerId"] = owner_a if stale_owner else owner_b
-    retained["provenance"]["sourceFindings"] = [{"id": f"{owner_b}:0", "finding": finding}]
+    if stale_owner != "unmatched":
+        retained["provenance"]["sourceFindings"] = [{"id": f"{owner_b}:0", "finding": finding}]
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": [retained]}))
     (scan.scan_dir / "coverage.json").write_text(
         json.dumps(
