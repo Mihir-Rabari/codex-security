@@ -257,7 +257,10 @@ export function readTarArchive(archiveBytes) {
           );
           // Retain sparse framing in order with the surrounding headers and padding.
           archiveMetadata.push(path);
-        } else archiveFiles.set(path, contents);
+        } else {
+          archiveFiles.set(path, contents);
+          if (oldSparse) archiveMetadata.push(contents);
+        }
         archiveMetadata.push(archiveBytes.subarray(contentsEnd, nextOffset));
       }
       entries.push({ path, size });

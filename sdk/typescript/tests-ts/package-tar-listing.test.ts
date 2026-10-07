@@ -534,6 +534,14 @@ describe("npm package tar listings", () => {
           error: "npm tarball contains an internal reference.",
         },
         {
+          name: "oldgnu-text-body-boundary-marker",
+          files: [
+            ["helpers.mjs", Buffer.from("synthetic-reference\n"), "oldgnu"],
+          ],
+          metadataMarker: "boundary",
+          error: "npm tarball contains an internal reference.",
+        },
+        {
           name: "global-sparse-keys",
           files: [["runtime.mjs.br", cleanCompressedPayload, false]],
           globalSparse: true,
