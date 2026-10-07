@@ -842,9 +842,11 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           onCodex,
           onWorkbench: () =>
             savedScan(resultWithFindings(["high"]), "scan-1", SAVED_REPOSITORY),
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, repository, options) => {
             if (command === "gh")
               throw new Error("GitHub authentication failed.");
+            if (args.includes("--absolute-git-dir"))
+              return options?.environment?.["GIT_DIR"] ?? repository;
             return args.includes("--name-only") &&
               !args.includes("HEAD") &&
               !args.includes("--cached")
