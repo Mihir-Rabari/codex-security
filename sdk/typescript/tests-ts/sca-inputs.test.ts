@@ -319,7 +319,7 @@ describe("additional SCA input contracts", () => {
     "<project><dependencies><dependency><groupId>example.test</groupId><artifactId>synthetic</artifactId><version>${dependency.version}</version></dependency></dependencies></project>",
     "<project><dependencies><dependency><groupId>example.test</groupId><artifactId>synthetic</artifactId></dependency></dependencies></project>",
     "<project><dependencies>",
-  ])("does not pass unresolved Maven manifest syntax to OSV", (content) => {
+  ])("does not pass unresolved Maven manifest syntax to OSV #%#", (content) => {
     expect(inspect(content, "maven").status).toBe("unsupported");
   });
 

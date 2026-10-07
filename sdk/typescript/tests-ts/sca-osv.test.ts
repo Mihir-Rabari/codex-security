@@ -1075,7 +1075,7 @@ packages:
       })),
     ),
   )(
-    "keeps $path alternate-registry coverage incomplete with advisory matches: $matched",
+    "keeps $path alternate-registry coverage incomplete with advisory matches: $matched (case %#)",
     async ({ path, content, matched, ecosystem }) => {
       const { repository, output } = await setup();
       await writeFile(join(repository, path), content);

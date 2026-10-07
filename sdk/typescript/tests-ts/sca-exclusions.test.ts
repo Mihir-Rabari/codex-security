@@ -237,7 +237,7 @@ for (const [origin, resolution] of [
     ["bare-reference", "local-alias", resolution, ""],
   ] as const) {
     test.each([false, true])(
-      `pnpm ${origin} ${layout} tarball uses the emitted identity while retained: %s`,
+      `pnpm ${origin} ${layout} tarball uses the emitted identity while retained: %p`,
       async (retained) => {
         const root = await realpath(
           await mkdtemp(join(tmpdir(), "sca-pnpm-exclusion-")),
