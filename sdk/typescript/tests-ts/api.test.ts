@@ -2360,7 +2360,8 @@ describe("CodexSecurity orchestration", () => {
               "model_context_window",
               "model_auto_compact_token_limit",
             ]) {
-              const value = resolveCodexProfile(overrides)[key];
+              const value = resolveCodexProfile(overrides)[key] as
+                number | undefined;
               expect(options.config?.[key]).toBe(value);
               expect(resolveCodexProfile(config)[key]).toBe(value);
             }

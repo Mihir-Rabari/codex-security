@@ -868,10 +868,17 @@ test.each([
     await using first = h.makeClient({
       profile: "selected",
       service_tier: global,
+      model_context_window: 128_000,
+      model_auto_compact_token_limit: 96_000,
       profiles: {
         selected: {
           model_provider: "synthetic",
-          ...(selected === undefined ? {} : { service_tier: selected }),
+          ...(selected === undefined
+            ? {}
+            : {
+                service_tier: selected,
+                model_auto_compact_token_limit: 112_000,
+              }),
         },
       },
       model_providers: {
@@ -905,6 +912,15 @@ test.each([
     };
     expect(config["model_providers"]).toEqual({ synthetic: replayProvider });
     expect(config["service_tier"]).toBe(expected);
+    const contextLimits = {
+      model_context_window: 128_000,
+      model_auto_compact_token_limit: selected === undefined ? 96_000 : 112_000,
+    };
+    expect(config).toMatchObject(contextLimits);
+    await writeFile(
+      join(h.home, "config.toml"),
+      "model_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n",
+    );
     expect(JSON.stringify(saved)).not.toContain("synthetic-private-");
     await using resumed = h.makeClient(config);
     const result = await resumed.run(h.repository, {
@@ -928,6 +944,7 @@ test.each([
         model_provider: "synthetic",
         model_providers: { synthetic: replayProvider },
         service_tier: expected,
+        ...contextLimits,
       });
       expect(launch.preflightConfig).not.toHaveProperty("model_providers");
     }

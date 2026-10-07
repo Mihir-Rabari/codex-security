@@ -4471,6 +4471,12 @@ export function scanPreflightCodexConfig(
   const result = executionConfig(config);
   // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
+  for (const key of [
+    "model_context_window",
+    "model_auto_compact_token_limit",
+  ]) {
+    if (resolved[key] !== undefined) result[key] = resolved[key]!;
+  }
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
