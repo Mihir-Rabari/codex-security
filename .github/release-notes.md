@@ -65,6 +65,7 @@
 - share finding formatting and finalization helpers ([#1355](https://github.com/openai/codex-security/pull/1355))
 - simplify scan event callback dispatch ([#1354](https://github.com/openai/codex-security/pull/1354))
 - reuse validated inputs and simplify preview sizing ([#1369](https://github.com/openai/codex-security/pull/1369))
+- share note generation and test setup ([#1373](https://github.com/openai/codex-security/pull/1373))
 
 <!-- release-section: highlights:end -->
 
