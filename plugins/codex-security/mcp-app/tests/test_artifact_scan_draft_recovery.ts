@@ -1619,6 +1619,106 @@ for (const explicit of ["neither", "scope", "threatModel", "both"]) {
   });
 }
 
+for (const metadata of [
+  "omitted",
+  "empty",
+  "explicit",
+  "absent",
+  "latest",
+  "current",
+]) {
+  test(`deep: interrupted terminal preserves retained metadata, model=${metadata}`, async (t) => {
+    const f = await fixture(t, "deep");
+    const oldModel = { summary: "Earlier model" };
+    const latestModel = { summary: "Latest saved model" };
+    const terminalModel =
+      metadata === "empty"
+        ? { summary: "Explicit model", assets: [], trustBoundaries: [] }
+        : metadata === "explicit"
+          ? { summary: "Explicit model" }
+          : undefined;
+    const stale = { id: "old-work", reason: "Earlier review" };
+    await f.write({
+      ...f.draft({ deferred: [stale] }),
+      findings: [findingFor("old-finding")],
+      scope: { summary: "Earlier scope" },
+      ...(metadata === "absent" ? {} : { threatModel: oldModel }),
+    });
+    const checkpoints = path.join(f.root, "checkpoints");
+    for (const name of await readdir(checkpoints))
+      await utimes(path.join(checkpoints, name), 100, 100);
+    for (const name of ["findings.json", "coverage.json", "scan-manifest.json"])
+      await utimes(path.join(f.root, name), 100, 100);
+    if (metadata === "latest") {
+      await saveScanDraftCheckpoint(f.context, {
+        ...f.draft(),
+        threatModel: latestModel,
+        scope: { summary: "Latest saved scope" },
+      });
+      for (const name of await readdir(checkpoints)) {
+        const saved = await readJson(checkpoints, name);
+        if (saved.threatModel?.summary === latestModel.summary)
+          await utimes(path.join(checkpoints, name), 150, 150);
+      }
+    }
+    const controller = new AbortController();
+    controller.abort(new Error("interrupted terminal publication"));
+    await assert.rejects(
+      draftApi.recordCodexSecurityScanDraft(
+        f.context,
+        {
+          ...f.draft({}, true),
+          ...(terminalModel === undefined
+            ? {}
+            : { threatModel: terminalModel }),
+        },
+        undefined,
+        controller.signal,
+      ),
+      /interrupted terminal publication/,
+    );
+    const originalCheckpoints = new Map<string, string>();
+    for (const name of await readdir(checkpoints)) {
+      const filename = path.join(checkpoints, name);
+      const contents = await readFile(filename, "utf8");
+      originalCheckpoints.set(name, contents);
+      if (JSON.parse(contents).complete) await utimes(filename, 200, 200);
+    }
+    for (let replay = 0; replay < 2; replay++) {
+      const result = await f.write({
+        ...f.draft(),
+        ...(metadata === "current"
+          ? { threatModel: { summary: "Current progress model" } }
+          : {}),
+      });
+      const saved = (await readJson(f.root, "scan-manifest.json")).scan;
+      assert.deepEqual(
+        saved.threatModel,
+        terminalModel ??
+          (metadata === "absent"
+            ? undefined
+            : metadata === "latest"
+              ? latestModel
+              : oldModel),
+      );
+      assert.equal(
+        saved.scope.summary,
+        metadata === "latest" ? "Latest saved scope" : "Earlier scope",
+      );
+      assert.notEqual(saved.complete, false);
+      assert.equal(result.findingCount, 0);
+      assert.deepEqual(result.coverage.deferred, []);
+      assert.deepEqual(result.coverage.surfaces, []);
+      assert.deepEqual((await readJson(f.root, "findings.json")).findings, []);
+    }
+    for (const [name, contents] of originalCheckpoints)
+      assert.equal(
+        await readFile(path.join(checkpoints, name), "utf8"),
+        contents,
+      );
+  });
+}
+
 for (const layout of ["standard", "diff", "worker"] as const) {
   test(`${layout}: progress survives a raw terminal checkpoint with unresolved saved work`, async (t) => {
     const f = await fixture(t, layout);

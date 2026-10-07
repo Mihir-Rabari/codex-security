@@ -436,6 +436,12 @@ function reconcileScanDraft(
     input.complete === false
       ? savedSources.find(({ input }) => input.complete !== false)
       : undefined;
+  const retainedScope = savedSources.find(
+    ({ input }) => input.scope !== undefined,
+  )?.input.scope;
+  const retainedThreatModel = savedSources.find(
+    ({ input }) => input.threatModel !== undefined,
+  )?.input.threatModel;
   if (terminalReplacesHistory && retainedFinal) {
     savedSources = savedSources.filter(
       ({ modifiedMs }) => modifiedMs >= retainedFinal.modifiedMs,
@@ -521,15 +527,9 @@ function reconcileScanDraft(
       ).input;
   }
   const metadata = retainedFinal?.input ?? result;
-  const retainedScope = sources.find(
-    (source) => source.scope !== undefined,
-  )?.scope;
   if (metadata.scope === undefined && retainedScope !== undefined) {
     result.scope = retainedScope;
   }
-  const retainedThreatModel = sources.find(
-    (source) => source.threatModel !== undefined,
-  )?.threatModel;
   if (metadata.threatModel === undefined && retainedThreatModel !== undefined) {
     result.threatModel = structuredClone(retainedThreatModel);
   }
