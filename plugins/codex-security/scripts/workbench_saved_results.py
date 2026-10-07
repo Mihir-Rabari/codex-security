@@ -60,8 +60,12 @@ from workbench_budget_candidates import (
     archive_candidate_payloads,
     archive_resolved_deferred_payloads,
     archive_resolved_diff_payloads,
+    copied_report_has_later_pending,
     project_resolved_candidate_rows,
     recover_candidate_receipts,
+)
+from workbench_budget_candidates import (
+    finding_content as _finding_content,
 )
 from workbench_budget_candidates import (
     preserve_budget_candidates as preserve_budget_candidates,
@@ -632,15 +636,6 @@ def _worker_candidate_key(
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
     return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
-
-
-def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
-    """Return substantive finding content without generated identity or provenance."""
-    return {
-        key: value
-        for key, value in finding.items()
-        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
-    }
 
 
 def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
@@ -1875,8 +1870,7 @@ def merge_saved_results(
         current_drafts = [source for source in current_drafts if source[0] != "parent"] + [
             ("parent", parent, None)
         ]
-    # Generic closures belong to one logical scan or worker, just like candidates.
-    # Keep them when recovering a terminal checkpoint without its canonical write.
+    # Recover terminal checkpoint closures for their scan or worker.
     closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
 
     candidate_ids: set[tuple[str | None, str]] = set()
@@ -2038,6 +2032,15 @@ def merge_saved_results(
         if any(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
+            and not (
+                owner is not None
+                and paths.get(relative) == paths.get(saved_relative) == owner
+                and modified[0] == order[0]
+                and source_digests[relative] == source_digests[saved_relative]
+                and not copied_report_has_later_pending(
+                    relative, owner, candidate_id, all_sources, source_order, valid_finding
+                )
+            )
             and (
                 modified[1] >= order[1]
                 if (relative == "parent" or saved_relative == "parent") and owner

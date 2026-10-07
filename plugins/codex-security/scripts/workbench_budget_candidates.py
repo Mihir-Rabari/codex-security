@@ -603,3 +603,72 @@ def _diff_candidate_decision(candidate: dict[str, Any]) -> dict[str, Any] | None
         ),
         "candidate": candidate,
     }
+
+
+def finding_content(finding: dict[str, Any]) -> dict[str, Any]:
+    """Return substantive finding content without generated identity or provenance."""
+    return {
+        key: value
+        for key, value in finding.items()
+        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
+    }
+
+
+def copied_report_has_later_pending(
+    relative: str,
+    owner: str,
+    candidate_id: str,
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    source_order: dict[str, tuple[int, int]],
+    valid_finding: Callable[[Any], bool],
+) -> bool:
+    """Keep explicit pending input when a worker copies its older report forward."""
+
+    def coverage_rows(draft: dict[str, Any], field: str) -> list[Any]:
+        rows = draft["coverage"].get(field)
+        return rows if isinstance(rows, list) else []
+
+    key = (owner, candidate_id)
+    attempt = source_order[relative][0]
+    drafts = {
+        path: draft
+        for path, draft, worker in sources
+        if worker == owner and source_order[path][0] == attempt
+    }
+    reports = [
+        finding
+        for finding in drafts[relative]["findings"]
+        if valid_finding(finding) and finding_candidate_key(finding, owner) == key
+    ]
+    if not reports:
+        return False
+    pending_orders = [
+        source_order[path]
+        for path, draft in drafts.items()
+        if any(
+            isinstance(row, dict) and coverage_candidate_key(row, owner) == key
+            for row in coverage_rows(draft, "deferred")
+        )
+        and not any(
+            valid_finding(finding)
+            and finding_candidate_key(finding, owner) == key
+            and finding["provenance"].get("candidateReopened") is not True
+            for finding in draft["findings"]
+        )
+        and not any(
+            isinstance(row, dict)
+            and coverage_candidate_key(row, owner) == key
+            and row.get("disposition") in {"rejected", "not_applicable"}
+            for field in ("surfaces", "explicitExclusions")
+            for row in coverage_rows(draft, field)
+        )
+    ]
+    return bool(pending_orders) and all(
+        any(
+            source_order[path] < pending_order
+            for path, draft in drafts.items()
+            if finding in draft["findings"]
+            for pending_order in pending_orders
+        )
+        for finding in reports
+    )
