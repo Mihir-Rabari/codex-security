@@ -740,7 +740,7 @@ async function preserveScanDraft(
       ...(result.coverage.explicitExclusions as JsonObject[]),
     ].filter(isTerminalCandidateDecision);
     const candidateRows = [...dispositions, ...deferred];
-    for (const pending of [
+    const candidateHistory = [
       ...(source.coverage.deferred as JsonObject[]),
       ...(source.coverage.surfaces as JsonObject[]).filter(
         isTerminalCandidateDecision,
@@ -748,37 +748,15 @@ async function preserveScanDraft(
       ...(source.coverage.explicitExclusions as JsonObject[]).filter(
         isTerminalCandidateDecision,
       ),
-    ]) {
+    ];
+    for (const pending of candidateHistory) {
       const candidateId = coverageKey(pending);
       if (typeof candidateId !== "string") continue;
       const finding = result.findings.find(
         (item) => findingKey(item) === candidateId,
       );
       if (finding) {
-        const provenance = finding.provenance as JsonObject;
-        if (pending.candidate !== undefined)
-          provenance.originalCandidates = exactUnion(
-            Array.isArray(provenance.originalCandidates)
-              ? provenance.originalCandidates
-              : [],
-            [pending.candidate],
-          );
-        if (Array.isArray(pending.originalCandidates))
-          provenance.originalCandidates = exactUnion(
-            Array.isArray(provenance.originalCandidates)
-              ? provenance.originalCandidates
-              : [],
-            pending.originalCandidates,
-          );
-        if (isObject(pending.finding))
-          preserveFindingDetails(finding, pending.finding);
-        if (Array.isArray(pending.previousFindings))
-          provenance.previousFindings = exactUnion(
-            Array.isArray(provenance.previousFindings)
-              ? provenance.previousFindings
-              : [],
-            pending.previousFindings,
-          );
+        preserveCandidateEvidence(finding, pending);
       } else {
         const candidateRow = candidateRows.find(
           (item) =>
@@ -864,8 +842,13 @@ async function preserveScanDraft(
           candidateId !== undefined &&
           isCurrentCandidateFinding(finding) &&
           isCurrentCandidateFinding(matches[0]!)
-        )
+        ) {
           resolvedCandidateKeys.add(candidateId);
+          if (findingKey(matches[0]!) !== candidateId)
+            for (const pending of candidateHistory)
+              if (coverageKey(pending) === candidateId)
+                preserveCandidateEvidence(matches[0]!, pending);
+        }
       } else {
         if (!matches.some((current) => containsSavedFinding(current, finding)))
           result.findings.push(structuredClone(finding));
@@ -1822,6 +1805,36 @@ function withoutPreviousFindings(finding: JsonObject): JsonObject {
   const result = structuredClone(finding);
   if (isObject(result.provenance)) delete result.provenance.previousFindings;
   return result;
+}
+
+function preserveCandidateEvidence(
+  finding: JsonObject,
+  pending: JsonObject,
+): void {
+  const provenance = finding.provenance as JsonObject;
+  if (pending.candidate !== undefined)
+    provenance.originalCandidates = exactUnion(
+      Array.isArray(provenance.originalCandidates)
+        ? provenance.originalCandidates
+        : [],
+      [pending.candidate],
+    );
+  if (Array.isArray(pending.originalCandidates))
+    provenance.originalCandidates = exactUnion(
+      Array.isArray(provenance.originalCandidates)
+        ? provenance.originalCandidates
+        : [],
+      pending.originalCandidates,
+    );
+  if (isObject(pending.finding))
+    preserveFindingDetails(finding, pending.finding);
+  if (Array.isArray(pending.previousFindings))
+    provenance.previousFindings = exactUnion(
+      Array.isArray(provenance.previousFindings)
+        ? provenance.previousFindings
+        : [],
+      pending.previousFindings,
+    );
 }
 
 /** Preserve both original sources and details synthesized after those sources. */

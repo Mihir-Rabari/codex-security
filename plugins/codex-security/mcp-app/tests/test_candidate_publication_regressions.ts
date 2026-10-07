@@ -1042,3 +1042,123 @@ test("Deep reducer clears historical reopening after the same worker accepts the
     assert.equal(await readFile(previousPath, "utf8"), previousBytes);
   }
 });
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const transition of ["same", "reassigned", "reopened"] as const) {
+    test(`preserves candidate payload when finding identity is ${transition} in ${mode}`, async (t) => {
+      const f = await fixture(t, mode);
+      const previous = {
+        ...finding("shared", "src/handler.ts"),
+        identity: { anchor: "shared-review" },
+        provenance: {
+          source: "local_plugin",
+          candidateId: "candidate-b",
+          sourceWorkerId: "worker-b",
+          ...(transition === "reopened" ? { candidateReopened: true } : {}),
+        },
+      };
+      const pending = {
+        id: "proof-b",
+        candidateId: "candidate-b",
+        sourceWorkerId: "worker-b",
+        reason: "Saved boundary review evidence.",
+        candidate: { evidence: "Original candidate evidence." },
+        originalCandidates: [{ evidence: "Earlier candidate evidence." }],
+        finding: { title: "Saved finding annotation." },
+        previousFindings: [{ title: "Earlier finding annotation." }],
+      };
+      await f.write({
+        ...f.draft({ deferred: [pending] }, true),
+        findings: [previous],
+      });
+      const checkpointRoot = path.join(f.root, "checkpoints");
+      const originals = await Promise.all(
+        (await readdir(checkpointRoot)).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(checkpointRoot, name), "utf8"),
+            ] as const,
+        ),
+      );
+      const current = {
+        ...previous,
+        provenance: {
+          source: "local_plugin",
+          candidateId: transition === "same" ? "candidate-b" : "candidate-a",
+          sourceWorkerId: transition === "same" ? "worker-b" : "worker-a",
+        },
+      };
+      for (const replay of [false, true]) {
+        await f.write({ ...f.draft({}, true), findings: [current] });
+        const savedFindings = JSON.parse(
+          await readFile(path.join(f.root, "findings.json"), "utf8"),
+        );
+        const coverage = await f.read();
+        const checkpoints = await Promise.all(
+          (await readdir(checkpointRoot)).map(async (name) =>
+            JSON.parse(await readFile(path.join(checkpointRoot, name), "utf8")),
+          ),
+        );
+        const checkpoint = checkpoints.find(
+          (saved) =>
+            JSON.stringify(saved.findings) ===
+              JSON.stringify(savedFindings.findings) &&
+            JSON.stringify(saved.coverage.deferred) ===
+              JSON.stringify(coverage.deferred),
+        );
+        assert.ok(
+          checkpoint,
+          "The reconciled checkpoint matches the published candidate state.",
+        );
+        assert.equal(savedFindings.findings.length, 1);
+        assert.equal(
+          savedFindings.findings[0].provenance.candidateId,
+          current.provenance.candidateId,
+        );
+        for (const document of [
+          { findings: savedFindings.findings, coverage },
+          checkpoint,
+        ]) {
+          if (transition === "reopened")
+            assert.deepEqual(document.coverage.deferred, [pending]);
+          else {
+            assert.equal(
+              document.coverage.deferred.length,
+              0,
+              "The previously reported candidate stays resolved.",
+            );
+            const provenance = document.findings[0].provenance;
+            for (const candidate of [
+              pending.candidate,
+              ...pending.originalCandidates,
+            ])
+              assert.ok(
+                provenance.originalCandidates?.some(
+                  (item: unknown) =>
+                    JSON.stringify(item) === JSON.stringify(candidate),
+                ),
+                `Candidate evidence survives replay=${replay}`,
+              );
+            for (const finding of [
+              pending.finding,
+              ...pending.previousFindings,
+            ])
+              assert.ok(
+                provenance.previousFindings?.some(
+                  (item: unknown) =>
+                    JSON.stringify(item) === JSON.stringify(finding),
+                ),
+                `Finding evidence survives replay=${replay}`,
+              );
+          }
+        }
+        for (const [name, contents] of originals)
+          assert.equal(
+            await readFile(path.join(checkpointRoot, name), "utf8"),
+            contents,
+          );
+      }
+    });
+  }
+}
