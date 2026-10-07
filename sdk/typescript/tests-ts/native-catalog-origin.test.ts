@@ -81,8 +81,8 @@ const catalog = {
   ],
 };
 
-test.each(["home", "selected", "recipe"] as const)(
-  "native catalog keeps file origin and explicit override across fresh/resumed workers, origin=%s",
+test.each(["home", "selected", "selected-profile", "recipe"] as const)(
+  "native files keep their origin and explicit overrides across fresh/resumed workers, origin=%s",
   async (origin) => {
     const explicit = origin === "recipe";
     const root = await temporaryDirectory();
@@ -94,11 +94,21 @@ test.each(["home", "selected", "recipe"] as const)(
       mkdir(discovery),
       mkdir(merge),
     ]);
-    const original = 'model_catalog_json = "models.json"\n';
+    const original =
+      'model_catalog_json = "models.json"\nmodel_instructions_file = "instructions.md"\n';
     await writeFile(join(home, "config.toml"), original);
     await writeFile(join(home, "models.json"), JSON.stringify(catalog));
-    for (const cwd of [discovery, merge])
+    await writeFile(
+      join(home, "instructions.md"),
+      "Synthetic home instructions.\n",
+    );
+    for (const cwd of [discovery, merge]) {
       await writeFile(join(cwd, "caller-models.json"), JSON.stringify(catalog));
+      await writeFile(
+        join(cwd, "caller-instructions.md"),
+        "Synthetic caller instructions.\n",
+      );
+    }
     const executable = join(root, "synthetic-codex.exe");
     const script = join(root, "synthetic-codex.cjs");
     const capture = join(root, "capture.jsonl");
@@ -117,16 +127,20 @@ test.each(["home", "selected", "recipe"] as const)(
       join(selectedDirectory, "selected-models.json"),
       JSON.stringify(catalog),
     );
+    await writeFile(
+      join(selectedDirectory, "selected-instructions.md"),
+      "Synthetic selected instructions.\n",
+    );
     const selectedPath = join(selectedDirectory, "settings.toml");
     await writeFile(
       selectedPath,
-      'model_catalog_json = "selected-models.json"\n',
+      `${origin === "selected-profile" ? 'profile = "selected"\n[profiles.selected]\n' : ""}model_catalog_json = "selected-models.json"\nmodel_instructions_file = "selected-instructions.md"\n`,
     );
     const environment = {
       PATH: process.env["PATH"],
       CODEX_HOME: home,
       CODEX_CLI_PATH: executable,
-      ...(origin === "selected"
+      ...(origin.startsWith("selected")
         ? { CODEX_SECURITY_CONFIG_PATH: selectedPath }
         : {}),
     };
@@ -156,7 +170,14 @@ test.each(["home", "selected", "recipe"] as const)(
     const configuration = await nativeScanConfiguration(
       environment,
       explicit
-        ? { recipe: { config: { model_catalog_json: "caller-models.json" } } }
+        ? {
+            recipe: {
+              config: {
+                model_catalog_json: "caller-models.json",
+                model_instructions_file: "caller-instructions.md",
+              },
+            },
+          }
         : {},
       2,
     );
@@ -170,7 +191,7 @@ const args = process.argv.slice(2), config = parse(fs.readFileSync(path.join(pro
 const merge=(target,value)=>{for(const [key,child] of Object.entries(value))target[key]=child&&typeof child==="object"&&!Array.isArray(child)?merge(target[key]??{},child):child;return target;};
 if(args.includes("--profile"))merge(config,parse(fs.readFileSync(path.join(process.env.CODEX_HOME,args[args.indexOf("--profile")+1]+".config.toml"),"utf8")));
 for(let i=0;i<args.length;i++)if(["-c","--config"].includes(args[i]))merge(config,parse(args[++i]));
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json,instructions:config.model_instructions_file})+"\\n");
 if(args.includes("app-server"))require("node:readline").createInterface({input:process.stdin}).on("line",line=>{const request=JSON.parse(line);if(request.id===undefined)return;const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};console.log(JSON.stringify({id:request.id,result}));});
 else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"thread.started",thread_id:"00000000-0000-4000-8000-000000000001"}));console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0}}));});}
 `,
@@ -195,6 +216,7 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
       releaseCredentialHome: null,
     };
     let nativeChecks = 0;
+    const nativeResults: Array<{ status: number | null; stderr: string }> = [];
     const spawn = spyOn(childProcess, "spawn").mockImplementation(
       fixtureSpawn(
         executablePathForSpawn(executable),
@@ -209,7 +231,10 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
             : String(options?.cwd ?? root);
           const result = startup(cwd, overrides);
           nativeChecks++;
-          expect(result.status, result.stderr || result.error?.message).toBe(0);
+          nativeResults.push({
+            status: result.status,
+            stderr: result.stderr || result.error?.message || "",
+          });
         },
       ),
     );
@@ -244,15 +269,25 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
         .split("\n")
         .map((line) => JSON.parse(line));
       expect(nativeChecks).toBe(8);
+      for (const result of nativeResults)
+        expect(result.status, result.stderr).toBe(0);
       expect(rows).toHaveLength(8);
-      for (const row of rows)
+      for (const row of rows) {
         expect(row.catalog).toBe(
           explicit
             ? "caller-models.json"
-            : origin === "selected"
+            : origin.startsWith("selected")
               ? join(selectedDirectory, "selected-models.json")
               : join(home, "models.json"),
         );
+        expect(row.instructions).toBe(
+          explicit
+            ? "caller-instructions.md"
+            : origin.startsWith("selected")
+              ? join(selectedDirectory, "selected-instructions.md")
+              : join(home, "instructions.md"),
+        );
+      }
       expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
     } finally {
       spawn.mockRestore();

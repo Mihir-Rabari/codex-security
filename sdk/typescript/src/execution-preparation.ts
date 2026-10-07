@@ -570,13 +570,13 @@ export async function nativeScanConfiguration(
   subagents: number,
 ): Promise<JsonObject> {
   const ambient = await readCodexHomeConfig(environment);
-  preserveCatalogFileOrigin(ambient, configuredCodexHome(environment));
+  preserveConfigFileOrigin(ambient, configuredCodexHome(environment));
   const selectedPath = environment["CODEX_SECURITY_CONFIG_PATH"];
   const selected = selectedPath
     ? parseToml(await readFile(selectedPath, "utf8"))
     : {};
   if (selectedPath)
-    preserveCatalogFileOrigin(
+    preserveConfigFileOrigin(
       selected as JsonObject,
       dirname(resolveConfigPath(".", selectedPath)),
     );
@@ -595,19 +595,16 @@ export async function nativeScanConfiguration(
   return config;
 }
 
-function preserveCatalogFileOrigin(
-  config: JsonObject,
-  directory: string,
-): void {
+function preserveConfigFileOrigin(config: JsonObject, directory: string): void {
   for (const layer of [
     config,
     ...(isRecord(config["profiles"]) ? Object.values(config["profiles"]) : []),
   ]) {
-    if (isRecord(layer) && typeof layer["model_catalog_json"] === "string")
-      layer["model_catalog_json"] = resolveConfigPath(
-        directory,
-        layer["model_catalog_json"],
-      );
+    if (!isRecord(layer)) continue;
+    for (const key of ["model_catalog_json", "model_instructions_file"]) {
+      if (typeof layer[key] === "string")
+        layer[key] = resolveConfigPath(directory, layer[key]);
+    }
   }
 }
 

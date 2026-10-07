@@ -1740,96 +1740,117 @@ if (process.argv.includes("app-server")) {
             network: { enabled: false },
           },
         );
-        const native = await prepareNativeScan({
-          ...input(),
-          scan: { ...input().scan, targetPath: target },
-          recipe: {
-            auth: "auto",
-            config: { forced_login_method: "api" },
-            cyberAccessProgram:
-              role === "discovery" ? "daybreak_blue" : "daybreak_red",
-          },
-        });
-        assert.equal(native.options.auth, "api-key");
-        assert.equal(
-          native.options.cyberAccessProgram,
-          role === "discovery" ? "daybreak_blue" : "daybreak_red",
+        const selectedProgram =
+          role === "discovery" ? "daybreak_blue" : "daybreak_red";
+        const settingsPath = join(root, `${role}-settings.toml`);
+        await writeFile(
+          settingsPath,
+          `forced_login_method = "api"\n[codex_security]\ncyber_access_program = "${selectedProgram}"\n`,
         );
-        const selectedEnvironment = native.client.dependencies.environment;
-        assert.equal(
-          selectedEnvironment.OPENAI_API_KEY,
-          "synthetic-native-key",
+        process.env.CODEX_SECURITY_CONFIG_PATH = settingsPath;
+        const nativeCases = await Promise.all(
+          [
+            undefined,
+            {
+              auth: "auto",
+              config: { forced_login_method: "api" },
+              cyberAccessProgram:
+                role === "discovery" ? "daybreak_red" : "daybreak_blue",
+            },
+          ].map(async (recipe) => ({
+            native: await prepareNativeScan({
+              ...input(),
+              scan: { ...input().scan, targetPath: target },
+              recipe,
+            }),
+            expectedProgram: recipe?.cyberAccessProgram ?? selectedProgram,
+          })),
         );
-        assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
-        assert.equal(
-          selectedEnvironment.PATH,
-          [root, selectedTools].join(delimiter),
-        );
-        assert.equal(
-          process.env.PATH,
-          [repositoryBin, root, selectedTools].join(delimiter),
-        );
-        const gitEnvironment = {
-          PATH: selectedEnvironment.PATH,
-          CODEX_SECURITY_GIT: join(root, "selected tools", "git"),
-          GIT_SSH_COMMAND: "synthetic-ssh --fixture",
-          GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
-        };
-        const sdk = createPermissionCheckedCodex({
-          codexPathOverride: selectedEnvironment.CODEX_CLI_PATH,
-          config: { ...config, default_permissions: ":read-only" },
-          configOverrides: ['default_permissions="codex_security_scan"'],
-          apiKey: "synthetic-final-key",
-          env: {
-            ...selectedEnvironment,
-            CODEX_HOME: root,
-            CODEX_API_KEY: "synthetic-stale-key",
-            NATIVE_PROFILE_CAPTURE: capture,
-            NATIVE_PROFILE_MARKER: role,
-            ...gitEnvironment,
-          },
-        });
-        for (const resumed of [false, true]) {
-          const options = {
-            workingDirectory: cwd,
-            skipGitRepoCheck: true,
-            approvalPolicy: "never",
+        for (const { native, expectedProgram } of nativeCases) {
+          assert.equal(native.options.auth, "api-key");
+          assert.equal(native.options.cyberAccessProgram, expectedProgram);
+          const selectedEnvironment = native.client.dependencies.environment;
+          assert.equal(
+            selectedEnvironment.OPENAI_API_KEY,
+            "synthetic-native-key",
+          );
+          assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
+          assert.equal(
+            selectedEnvironment.PATH,
+            [root, selectedTools].join(delimiter),
+          );
+          assert.equal(
+            process.env.PATH,
+            [repositoryBin, root, selectedTools].join(delimiter),
+          );
+          const gitEnvironment = {
+            PATH: selectedEnvironment.PATH,
+            CODEX_SECURITY_GIT: join(root, "selected tools", "git"),
+            GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+            GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
           };
-          const thread = resumed
-            ? sdk.resumeThread(`synthetic-${role}-thread`, options)
-            : sdk.startThread(options);
-          await writeFile(capture, "");
-          const events = await collectNativeEvents(
-            thread,
-            "Synthetic worker path verification.",
-            { cyberAccessProgram: native.options.cyberAccessProgram },
-          );
-          assert.equal(events.at(-1).type, "turn.completed");
-          assert.equal(thread.id, "synthetic-worker-thread");
-          const observed = await observations();
-          const preflight = observed.find(
-            (entry) => entry.kind === "preflight",
-          );
-          const executed = observed.find((entry) => entry.kind === "exec");
-          assert.equal(executed.executable, executable);
-          assert.equal(preflight.cwd, cwd);
-          assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
-          assert.equal(executed.argv.includes("resume"), resumed);
-          assert.equal(
-            executed.argv[executed.argv.indexOf("--cyber-access-program") + 1],
-            native.options.cyberAccessProgram,
-          );
-          assert.deepEqual(rawConfig(preflight.argv), rawConfig(executed.argv));
-          assert.equal(
-            rawConfig(preflight.argv).at(-1),
-            'approval_policy="never"',
-          );
-          for (const process of [preflight, executed]) {
-            assert.deepEqual(process.gitEnvironment, gitEnvironment);
-            assert.equal(process.marker, role);
-            assert.equal(process.codex, "synthetic-final-key");
-            assert.equal(process.openai, "synthetic-native-key");
+          const sdk = createPermissionCheckedCodex({
+            codexPathOverride: selectedEnvironment.CODEX_CLI_PATH,
+            config: { ...config, default_permissions: ":read-only" },
+            configOverrides: ['default_permissions="codex_security_scan"'],
+            apiKey: "synthetic-final-key",
+            env: {
+              ...selectedEnvironment,
+              CODEX_HOME: root,
+              CODEX_API_KEY: "synthetic-stale-key",
+              NATIVE_PROFILE_CAPTURE: capture,
+              NATIVE_PROFILE_MARKER: role,
+              ...gitEnvironment,
+            },
+          });
+          for (const resumed of [false, true]) {
+            const options = {
+              workingDirectory: cwd,
+              skipGitRepoCheck: true,
+              approvalPolicy: "never",
+            };
+            const thread = resumed
+              ? sdk.resumeThread(`synthetic-${role}-thread`, options)
+              : sdk.startThread(options);
+            await writeFile(capture, "");
+            const events = await collectNativeEvents(
+              thread,
+              "Synthetic worker path verification.",
+              { cyberAccessProgram: native.options.cyberAccessProgram },
+            );
+            assert.equal(events.at(-1).type, "turn.completed");
+            assert.equal(thread.id, "synthetic-worker-thread");
+            const observed = await observations();
+            const preflight = observed.find(
+              (entry) => entry.kind === "preflight",
+            );
+            const executed = observed.find((entry) => entry.kind === "exec");
+            assert.equal(executed.executable, executable);
+            assert.equal(preflight.cwd, cwd);
+            assert.equal(executed.argv[executed.argv.indexOf("--cd") + 1], cwd);
+            assert.equal(executed.argv.includes("resume"), resumed);
+            assert.equal(
+              executed.argv[
+                executed.argv.indexOf("--cyber-access-program") + 1
+              ],
+              native.options.cyberAccessProgram,
+            );
+            assert.deepEqual(
+              rawConfig(preflight.argv),
+              rawConfig(executed.argv),
+            );
+            assert.equal(
+              rawConfig(preflight.argv).at(-1),
+              'approval_policy="never"',
+            );
+            for (const process of [preflight, executed]) {
+              assert.deepEqual(process.gitEnvironment, gitEnvironment);
+              assert.equal(process.marker, role);
+              assert.equal(process.codex, "synthetic-final-key");
+              assert.equal(process.openai, "synthetic-native-key");
+            }
           }
+          assert.equal(process.env.CODEX_SECURITY_CONFIG_PATH, settingsPath);
         }
       }
     } finally {

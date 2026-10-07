@@ -209,6 +209,17 @@ export async function prepareNativeScan(
     input,
     deep.settings.subagents,
   );
+  const security = config["codex_security"];
+  if (
+    recipe === undefined &&
+    security !== null &&
+    typeof security === "object" &&
+    !Array.isArray(security) &&
+    typeof security["cyber_access_program"] === "string"
+  )
+    options.cyberAccessProgram = security[
+      "cyber_access_program"
+    ] as ScanOptions["cyberAccessProgram"];
   const ambientExecution = await prepareAmbientExecution(
     {
       environment,
