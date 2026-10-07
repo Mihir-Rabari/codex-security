@@ -87,6 +87,7 @@ assert.deepEqual(
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_SURFACE",
@@ -1443,6 +1444,10 @@ try {
     (tool: { name: string }) =>
       tool.name === "update_codex_security_scan_context_from_app",
   );
+  const renameScan = toolList.result.tools.find(
+    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
+  );
+  assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
   const submit = toolList.result.tools.find(
     (tool: { name: string }) => tool.name === "submit_codex_security_setup",
   );
@@ -1512,7 +1517,18 @@ try {
   assert.equal(elicitationRequest.params.mode, "form");
   assert.equal(
     elicitationRequest.params.message,
-    "Codex Security needs your input before it can continue.",
+    [
+      "Deep scan?",
+      "Another Deep Security Scan is running. Continue this one?",
+      "- Cancel (Recommended): Stop this new scan before preflight or substantive work.",
+      "- Continue: Proceed even though both scans may use more resources.",
+      "",
+      "Preflight?",
+      "How should Codex Security handle the blocked preflight?",
+      "- Apply and retry: Apply the proposed Codex configuration change and rerun preflight.",
+      "- Leave paused: Keep the scan available for a later retry.",
+      "- Cancel scan: Cancel this scan without changing configuration.",
+    ].join("\n"),
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
@@ -1526,11 +1542,9 @@ try {
     ],
   );
   assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan,
-      "description",
-    ),
-    false,
+    elicitationRequest.params.requestedSchema.properties.concurrent_deep_scan
+      .description,
+    "Another Deep Security Scan is running. Continue this one?",
   );
   assert.deepEqual(
     elicitationRequest.params.requestedSchema.properties.preflight_action.oneOf,
@@ -1547,11 +1561,9 @@ try {
     ],
   );
   assert.equal(
-    Object.hasOwn(
-      elicitationRequest.params.requestedSchema.properties.preflight_action,
-      "description",
-    ),
-    false,
+    elicitationRequest.params.requestedSchema.properties.preflight_action
+      .description,
+    "How should Codex Security handle the blocked preflight?",
   );
   testServer.sendResponse(elicitationRequest.id, {
     action: "accept",
@@ -1612,8 +1624,18 @@ try {
   const declinedElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Decline this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Decline this Codex Security input request?",
+      ),
     "declined Codex Security elicitation request",
+  );
+  assert.equal(
+    declinedElicitation.params.message,
+    [
+      "Decline this Codex Security input request?",
+      "- Continue: Continue the current workflow.",
+      "- Cancel: Leave the current workflow paused.",
+    ].join("\n"),
   );
   testServer.sendResponse(declinedElicitation.id, { action: "decline" });
   const declinedUserInput = await testServer.waitForMessage(
@@ -1641,7 +1663,9 @@ try {
   const cancelledElicitation = await testServer.waitForMessage(
     (message) =>
       message.method === "elicitation/create" &&
-      message.params?.message === "Cancel this Codex Security input request?",
+      message.params?.message.startsWith(
+        "Cancel this Codex Security input request?",
+      ),
     "cancelled Codex Security elicitation request",
   );
   testServer.sendResponse(cancelledElicitation.id, { action: "cancel" });
@@ -2495,6 +2519,24 @@ try {
   assertNoError(deliveredWithoutToken);
 
   const longUserContext = "Prioritize tenant isolation. ".repeat(120).trim();
+  const renamedScan = await testServer.callTool(92020, {
+    name: "rename_codex_security_scan",
+    arguments: { scanId, name: "  - Release audit  " },
+  });
+  assertNoError(renamedScan);
+  assert.deepEqual(renamedScan.result.structuredContent, {
+    scanId,
+    name: "- Release audit",
+  });
+  const reopenedScan = await testServer.callTool(92021, {
+    name: "get_codex_security_scan",
+    arguments: { scanId },
+  });
+  assertNoError(reopenedScan);
+  assert.equal(
+    reopenedScan.result.structuredContent.scan.name,
+    "- Release audit",
+  );
   const updatedContext = await callUpdateScanContext(92010, {
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },
     _meta: { "openai/threadId": "fixture-thread" },

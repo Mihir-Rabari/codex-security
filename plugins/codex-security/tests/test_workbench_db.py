@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     SCRIPT,
     begin_deep_scan,
     claim_remediation_resend,
@@ -66,14 +67,6 @@ GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {
@@ -926,7 +919,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -1312,7 +1305,7 @@ def test_completed_finding_triage_and_remediation_persist(
 
 
 def test_filesystem_identity_serialization_supports_windows_stat_values() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    namespace = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))
     serialize_identity = namespace["serialize_filesystem_identity"]
     identity_matches = namespace["stored_filesystem_identity_matches"]
     windows_device_id = (1 << 64) - 1
@@ -2371,10 +2364,8 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     revision = initialize_git_repository(target)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
+    created = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2386,16 +2377,11 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
         revision,
     )
     diff_target = created["diffTarget"]
-    run_workbench(
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "working_tree",
@@ -2463,10 +2449,8 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--target-path",
         str(target),
@@ -2477,16 +2461,11 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         "--diff-head-revision",
         revision,
     )
-    saved = run_workbench(
+    saved = save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--diff-target-kind",
         "commit",
