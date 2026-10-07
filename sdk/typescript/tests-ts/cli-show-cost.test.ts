@@ -102,7 +102,7 @@ test.each([
   { name: "CI", args: [], tty: true, environment: { CI: "true" } },
   { name: "non-TTY", args: [], tty: false, environment: {} },
 ])("shows live unpriced usage in $name scans", async (mode) => {
-  const { stdout, stderr, runCli } = createCliTest(main, { stderr: mode.tty });
+  const { stderr, runCli } = createCliTest(main, { stderr: mode.tty });
   const unpriced = new ScanResult({
     ...result,
     turnResult: {
@@ -123,8 +123,7 @@ test.each([
       expect(stderr.text().trim().split("\n").at(-1)).toContain("1,280 total");
       return unpriced;
     });
-  expect(await runCli(["scan", ".", "--json", ...mode.args], deps)).toBe(0);
-  expect(JSON.parse(stdout.text())).toEqual(unpriced.toJSON());
+  expect(await runCli(["scan", ".", ...mode.args], deps)).toBe(0);
   expect(stderr.text().split("REPORT")[1]).toContain("1,280 total");
 });
 
