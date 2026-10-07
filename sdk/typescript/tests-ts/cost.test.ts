@@ -3320,3 +3320,49 @@ test.each(["other turn", "outside window"])(
     }
   },
 );
+
+test.each(["sdk-owner", "unbound-owner", "unknown-worker"] as const)(
+  "prices known completion receipts without a rollout: %s",
+  async (kind) => {
+    const home = await codexHome();
+    const observed: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 0.003,
+      onCost: (cost) => observed.push(cost),
+      onCostLowerBound: (cost) => observed.push(cost),
+    });
+    if (kind !== "unbound-owner")
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: [kind === "unknown-worker" ? "worker" : "owner"],
+        owner: {
+          threadId: "owner",
+          turnId: "turn",
+          startedAt: "2026-09-01T00:00:00Z",
+          dedicated: true,
+        },
+        startedAt: "2026-09-01T00:00:00Z",
+        completedAt: null,
+      }));
+    tracker.start("owner");
+    try {
+      const receipt = { input_tokens: 1000, output_tokens: 0 };
+      if (kind === "unknown-worker") tracker.recordUsage(receipt, "worker");
+      const snapshot = await tracker.stop(
+        kind === "unknown-worker" ? undefined : receipt,
+      );
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1000);
+      if (kind === "unknown-worker") {
+        expect(snapshot.cost).toBeNull();
+        expect(observed).toHaveLength(0);
+      } else {
+        expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+        expect(observed.at(-1)?.estimatedUsd).toBeGreaterThan(0.003);
+      }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);

@@ -1579,7 +1579,7 @@ describe("CodexSecurity orchestration", () => {
     expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
     expect(savedRecipe).toMatchObject({
       config: {
-        model_provider: "openai",
+        model_provider: "amazon-bedrock",
         profile: "bedrock",
         profiles: {
           bedrock: {

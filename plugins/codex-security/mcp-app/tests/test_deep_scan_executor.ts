@@ -3024,20 +3024,24 @@ async function testIsolatedReconstructedWorkers() {
     };
     await writeFile(
       configPath,
-      Object.entries(config)
-        .filter(
-          ([key]) =>
-            name !== "first" ||
-            ![
-              "model_provider",
-              "model_reasoning_summary",
-              "service_tier",
-            ].includes(key),
-        )
-        .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
-        .join("") +
+      (name === "second"
+        ? 'model_provider = "openai"\nprofile = "cloud.production"\n'
+        : "") +
+        Object.entries(config)
+          .filter(
+            ([key]) =>
+              (name !== "second" || key !== "model_provider") &&
+              (name !== "first" ||
+                ![
+                  "model_provider",
+                  "model_reasoning_summary",
+                  "service_tier",
+                ].includes(key)),
+          )
+          .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
+          .join("") +
         (name === "second"
-          ? '[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
+          ? '[profiles."cloud.production"]\nmodel_provider = "amazon-bedrock"\n[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
           : "") +
         `[codex_security]\ncyber_access_program = "${name === "first" ? "daybreak_blue" : "standard"}"\n[features]\napi_key_cyber_access_programs = ${name === "first"}\napi_key_model_discovery = ${name !== "first"}\n`,
     );

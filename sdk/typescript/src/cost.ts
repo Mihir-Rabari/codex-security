@@ -553,7 +553,8 @@ export class ScanCostTracker {
         : value;
       if (remainder !== null && remainder.total_tokens > 0) {
         const model =
-          this.#attribution || (session?.modelUsage.size ?? 0) > 0
+          (this.#attribution && threadId !== this.#threadId) ||
+          (session?.modelUsage.size ?? 0) > 0
             ? null
             : (session?.model ??
               (threadId === this.#threadId ? this.#options.model : null));
