@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { resolveScanSessionPaths } from "../src/runtime.js";
+import type { JsonObject } from "../src/config.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { nodeCommand, pythonExecutable } from "./support/shell.js";
@@ -353,7 +354,7 @@ test.each(["direct", "profile"])(
       f.ids[0]!,
     ]);
     f.options.environment["CODEX_SQLITE_HOME"] = callerHome;
-    const config =
+    const config: JsonObject =
       selection === "direct"
         ? { sqlite_home: callerHome }
         : {
