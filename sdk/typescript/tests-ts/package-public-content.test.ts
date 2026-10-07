@@ -2,14 +2,7 @@ import { readFileSync } from "node:fs";
 import { brotliCompressSync, brotliDecompressSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 
-const { assertPublicPackageContents } = (await import(
-  new URL("../scripts/package-public-content.mjs", import.meta.url).href
-)) as {
-  assertPublicPackageContents: (
-    files: Map<string, Buffer>,
-    archiveMetadata?: Buffer,
-  ) => void;
-};
+import { assertPublicPackageContents } from "../scripts/package-public-content.mjs";
 
 import { cleanCompressedPayload } from "./package-tar-fixtures.js";
 
