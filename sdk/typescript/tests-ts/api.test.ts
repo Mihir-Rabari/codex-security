@@ -64,11 +64,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
-import {
-  resolveCodexCommand,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
@@ -2517,7 +2513,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
@@ -5051,7 +5047,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
