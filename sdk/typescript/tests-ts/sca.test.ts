@@ -906,7 +906,7 @@ process.exit(0);
   ["HOME", true],
   ["USERPROFILE", true],
 ] as const)(
-  "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %s",
+  "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %p",
   async (homeVariable, configuredGitHubHome) => {
     const f = await fixture({
       wrappedCodex: true,
