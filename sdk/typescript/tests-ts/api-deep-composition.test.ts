@@ -939,7 +939,10 @@ test.each([
 test("a reused client's sealed read uses its installed plugin after the source is removed", async () => {
   const h = await fixture();
   const source = join(h.root, "plugin-source");
-  await cp(pluginRoot, source, { recursive: true });
+  await cp(pluginRoot, source, {
+    recursive: true,
+    filter: (path) => path !== join(pluginRoot, "mcp-app", "node_modules"),
+  });
   await using client = h.makeClient({}, source);
   const options = { ...h.options, knowledgeBasePaths: undefined };
   h.stopAfterSealing();
