@@ -1786,6 +1786,8 @@ function sameSavedFinding(
     return scanFindingIdentity(left) === scanFindingIdentity(right);
   if (
     owner === undefined &&
+    (findingCandidateId(left) !== undefined ||
+      findingCandidateId(right) !== undefined) &&
     !isDeepStrictEqual(
       findingCandidateOwner(left) ?? null,
       findingCandidateOwner(right) ?? null,

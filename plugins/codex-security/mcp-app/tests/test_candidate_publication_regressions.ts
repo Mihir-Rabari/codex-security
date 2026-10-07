@@ -311,54 +311,134 @@ test("publishes colliding worker-local deferred IDs without changing their evide
 });
 
 for (const mode of ["standard", "diff"] as const) {
-  test(`keeps a same-identity ${mode} reassessment when its attribution changes`, async (t) => {
-    const { context, draft } = await fixture(t, mode);
-    const earlier = {
-      ...finding("shared", "src/handler.ts"),
-      identity: { anchor: "shared-review" },
-      severity: { level: "high" },
-      provenance: { source: "local_plugin", sourceWorkerId: "earlier-worker" },
-    };
-    const current = {
-      ...earlier,
-      summary: "Current evidence lowers the severity.",
-      severity: { level: "low" },
-      provenance: { source: "local_plugin", sourceWorkerId: "current-worker" },
-    };
-    await recordCodexSecurityScanDraft(context, {
-      ...draft({}, true),
-      findings: [earlier],
-    });
-    await recordCodexSecurityScanDraft(context, {
-      ...draft({}, true),
-      findings: [current],
-    });
-    const saved = JSON.parse(
-      await readFile(path.join(context.root, "findings.json"), "utf8"),
-    );
-    assert.equal(saved.findings.length, 1);
-    assert.equal(saved.findings[0].severity.level, "low");
-    assert.equal(saved.findings[0].summary, current.summary);
-    assert.deepEqual(saved.findings[0].provenance.previousFindings, [earlier]);
+  for (const identity of ["derived", "explicit"] as const) {
+    for (const owner of ["changed", "omitted"] as const) {
+      test(`keeps a ${mode} reassessment with ${identity} identity and ${owner} attribution`, async (t) => {
+        const { context, draft } = await fixture(t, mode);
+        const { identity: _identity, ...details } = finding(
+          "shared",
+          "src/handler.ts",
+        );
+        const earlier = {
+          ...details,
+          ...(identity === "explicit"
+            ? { identity: { anchor: "shared-review" } }
+            : {}),
+          provenance: {
+            source: "local_plugin",
+            sourceWorkerId: "earlier-worker",
+          },
+        };
+        const current = {
+          ...earlier,
+          summary: "Current evidence lowers the severity.",
+          severity: { level: "low" },
+          provenance: {
+            source: "local_plugin",
+            ...(owner === "changed"
+              ? { sourceWorkerId: "current-worker" }
+              : {}),
+          },
+        };
+        await recordCodexSecurityScanDraft(context, {
+          ...draft({}, true),
+          findings: [earlier],
+        });
+        for (const replay of [false, true]) {
+          await recordCodexSecurityScanDraft(context, {
+            ...draft({}, true),
+            findings: [current],
+          });
+          const saved = JSON.parse(
+            await readFile(path.join(context.root, "findings.json"), "utf8"),
+          );
+          assert.equal(saved.findings.length, 1, `replay=${replay}`);
+          assert.equal(saved.findings[0].severity.level, "low");
+          assert.equal(saved.findings[0].summary, current.summary);
+          const history = saved.findings[0].provenance.previousFindings;
+          assert.deepEqual(
+            identity === "explicit"
+              ? history
+              : history.filter(
+                  (item: { identity?: unknown }) => item.identity === undefined,
+                ),
+            [earlier],
+          );
+        }
 
-    const independentRoot = path.join(context.root, "independent");
-    await mkdir(independentRoot);
-    const independentContext = { ...context, root: independentRoot };
-    await recordCodexSecurityScanDraft(independentContext, {
-      ...draft({}, true),
-      findings: [
-        earlier,
-        {
-          ...current,
-          identity: { anchor: "shared-review", instance: "independent" },
-        },
-      ],
-    });
-    const independent = JSON.parse(
-      await readFile(path.join(independentRoot, "findings.json"), "utf8"),
-    );
-    assert.equal(independent.findings.length, 2);
-  });
+        const independentRoot = path.join(context.root, "independent");
+        await mkdir(independentRoot);
+        const independentContext = { ...context, root: independentRoot };
+        await recordCodexSecurityScanDraft(independentContext, {
+          ...draft({}, true),
+          findings: [
+            { ...earlier, identity: { anchor: "shared-review" } },
+            {
+              ...current,
+              identity: { anchor: "shared-review", instance: "independent" },
+            },
+          ],
+        });
+        const independent = JSON.parse(
+          await readFile(path.join(independentRoot, "findings.json"), "utf8"),
+        );
+        assert.equal(independent.findings.length, 2);
+      });
+    }
+  }
+
+  for (const candidate of ["same", "different"] as const) {
+    for (const owner of ["changed", "omitted"] as const) {
+      test(`keeps independent ${mode} candidates with ${candidate} ID and ${owner} owner`, async (t) => {
+        const { context, draft } = await fixture(t, mode);
+        const { identity: _identity, ...details } = finding(
+          "shared",
+          "src/handler.ts",
+        );
+        const earlier = {
+          ...details,
+          provenance: {
+            source: "local_plugin",
+            candidateId: "candidate-a",
+            sourceWorkerId: "earlier-worker",
+          },
+        };
+        const current = {
+          ...details,
+          severity: { level: "low" },
+          provenance: {
+            source: "local_plugin",
+            candidateId: candidate === "same" ? "candidate-a" : "candidate-b",
+            ...(owner === "changed"
+              ? { sourceWorkerId: "current-worker" }
+              : {}),
+          },
+        };
+        await recordCodexSecurityScanDraft(context, {
+          ...draft({}, true),
+          findings: [earlier],
+        });
+        for (const replay of [false, true]) {
+          await recordCodexSecurityScanDraft(context, {
+            ...draft({}, true),
+            findings: [current],
+          });
+          const saved = JSON.parse(
+            await readFile(path.join(context.root, "findings.json"), "utf8"),
+          );
+          assert.equal(saved.findings.length, 2, `replay=${replay}`);
+          assert.deepEqual(
+            saved.findings.map(
+              (item: { severity: { level: string } }) => item.severity.level,
+            ),
+            ["low", "high"],
+          );
+          assert.deepEqual(saved.findings[0].provenance, current.provenance);
+          assert.deepEqual(saved.findings[1].provenance, earlier.provenance);
+        }
+      });
+    }
+  }
 }
 
 for (const mode of ["standard", "diff"] as const) {
