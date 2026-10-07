@@ -177,6 +177,57 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+test("initialized stores keep relative state in the original directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-relative-state-"));
+  directories.push(directory);
+  const first = join(directory, "first");
+  const second = join(directory, "second");
+  await Promise.all([mkdir(first), mkdir(second)]);
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      "--eval",
+      `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(second)});
+await store.insert(${JSON.stringify([embedded(1)])});
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
+    ],
+    {
+      cwd: first,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: "state",
+      },
+    },
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
+  expect(await readdir(first)).toEqual(["state"]);
+  expect(await readdir(second)).toEqual([]);
+});
+
+test("initialized stores retain their environment across findings operations", async () => {
+  const { environment } = await fixture();
+  const store = new SqliteFindingsStore(environment);
+  await store.initialize();
+  const directory = dirname(environment.CODEX_SECURITY_STATE_DIR);
+  environment.CODEX_SECURITY_STATE_DIR = join(directory, "other state");
+  const entries = [embedded(1), embedded(2)];
+  await store.insert(entries);
+  const groups = await store.storeDedupeGroups([
+    entries.map(({ finding }) => finding.findingId),
+  ]);
+  expect(await store.listDedupeGroups(entries[0]!.finding.findingId)).toEqual(
+    groups,
+  );
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    entries.map(({ finding }) => finding),
+  );
+  expect(await readdir(directory)).toEqual(["state with spaces"]);
+});
+
 test("escapes terminal controls in database helper diagnostics", async () => {
   const directory = await mkdtemp(join(tmpdir(), "database-info-"));
   directories.push(directory);
