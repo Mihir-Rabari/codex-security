@@ -1,3 +1,7 @@
+import {
+  nativeSqlitePreflight,
+  sqliteProviderConfig,
+} from "./support/native-sqlite-preflight.js";
 import { once } from "node:events";
 import {
   appendFile,
@@ -4775,55 +4779,73 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const warnings = mock((_warning: string) => {});
-    const commands: Array<readonly string[]> = [];
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: recordingWorkbench(commands),
-      createCodex: (options: CodexOptions) => ({
-        startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
-          const thread = new Codex({
-            ...options,
-            codexPathOverride: process.execPath,
-          }).startThread(threadOptions);
-          const executable = thread as unknown as {
-            _exec: { run(): AsyncGenerator<string> };
-          };
-          executable._exec.run = async function* () {
-            await copyCompletedScan(root);
-            yield JSON.stringify({
-              type: "thread.started",
-              thread_id: "scan-thread",
-            });
-            yield JSON.stringify({ type: "turn.completed", usage: null });
-          };
-          return thread;
-        },
-      }),
-    });
+  test.each([false, true])(
+    "requires usage only for a requested cost limit (%p)",
+    async (limited) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const warnings = mock((_warning: string) => {});
+      const commands: Array<readonly string[]> = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: recordingWorkbench(commands),
+        createCodex: (options: CodexOptions) => ({
+          startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+            const thread = new Codex({
+              ...options,
+              codexPathOverride: process.execPath,
+            }).startThread(threadOptions);
+            const executable = thread as unknown as {
+              _exec: { run(): AsyncGenerator<string> };
+            };
+            executable._exec.run = async function* () {
+              await copyCompletedScan(root);
+              yield JSON.stringify({
+                type: "thread.started",
+                thread_id: "scan-thread",
+              });
+              yield JSON.stringify({ type: "turn.completed", usage: null });
+            };
+            return thread;
+          },
+        }),
+      });
 
-    const result = await client.run(repository, {
-      maxCostUsd: 1,
-      onWarning: warnings,
-    });
-    expect(result.threadId).toBe("scan-thread");
-    expect(result.cost).toBeNull();
-    expect(warnings.mock.calls.map(([value]) => value)).toEqual([
-      "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    ]);
-    expect(commands.map(([command]) => command)).toEqual([
-      "register-cli-scan",
-      "get-scan-feedback",
-      "set-scan-thread",
-      "prepare-scan-completion",
-      "complete-scan",
-      "list-global-findings",
-    ]);
-    expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
-    await client.close();
-  });
+      try {
+        const scan = client.run(repository, {
+          ...(limited ? { maxCostUsd: 1 } : {}),
+          onWarning: warnings,
+        });
+        if (limited) {
+          await expect(scan).rejects.toThrow(
+            "cost limit could not be verified",
+          );
+          expect(commands.map(([command]) => command)).toContain("fail-scan");
+          expect(commands.map(([command]) => command)).not.toContain(
+            "complete-scan",
+          );
+        } else {
+          await expect(scan).resolves.toMatchObject({
+            threadId: "scan-thread",
+            cost: null,
+          });
+          expect(commands.map(([command]) => command)).toEqual([
+            "register-cli-scan",
+            "get-scan-feedback",
+            "set-scan-thread",
+            "prepare-scan-completion",
+            "complete-scan",
+            "list-global-findings",
+          ]);
+          expect(commands.map(([command]) => command)).not.toContain(
+            "fail-scan",
+          );
+        }
+        expect(warnings).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each(["repository", "standalone-file"])(
     "protects %s knowledge-base context without retaining its documents",
@@ -8103,6 +8125,7 @@ test.each([
   "inherited-relative",
   "inherited-padded",
   "default",
+  "native-provider",
 ])(
   "verifies budget ownership at the effective %s SQLite location",
   async (location) => {
@@ -8129,31 +8152,41 @@ test.each([
     const python = await runtime.resolvePluginPython({
       environment: process.env,
     });
+    const native =
+      location === "native-provider"
+        ? await nativeSqlitePreflight(root, sqliteHome)
+        : null;
     let ownershipChecks = 0;
     let selectedEnvironment: Record<string, string> | undefined;
     const config =
-      location === "default" ||
-      location === "inherited-relative" ||
-      location === "inherited-padded"
-        ? {}
-        : {
-            codexOverrides: {
-              sqlite_home:
-                location === "relative"
-                  ? "selected-state"
-                  : location === "tilde"
-                    ? "~/selected-state"
-                    : sqliteHome,
-            },
-          };
+      native !== null
+        ? { codexOverrides: sqliteProviderConfig }
+        : location === "default" ||
+            location === "inherited-relative" ||
+            location === "inherited-padded"
+          ? {}
+          : {
+              codexOverrides: {
+                sqlite_home:
+                  location === "relative"
+                    ? "selected-state"
+                    : location === "tilde"
+                      ? "~/selected-state"
+                      : sqliteHome,
+              },
+            };
     const client = new TestClient(config, {
+      ...(native === null
+        ? {}
+        : { resolveCodexCommand: () => ({ ...nodeCommand(), args: ["--"] }) }),
       environment: {
+        ...native?.environment,
         PATH: process.env["PATH"]!,
         CODEX_HOME: codexHome,
         HOME: root,
         USERPROFILE: root,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
-        ...(location === "default"
+        ...(location === "default" || native !== null
           ? {}
           : {
               CODEX_SQLITE_HOME:
@@ -8167,12 +8200,13 @@ test.each([
       prepareRuntime: async () => ({
         ...preparedRuntime(codexHome),
         environment: {
+          ...native?.environment,
           PATH: process.env["PATH"]!,
           CODEX_HOME: codexHome,
           HOME: root,
           USERPROFILE: root,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
-          ...(location === "default"
+          ...(location === "default" || native !== null
             ? {}
             : {
                 CODEX_SQLITE_HOME:
@@ -8187,9 +8221,19 @@ test.each([
       resolvePluginPython: async () => python,
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
-      resolveScanSessionPaths: async (options, scanId, threadId) => {
+      resolveScanSessionPaths: async (
+        options,
+        scanId,
+        threadId,
+        nativeConfig,
+      ) => {
         ownershipChecks += 1;
-        return await runtime.resolveScanSessionPaths(options, scanId, threadId);
+        return await runtime.resolveScanSessionPaths(
+          options,
+          scanId,
+          threadId,
+          nativeConfig,
+        );
       },
       createCodex: (configuration) => {
         selectedEnvironment = configuration?.env;
@@ -8226,9 +8270,13 @@ test.each([
       expect(result).toMatchObject({ threadId: "thread-1" });
       expect(ownershipChecks).toBe(1);
       expect(selectedEnvironment?.["CODEX_SQLITE_HOME"]).toBe(
-        location === "default" ? undefined : sqliteHome,
+        location === "default" || native !== null ? undefined : sqliteHome,
       );
       expect(selectedEnvironment?.["CODEX_HOME"]).toBe(codexHome);
+      if (native !== null)
+        expect(await readFile(native.transcript, "utf8")).toContain(
+          '"method":"config/read"',
+        );
     } finally {
       await client.close();
     }

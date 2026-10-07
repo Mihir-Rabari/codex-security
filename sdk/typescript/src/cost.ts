@@ -223,9 +223,11 @@ export class ScanCostTracker {
     poll();
   }
 
-  public async refresh(): Promise<ScanCostSnapshot> {
+  public async refresh(
+    ownedPaths?: ReadonlySet<string>,
+  ): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      await this.#readSessions(ownedPaths);
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -240,9 +242,25 @@ export class ScanCostTracker {
       this.#timer = null;
     }
     const suppliedRoot = tokenUsage(fallbackUsage);
+    let ownedPaths: ReadonlySet<string> | undefined;
+    let ownershipFailure: { error: unknown } | null = null;
+    if (
+      finalizing &&
+      this.#options.maxCostUsd !== undefined &&
+      this.#threadId !== null &&
+      this.#options.resolveOwnedSessionPaths !== undefined
+    ) {
+      try {
+        ownedPaths = await this.#options.resolveOwnedSessionPaths(
+          this.#threadId,
+        );
+      } catch (error) {
+        ownershipFailure = { error };
+      }
+    }
     let refreshFailure: { error: unknown } | null = null;
     try {
-      await this.refresh();
+      await this.refresh(ownedPaths);
     } catch (error) {
       refreshFailure = { error };
     } finally {
@@ -300,11 +318,10 @@ export class ScanCostTracker {
     }
     let unidentifiedOwnedSession = false;
     if (finalizing && this.#options.maxCostUsd !== undefined) {
-      const resolveOwnedSessionPaths = this.#options.resolveOwnedSessionPaths;
-      if (resolveOwnedSessionPaths === undefined || this.#threadId === null) {
+      if (ownershipFailure !== null) throw ownershipFailure.error;
+      if (ownedPaths === undefined) {
         unidentifiedOwnedSession = observed.unidentifiedSessions.size > 0;
       } else {
-        const ownedPaths = await resolveOwnedSessionPaths(this.#threadId);
         const accountedPaths = new Set(
           await Promise.all(
             [...observed.accountedSessions].map(async (path) => realpath(path)),
@@ -355,15 +372,43 @@ export class ScanCostTracker {
     return result;
   }
 
-  async #readSessions(): Promise<void> {
+  async #hasCompleteCopy(
+    path: string,
+    partial: SessionUsage,
+    present: ReadonlySet<string>,
+    ownedPaths?: ReadonlySet<string>,
+  ): Promise<boolean> {
+    if (this.#options.maxCostUsd === undefined) return false;
+    for (const [completePath, complete] of this.#sessions) {
+      if (
+        completePath !== path &&
+        (ownedPaths === undefined || ownedPaths.has(completePath)) &&
+        present.has(completePath) &&
+        complete.threadId === partial.threadId &&
+        complete.taskCompleted &&
+        complete.pendingLine.length === 0 &&
+        complete.accounting !== null &&
+        complete.accountingError === null &&
+        complete.offset >= partial.offset &&
+        (await sessionPrefixMatches(path, partial.offset, completePath))
+      )
+        return true;
+    }
+    return false;
+  }
+
+  async #readSessions(ownedPaths?: ReadonlySet<string>): Promise<void> {
     const rootThreadId = this.#threadId;
     if (rootThreadId === null) return;
     this.#rootOnlyReadError = false;
     const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
+    const paths = new Set(ownedPaths);
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
-    )) {
+    ))
+      paths.add(path);
+    for (const path of paths) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
         session = createSessionUsage();
@@ -414,6 +459,11 @@ export class ScanCostTracker {
 
     const included = new Set([
       rootThreadId,
+      ...[...this.#sessions].flatMap(([path, session]) =>
+        ownedPaths?.has(path) && session.threadId !== null
+          ? [session.threadId]
+          : [],
+      ),
       ...[...this.#completedThreadUsage.keys()].filter(
         (threadId): threadId is string => threadId !== null,
       ),
@@ -545,7 +595,16 @@ export class ScanCostTracker {
             rootOnlyRecoverable: true,
           });
         }
-        if (session.pendingLine.length > 0) observed.unverified = true;
+        if (
+          session.pendingLine.length > 0 &&
+          !(await this.#hasCompleteCopy(
+            path,
+            session,
+            presentSessions,
+            ownedPaths,
+          ))
+        )
+          observed.unverified = true;
         const usage = higherCostUsage(
           this.#options.model,
           session.accounting?.usage ?? null,
@@ -733,6 +792,38 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
     } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
       yield path;
     }
+  }
+}
+
+async function sessionPrefixMatches(
+  path: string,
+  length: number,
+  completePath: string,
+): Promise<boolean> {
+  const partial = await open(path, "r");
+  try {
+    const complete = await open(completePath, "r");
+    try {
+      const left = Buffer.alloc(SESSION_READ_SIZE);
+      const right = Buffer.alloc(SESSION_READ_SIZE);
+      for (let offset = 0; offset < length;) {
+        const size = Math.min(left.length, length - offset);
+        const a = await partial.read(left, 0, size, offset);
+        const b = await complete.read(right, 0, a.bytesRead, offset);
+        if (
+          a.bytesRead === 0 ||
+          a.bytesRead !== b.bytesRead ||
+          !left.subarray(0, a.bytesRead).equals(right.subarray(0, b.bytesRead))
+        )
+          return false;
+        offset += a.bytesRead;
+      }
+      return true;
+    } finally {
+      await complete.close();
+    }
+  } finally {
+    await partial.close();
   }
 }
 

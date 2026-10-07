@@ -1549,6 +1549,7 @@ export async function preparePersistentOutputRoot(
 
 interface NativeSessionConfig {
   command: CodexCommand;
+  config?: JsonObject;
   workingDirectory: string;
   sqliteHome?: Promise<string | undefined>;
 }
@@ -1577,14 +1578,16 @@ export async function resolveScanSessionPaths(
     "        roots = usage._scan_root_thread_ids(connection, scan, sys.argv[3])",
     "    finally:",
     "        connection.close()",
-    "database = usage._codex_state_database()",
-    "if database is None:",
-    `    print('{"missingDatabase":true}')`,
-    "    raise RuntimeError('Codex session ownership is unavailable.')",
-    "warnings = set()",
-    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
-    "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
-    "    raise RuntimeError('Scan session ownership is incomplete.')",
+    "try:",
+    "    database = usage._codex_state_database()",
+    "    if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
+    "    warnings = set()",
+    "    sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
+    "    if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
+    "        raise RuntimeError('Scan session ownership is incomplete.')",
+    "except (sqlite3.Error, OSError, ValueError, RuntimeError):",
+    `    print('{"unverifiedDatabase":true}')`,
+    "    raise",
     "print(json.dumps([str(session.path) for session in sessions], allow_nan=False))",
   ].join("\n");
   try {
@@ -1623,7 +1626,7 @@ export async function resolveScanSessionPaths(
       !options.environment?.["CODEX_SQLITE_HOME"] &&
       isRecord(error) &&
       typeof error["stdout"] === "string" &&
-      error["stdout"].trim() === '{"missingDatabase":true}'
+      error["stdout"].trim() === '{"unverifiedDatabase":true}'
     ) {
       try {
         const sqliteHome = await (nativeConfig.sqliteHome ??=
@@ -1657,12 +1660,13 @@ export async function resolveScanSessionPaths(
 }
 
 async function readNativeSqliteHome(
-  config: { command: CodexCommand; workingDirectory: string },
+  config: NativeSessionConfig,
   options: WorkbenchCommandOptions,
 ): Promise<string | undefined> {
-  const { readNativeSessionSqliteHome } = await import("./provider-profile.js");
+  const { providerPreflightCommand, readNativeSessionSqliteHome } =
+    await import("./provider-profile.js");
   return await readNativeSessionSqliteHome(
-    config.command,
+    await providerPreflightCommand(config.command, config.config ?? {}),
     options.environment,
     config.workingDirectory,
     options.signal,

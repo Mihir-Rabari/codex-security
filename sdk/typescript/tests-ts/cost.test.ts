@@ -5371,13 +5371,13 @@ describe("live scan cost tracking", () => {
     [
       "unobserved delegated worker rollout",
       "unobserved-delegated",
-      true,
+      false,
       "unobserved",
     ],
     [
       "unobserved independent Deep Scan worker rollout",
       "unobserved-independent",
-      true,
+      false,
       "unobserved",
     ],
     ["complete root-only scan", "root-only", false, "missing"],
@@ -5535,7 +5535,14 @@ describe("live scan cost tracking", () => {
         await expect(result).rejects.toThrow(/could not be verified/u);
       } else {
         await expect(result).resolves.toMatchObject({
-          cost: { inputTokens: 100, outputTokens: 10, estimatedUsd: 0.00032 },
+          cost:
+            contents === "unobserved"
+              ? {
+                  inputTokens: 10_100,
+                  outputTokens: 1_010,
+                  estimatedUsd: 0.03232,
+                }
+              : { inputTokens: 100, outputTokens: 10, estimatedUsd: 0.00032 },
         });
       }
       expect(ownershipChecks).toBe(1);
@@ -5585,6 +5592,180 @@ describe("live scan cost tracking", () => {
       });
     },
   );
+
+  test.each(["root", "worker", "resumed worker"])(
+    "accounts for an authoritative archived %s rollout",
+    async (archived) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      let root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        home,
+        "2026-07-26T12:02:00Z",
+        true,
+      );
+      let worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        archived === "resumed worker" ? undefined : "scan-thread",
+        home,
+        "2026-07-26T12:01:00Z",
+        true,
+      );
+      const archive = join(home, "archived_sessions");
+      await mkdir(archive);
+      const moved = join(archive, "owned.jsonl");
+      await fsPromises.rename(archived === "root" ? root : worker, moved);
+      if (archived === "root") root = moved;
+      else worker = moved;
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory: home,
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+      });
+      tracker.start("scan-thread");
+      const snapshot = await tracker.stop(rootUsage);
+      expect(snapshot.cost).toMatchObject({
+        inputTokens: 150,
+        outputTokens: 15,
+        estimatedUsd: 0.0009,
+      });
+    },
+  );
+
+  test.each(["root", "worker"])(
+    "accepts an exact truncated restored prefix of a complete owned %s rollout",
+    async (copied) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        "scan-thread",
+        undefined,
+        undefined,
+        true,
+      );
+      const contents = await fsPromises.readFile(
+        copied === "root" ? root : worker,
+      );
+      await writeFile(
+        join(home, "sessions", "restored-copy.jsonl"),
+        contents.subarray(0, contents.indexOf('"total_token_usage"') + 12),
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+      });
+      tracker.start("scan-thread");
+      expect((await tracker.stop(rootUsage)).cost).toMatchObject({
+        inputTokens: 150,
+        outputTokens: 15,
+        estimatedUsd: 0.0009,
+      });
+    },
+  );
+
+  test.each(["divergent", "longer"])(
+    "rejects a %s incomplete copy despite a complete owned same-thread rollout",
+    async (kind) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        "scan-thread",
+        undefined,
+        undefined,
+        true,
+      );
+      const contents = await fsPromises.readFile(worker, "utf8");
+      const copy =
+        kind === "longer"
+          ? contents + '{"type":"event_msg"'
+          : contents
+              .replace('"input_tokens":50', '"input_tokens":51')
+              .slice(0, -8);
+      await writeFile(join(home, "sessions", "restored-copy.jsonl"), copy);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+      });
+      tracker.start("scan-thread");
+      await expect(tracker.stop(rootUsage)).rejects.toThrow(
+        "cost limit could not be verified",
+      );
+    },
+  );
+
+  test("does not use an unowned complete copy to verify an owned partial rollout", async () => {
+    const home = await codexHome();
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const root = await writeSession(
+      home,
+      "scan-thread",
+      rootUsage,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      { input_tokens: 50, output_tokens: 5 },
+      "scan-thread",
+      undefined,
+      undefined,
+      true,
+    );
+    const contents = await fsPromises.readFile(worker);
+    const partial = join(home, "sessions", "owned-partial.jsonl");
+    await writeFile(
+      partial,
+      contents.subarray(0, contents.indexOf('"total_token_usage"') + 12),
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+      resolveOwnedSessionPaths: async () => new Set([root, partial]),
+    });
+    tracker.start("scan-thread");
+    await expect(tracker.stop(rootUsage)).rejects.toThrow(
+      "cost limit could not be verified",
+    );
+  });
 
   test("does not let an unrelated partial session hide incomplete owned usage", async () => {
     const home = await codexHome();

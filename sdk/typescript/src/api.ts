@@ -1058,6 +1058,7 @@ export class CodexSecurity {
       const outputSchema = securityPolicyStageOutputSchema();
       const nativeSessionConfig = {
         command: this.#codexCommand(),
+        config: effectiveConfig,
         workingDirectory: outputDir,
       };
       const run = async (
@@ -1539,6 +1540,7 @@ export class CodexSecurity {
         get command() {
           return selectedCodexCommand();
         },
+        config: effectiveConfig,
         workingDirectory: scanDir,
       };
       const tracker = new ScanCostTracker({

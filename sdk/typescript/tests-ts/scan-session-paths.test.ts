@@ -211,3 +211,54 @@ test("aborts a pending native SQLite query and drains its child", async () => {
   controller.abort(new Error("Synthetic caller cancellation"));
   await expect(pending).rejects.toBeDefined();
 });
+
+test.each(["unrelated", "schema"])(
+  "resolves native SQLite ownership when the default database is %s",
+  async (stale) => {
+    const f = await fixture("stale-" + stale);
+    execFileSync(f.options.python, [
+      "-I",
+      "-B",
+      "-c",
+      stale === "schema"
+        ? "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('CREATE TABLE legacy(value TEXT)');c.close()"
+        : "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)');c.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)');c.close()",
+      join(f.home, "state_7.sqlite"),
+    ]);
+    expect(
+      [
+        ...(await resolveScanSessionPaths(
+          f.options,
+          "scan",
+          f.ids[0]!,
+          f.native,
+        )),
+      ].sort(),
+    ).toEqual([...f.paths].sort());
+    expect(await readFile(f.transcript, "utf8")).toContain(
+      '"method":"config/read"',
+    );
+  },
+);
+
+test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
+  "does not replace an incomplete explicit %s with native fallback",
+  async (key) => {
+    const f = await fixture("explicit-incomplete");
+    const database = join(f.home, "state_7.sqlite");
+    execFileSync(f.options.python, [
+      "-I",
+      "-B",
+      "-c",
+      "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)');c.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)');c.close()",
+      database,
+    ]);
+    f.options.environment[key] = key === "CODEX_STATE_DB" ? database : f.home;
+    await expect(
+      resolveScanSessionPaths(f.options, "scan", f.ids[0]!, f.native),
+    ).rejects.toThrow("scan session ownership");
+    await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);

@@ -1,3 +1,8 @@
+import {
+  nativeSqlitePreflight,
+  sqliteProviderConfig,
+} from "./support/native-sqlite-preflight.js";
+import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
   link,
@@ -56,6 +61,7 @@ async function setup(
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
     resolveOwnedSessions?: typeof runtime.resolveScanSessionPaths;
+    resolveCodexCommand?: typeof runtime.resolveCodexCommand;
   } = {},
 ) {
   const f = await fixture();
@@ -89,10 +95,11 @@ async function setup(
     "threat_model",
     "policy",
   ];
+  const environment = { CODEX_SECURITY_STATE_DIR: join(f.root, "state") };
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment: { CODEX_SECURITY_STATE_DIR: join(f.root, "state") },
+      environment,
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -110,6 +117,7 @@ async function setup(
       },
       runWorkbench: rejecting("Policy generation must not register a scan."),
       createCodex,
+      resolveCodexCommand: options.resolveCodexCommand,
       resolveScanSessionPaths:
         options.resolveOwnedSessions ?? (async () => new Set<string>()),
     },
@@ -117,6 +125,7 @@ async function setup(
   );
   return {
     ...f,
+    environment,
     security,
     runtime,
     threads,
@@ -1556,24 +1565,35 @@ describe("CodexSecurity policy API", () => {
   });
 
   test.each(
-    ["default", "profile", "tilde", "inherited-relative"].flatMap((location) =>
+    [
+      "default",
+      "profile",
+      "tilde",
+      "inherited-relative",
+      "native-provider",
+    ].flatMap((location) =>
       [false, true].map((limited) => ({ location, limited })),
     ),
   )(
     "policy accounting ignores unrelated empty sessions at the $location SQLite home with budget=$limited",
     async ({ location, limited }) => {
       const f = await setup({
+        ...(location === "native-provider"
+          ? { resolveCodexCommand: () => ({ ...nodeCommand(), args: ["--"] }) }
+          : {}),
         config:
-          location === "profile"
-            ? {
-                codexOverrides: {
-                  profile: "review",
-                  profiles: { review: { sqlite_home: "../selected-state" } },
-                },
-              }
-            : location === "tilde"
-              ? { codexOverrides: { sqlite_home: "~/selected-state" } }
-              : {},
+          location === "native-provider"
+            ? { codexOverrides: sqliteProviderConfig }
+            : location === "profile"
+              ? {
+                  codexOverrides: {
+                    profile: "review",
+                    profiles: { review: { sqlite_home: "../selected-state" } },
+                  },
+                }
+              : location === "tilde"
+                ? { codexOverrides: { sqlite_home: "~/selected-state" } }
+                : {},
         resolveOwnedSessions: async (...args) => {
           expect(args[3]?.command.command.length).toBeGreaterThan(0);
           expect(args[3]?.workingDirectory).toBe(f.outputDir);
@@ -1615,12 +1635,22 @@ describe("CodexSecurity policy API", () => {
         },
       });
       const sqliteHome =
-        location === "profile" || location === "inherited-relative"
+        location === "profile" ||
+        location === "inherited-relative" ||
+        location === "native-provider"
           ? join(f.root, "selected-state")
           : location === "tilde"
             ? join(f.root, "selected-state")
             : f.runtime.codexHome;
       await mkdir(sqliteHome, { recursive: true });
+      const native =
+        location === "native-provider"
+          ? await nativeSqlitePreflight(f.root, sqliteHome)
+          : null;
+      if (native !== null) {
+        Object.assign(f.environment, native.environment);
+        Object.assign(f.runtime.environment, native.environment);
+      }
       f.runtime.environment["HOME"] = f.root;
       f.runtime.environment["USERPROFILE"] = f.root;
       if (location === "inherited-relative")
@@ -1637,6 +1667,16 @@ describe("CodexSecurity policy API", () => {
         });
         expect(result.content).toBe(POLICY);
         expect(result.cost?.inputTokens).toBe(300);
+        if (native !== null) {
+          if (limited)
+            expect(await readFile(native.transcript, "utf8")).toContain(
+              '"method":"config/read"',
+            );
+          else
+            await expect(
+              readFile(native.transcript, "utf8"),
+            ).rejects.toMatchObject({ code: "ENOENT" });
+        }
       } finally {
         await f.security.close();
       }
