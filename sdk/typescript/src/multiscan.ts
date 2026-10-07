@@ -44,7 +44,7 @@ import {
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
-import type { CoverageDocument } from "./models.js";
+import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
   bundledPluginRoot,
@@ -406,6 +406,9 @@ async function runCampaign(
         restoreReport,
         options.config.pythonPath ??
           environmentValue(pluginHelperEnvironment(process.env), "PYTHON"),
+        options.recoverScan === undefined
+          ? undefined
+          : (scanDir) => options.recoverScan!(scanDir, options),
       );
       if (resumed !== undefined) {
         if (receipt.status !== "failed" && receipt.warnings?.length) {
@@ -424,7 +427,15 @@ async function runCampaign(
             () => undefined,
           );
         }
-        policyFailed ||= receipt.policyFailed === true;
+        const failureSeverity =
+          options.scanOptionsByMode?.[task.mode]?.failureSeverity;
+        policyFailed ||=
+          resumed.restoredReportFindings !== undefined &&
+          failureSeverity !== undefined
+            ? resumed.restoredReportFindings.findings.some((finding) =>
+                meetsSeverity(finding, failureSeverity),
+              )
+            : receipt.policyFailed === true;
         if (resumed.completeness === "complete") completed += 1;
         else {
           incomplete += 1;
@@ -1186,10 +1197,16 @@ async function loadResumableScan(
     protectedRoot: string,
   ) => Promise<void>,
   configuredPythonPath: string | undefined,
+  recoverScan:
+    | ((
+        scanDir: string,
+      ) => ReturnType<NonNullable<MultiscanOptions["recoverScan"]>>)
+    | undefined,
 ): Promise<
   | {
       completeness: CoverageDocument["completeness"];
       checkout: string;
+      restoredReportFindings?: FindingsDocument;
     }
   | undefined
 > {
@@ -1267,6 +1284,15 @@ async function loadResumableScan(
           receipt.error === "Multiscan repository coverage is incomplete.");
   if (!matchesOutcome) return undefined;
   const reportSealed = await hasSealedReport(path, manifest, signal);
+  const reportMissing =
+    (await lstat(join(path, "report.md")).catch(undefinedIfMissingFile)) ===
+    undefined;
+  if (
+    reportMissing &&
+    recoverScan !== undefined &&
+    (await recoverScan(path)) === undefined
+  )
+    return undefined;
   let pythonPath: string | undefined;
   if (!reportSealed) {
     const automaticAvailable =
@@ -1489,7 +1515,11 @@ async function loadResumableScan(
     }
 
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
-    return { completeness, checkout: matchedRoot };
+    return {
+      completeness,
+      checkout: matchedRoot,
+      ...(reportMissing ? { restoredReportFindings: findings } : {}),
+    };
   } finally {
     if (createdCheckout)
       await rm(matchedRoot, { recursive: true, force: true });

@@ -6628,3 +6628,152 @@ for (const ignoreCase of [false, true]) {
     expect(await readFile(initial.resultsPath)).toEqual(ledger);
   });
 }
+
+for (const scenario of [
+  "policy-edited",
+  "foreign-scan",
+  "registered-scan",
+] as const)
+  test(`missing report uses registered campaign and severity ${scenario}`, async () => {
+    const { paths, source } = await repositoryFixture(
+      `report-${scenario}`,
+      "repo",
+    );
+    const environment = {
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+    };
+    const python = await runtime.resolvePluginPython({ environment });
+    const call = (args: readonly string[], input?: string) =>
+      runtime.runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        args,
+        input,
+      );
+    const writeActualScan = async (
+      checkout: string,
+      outputDir: string,
+      userContext: string,
+    ) => {
+      await mkdir(outputDir, { recursive: true, mode: 0o700 });
+      const registered = (await call(
+        [
+          "register-cli-scan",
+          "--repository",
+          checkout,
+          "--scan-dir",
+          outputDir,
+          "--registration-json-stdin",
+        ],
+        JSON.stringify({
+          recipe: {
+            repository: checkout,
+            repositoryRevision: source.revision,
+            mode: "standard",
+            target: { kind: "repository", paths: [] },
+            config: {},
+          },
+          userContext,
+        }),
+      )) as unknown as {
+        scanId: string;
+        targetId: string;
+        targetRevision: string;
+        contract: { target: { allowedKinds: string[] } };
+      };
+      await completedScan(outputDir, "complete", checkout);
+      for (const name of [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+      ]) {
+        const p = join(outputDir, name),
+          document = JSON.parse(await readFile(p, "utf8"));
+        if (name === "scan-manifest.json") {
+          document.scan.id = registered.scanId;
+          document.scan.target.kind =
+            registered.contract.target.allowedKinds[0];
+          document.scan.target.targetId = registered.targetId;
+          document.scan.target.revision = registered.targetRevision;
+          delete document.scan.target.snapshotDigest;
+          delete document.scan.sealedAt;
+          delete document.scan.artifacts;
+        } else document.scanId = registered.scanId;
+        await writeFile(p, JSON.stringify(document));
+      }
+      await call(["complete-scan", "--scan-id", String(registered.scanId)]);
+      return {
+        ...(await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT })),
+        scanDir: outputDir,
+        cost: null,
+      } as ScanResult;
+    };
+    const initial = client(async (checkout, scan) =>
+      writeActualScan(
+        checkout,
+        scan!.outputDir!,
+        "Requested campaign instructions.",
+      ),
+    );
+    const configured = options(paths, initial, {
+      maxAttempts: 1,
+      scanPrompt: "Requested campaign instructions.",
+      scanOptionsByMode: { standard: { failureSeverity: "high" } },
+    });
+    const first = await runMultiscan(configured);
+    expect(first.failed).toBe(0);
+    expect(first.policyFailed).toBe(true);
+    const [receipt] = await results(first.resultsPath);
+    expect(receipt!["policyFailed"]).toBe(true);
+    const scanDir = String(receipt!["outputDir"]);
+    if (scenario === "foreign-scan") {
+      const checkout = join(paths.output, "checkouts", "repo");
+      git(paths.root, "clone", "-q", source.path, checkout);
+      const replacement = join(paths.root, "replacement-scan");
+      await writeActualScan(
+        checkout,
+        replacement,
+        "Different supplied instructions.",
+      );
+      await rm(scanDir, { recursive: true });
+      await cp(replacement, scanDir, { recursive: true });
+      await chmod(scanDir, 0o700);
+    }
+    if (scenario === "policy-edited") {
+      receipt!["policyFailed"] = false;
+      await writeFile(first.resultsPath, JSON.stringify(receipt) + "\n");
+    }
+    await rm(join(scanDir, "report.md"));
+    const recoverScan = async (path: string) => {
+      const history = await call(["list-scans", "--scan-root", path]);
+      const scan = (
+        history["scans"] as Array<{ scanId: string; scanDir: string }>
+      ).find((row) => row.scanDir === path);
+      if (!scan) return undefined;
+      const saved = await loadContract(path, {
+        pluginRoot: PLUGIN_ROOT,
+        expectedScanId: scan.scanId,
+      });
+      return { coverage: saved.coverage, findings: saved.findings, cost: null };
+    };
+    const resumed = () =>
+      runMultiscan({
+        ...configured,
+        createSecurity: () =>
+          client(throwing("Unexpected replacement analysis")),
+        recoverScan,
+      });
+    if (scenario === "foreign-scan")
+      await expect(resumed()).rejects.toThrow(
+        /Scan artifacts do not match selected scan/,
+      );
+    else {
+      const value = await resumed();
+      expect(value).toMatchObject({
+        completed: 1,
+        skipped: 1,
+        failed: 0,
+        policyFailed: true,
+      });
+    }
+  });
