@@ -22,11 +22,15 @@ from workbench_test_support import (
     empty_target_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    request_remediation,
+    request_remediation_action,
     run_workbench,
     save_workspace,
+    set_remediation,
     start_delivered_scan,
     start_saved_scan,
     start_workspace_scan,
+    triage_finding,
     write_checkpoint,
     write_completed_contract,
 )
@@ -272,12 +276,9 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     write_completed_contract(scan_dir, scan_id, target)
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     original = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["findings"][0]
-    run_workbench(
+    triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(original["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "wont_fix",
@@ -1347,30 +1348,15 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
     request_id = str(uuid.uuid4())
     generation_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        generation_token,
-    )
+    request_remediation(state_dir, occurrence_id, request_id, generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/src/extract.py b/src/extract.py\n")
-    run_workbench(
+    set_remediation(
         state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--action-token",
         generation_token,
-        "--expected-version",
         "1",
-        "--state",
         "generated",
         "--patch-path",
         patch_path.name,
@@ -1383,20 +1369,8 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
     replacement_parent = tmp_path / "replacement-parent"
     shutil.copytree(moved_parent, replacement_parent)
     stored_parent.symlink_to(replacement_parent, target_is_directory=True)
-    failed = run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        "2",
-        "--action",
-        "apply",
-        "--action-token",
-        str(uuid.uuid4()),
-        check=False,
+    failed = request_remediation_action(
+        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
     )
     assert "canonical non-symlink directory" in str(failed["stderr"])
 

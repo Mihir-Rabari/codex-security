@@ -6,7 +6,11 @@ import uuid
 from pathlib import Path
 
 from workbench_test_support import (
+    request_remediation,
+    request_remediation_action,
+    run_remediation,
     run_workbench,
+    set_remediation,
     start_saved_scan,
     write_completed_contract,
 )
@@ -25,52 +29,30 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
 
     canceled_request_id = str(uuid.uuid4())
     canceled_token = str(uuid.uuid4())
-    requested_initial = run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        canceled_request_id,
-        "--action-token",
-        canceled_token,
+    requested_initial = request_remediation(
+        state_dir, occurrence_id, canceled_request_id, canceled_token
     )["scan"]
-    canceled_initial = run_workbench(
+    canceled_initial = run_remediation(
         state_dir,
         "cancel-finding-remediation-request",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         canceled_request_id,
-        "--action-token",
         canceled_token,
     )["scan"]
     assert canceled_initial["findings"][0]["remediationState"] == {"state": "idle"}
     assert canceled_initial["updatedAt"] > requested_initial["updatedAt"]
-    replayed_cancel = run_workbench(
+    replayed_cancel = run_remediation(
         state_dir,
         "cancel-finding-remediation-request",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         canceled_request_id,
-        "--action-token",
         canceled_token,
     )["scan"]
     assert replayed_cancel["findings"][0]["remediationState"] == {"state": "idle"}
 
     request_id = str(uuid.uuid4())
     generation_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        generation_token,
-    )
+    request_remediation(state_dir, occurrence_id, request_id, generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text(
         "diff --git a/source.txt b/source.txt\n"
@@ -80,18 +62,12 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
         "-vulnerable\n"
         "+fixed\n"
     )
-    generated = run_workbench(
+    generated = set_remediation(
         state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--action-token",
         generation_token,
-        "--expected-version",
         "1",
-        "--state",
         "generated",
         "--patch-path",
         patch_path.name,
@@ -102,24 +78,12 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
 
     replacement_request_id = str(uuid.uuid4())
     replacement_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        replacement_request_id,
-        "--action-token",
-        replacement_token,
-    )
-    canceled_replacement = run_workbench(
+    request_remediation(state_dir, occurrence_id, replacement_request_id, replacement_token)
+    canceled_replacement = run_remediation(
         state_dir,
         "cancel-finding-remediation-request",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         replacement_request_id,
-        "--action-token",
         replacement_token,
     )["scan"]
     restored = canceled_replacement["findings"][0]["remediationState"]
@@ -129,29 +93,11 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     assert restored["patchPath"] == patch_path.name
 
     apply_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        str(restored["version"]),
-        "--action",
-        "apply",
-        "--action-token",
-        apply_token,
+    request_remediation_action(
+        state_dir, occurrence_id, request_id, str(restored["version"]), "apply", apply_token
     )
-    canceled_apply = run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        apply_token,
+    canceled_apply = run_remediation(
+        state_dir, "cancel-finding-remediation-request", occurrence_id, request_id, apply_token
     )["scan"]
     restored_after_apply = canceled_apply["findings"][0]["remediationState"]
     assert restored_after_apply["state"] == "generated"
@@ -159,62 +105,37 @@ def test_cancel_finding_remediation_request_restores_previous_state(tmp_path: Pa
     assert restored_after_apply["actionClaimToken"] is None
 
     apply_token = str(uuid.uuid4())
-    apply_requested = run_workbench(
+    apply_requested = request_remediation_action(
         state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--expected-version",
         str(restored_after_apply["version"]),
-        "--action",
         "apply",
-        "--action-token",
         apply_token,
     )["scan"]
     subprocess.run(["git", "apply", "--no-index", str(patch_path)], cwd=target, check=True)
-    applied = run_workbench(
+    applied = set_remediation(
         state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--action-token",
         apply_token,
-        "--expected-version",
         str(apply_requested["findings"][0]["remediationState"]["version"]),
-        "--state",
         "applied",
         "--base-revision",
         "unversioned",
     )["scan"]
 
     verify_token = str(uuid.uuid4())
-    run_workbench(
+    request_remediation_action(
         state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
         occurrence_id,
-        "--request-id",
         request_id,
-        "--expected-version",
         str(applied["findings"][0]["remediationState"]["version"]),
-        "--action",
         "verify",
-        "--action-token",
         verify_token,
     )
-    canceled_verify = run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        verify_token,
+    canceled_verify = run_remediation(
+        state_dir, "cancel-finding-remediation-request", occurrence_id, request_id, verify_token
     )["scan"]
     restored_after_verify = canceled_verify["findings"][0]["remediationState"]
     assert restored_after_verify["state"] == "applied"

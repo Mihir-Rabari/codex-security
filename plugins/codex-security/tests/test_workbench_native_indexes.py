@@ -11,6 +11,7 @@ from workbench_test_support import (
     save_workspace,
     stable_target_id,
     start_delivered_scan,
+    triage_finding,
     write_completed_contract,
 )
 
@@ -139,12 +140,9 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
-    run_workbench(
+    triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(older_first["findings"][0]["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -175,12 +173,9 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
             """,
             (latest_first_occurrence, "src/control.py", 10, 12, "root_control", 1),
         )
-    run_workbench(
+    triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         distinct_first_occurrence,
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",

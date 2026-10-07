@@ -19,6 +19,7 @@ from workbench_test_support import (
     mark_deep_coordinator_succeeded,
     run_workbench,
     stable_target_id,
+    triage_finding,
     write_completed_contract,
 )
 
@@ -773,16 +774,7 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     assert persisted["comparable"] is True
     assert persisted["summary"]["persisting"] == 1
     occurrence = persisted["findings"][0]["beforeOccurrenceId"]
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence,
-        "--status",
-        "closed",
-        "--close-reason",
-        "already_fixed",
-    )
+    triage_finding(state_dir, occurrence, "closed", "--close-reason", "already_fixed")
     reopened = compare_scan_pair(state_dir, before, after)
     assert reopened["summary"]["reopened"] == 1
     assert reopened["findings"][0]["triage"] == {"closeReason": None, "status": "open"}
@@ -1078,12 +1070,9 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
             "UPDATE finding_occurrences SET severity = ? WHERE id = ?",
             (("low", current[0]["occurrenceId"]), ("critical", current[1]["occurrenceId"])),
         )
-    run_workbench(
+    triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         previous["occurrenceId"],
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",

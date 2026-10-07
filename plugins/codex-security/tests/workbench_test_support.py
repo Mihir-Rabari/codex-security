@@ -302,6 +302,118 @@ def create_workspace(
     )
 
 
+def triage_finding(
+    state_dir: Path,
+    occurrence_id: str,
+    status: str,
+    *args: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence_id,
+        "--status",
+        status,
+        *args,
+        check=check,
+    )
+
+
+def run_remediation(
+    state_dir: Path,
+    command: str,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *args: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        command,
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--action-token",
+        action_token,
+        *args,
+        check=check,
+    )
+
+
+def set_remediation(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    expected_version: str,
+    state: str,
+    *args: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_remediation(
+        state_dir,
+        "set-finding-remediation",
+        occurrence_id,
+        request_id,
+        action_token,
+        "--expected-version",
+        expected_version,
+        "--state",
+        state,
+        *args,
+        check=check,
+    )
+
+
+def request_remediation_action(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    expected_version: str,
+    action: str,
+    action_token: str,
+    *,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "request-finding-remediation-action",
+        "--occurrence-id",
+        occurrence_id,
+        "--request-id",
+        request_id,
+        "--expected-version",
+        expected_version,
+        "--action",
+        action,
+        "--action-token",
+        action_token,
+        check=check,
+    )
+
+
+def request_remediation(
+    state_dir: Path,
+    occurrence_id: str,
+    request_id: str,
+    action_token: str,
+    *,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_remediation(
+        state_dir,
+        "request-finding-remediation",
+        occurrence_id,
+        request_id,
+        action_token,
+        check=check,
+    )
+
+
 def create_saved_workspace(
     state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
 ) -> dict[str, object]:

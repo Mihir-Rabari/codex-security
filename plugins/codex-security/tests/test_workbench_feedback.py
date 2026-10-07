@@ -12,6 +12,7 @@ from workbench_test_support import (
     run_workbench,
     stable_target_id,
     start_delivered_scan,
+    triage_finding,
     write_completed_contract,
 )
 
@@ -120,12 +121,9 @@ def test_false_positive_triage_requires_a_reason(tmp_path: Path, note: str | Non
     completed = _complete_scan(state_dir, workspace_id, tmp_path / "scans", target)
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
 
-    rejected = run_workbench(
+    rejected = triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         occurrence_id,
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -257,14 +255,7 @@ def test_latest_decision_controls_false_positive_feedback(tmp_path: Path) -> Non
         feedback["falsePositives"][0]["updatedAt"] == (closed["findings"][0]["triage"]["updatedAt"])
     )
 
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "open",
-    )
+    triage_finding(state_dir, occurrence_id, "open")
     assert _feedback(state_dir, scan_id)["falsePositives"] == []
 
     _close_finding(state_dir, occurrence_id, "wont_fix", "Accepted risk.")
