@@ -21,6 +21,7 @@ interface ScanTarget {
 }
 
 interface BootstrapDatabase {
+  exec(sql: string): unknown;
   prepare(sql: string): {
     all(...parameters: (string | number)[]): unknown[];
   };
@@ -162,14 +163,28 @@ async function readTargets(
     bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
   ) as new (
     path: string,
-    options: { readonly?: boolean; readOnly?: boolean },
+    options: {
+      readonly?: boolean;
+      readOnly?: boolean;
+      readwrite?: boolean;
+      create?: boolean;
+    },
   ) => BootstrapDatabase;
   let database: BootstrapDatabase | undefined;
   try {
     database = new Database(
       join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-      bun ? { readonly: true } : { readOnly: true },
+      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
+      // Open only an existing file there; query_only still prevents SQL data/schema writes.
+      bun
+        ? {
+            readonly: process.platform !== "darwin",
+            readwrite: process.platform === "darwin",
+            create: false,
+          }
+        : { readOnly: true },
     );
+    database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {
       const columns = database
         .prepare("PRAGMA table_info(finding_workflows)")

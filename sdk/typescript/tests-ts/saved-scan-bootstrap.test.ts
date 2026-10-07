@@ -866,3 +866,44 @@ test.skipIf(process.platform === "win32")(
     expect(existsSync(marker)).toBe(false);
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "bootstrap protects a target committed only to the live WAL",
+  async () => {
+    const f = await fixture();
+    const target = join(f.root, "wal-target");
+    await mkdir(target);
+    const executable = join(target, "python3");
+    const marker = join(f.root, "wal-target-probed");
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+      { mode: 0o700 },
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE scans SET target_path = ? WHERE id = ?").run(
+        target,
+        f.first.scanId,
+      );
+      const workbench = await savedScanWorkbench(f.first.scanId, {
+        environment: {
+          ...f.environment,
+          PYTHON: executable,
+          TEST_PYTHON_PROBE: marker,
+        },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.root,
+      });
+      await expect(
+        workbench(["get-scan", "--scan-id", f.first.scanId]),
+      ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      db.close();
+    }
+  },
+);
