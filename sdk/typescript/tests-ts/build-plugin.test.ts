@@ -78,7 +78,7 @@ describe("bundled plugin build", () => {
       join(sdk, "node_modules"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    for (const name of ["schemas", "mcp-app/src"]) {
+    for (const name of ["schemas", "shared", "mcp-app/src"]) {
       await cp(new URL(name, source), join(plugin, name), { recursive: true });
     }
     await copyFile(
@@ -197,6 +197,7 @@ describe("bundled plugin build", () => {
     }
     for (const name of [
       "schemas",
+      "shared",
       "native/prebuilt",
       "plugin-files.json",
       "scripts/reserved_artifact_paths.json",

@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { runScanEvents } from "../src/api.js";
-import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { runNodePython } from "./support/python-probe.js";
@@ -471,7 +471,7 @@ for (const scenario of ["published", "interrupted", "unfinished"] as const) {
     };
     const python = process.env["PYTHON"] ?? Bun.which("python3")!;
     let registration: Record<string, unknown>;
-    let savedOptions: WorkbenchCommandOptions;
+    let savedOptions: Parameters<typeof runWorkbench>[0];
     const commands: string[] = [];
     const runtime = preparedRuntime(home);
     runtime.plugin.version = JSON.parse(

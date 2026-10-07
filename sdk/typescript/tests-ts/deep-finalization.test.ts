@@ -8,11 +8,7 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "../src/errors.js";
-import {
-  prepareScanArtifactRestorer,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { resumeSelectedDeepScan } from "../src/deep-scan-finalization.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
@@ -47,7 +43,7 @@ for (const boundary of ["registration", "stream-start"] as const) {
     );
     const commands: string[][] = [];
     let scanId = "";
-    let savedOptions: WorkbenchCommandOptions;
+    let savedOptions: Parameters<typeof runWorkbench>[0];
     let startedTurns = 0;
     const client = new TestClient(
       {},
@@ -233,7 +229,7 @@ for (const {
       "Parent turn ended before its final completion tool call",
     );
     let scanId = "";
-    let workbenchOptions: WorkbenchCommandOptions;
+    let workbenchOptions: Parameters<typeof runWorkbench>[0];
     let publicationFails = restart && !statusReadFault;
     let selectionReadLost = false;
     let completionReceiptLost = loseCompletionResponse;
