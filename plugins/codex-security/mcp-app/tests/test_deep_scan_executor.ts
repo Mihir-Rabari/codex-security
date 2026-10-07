@@ -1621,6 +1621,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment!.CODEX_SQLITE_HOME,
               sqliteHomes[index],
             );
+            const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(
               invocation.argv.some((arg: string) =>
                 arg.startsWith("sqlite_home="),
@@ -1651,7 +1652,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   workerConfigurations[index].permissionProfile,
               },
             );
-            const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.providerHeader, providerHeaders[index]);
