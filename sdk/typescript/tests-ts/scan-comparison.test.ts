@@ -1309,22 +1309,50 @@ describe("semantic scan comparison", () => {
         expect(startThread).toHaveBeenCalledTimes(1);
         startThread.mockClear();
 
-        // An ambient profile must not replace that explicitly selected provider.
+        // An ambient profile must not replace the caller's selected profile.
         await writeFile(
           join(home, "config.toml"),
           stringify({
             profile: "ambient",
-            profiles: { ambient: { model_provider: "other" } },
+            profiles: {
+              ambient: { model_provider: "other" },
+              caller: { model_provider: "other" },
+            },
             model_providers: { other: provider },
           }),
         );
-        await expect(
-          matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            { ...options, config: { codexOverrides: config } },
-          ),
-        ).rejects.toThrow("conflicts with command authentication");
-        expect(startThread).not.toHaveBeenCalled();
+        await writeFile(join(home, "caller.config.toml"), stringify(config));
+        const nativeCommand = spyOn(runtimeCommands, "runCodexCommand");
+        try {
+          for (const [selected, codexOverrides] of [
+            ["synthetic", { profile: "caller", profiles: { caller: config } }],
+            [
+              "openai",
+              {
+                profile: "caller",
+                profiles: { caller: { model_provider: "openai" } },
+              },
+            ],
+            ["synthetic", { profile: "caller" }],
+            ["synthetic", config],
+          ] as [string, JsonObject][]) {
+            nativeCommand.mockClear();
+            await expect(
+              matchScanFindings(
+                { before: [finding("before")], after: [finding("after")] },
+                { ...options, config: { codexOverrides } },
+              ),
+            ).rejects.toThrow("Could not read MCP configuration");
+            // Native Codex rejects the legacy home selector after caller selection.
+            expect(nativeCommand).toHaveBeenCalledTimes(1);
+            expect(nativeCommand.mock.calls[0]![0].args).toContain(
+              `model_provider="${selected}"`,
+            );
+            expect(startThread).not.toHaveBeenCalled();
+          }
+        } finally {
+          nativeCommand.mockRestore();
+        }
       } finally {
         profileClient.spy.mockRestore();
         startThread.mockRestore();

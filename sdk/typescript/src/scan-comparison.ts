@@ -564,7 +564,10 @@ async function startReadOnlyCodexThread(
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
   const providerConfig = resolveCommandAuthConfig(
-    deepMerge(homeConfig, resolveCodexProfile(config ?? {})),
+    deepMerge(
+      structuredClone(homeExecutionConfig),
+      resolveCodexProfile(config ?? {}),
+    ),
     configuredCodexHome(source),
   );
   const suppliedConfig = resolveCodexProfile(
