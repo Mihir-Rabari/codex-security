@@ -69,7 +69,6 @@ async function bundledWorkerExecutor(
     "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
     "snapshotWorkerEnvironment",
     "workerModelConfig",
-    "workerModelSelection",
     "workerRuntimeSettings",
     "environmentVariable",
     "preflightDeepScanWorkerPermissionProfile",
