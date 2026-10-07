@@ -6794,7 +6794,9 @@ describe("inherited patch publication context", () => {
       expect(git("write-tree")).toBe(index);
       expect(git("ls-remote", "origin")).toBe("");
     } else {
-      expect(git("show", `HEAD:${file}`)).toBe(`fixed\n${content}`);
+      expect(git("show", `HEAD:${file.replaceAll("\\", "/")}`)).toBe(
+        `fixed\n${content}`,
+      );
       if (dirty.startsWith("clean"))
         expect(
           git("diff", "--name-status", "--no-renames", "HEAD^", "HEAD"),
