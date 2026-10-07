@@ -2,7 +2,7 @@ import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { parseJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
 import { listDedupeGroups } from "./duplicates";
-import { transaction } from "./findings";
+import { transaction } from "./transaction";
 
 const records = {
   findings: `
