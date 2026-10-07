@@ -7852,22 +7852,6 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
-  const indexPath = await run([
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-path",
-    "index",
-  ]);
-  const index = await readFile(indexPath).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    },
-  );
-  const restoreIndex = () =>
-    index === undefined
-      ? rm(indexPath, { force: true })
-      : writeFile(indexPath, index);
   const temporaryIndex = await mkdtemp(
     join(tmpdir(), "codex-security-patch-index-"),
   );
@@ -7931,7 +7915,6 @@ async function createPatchPullRequest(
         committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
         if (committed) await syncIndex();
         else {
-          await restoreIndex();
           try {
             await run(
               previousBranch === "HEAD"
@@ -7948,7 +7931,6 @@ async function createPatchPullRequest(
               throw restoreError;
           }
           await run(["branch", "-D", branch]);
-          await restoreIndex();
         }
       } catch (restoreError) {
         throw new CodexSecurityError(
@@ -8117,7 +8099,24 @@ async function changedPatchFiles(
       if (before.get(path) !== after.get(path)) files.add(path);
     }
   }
-  return { files: [...files].sort(), rootFiles: rootFiles.sort() };
+  const publicationFiles = new Set(rootFiles);
+  for (const file of files) {
+    const owner = [...head.gitlinks]
+      .filter(([directory]) => file.startsWith(`${directory}/`))
+      .sort(([left], [right]) => right.length - left.length)[0];
+    if (
+      owner !== undefined &&
+      (owner[1].committed === null ||
+        owner[1].committed.get(file.slice(owner[0].length + 1)) !==
+          head.files.get(file))
+    ) {
+      for (const rootFile of rootFiles) {
+        if (file.startsWith(`${rootFile}/`)) publicationFiles.delete(rootFile);
+      }
+      publicationFiles.add(file);
+    }
+  }
+  return { files: [...files].sort(), rootFiles: [...publicationFiles].sort() };
 }
 
 async function snapshotPatchState(

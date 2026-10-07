@@ -3988,8 +3988,8 @@ describe("patch publication integrity", () => {
           if (
             (failure === "commit" && args.includes("commit")) ||
             (failure === "checkpoint" &&
-              args[0] === "config" &&
-              args[1] === "--local")
+              args.includes("config") &&
+              args[args.indexOf("config") + 1] === "--local")
           )
             throw new Error(`Synthetic ${failure} failure`);
           return runGitRepositoryCommand(command, args, cwd, options);
@@ -4137,11 +4137,10 @@ describe("patch publication integrity", () => {
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(JSON.parse(outcome.stdout).files).toEqual(
-        renameReporting
-          ? ["src/renamed.ts"]
-          : ["src/finding-1.ts", "src/renamed.ts"],
-      );
+      expect(JSON.parse(outcome.stdout).files).toEqual([
+        "src/finding-1.ts",
+        "src/renamed.ts",
+      ]);
       const commit = git("rev-parse", "HEAD");
       expect(git("ls-remote", "origin")).toContain(commit);
       expect(git("--git-dir", remote, "show", `${commit}:src/renamed.ts`)).toBe(
@@ -5176,8 +5175,9 @@ describe("patch publication integrity", () => {
       files: [
         ...(replaced ? [".gitmodules"] : []),
         ...(shallow || replaced ? ["dependency"] : []),
-        ...(replaced ? ["dependency/HEAD"] : []),
-        ...(changed || replaced ? ["dependency/app.ts"] : []),
+        ...(shallow || replaced ? ["dependency/HEAD"] : []),
+        ...(changed || shallow || replaced ? ["dependency/app.ts"] : []),
+        ...(shallow ? ["dependency/upstream.ts"] : []),
       ],
       ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
     });
@@ -5425,6 +5425,7 @@ describe("patch publication integrity", () => {
       result.findings.findings[0]!.locations = [{ path, startLine: 1 }];
       const head = git("rev-parse", "HEAD");
       const index = git("write-tree");
+      let assessments = 0;
       const outcome = await runWorkflow(
         [
           "patch",
@@ -5438,6 +5439,26 @@ describe("patch publication integrity", () => {
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex: async (args, output) => {
             expect(output?.appServer?.directory).toBe(directory);
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              assessments++;
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              );
+              expect(artifact.changedFiles).toContain(
+                "component/nested/app.ts",
+              );
+              const diff = await readFile(artifact.path, "utf8");
+              expect(diff).toContain("-unsafe");
+              expect(diff).toContain("+fixed");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
             await writeFile(join(nested, "app.ts"), "fixed\n");
             if (kind === "saved") completePatches(args, output);
             else output?.stdout.write("Fixed and checked.");
@@ -5445,8 +5466,8 @@ describe("patch publication integrity", () => {
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(2);
-      expect(outcome.stderr).toContain("No completed patch changes to assess.");
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(assessments).toBe(1);
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         applied: true,
         files: ["component/nested/app.ts"],
@@ -5814,17 +5835,24 @@ describe("patch publication integrity", () => {
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
               ? runGitRepositoryCommand(command, args, cwd, options)
-              : existing === "remote" || existing === "push remote"
-                ? "[]"
-                : JSON.stringify([
-                    {
-                      url: "https://github.example.test/example/repository/pull/1",
-                      head: git("rev-parse", "HEAD"),
-                      repositoryId: "synthetic-origin-id",
-                      crossRepository: false,
-                      state: existing,
-                    },
-                  ]),
+              : args[0] === "repo"
+                ? args[1] === "set-default"
+                  ? "example/repository"
+                  : JSON.stringify({
+                      id: "synthetic-origin-id",
+                      url: "https://github.example.test/example/repository",
+                    })
+                : existing === "remote" || existing === "push remote"
+                  ? "[]"
+                  : JSON.stringify([
+                      {
+                        url: "https://github.example.test/example/repository/pull/1",
+                        head: git("rev-parse", "HEAD"),
+                        repositoryId: "synthetic-origin-id",
+                        crossRepository: false,
+                        state: existing,
+                      },
+                    ]),
         },
       );
       expect(outcome.exitCode).toBe(2);
