@@ -1561,7 +1561,7 @@ export async function resolveScanSessionPaths(
   scanId: string | null,
   rootThreadId: string,
   nativeConfig?: NativeSessionConfig,
-): Promise<ReadonlySet<string>> {
+): Promise<ReadonlyMap<string, string>> {
   const source = [
     "import json, os, sqlite3, sys",
     "from pathlib import Path",
@@ -1585,7 +1585,7 @@ export async function resolveScanSessionPaths(
     "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
     "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
     "    raise RuntimeError('Scan session ownership is incomplete.')",
-    "print(json.dumps([str(session.path) for session in sessions], allow_nan=False))",
+    "print(json.dumps([[str(session.path), session.thread_id] for session in sessions], allow_nan=False))",
   ].join("\n");
   try {
     if (
@@ -1626,11 +1626,24 @@ export async function resolveScanSessionPaths(
     const paths: unknown = JSON.parse(stdout);
     if (
       !Array.isArray(paths) ||
-      !paths.every((path) => typeof path === "string" && isAbsolute(path))
+      !paths.every(
+        (entry) =>
+          Array.isArray(entry) &&
+          entry.length === 2 &&
+          typeof entry[0] === "string" &&
+          isAbsolute(entry[0]) &&
+          typeof entry[1] === "string",
+      )
     ) {
       throw new Error("The scan session ownership response is invalid.");
     }
-    return new Set(paths);
+    const owned = new Map<string, string>(paths);
+    if (owned.size !== paths.length) {
+      throw new Error(
+        "The scan session ownership response has conflicting paths.",
+      );
+    }
+    return owned;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw new CodexSecurityError(

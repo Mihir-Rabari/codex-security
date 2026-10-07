@@ -95,6 +95,7 @@ try {
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testWorkerCyberAccessSettings();
   await testCompletedWorkerDrainPreservesCancellation();
+  await testUnbudgetedCompletedWorkerReturns();
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
@@ -2420,6 +2421,7 @@ async function completedWorkerDrainPreservesCancellation(
   resumed = false,
 ) {
   const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
   const saved = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -2450,7 +2452,7 @@ async function completedWorkerDrainPreservesCancellation(
     await writeFile(configPath, "");
     await writeFile(
       workerConfigPath,
-      '[worker_runtime]\nnative_profile = "completion_fixture"\n',
+      '[worker_runtime]\ndrain_session_records = true\nnative_profile = "completion_fixture"\n',
     );
     await writeFile(
       path.join(home, "completion_fixture.config.toml"),
@@ -2520,6 +2522,9 @@ async function completedWorkerDrainPreservesCancellation(
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
     assert.equal(invocation.argv.includes("resume"), resumed);
+    assertConfigOverrides(invocation.argv, {
+      drain_session_records: undefined,
+    });
 
     controller.abort("coordinator canceled its completed worker drain");
     if (process.platform !== "win32") {
@@ -2562,6 +2567,7 @@ async function completedWorkerDrainPreservesCancellation(
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
     for (const [name, value] of saved) restoreEnv(name, value);
+    restoreDrain();
   }
 }
 
@@ -3033,6 +3039,7 @@ async function withWorkerFixture<Result>(
 
 async function testCancelCompletedWorkerDrain() {
   const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
   const previousPath = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   const controller = new AbortController();
@@ -3089,11 +3096,13 @@ async function testCancelCompletedWorkerDrain() {
       } catch {}
     await execution?.catch(() => {});
     restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreDrain();
   }
 }
 
 async function testCompletedWorkerFlushesBeforeSettling() {
   const fixture = await fakeCodexFixture();
+  const restoreDrain = await budgetedWorkerFixture(fixture);
   const previousPath = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = fixture.executablePath;
   const controller = new AbortController();
@@ -3156,5 +3165,94 @@ async function testCompletedWorkerFlushesBeforeSettling() {
     }
     process.removeListener("uncaughtException", captureUnexpectedError);
     restoreEnv("CODEX_CLI_PATH", previousPath);
+    restoreDrain();
+  }
+}
+
+async function budgetedWorkerFixture(
+  fixture: Awaited<ReturnType<typeof fakeCodexFixture>>,
+) {
+  const saved = [
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ].map((name) => [name, process.env[name]] as const);
+  const config = path.join(fixture.root, "budget-config.toml");
+  const worker = path.join(fixture.root, "budget-worker.toml");
+  await writeFile(config, "");
+  await writeFile(worker, "[worker_runtime]\ndrain_session_records = true\n");
+  process.env.CODEX_SECURITY_CONFIG_PATH = config;
+  process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = worker;
+  return () => {
+    for (const [name, value] of saved) restoreEnv(name, value);
+  };
+}
+
+async function testUnbudgetedCompletedWorkerReturns() {
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumed of [false, true]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "COMPLETE_THEN_HANG\n");
+        const originalSpawn = childProcess.spawn;
+        const previousPath = process.env.CODEX_CLI_PATH;
+        process.env.CODEX_CLI_PATH = process.execPath;
+        childProcess.spawn = ((
+          command: string,
+          args: readonly string[] = [],
+          options: SpawnOptions = {},
+        ) =>
+          originalSpawn(
+            command,
+            command === process.execPath ||
+              command === path.win32.toNamespacedPath(process.execPath)
+              ? [fixture.executablePath, ...args]
+              : args,
+            options,
+          )) as typeof childProcess.spawn;
+        syncBuiltinESMExports();
+        const controller = new AbortController();
+        let childPid: number | undefined;
+        let timeout: NodeJS.Timeout | undefined;
+        const execution = new CodexSdkWorkerExecutor({
+          parentSandbox: trustedParentSandbox,
+        }).run({
+          kind,
+          promptPath,
+          workingDirectory,
+          subagents: 0,
+          signal: controller.signal,
+          ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
+          onThreadStarted: async () => {
+            childPid = (await readJson(fixture.markerPath)).pid;
+          },
+        });
+        try {
+          const result = await Promise.race([
+            execution,
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => {
+                controller.abort("fixture completion bound");
+                reject(new Error("unbudgeted worker waited for EOF"));
+              }, 5_000);
+            }),
+          ]);
+          assert.equal(
+            result.threadId,
+            resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
+          );
+          assert.equal(controller.signal.aborted, false);
+        } finally {
+          clearTimeout(timeout);
+          controller.abort("fixture cleanup");
+          if (childPid)
+            try {
+              process.kill(childPid, "SIGKILL");
+            } catch {}
+          await execution.catch(() => {});
+          childProcess.spawn = originalSpawn;
+          syncBuiltinESMExports();
+          restoreEnv("CODEX_CLI_PATH", previousPath);
+        }
+      });
+    }
   }
 }

@@ -122,7 +122,11 @@ test("resolves native SQLite ownership for concurrent fresh and resumed Deep wor
           [
             ...(await resolveScanSessionPaths(f.options, "scan", id, f.native)),
           ].sort(),
-        ).toEqual([...f.paths].sort());
+        ).toEqual(
+          f.paths
+            .map<[string, string]>((path, index) => [path, f.ids[index]!])
+            .sort(),
+        );
       const requests = (await readFile(f.transcript, "utf8"))
         .trim()
         .split("\n")
@@ -171,7 +175,11 @@ test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
           f.native,
         )),
       ].sort(),
-    ).toEqual([...f.paths].sort());
+    ).toEqual(
+      f.paths
+        .map<[string, string]>((path, index) => [path, f.ids[index]!])
+        .sort(),
+    );
     if (key === "CODEX_STATE_DB") {
       await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
         code: "ENOENT",
@@ -249,7 +257,11 @@ test.each(["unrelated", "schema"])(
           f.native,
         )),
       ].sort(),
-    ).toEqual([...f.paths].sort());
+    ).toEqual(
+      f.paths
+        .map<[string, string]>((path, index) => [path, f.ids[index]!])
+        .sort(),
+    );
     expect(await readFile(f.transcript, "utf8")).toContain(
       '"method":"config/read"',
     );
@@ -293,7 +305,11 @@ test.each(["absent", "incomplete", "readable"])(
           f.native,
         )),
       ].sort(),
-    ).toEqual([...f.paths].sort());
+    ).toEqual(
+      f.paths
+        .map<[string, string]>((path, index) => [path, f.ids[index]!])
+        .sort(),
+    );
     expect(await readFile(f.transcript, "utf8")).toContain(
       '"method":"config/read"',
     );
@@ -366,7 +382,7 @@ test.each(["direct", "profile"])(
         ...f.native,
         config,
       })),
-    ]).toEqual([callerRollout]);
+    ]).toEqual([[callerRollout, f.ids[0]!]]);
     const requests = (await readFile(f.transcript, "utf8"))
       .trim()
       .split("\n")

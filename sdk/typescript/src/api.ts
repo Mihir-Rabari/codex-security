@@ -1431,6 +1431,7 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
+        ...(maxCostUsd === undefined ? {} : { drain_session_records: true }),
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),

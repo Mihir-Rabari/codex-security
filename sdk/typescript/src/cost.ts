@@ -87,7 +87,7 @@ interface ScanCostTrackerOptions {
   onError?: (error: unknown) => void;
   resolveOwnedSessionPaths?: (
     rootThreadId: string,
-  ) => Promise<ReadonlySet<string>>;
+  ) => Promise<ReadonlyMap<string, string>>;
 }
 
 interface ScanCostSnapshot {
@@ -227,7 +227,7 @@ export class ScanCostTracker {
   }
 
   public async refresh(
-    ownedPaths?: ReadonlySet<string>,
+    ownedPaths?: ReadonlyMap<string, string>,
   ): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
       await this.#readSessions(ownedPaths);
@@ -245,7 +245,7 @@ export class ScanCostTracker {
       this.#timer = null;
     }
     const suppliedRoot = tokenUsage(fallbackUsage);
-    let ownedPaths: ReadonlySet<string> | undefined;
+    let ownedPaths: ReadonlyMap<string, string> | undefined;
     let ownershipFailure: { error: unknown } | null = null;
     if (
       finalizing &&
@@ -330,7 +330,7 @@ export class ScanCostTracker {
             [...observed.accountedSessions].map(async (path) => realpath(path)),
           ),
         );
-        for (const path of ownedPaths) {
+        for (const path of ownedPaths.keys()) {
           if (!accountedPaths.has(path)) {
             unidentifiedOwnedSession = true;
             break;
@@ -379,7 +379,7 @@ export class ScanCostTracker {
     path: string,
     partial: SessionUsage,
     present: ReadonlySet<string>,
-    ownedPaths?: ReadonlySet<string>,
+    ownedPaths?: ReadonlyMap<string, string>,
   ): Promise<boolean> {
     if (this.#options.maxCostUsd === undefined) return false;
     for (const [completePath, complete] of this.#sessions) {
@@ -405,13 +405,13 @@ export class ScanCostTracker {
     return false;
   }
 
-  async #readSessions(ownedPaths?: ReadonlySet<string>): Promise<void> {
+  async #readSessions(ownedPaths?: ReadonlyMap<string, string>): Promise<void> {
     const rootThreadId = this.#threadId;
     if (rootThreadId === null) return;
     this.#rootOnlyReadError = false;
     const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    const paths = new Set(ownedPaths);
+    const paths = new Set(ownedPaths?.keys());
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
     ))
@@ -592,7 +592,11 @@ export class ScanCostTracker {
       workers: null,
       completedRoot: this.#observedUsage.completedRoot,
       rootCompleted: false,
-      unverified: hasUnverifiedWorkerAttribution,
+      unverified:
+        hasUnverifiedWorkerAttribution ||
+        [...(ownedPaths ?? [])].some(
+          ([path, threadId]) => this.#sessions.get(path)?.threadId !== threadId,
+        ),
       unfinishedWorkers: false,
       unidentifiedSessions: new Set(),
       accountedSessions: new Set(),
@@ -646,8 +650,10 @@ export class ScanCostTracker {
           ),
         );
         if (
-          session.taskCompleted ||
-          this.#completedThreadUsage.has(session.threadId)
+          this.#completedThreadUsage.has(session.threadId) ||
+          (session.taskCompleted &&
+            (ownedPaths === undefined ||
+              ownedPaths.get(path) === session.threadId))
         )
           completedThreads.add(session.threadId);
       }

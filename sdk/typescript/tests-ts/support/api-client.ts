@@ -73,7 +73,7 @@ export class TestClient extends CodexSecurity {
       {
         createCodex: throwing("Unexpected Codex invocation in test"),
         environment: {},
-        resolveScanSessionPaths: async () => new Set<string>(),
+        resolveScanSessionPaths: async () => new Map<string, string>(),
         probeCodexSandbox: async () => {},
         prepareScanArtifactRestorer: async () => ({
           restore: async () => {},

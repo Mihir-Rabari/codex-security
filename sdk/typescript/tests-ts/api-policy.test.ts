@@ -119,7 +119,7 @@ async function setup(
       createCodex,
       resolveCodexCommand: options.resolveCodexCommand,
       resolveScanSessionPaths:
-        options.resolveOwnedSessions ?? (async () => new Set<string>()),
+        options.resolveOwnedSessions ?? (async () => new Map<string, string>()),
     },
     { surface: options.surface ?? "sdk" },
   );

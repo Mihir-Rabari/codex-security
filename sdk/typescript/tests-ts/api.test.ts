@@ -1760,6 +1760,9 @@ describe("CodexSecurity orchestration", () => {
                   const workerConfig = parseToml(
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
+                  expect(workerConfig["drain_session_records"]).toBe(
+                    index === 0 ? true : undefined,
+                  );
                   const windows = (resolveCodexProfile(overrides)["windows"] ??
                     DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
                   expect(workerConfig["windows"] as JsonObject).toEqual(
@@ -1818,6 +1821,7 @@ describe("CodexSecurity orchestration", () => {
               workers: index + 1,
               subagents: index,
               stopAfterConsecutiveErrors: index + 2,
+              ...(index === 0 ? { maxCostUsd: 1 } : {}),
             })
             .finally(allStarted.resolve),
         ),
@@ -8085,9 +8089,9 @@ test.each([
           expect(nativeConfig!.workingDirectory).toBe(scanDir);
           expect(scanId).toBe("scan_example_001");
           expect(threadId).toBe("thread-1");
-          return new Set([
-            rootSession!,
-            join(codexHome, "missing-owned-worker.jsonl"),
+          return new Map([
+            [rootSession!, "thread-1"],
+            [join(codexHome, "missing-owned-worker.jsonl"), "missing-worker"],
           ]);
         },
         prepareOutputDir: async () => scanDir,

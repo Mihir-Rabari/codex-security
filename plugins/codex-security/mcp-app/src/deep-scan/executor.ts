@@ -66,6 +66,7 @@ interface CodexSdkWorkerRuntimeSettings {
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
+  drainSessionRecords?: boolean;
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -214,7 +215,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             appendSafeItemDiagnostic(diagnostics, event.item);
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
-            // Drain the SDK stream so the worker can flush its session records.
+            if (!runtimeSettings.drainSessionRecords) break;
+            // Requested budgets require the worker's final session records.
           } else if (event.type === "turn.failed") {
             throw new Error(event.error.message);
           } else if (event.type === "error") {
@@ -502,9 +504,11 @@ async function workerRuntimeSettings(
   const {
     environment: workerEnvironment,
     native_profile: nativeProfile,
+    drain_session_records: drainSessionRecords,
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
+  settings.drainSessionRecords = drainSessionRecords === true;
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }

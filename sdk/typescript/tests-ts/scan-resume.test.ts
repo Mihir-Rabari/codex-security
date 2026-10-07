@@ -33,7 +33,11 @@ async function interruptedScan(
   bulk = false,
   settings: Pick<
     ScanOptions,
-    "safetyIdentifier" | "postScanPrompt" | "auth" | "cyberAccessProgram"
+    | "safetyIdentifier"
+    | "postScanPrompt"
+    | "auth"
+    | "cyberAccessProgram"
+    | "maxCostUsd"
   > = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -436,6 +440,48 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
+
+test.each(["budgeted", "unbudgeted"])(
+  "resume carries the saved %s setting into the private worker snapshot",
+  async (mode) => {
+    const f = await interruptedScan(
+      "deep",
+      false,
+      mode === "budgeted" ? { maxCostUsd: 1 } : {},
+    );
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(
+        f,
+        (options) => ({
+          startThread: () => fail("Resume must use the existing thread."),
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed() {
+                const configPath =
+                  options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                expect(configPath).toBe(join(f.codexHome, "deep-scan.toml"));
+                const snapshot = parseToml(await readFile(configPath!, "utf8"))[
+                  "worker_runtime"
+                ] as Record<string, unknown>;
+                expect(snapshot["drain_session_records"]).toBe(
+                  mode === "budgeted" ? true : undefined,
+                );
+                throw new Error("resumed budget snapshot captured");
+              },
+            };
+          },
+        }),
+        { deepScanConfigPath: join(f.codexHome, "deep-scan.toml") },
+      ),
+    );
+    expect(code).not.toBe(0);
+    expect(stderr.text()).toContain("resumed budget snapshot captured");
+  },
+);
 
 function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,

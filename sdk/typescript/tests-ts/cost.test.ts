@@ -5307,7 +5307,7 @@ describe("live scan cost tracking", () => {
       maxCostUsd: 0.001,
       resolveOwnedSessionPaths: async () => {
         ownershipChecks += 1;
-        return new Set([root]);
+        return new Map([[root, "scan-thread"]]);
       },
     });
     tracker.start("scan-thread");
@@ -5327,6 +5327,7 @@ describe("live scan cost tracking", () => {
 
   test.each([
     ["delegated worker", "delegated", true, "partial"],
+    ["owned worker with root metadata", "delegated", true, "wrong-id"],
     ["independent Deep Scan worker", "independent", true, "partial"],
     ["unrelated session", "unrelated", false, "partial"],
     ["empty delegated worker", "delegated", true, "empty"],
@@ -5419,15 +5420,23 @@ describe("live scan cost tracking", () => {
             ? '{"type":"session_meta","payload":\n'
             : contents === "usage"
               ? `${workerUsage}\n`
-              : contents === "session-id" || contents === "unobserved"
+              : contents === "session-id" ||
+                  contents === "unobserved" ||
+                  contents === "wrong-id"
                 ? `${JSON.stringify({
                     type: "session_meta",
                     payload: {
                       ...(contents === "session-id"
                         ? { session_id: "pending-thread" }
-                        : { id: "pending-thread" }),
-                      ...(relationship === "delegated" ||
-                      relationship === "unobserved-delegated"
+                        : {
+                            id:
+                              contents === "wrong-id"
+                                ? "scan-thread"
+                                : "pending-thread",
+                          }),
+                      ...((relationship === "delegated" ||
+                        relationship === "unobserved-delegated") &&
+                      contents !== "wrong-id"
                         ? { parent_thread_id: "scan-thread" }
                         : {}),
                     },
@@ -5549,6 +5558,64 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["unfinished", "completed"])(
+    "uses the authoritative %s worker status despite a completed copy",
+    async (status) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        "scan-thread",
+        undefined,
+        undefined,
+        true,
+      );
+      await fsPromises.copyFile(
+        worker,
+        join(
+          home,
+          "sessions",
+          "2026",
+          "07",
+          "26",
+          "previous-completed-turn.jsonl",
+        ),
+      );
+      await appendFile(worker, `${taskEvent("task_started")}\n`);
+      if (status === "completed")
+        await appendFile(worker, `${taskEvent("task_complete")}\n`);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [worker, "worker-thread"],
+          ]),
+      });
+      tracker.start("scan-thread");
+      const result = tracker.stop(rootUsage);
+      if (status === "unfinished")
+        await expect(result).rejects.toThrow(/could not be verified/u);
+      else
+        await expect(result).resolves.toMatchObject({
+          cost: { inputTokens: 150, outputTokens: 15 },
+        });
+    },
+  );
+
   test.each(["root", "worker"])(
     "counts copied %s rollouts once per native thread",
     async (copied) => {
@@ -5581,7 +5648,11 @@ describe("live scan cost tracking", () => {
         codexHome: home,
         model: "gpt-5.6-sol",
         maxCostUsd: 1,
-        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [worker, "worker-thread"],
+          ]),
       });
       tracker.start("scan-thread");
       const snapshot = await tracker.stop(rootUsage);
@@ -5625,7 +5696,11 @@ describe("live scan cost tracking", () => {
         model: "gpt-5.6-sol",
         scanDirectory: home,
         maxCostUsd: 1,
-        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [worker, "worker-thread"],
+          ]),
       });
       if (polled) {
         tracker.start("scan-thread");
@@ -5682,7 +5757,10 @@ describe("live scan cost tracking", () => {
       resolveOwnedSessionPaths: async () => {
         ownershipCalls += 1;
         finishPoll();
-        return new Set([root, worker]);
+        return new Map([
+          [root, "scan-thread"],
+          [worker, "worker-thread"],
+        ]);
       },
       onError: (error) => {
         errors.push(error);
@@ -5741,7 +5819,14 @@ describe("live scan cost tracking", () => {
         model: "gpt-5.6-sol",
         maxCostUsd: 1,
         resolveOwnedSessionPaths: async () =>
-          new Set(replacement === "unowned" ? [root] : [root, archive]),
+          new Map(
+            replacement === "unowned"
+              ? [[root, "scan-thread"]]
+              : [
+                  [root, "scan-thread"],
+                  [archive, "worker-thread"],
+                ],
+          ),
       });
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -5795,7 +5880,11 @@ describe("live scan cost tracking", () => {
         codexHome: home,
         model: "gpt-5.6-sol",
         maxCostUsd: 1,
-        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [worker, "worker-thread"],
+          ]),
       });
       tracker.start("scan-thread");
       expect((await tracker.stop(rootUsage)).cost).toMatchObject({
@@ -5841,7 +5930,11 @@ describe("live scan cost tracking", () => {
         codexHome: home,
         model: "gpt-5.6-sol",
         maxCostUsd: 1,
-        resolveOwnedSessionPaths: async () => new Set([root, worker]),
+        resolveOwnedSessionPaths: async () =>
+          new Map([
+            [root, "scan-thread"],
+            [worker, "worker-thread"],
+          ]),
       });
       tracker.start("scan-thread");
       await expect(tracker.stop(rootUsage)).rejects.toThrow(
@@ -5881,7 +5974,11 @@ describe("live scan cost tracking", () => {
       codexHome: home,
       model: "gpt-5.6-sol",
       maxCostUsd: 1,
-      resolveOwnedSessionPaths: async () => new Set([root, partial]),
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [root, "scan-thread"],
+          [partial, "worker-thread"],
+        ]),
     });
     tracker.start("scan-thread");
     await expect(tracker.stop(rootUsage)).rejects.toThrow(
@@ -5918,7 +6015,11 @@ describe("live scan cost tracking", () => {
       codexHome: home,
       model: "gpt-5.6-terra",
       maxCostUsd: 0.001,
-      resolveOwnedSessionPaths: async () => new Set([root, worker]),
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [root, "scan-thread"],
+          [worker, "worker-thread"],
+        ]),
     });
     tracker.start("scan-thread");
 
@@ -6022,7 +6123,7 @@ describe("live scan cost tracking", () => {
         maxCostUsd,
         resolveOwnedSessionPaths: async () => {
           ownershipChecks += 1;
-          return new Set([root]);
+          return new Map([[root, "scan-thread"]]);
         },
       });
       tracker.start("scan-thread");
