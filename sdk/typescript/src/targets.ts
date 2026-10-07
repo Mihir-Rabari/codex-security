@@ -778,10 +778,25 @@ export async function gitMarkerRoot(
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  const canonical = await abortable(() => realpath(repository), signal);
-  let current = (await lstat(canonical)).isDirectory()
-    ? canonical
-    : dirname(canonical);
+  let candidate = resolve(repository);
+  let current: string;
+  while (true) {
+    try {
+      const canonical = await abortable(() => realpath(candidate), signal);
+      current = (await lstat(canonical)).isDirectory()
+        ? canonical
+        : dirname(canonical);
+      break;
+    } catch (error) {
+      // Executable protection must retain surviving checkout ancestors of stale targets.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (search !== "outermost" || (code !== "ENOENT" && code !== "ENOTDIR"))
+        throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);

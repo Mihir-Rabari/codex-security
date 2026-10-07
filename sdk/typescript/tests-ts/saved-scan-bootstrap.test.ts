@@ -947,3 +947,54 @@ test("saved-scan bootstrap waits for a concurrent database writer", async () => 
     await closed;
   }
 });
+
+for (const source of ["PYTHON", "PATH"] as const) {
+  test.skipIf(process.platform === "win32")(
+    `saved missing targets still protect their enclosing checkout from ${source}`,
+    async () => {
+      const f = await fixture(true);
+      const target = join(f.repository, "deleted-component", "nested");
+      const python = join(f.repository, "python3");
+      const marker = join(f.root, "missing-target-probed");
+      await writeFile(
+        python,
+        '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+        { mode: 0o700 },
+      );
+      const db = new Database(
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      );
+      try {
+        db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
+          target,
+          f.first.scanId,
+        );
+      } finally {
+        db.close();
+      }
+      const workbench = await savedScanWorkbench(f.first.scanId, {
+        environment: {
+          ...f.environment,
+          TEST_PYTHON_PROBE: marker,
+          ...(source === "PYTHON"
+            ? { PYTHON: python }
+            : { PATH: f.repository + delimiter + f.environment.PATH }),
+        },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.root,
+      });
+      const result = workbench(["get-scan", "--scan-id", f.first.scanId]);
+      if (source === "PYTHON")
+        await expect(result).rejects.toThrow(
+          "PYTHON interpreter is unavailable or unusable",
+        );
+      else {
+        expect((await result)["scan"]).toMatchObject({
+          scanId: f.first.scanId,
+        });
+        expect(workbench.environment["PYTHON"]).not.toBe(python);
+      }
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+}

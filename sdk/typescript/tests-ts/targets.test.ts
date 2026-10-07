@@ -712,6 +712,20 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   expect(await gitMarkerRoot(alias, undefined, "nearest")).toBe(nested);
   expect(await gitMarkerRoot(alias, undefined, "outermost")).toBe(repo);
   expect(
+    await gitMarkerRoot(
+      join(alias, "removed", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
+    await gitMarkerRoot(
+      join(alias, "context.md", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
 });
