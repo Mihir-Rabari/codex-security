@@ -1495,29 +1495,7 @@ async function loadResumableScan(
         if (evidenceIds.has(evidence.id)) return undefined;
         evidenceIds.add(evidence.id);
       }
-      for (const evidence of finding.code_evidence ?? []) {
-        evidenceIds.add(evidence.id);
-      }
-      // Sealed legacy details retain their original references through loadContract.
-      if (finding.code_evidence !== undefined) continue;
-      for (const section of [
-        finding.rootCause,
-        finding.validation,
-        finding.attackPath,
-      ]) {
-        if (!isReceiptRecord(section)) continue;
-        const references = section["evidenceRefs"];
-        if (
-          references !== undefined &&
-          (!Array.isArray(references) ||
-            references.some(
-              (reference) =>
-                typeof reference !== "string" || !evidenceIds.has(reference),
-            ))
-        ) {
-          return undefined;
-        }
-      }
+      // loadContract preserves supported sealed references through canonical legacy validation.
     }
 
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);

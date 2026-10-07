@@ -2220,13 +2220,13 @@ describe("multiscan", () => {
     "dangling root-cause evidence",
     "dangling validation evidence",
     "dangling attack-path evidence",
-  ] as const)("rescans sealed artifacts with %s", async (corruption) => {
+  ] as const)("checks sealed artifacts with %s", async (corruption) => {
     if (corruption === "forged lexical symlink scope") {
       const count = Number(process.env["GIT_CONFIG_COUNT"] ?? "0");
       if (
         runTestInSubprocess(
           fileURLToPath(import.meta.url),
-          `rescans sealed artifacts with ${corruption}`,
+          `checks sealed artifacts with ${corruption}`,
           {
             ...process.env,
             GIT_CONFIG_COUNT: String(count + 1),
@@ -2446,12 +2446,18 @@ describe("multiscan", () => {
       await contract.hasSealedReport(outputDir, sealedManifest),
     ).toBeTrue();
 
+    const compatibleLegacyReference =
+      corruption === "dangling root-cause evidence" ||
+      corruption === "dangling validation evidence" ||
+      corruption === "dangling attack-path evidence";
+    if (compatibleLegacyReference)
+      await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
       failed: 0,
-      skipped: 0,
+      skipped: compatibleLegacyReference ? 1 : 0,
     });
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(compatibleLegacyReference ? 1 : 2);
   });
 
   test.each([
@@ -3857,41 +3863,44 @@ test("resume compatibility recovers a failed completed bundle without fetching i
 });
 
 for (const section of ["rootCause", "validation", "attackPath"] as const) {
-  test(`resume compatibility reuses sealed legacy ${section} references`, async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "legacy-reference-source");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
-    );
-    const runs = mock(completeRun);
-    const campaign = options(paths, client(runs));
-    const first = await runMultiscan(campaign);
-    const dir = (await results(first.resultsPath))[0]!["outputDir"] as string;
-    const path = join(dir, "findings.json");
-    const saved = JSON.parse(
-      await readFile(path, "utf8"),
-    ) as ScanResult["findings"];
-    const finding = saved.findings[0]!;
-    finding.code_evidence = [{ id: "saved-evidence", code: "extract()" }];
-    finding[section] = {
-      summary: "Existing saved source evidence",
-      evidenceRefs: ["saved-evidence", "obsolete-evidence"],
-    };
-    await writeFile(path, JSON.stringify(saved));
-    await reseal(dir);
-    expect(
-      (await loadContract(dir, { pluginRoot: PLUGIN_ROOT })).findings
-        .findings[0]![section],
-    ).toEqual(finding[section]);
-    const bytes = await readFile(path);
-    expect(await runMultiscan(campaign)).toMatchObject({
-      completed: 1,
-      skipped: 1,
+  for (const evidenceCatalog of ["present", "absent"] as const) {
+    test(`resume compatibility reuses sealed legacy ${section} references with ${evidenceCatalog} evidence catalog`, async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "legacy-reference-source");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+      );
+      const runs = mock(completeRun);
+      const campaign = options(paths, client(runs));
+      const first = await runMultiscan(campaign);
+      const dir = (await results(first.resultsPath))[0]!["outputDir"] as string;
+      const path = join(dir, "findings.json");
+      const saved = JSON.parse(
+        await readFile(path, "utf8"),
+      ) as ScanResult["findings"];
+      const finding = saved.findings[0]!;
+      if (evidenceCatalog === "present")
+        finding.code_evidence = [{ id: "saved-evidence", code: "extract()" }];
+      finding[section] = {
+        summary: "Existing saved source evidence",
+        evidenceRefs: ["saved-evidence", "obsolete-evidence"],
+      };
+      await writeFile(path, JSON.stringify(saved));
+      await reseal(dir);
+      expect(
+        (await loadContract(dir, { pluginRoot: PLUGIN_ROOT })).findings
+          .findings[0]![section],
+      ).toEqual(finding[section]);
+      const bytes = await readFile(path);
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(runs).toHaveBeenCalledTimes(1);
+      expect(await readFile(path)).toEqual(bytes);
     });
-    expect(runs).toHaveBeenCalledTimes(1);
-    expect(await readFile(path)).toEqual(bytes);
-  });
+  }
 }
 
 for (const spelling of [
