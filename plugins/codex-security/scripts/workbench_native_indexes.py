@@ -768,18 +768,32 @@ def list_repositories(
     for row in connection.execute("SELECT id, target_id FROM scans ORDER BY rowid DESC"):
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 
+    targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    query = args.query.strip().casefold() if args is not None and args.query else ""
+    selected_targets = (
+        {
+            target_id
+            for target_id, target in targets.items()
+            if (args.target_id is None or target_id == args.target_id)
+            and args.status != "not_scanned"
+            and (
+                not query
+                or query in target["display_name"].casefold()
+                or query in target["current_path"].casefold()
+            )
+        }
+        if args is not None
+        else None
+    )
     open_findings_by_target = Counter(
         row["target_id"]
         for row in _indexed_active_findings(
             connection,
             read_coverage,
-            target_ids={args.target_id}
-            if args is not None and args.target_id is not None
-            else None,
+            target_ids=selected_targets,
         )
         if row["status"] == "open"
     )
-    targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
@@ -796,7 +810,6 @@ def list_repositories(
     if args is None:
         return {"repositories": repositories}
 
-    query = args.query.strip().casefold() if args.query else ""
     repositories = [
         repository
         for repository in repositories

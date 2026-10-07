@@ -435,6 +435,8 @@ export function renderScanHistory(
                   ? [
                       ["Attacker", "attacker"],
                       ["Entry point", "entrypoint"],
+                      ["Source", "source"],
+                      ["Sink", "sink"],
                       ["Outcome", "outcome"],
                     ]
                   : [];
@@ -479,25 +481,24 @@ export function renderScanHistory(
       result["codeEvidence"],
       result["code_evidence"],
     ].flatMap((catalog) => (Array.isArray(catalog) ? catalog : []));
-    const rootCause = result["rootCause"] ?? result["root_cause"];
-    const legacyRootCode =
-      typeof rootCause === "object" &&
-      rootCause !== null &&
-      !Array.isArray(rootCause) &&
-      typeof rootCause["code"] === "string"
-        ? rootCause["code"]
-        : undefined;
-    const evidenceEntries: JsonObject[] =
-      Array.isArray(codeEvidence) && codeEvidence.length > 0
-        ? codeEvidence.filter(
-            (entry): entry is JsonObject =>
-              typeof entry === "object" &&
-              entry !== null &&
-              !Array.isArray(entry),
-          )
-        : legacyRootCode === undefined
-          ? []
-          : [{ label: "Root-cause source", code: legacyRootCode }];
+    const evidenceEntries: JsonObject[] = codeEvidence.filter(
+      (entry): entry is JsonObject =>
+        typeof entry === "object" && entry !== null && !Array.isArray(entry),
+    );
+    for (const rootCause of [result["rootCause"], result["root_cause"]]) {
+      if (
+        typeof rootCause === "object" &&
+        rootCause !== null &&
+        !Array.isArray(rootCause) &&
+        typeof rootCause["code"] === "string" &&
+        !evidenceEntries.some((entry) => entry["code"] === rootCause["code"])
+      ) {
+        evidenceEntries.push({
+          label: "Root-cause source",
+          code: rootCause["code"],
+        });
+      }
+    }
     if (evidenceEntries.length > 0) {
       lines.push("", `  ${strong("CODE EVIDENCE")}`);
       for (const evidence of evidenceEntries) {

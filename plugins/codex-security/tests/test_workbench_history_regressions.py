@@ -646,7 +646,8 @@ def test_pruned_coverage_keeps_history_but_tampering_is_rejected(
         assert "changed" in result["stderr"]
 
 
-def test_selected_repository_ignores_an_unrelated_tampered_scan(history) -> None:
+@pytest.mark.parametrize("selector", ["target", "query"])
+def test_selected_repository_ignores_an_unrelated_tampered_scan(history, selector) -> None:
     state, root, repository = history
     selected = create_cli_scan(state, root, repository)
     unrelated = repository.with_name("unrelated")
@@ -655,7 +656,15 @@ def test_selected_repository_ignores_an_unrelated_tampered_scan(history) -> None
     later = create_cli_scan(state, root, unrelated, finding=False)
     manifest = Path(later["scanDir"]) / "scan-manifest.json"
     manifest.write_text(manifest.read_text() + "\n")
-    result = run_workbench(state, "list-repositories", "--target-id", selected["targetId"])
+    result = run_workbench(
+        state,
+        "list-repositories",
+        *(
+            ["--target-id", selected["targetId"]]
+            if selector == "target"
+            else ["--query", str(repository)]
+        ),
+    )
     assert len(result["repositories"]) == 1
     assert result["repositories"][0]["targetId"] == selected["targetId"]
     assert result["repositories"][0]["openFindingsCount"] == 1
@@ -1380,7 +1389,7 @@ def test_bulk_matching_preserves_legacy_seals(tmp_path, identity):
     )
 
 
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("legacy", [False, True, "all-legacy"])
 def test_offline_saved_comparison_keeps_pretransition_legacy_seals(tmp_path, legacy):
     state, root, repo = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     repo.mkdir()
@@ -1392,7 +1401,8 @@ def test_offline_saved_comparison_keeps_pretransition_legacy_seals(tmp_path, leg
     if legacy:
         with sqlite3.connect(state / "workbench.sqlite3") as db:
             db.execute("UPDATE scans SET target_device=NULL,target_inode=NULL")
-        create_cli_scan(state, root, repo, identity_anchor="recorded-current-owner")
+        if legacy != "all-legacy":
+            create_cli_scan(state, root, repo, identity_anchor="recorded-current-owner")
     saved = save_scan_matches(state, *scans, confirmed_match(*[r["occurrenceId"] for r in rows]))
     repo.rename(repo.with_name("offline-owner"))
     result = compare_scan_pair(state, *scans, check=False)
@@ -1554,3 +1564,41 @@ def test_inherited_fixed_closure_verifies_each_active_worktree(tmp_path, drift):
     assert (inherited["returncode"] != 0) == drift
     if drift:
         assert "Working-tree contents changed" in inherited["stderr"]
+
+
+@pytest.mark.parametrize("reaffirm_after_admission", [False, True])
+def test_identical_decision_refreshes_the_scan_admission_boundary(
+    history, reaffirm_after_admission
+):
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    decision = (
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic reaffirmed decision",
+    )
+    run_workbench(state, *decision)
+    run_workbench(state, *decision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone()[0] == 1
+    pending = create_cli_scan(state, root, repository, complete=False)
+    if reaffirm_after_admission:
+        run_workbench(state, *decision)
+    scan_dir = Path(pending["scanDir"])
+    write_completed_contract(scan_dir, pending["scanId"], repository)
+    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
+    run_workbench(state, "complete-scan", "--scan-id", pending["scanId"])
+    findings = run_workbench(
+        state, "list-global-findings", "--repository", str(repository), "--include-resolved"
+    )["findings"]
+    assert len(findings) == 1
+    assert findings[0]["status"] == ("closed" if reaffirm_after_admission else "open")

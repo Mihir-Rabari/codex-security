@@ -960,6 +960,11 @@ def _same_registered_repository(
             except FileNotFoundError:
                 ownership = _recorded_target_ownership(connection, scan["target_id"])
                 if ownership is None:
+                    if before["target_id"] == after["target_id"] and (
+                        _legacy_scan_before_ownership_transition(scan, None)
+                    ):
+                        missing_checkout = True
+                        continue
                     return False
                 recorded, epoch_start = ownership
                 if not (

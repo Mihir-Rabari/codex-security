@@ -4,6 +4,50 @@ import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each([false, true])(
+    "keeps native reachability and complementary root evidence with catalogs %s",
+    (catalog) => {
+      const output = renderScanHistory(
+        {
+          title: "Synthetic saved finding",
+          severity: { level: "high" },
+          rootCause: {
+            summary: "Synthetic modern root summary",
+            code: "synthetic_modern_control();",
+          },
+          root_cause: { code: "synthetic_legacy_control();" },
+          codeEvidence: catalog
+            ? [
+                {
+                  label: "Existing catalog",
+                  code: "synthetic_modern_control();",
+                },
+              ]
+            : [],
+          attackPath: {
+            reachability: {
+              summary: "Supported reachability",
+              source: "Synthetic reachability input",
+              sink: "Synthetic authorized filesystem sink",
+            },
+          },
+        },
+        "finding",
+        { color: false },
+      );
+      for (const detail of [
+        "Synthetic modern root summary",
+        "synthetic_modern_control();",
+        "synthetic_legacy_control();",
+        "Synthetic reachability input",
+        "Synthetic authorized filesystem sink",
+      ]) {
+        expect(output).toContain(detail);
+      }
+      expect(output.split("synthetic_modern_control();")).toHaveLength(2);
+    },
+  );
+
   test("keeps supported attack-path caveats", () => {
     const output = renderScanHistory(
       {
