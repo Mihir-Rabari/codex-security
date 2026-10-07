@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { parseJson, stringifyJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
+import { transaction } from "./transaction";
 
 export interface Finding {
   findingId: string;
@@ -13,26 +14,6 @@ export interface Finding {
 export interface EmbeddedFinding {
   finding: Finding;
   embedding: { model: string; vector: number[] };
-}
-
-export function transaction<T>(
-  database: DatabaseSync,
-  begin: "BEGIN" | "BEGIN IMMEDIATE",
-  action: () => T,
-): T {
-  database.exec(begin);
-  try {
-    const result = action();
-    database.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      database.exec("ROLLBACK");
-    } catch {
-      // SQLite can roll back automatically after a storage failure.
-    }
-    throw error;
-  }
 }
 
 class FindingConflict extends Error {}
