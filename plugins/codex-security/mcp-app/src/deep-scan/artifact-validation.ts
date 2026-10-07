@@ -330,19 +330,27 @@ export function projectDiscoveryCoverage(
     item: Record<string, unknown>,
     source: Record<string, unknown> = item,
   ) => {
-    const original = history.find((source) =>
-      ((source.coverage[field] as unknown[] | undefined) ?? []).some((saved) => {
-        const original = typeof saved === "string" ? { question: saved } : structuredClone(saved);
-        const normalized = structuredClone(item);
-        if (field === "surfaces" && isRecord(original)) {
-          original.receiptRefs ??= [];
-          normalized.receiptRefs ??= [];
-          const prefix = `${archivePrefix}attempt-${String(source.attempt).padStart(2, "0")}/`;
-          for (const row of [original, normalized])
-            row.receiptRefs = (row.receiptRefs as string[]).map((ref) => ref.startsWith(prefix) ? ref.slice(prefix.length) : ref);
-        }
-        return isDeepStrictEqual(original, normalized);
-      }),
+    const original = history.find((historical) =>
+      ((historical.coverage[field] as unknown[] | undefined) ?? []).some(
+        (saved) =>
+          (field === "surfaces" ? [item, source] : [item]).some((current) => {
+            const original =
+              typeof saved === "string"
+                ? { question: saved }
+                : structuredClone(saved);
+            const normalized = structuredClone(current);
+            if (field === "surfaces" && isRecord(original)) {
+              original.receiptRefs ??= [];
+              normalized.receiptRefs ??= [];
+              const prefix = `${archivePrefix}attempt-${String(historical.attempt).padStart(2, "0")}/`;
+              for (const row of [original, normalized])
+                row.receiptRefs = (row.receiptRefs as string[]).map((ref) =>
+                  ref.startsWith(prefix) ? ref.slice(prefix.length) : ref,
+                );
+            }
+            return isDeepStrictEqual(original, normalized);
+          }),
+      ),
     );
     const origin = original
       ? { workerId: worker.id, attempt: original.attempt }
@@ -390,7 +398,8 @@ export function projectDiscoveryCoverage(
   });
   const surfaceIds = new Map();
   for (const [index, surface] of surfaces.entries()) {
-    if (!surfaceIds.has(surface.id)) surfaceIds.set(surface.id, projectedSurfaces[index]!.id);
+    if (!surfaceIds.has(surface.id))
+      surfaceIds.set(surface.id, projectedSurfaces[index]!.id);
   }
   return {
     completeness: coverage.completeness,

@@ -262,62 +262,96 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
-for (const optionalIds of [false, true]) {
-  test(`retry writer retains raw archived coverage ownership, optional IDs=${optionalIds}`, async () => {
-    const f = await fixture();
-    try {
-      f.context.deepReducer.claimedWorkers[0].attempt = 2;
-      const inherited = workerDraft([], {
-        complete: false,
-        coverage: {
-          completeness: "partial",
-          surfaces: [
-            {
-              ...(optionalIds ? { id: "first-surface", receiptRefs: [] } : {}),
-              label: "First attempt review",
-              disposition: "needs_follow_up",
+for (const withReceipts of [false, true]) {
+  for (const directFile of [false, true]) {
+    for (const optionalIds of [false, true]) {
+      test(`retry writer retains raw archived coverage ownership, optional IDs=${optionalIds}, receipts=${withReceipts}, direct file=${directFile}`, async () => {
+        const f = await fixture();
+        try {
+          f.context.deepReducer.claimedWorkers[0].attempt = 2;
+          const inherited = workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [
+                {
+                  ...(optionalIds
+                    ? { id: "first-surface", receiptRefs: [] }
+                    : {}),
+                  receiptRefs: withReceipts ? ["artifacts/review.txt"] : [],
+                  label: "First attempt review",
+                  disposition: "needs_follow_up",
+                },
+              ],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  ...(optionalIds ? { id: "first-task" } : {}),
+                  reason: "First attempt still needs validation.",
+                },
+              ],
             },
-          ],
-          explicitExclusions: [],
-          deferred: [
-            {
-              ...(optionalIds ? { id: "first-task" } : {}),
-              reason: "First attempt still needs validation.",
-            },
-          ],
-        },
+          });
+          // A worker can finish with an incomplete result; its retry uses the normal
+          // recording API to retain those saved observations.
+          if (withReceipts) {
+            await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+            await writeFile(
+              path.join(f.output, "artifacts/review.txt"),
+              "Original synthetic review.\n",
+            );
+          }
+          await writeFile(f.resultPath, JSON.stringify(inherited));
+          const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+          await archiveDirectory(f.output, archive);
+          const archiveResult = path.join(archive, "result.json");
+          const before = await readFile(archiveResult);
+          await mkdir(f.output, { recursive: true });
+          if (directFile) {
+            if (withReceipts) {
+              await mkdir(path.join(f.output, "artifacts"), {
+                recursive: true,
+              });
+              await writeFile(
+                path.join(f.output, "artifacts/review.txt"),
+                "Original synthetic review.\n",
+              );
+            }
+            await writeFile(
+              f.resultPath,
+              JSON.stringify({ ...inherited, complete: true }),
+            );
+            await validateDiscoveryArtifacts(
+              { workersRoot: path.dirname(f.workerRoot) },
+              f.resultPath,
+              scanId,
+            );
+          } else
+            await recordCodexSecurityWorkerScanDraft(
+              {
+                root: f.output,
+                repoRoot: f.root,
+                scanId,
+                layout: "worker",
+              },
+              workerDraft([], { complete: true }),
+            );
+          const source = (await readDeepReductionSources(f.context))
+            .discoveries[0].coverage;
+          for (const field of ["surfaces", "deferred"])
+            assert.equal(source[field][0].provenance.attempt, 1);
+          assert.ok(
+            source.reviews.some(
+              (review: { attempt: number }) => review.attempt === 1,
+            ),
+          );
+          assert.deepEqual(await readFile(archiveResult), before);
+        } finally {
+          await rm(f.root, { recursive: true, force: true });
+        }
       });
-      // A worker can finish with an incomplete result; its retry uses the normal
-      // recording API to retain those saved observations.
-      await writeFile(f.resultPath, JSON.stringify(inherited));
-      const archive = path.join(f.workerRoot, "attempts", "attempt-01");
-      await archiveDirectory(f.output, archive);
-      const archiveResult = path.join(archive, "result.json");
-      const before = await readFile(archiveResult);
-      await mkdir(f.output, { recursive: true });
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: f.output,
-          repoRoot: f.root,
-          scanId,
-          layout: "worker",
-        },
-        workerDraft([], { complete: true }),
-      );
-      const source = (await readDeepReductionSources(f.context)).discoveries[0]
-        .coverage;
-      for (const field of ["surfaces", "deferred"])
-        assert.equal(source[field][0].provenance.attempt, 1);
-      assert.ok(
-        source.reviews.some(
-          (review: { attempt: number }) => review.attempt === 1,
-        ),
-      );
-      assert.deepEqual(await readFile(archiveResult), before);
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }
 }
 
 test("persisted optional coverage IDs retain their original host-projection shape", async () => {

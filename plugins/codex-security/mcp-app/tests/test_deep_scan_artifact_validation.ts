@@ -692,7 +692,7 @@ function testArchivedCoverageOrigins() {
     coverage,
     { id: "synthetic-worker", attempt: 2 },
     "artifacts/deep_discovery/workers/discovery-0001/output",
-    [{ coverage: prior, attempt: "attempt-01" }],
+    [{ coverage: prior, attempt: 1 }],
   );
   assert.equal(projected.surfaces[0].provenance.attempt, 2);
   for (const field of [

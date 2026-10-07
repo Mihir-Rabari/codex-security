@@ -1,3 +1,4 @@
+import type { JsonObject } from "./types.js";
 import { dirname, join, relative, sep } from "node:path";
 import type { ZodType } from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
@@ -118,6 +119,9 @@ export async function readDeepReductionSources(
           },
           true,
         ).catch(() => []);
+        const originalArchivedCoverage = archived.map(({ input }) =>
+          structuredClone(input.coverage),
+        );
         const originalCoverage = structuredClone(result.coverage);
         normalizeSavedScanCoverage([
           result,
@@ -132,11 +136,23 @@ export async function readDeepReductionSources(
             relative(bound.artifacts.scanDir, dirname(worker.resultPath))
               .split(sep)
               .join("/"),
-            archived.flatMap(({ input, attempt }) => {
+            archived.flatMap(({ input, attempt }, index) => {
               const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
               return number === undefined
                 ? []
-                : [{ attempt: Number(number), coverage: input.coverage }];
+                : [
+                    {
+                      attempt: Number(number),
+                      coverage: {
+                        ...input.coverage,
+                        surfaces: [
+                          ...(input.coverage.surfaces as JsonObject[]),
+                          ...(originalArchivedCoverage[index]
+                            .surfaces as JsonObject[]),
+                        ],
+                      },
+                    },
+                  ];
             }),
             originalCoverage,
           ),

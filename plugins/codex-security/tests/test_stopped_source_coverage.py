@@ -700,6 +700,25 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
             }
         )
     )
+    documents = {
+        "manifest": json.loads(manifest_path.read_text()),
+        "findings": {"findings": []},
+        "coverage": json.loads((scan.scan_dir / "coverage.json").read_text()),
+    }
+    staged = scan.scan_dir / "drafts" / f"{scan.scan_id}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    workbench_api["saved_results"].write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            draft_path=str(staged),
+            checkpoint_path=None,
+            expected_draft_digest=None,
+        ),
+    )
     workbench_api["fail_scan"](
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),

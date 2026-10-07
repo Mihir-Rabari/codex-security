@@ -155,6 +155,13 @@ def test_recovery_uses_host_reviews_without_discovery_review_extensions(
         (scan.scan_dir / "coverage.json").write_text(
             json.dumps({**scan.coverage, "reviews": [host_review]})
         )
+    else:
+        # Reconstruct the review from an accepted host checkpoint, never from
+        # the discovery's untrusted reviews extension.
+        publish_review_projection(
+            workbench_api, workbench_db, scan, {**scan.coverage, "reviews": [host_review]}
+        )
+        (scan.scan_dir / "coverage.json").unlink()
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
     with monkeypatch.context() as interrupted:
@@ -318,19 +325,35 @@ def test_missing_deferred_uses_retained_surface_from_its_reviewed_attempt(
 
 @pytest.mark.parametrize("missing_surface", [False, True])
 @pytest.mark.parametrize("retry_publication", [False, True])
+@pytest.mark.parametrize("with_receipt", [False, True])
 def test_retry_recovery_restores_original_attempt_and_retained_deferral(
-    workbench_api, workbench_db, publication_scan, monkeypatch, missing_surface, retry_publication
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    missing_surface,
+    retry_publication,
+    with_receipt,
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    if with_receipt:
+        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
     with workbench_db:
         workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
     surface = {
         "id": "first-surface",
         "label": "First attempt evidence",
         "disposition": "needs_follow_up",
-        "receiptRefs": [],
+        "receiptRefs": ["artifacts/review.txt"] if with_receipt else [],
     }
     deferred = {
         "id": "first-gap",
@@ -348,14 +371,29 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
             "deferred": [deferred],
         },
     }
-    archived = result.parent / "attempts" / "attempt-1" / "result.json"
+    archived = (
+        (result.parent.parent if result.parent.name == "output" else result.parent)
+        / "attempts"
+        / "attempt-1"
+        / "result.json"
+    )
     archived.parent.mkdir(parents=True)
+    if with_receipt:
+        for root in (result.parent, archived.parent):
+            receipt = root / "artifacts/review.txt"
+            receipt.parent.mkdir(exist_ok=True)
+            receipt.write_text("Original synthetic review evidence.\n")
     archived.write_text(json.dumps({**draft, "complete": False}))
     result.write_text(json.dumps(draft))
     prefix = f"{worker_id}-attempt-1"
     projected_surface = {
         **surface,
         "id": f"{prefix}-surface-1",
+        "receiptRefs": [
+            result.relative_to(scan.scan_dir).parent.as_posix() + "/artifacts/review.txt"
+        ]
+        if with_receipt
+        else [],
         "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
     }
     projected_deferred = {
