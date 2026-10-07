@@ -23,16 +23,10 @@ export interface DeepScanConfig {
   maxTimeHours?: number;
 }
 
-export interface DeepScanCanonicalArtifacts {
-  inScopeFilesPath: string;
-  candidateLedgerPath: string;
-}
-
 export interface DeepScanRunState {
   scanId: string;
   workflowVersion?: string;
   status: DeepScanRunStatus;
-  phase?: "setup" | "discovery" | "reducing" | "terminal";
   coordinatorGeneration?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -44,7 +38,6 @@ export interface DeepScanRunState {
   dispatchedCount: number;
   noNewStreak: number;
   consecutiveErrors: number;
-  canonicalArtifacts?: DeepScanCanonicalArtifacts;
   manifestPath?: string;
   terminalReason?: DeepScanTerminalReason;
   error?: string;
