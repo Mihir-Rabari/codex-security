@@ -118,6 +118,7 @@ export class SqliteFindingsStore implements FindingsStore {
   > {
     const environment = workbenchEnvironment(this.environment);
     return {
+      protectedRoot: process.cwd(),
       pluginRoot: await bundledPluginRoot(),
       environment,
       stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
