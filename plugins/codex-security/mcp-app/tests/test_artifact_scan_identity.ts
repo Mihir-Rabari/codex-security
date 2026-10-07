@@ -3356,3 +3356,68 @@ for (const missing of [false, true]) {
     assert.deepEqual(result.warnings, []);
   });
 }
+
+for (const reversed of [false, true]) {
+  test(`worker: colliding authored identities retain independent findings (reversed=${reversed})`, async (t) => {
+    const f = await fixture(t, "worker");
+    const rows = [1, 2].map((line) =>
+      finding("Synthetic shared review", {
+        identity: { anchor: "shared-review" },
+        locations: [{ path: "src/example.py", startLine: line }],
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+      }),
+    );
+    await f.write({
+      ...f.draft(),
+      findings: reversed ? rows.toReversed() : rows,
+    });
+    for (let replay = 0; replay < 2; replay++) {
+      await f.write(f.draft({}, true));
+      const saved = JSON.parse(
+        await readFile(path.join(f.root, "result.json"), "utf8"),
+      );
+      assert.equal(saved.findings.length, 2);
+      assert.deepEqual(
+        saved.findings
+          .map((row: FixtureFinding) => row.locations[0]!.startLine)
+          .sort(),
+        [1, 2],
+      );
+    }
+  });
+  for (const layout of ["standard", "diff", "worker"] as const) {
+    test(`${layout}: content-only replay retains ambiguous saved identities (reversed=${reversed})`, async (t) => {
+      const f = await fixture(t, layout);
+      const raw = finding("Synthetic shared review", {
+        provenance: { source: "local_plugin", candidateId: "candidate-1" },
+      });
+      const rows = ["first", "second"].map((instance) => ({
+        ...structuredClone(raw),
+        identity: { anchor: "shared-review", instance },
+      }));
+      await f.write({
+        ...f.draft(),
+        findings: reversed ? rows.toReversed() : rows,
+      });
+      for (let replay = 0; replay < 2; replay++) {
+        await f.write({ ...f.draft({}, true), findings: [raw] });
+        const saved = JSON.parse(
+          await readFile(
+            path.join(
+              f.root,
+              layout === "worker" ? "result.json" : "findings.json",
+            ),
+            "utf8",
+          ),
+        );
+        assert.equal(saved.findings.length, 2);
+        assert.deepEqual(
+          saved.findings
+            .map((row: FixtureFinding) => row.identity?.instance)
+            .sort(),
+          ["first", "second"],
+        );
+      }
+    });
+  }
+}

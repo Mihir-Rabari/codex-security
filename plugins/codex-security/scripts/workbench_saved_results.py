@@ -1452,6 +1452,18 @@ def merge_saved_results(
         else:
             _ensure_finding_identity(finding)
 
+    def finding_within_scope(finding: dict[str, Any]) -> bool:
+        locations = finding.get("locations", [])
+        return isinstance(locations, list) and any(
+            isinstance(location, dict)
+            and isinstance(location.get("path"), str)
+            and any(
+                path_within_scope(location["path"], path)
+                for path in binding["scope"]["includePaths"]
+            )
+            for location in locations
+        )
+
     valid_findings: dict[bytes, bool] = {}
 
     def valid_finding(value: Any) -> bool:
@@ -1883,11 +1895,20 @@ def merge_saved_results(
         explicit_identity_counts = Counter(
             _semantic_identity_key(sibling, _finding_identity(sibling))
             for sibling in draft["findings"]
-            if isinstance(sibling, dict) and isinstance(sibling.get("identity"), dict)
+            if isinstance(sibling, dict)
+            and isinstance(sibling.get("identity"), dict)
+            and ((relative == "parent" and parent_is_canonical) or finding_within_scope(sibling))
         )
         pending = []
         for index, value in enumerate(draft["findings"]):
-            if not isinstance(value, dict) or not valid_finding(value):
+            if (
+                not isinstance(value, dict)
+                or not valid_finding(value)
+                or (
+                    not (relative == "parent" and parent_is_canonical)
+                    and not finding_within_scope(value)
+                )
+            ):
                 continue
             owner = raw_owner(value, source_owner)
             scope = raw_scope(value)
@@ -2227,16 +2248,7 @@ def merge_saved_results(
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
-            locations = finding.get("locations", [])
-            if not isinstance(locations, list) or not any(
-                isinstance(location, dict)
-                and isinstance(location.get("path"), str)
-                and any(
-                    path_within_scope(location["path"], path)
-                    for path in binding["scope"]["includePaths"]
-                )
-                for location in locations
-            ):
+            if not finding_within_scope(finding):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
                 coverage["completeness"] = "partial"
                 continue

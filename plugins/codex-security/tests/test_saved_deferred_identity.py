@@ -942,3 +942,85 @@ def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
             for row in retained["provenance"]["previousFindings"]
         )
     assert documents[1] == replay[1]
+
+
+@pytest.mark.parametrize("reverse_checkpoints", [False, True])
+def test_latest_eligible_worker_revision_survives_out_of_scope_result(
+    tmp_path, saved_results, monkeypatch, reverse_checkpoints
+):
+    first = {
+        "ruleId": "fixture.review",
+        "title": "Synthetic review",
+        "summary": "Older assessment 0",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic fixture."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete review.",
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
+        "identity": {"anchor": "stable"},
+    }
+    latest = {
+        **first,
+        "summary": "Confirmed newer high severity assessment",
+        "severity": {"level": "high"},
+    }
+    excluded = {
+        **latest,
+        "summary": "Excluded revision",
+        "locations": [{"path": "unselected/example.py", "startLine": 1}],
+    }
+    worker = save_worker(
+        tmp_path,
+        saved_results,
+        "reviewer",
+        [saved_draft("identity-scan", findings=[row]) for row in (first, latest)],
+        saved_draft("identity-scan", findings=[excluded]),
+    )
+    checkpoint_paths = saved_results._checkpoint_paths
+    monkeypatch.setattr(
+        saved_results,
+        "_checkpoint_paths",
+        lambda *args: sorted(checkpoint_paths(*args), reverse=reverse_checkpoints),
+    )
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {
+            "kind": "git_revision",
+            "targetId": "synthetic",
+            "displayName": "Synthetic",
+            "revision": "head",
+        },
+        "scope": {"includePaths": ["src"], "excludePaths": []},
+        "coverageMode": "scoped_path",
+    }
+    frozen = None
+    original = None
+    for _ in range(2):
+        warnings = []
+        documents = saved_results.merge_saved_results(
+            tmp_path,
+            "identity-scan",
+            binding,
+            [worker],
+            warnings,
+            stopped=True,
+            reason="Synthetic interruption",
+            frozen_source_digests=frozen,
+        )
+        assert documents is not None
+        findings = documents[1]["findings"]
+        assert len(findings) == 1
+        assert findings[0]["summary"] == latest["summary"]
+        assert findings[0]["severity"] == latest["severity"]
+        assert any(
+            row["summary"] == first["summary"]
+            for row in findings[0]["provenance"]["previousFindings"]
+        )
+        assert warnings == ["Skipped out-of-scope finding from reviewer/result.json."]
+        assert documents[2]["completeness"] == "partial"
+        if original is not None:
+            assert documents == original
+        original = documents
+        frozen = documents[0]["scan"]["preservedSources"]
