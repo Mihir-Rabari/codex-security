@@ -79,7 +79,7 @@ export function assertStoredSparseContents(archive, extractedFiles) {
     // GNU tar pads stored extents; libarchive also accepts packed extents.
     for (const padded of [false, true]) {
       let offset = dataOffset;
-      const discarded = [contents.subarray(0, dataOffset)];
+      const parts = [contents.subarray(0, dataOffset)];
       const matches = extents.every((extent, index) => {
         const end = offset + extent.size;
         if (
@@ -94,26 +94,45 @@ export function assertStoredSparseContents(archive, extractedFiles) {
           padded && index < extents.length - 1
             ? Math.ceil(end / blockSize) * blockSize
             : end;
-        discarded.push(contents.subarray(end, next));
+        parts.push(
+          { binary: contents.subarray(offset, end) },
+          contents.subarray(end, next),
+        );
         offset = next;
         return true;
       });
       if (matches) {
-        discarded.push(contents.subarray(offset));
-        metadata = Buffer.concat(discarded);
+        parts.push(contents.subarray(offset));
+        metadata = parts;
         break;
       }
     }
     if (metadata === undefined) invalidTarEntry();
     sparseMetadata.set(path, metadata);
   }
-  assertPublicText(
-    Buffer.concat(
-      archive.metadata.map((part) =>
-        typeof part === "string" ? sparseMetadata.get(part) : part,
-      ),
-    ).toString("utf8"),
+  const parts = archive.metadata.flatMap((part) =>
+    typeof part === "string" ? sparseMetadata.get(part) : part,
   );
+  assertPublicText(
+    Buffer.concat(parts.filter(Buffer.isBuffer)).toString("utf8"),
+  );
+  const binaryRanges = [];
+  let text = "";
+  for (const part of parts) {
+    const binary = !Buffer.isBuffer(part);
+    const decoded = (binary ? part.binary : part).toString("utf8");
+    if (binary) {
+      const previous = binaryRanges.at(-1);
+      if (previous?.end === text.length) previous.end += decoded.length;
+      else
+        binaryRanges.push({
+          start: text.length,
+          end: text.length + decoded.length,
+        });
+    }
+    text += decoded;
+  }
+  assertPublicText(text, binaryRanges);
 }
 
 export function readTarArchive(archiveBytes) {
@@ -124,6 +143,7 @@ export function readTarArchive(archiveBytes) {
   let offset = 0;
   const globalAttributes = new Map();
   const nextAttributes = new Map();
+  let nextName;
 
   while (offset + blockSize <= archiveBytes.byteLength) {
     const header = archiveBytes.subarray(offset, offset + blockSize);
@@ -136,7 +156,8 @@ export function readTarArchive(archiveBytes) {
     const signature = header.subarray(257, 265).toString("latin1");
     const directory = header[156] === 0x35;
     const oldSparse = header[156] === 0x53;
-    const extended = header[156] === 0x78 || header[156] === 0x67;
+    const longName = header[156] === 0x4c;
+    const extended = header[156] === 0x78 || header[156] === 0x67 || longName;
     if (
       (header[156] !== 0 &&
         header[156] !== 0x30 &&
@@ -161,6 +182,7 @@ export function readTarArchive(archiveBytes) {
     const path =
       attribute("GNU.sparse.name") ??
       attribute("path") ??
+      nextName ??
       (prefix === "" ? name : `${prefix}/${name}`);
     if (!extended && (path === "" || path.endsWith("/") !== directory))
       invalidTarEntry();
@@ -203,12 +225,15 @@ export function readTarArchive(archiveBytes) {
     if (extended) {
       const contents = archiveBytes.subarray(contentsStart, contentsEnd);
       archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
-      const destination =
-        header[156] === 0x67 ? globalAttributes : nextAttributes;
-      for (const [key, value] of paxAttributes(contents)) {
-        if (destination === globalAttributes && value === "")
-          destination.delete(key);
-        else destination.set(key, value);
+      if (longName) nextName = headerText(contents, 0, contents.length);
+      else {
+        const destination =
+          header[156] === 0x67 ? globalAttributes : nextAttributes;
+        for (const [key, value] of paxAttributes(contents)) {
+          if (destination === globalAttributes && value === "")
+            destination.delete(key);
+          else destination.set(key, value);
+        }
       }
     } else {
       if (directory)
@@ -237,6 +262,7 @@ export function readTarArchive(archiveBytes) {
       }
       entries.push({ path, size });
       nextAttributes.clear();
+      nextName = undefined;
     }
     offset = nextOffset;
   }

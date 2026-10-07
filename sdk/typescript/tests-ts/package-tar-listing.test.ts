@@ -49,6 +49,7 @@ function packageTar({
   readmeMode = 0o644,
   mtime = 0,
   readmeSparse,
+  readmeLongName = false,
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
@@ -59,6 +60,7 @@ function packageTar({
   readmeMode?: number;
   mtime?: number;
   readmeSparse?: "0.0" | "1.0";
+  readmeLongName?: boolean;
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -132,6 +134,14 @@ function packageTar({
       ...(compatibleLayout ? { magic: "ustar ", version: " \0" } : {}),
     });
     if (compatibleLayout) record[record.length - 1] = 1;
+    if (path === "package/README.md" && readmeLongName)
+      return Buffer.concat([
+        tarRecord(Buffer.from(`${path}\0`), {
+          name: "././@LongLink",
+          type: 0x4c,
+        }),
+        record,
+      ]);
     return record;
   });
   if (compatibleLayout) {
@@ -308,6 +318,7 @@ describe("npm package tar listings", () => {
         ["level-0", gzipSync(tarBytes, { level: 0 })],
         ["sparse-0.0", gzipSync(packageTar({ readmeSparse: "0.0" }))],
         ["sparse-1.0", gzipSync(packageTar({ readmeSparse: "1.0" }))],
+        ["gnu-long-name", gzipSync(packageTar({ readmeLongName: true }))],
         ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
         ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
         [
@@ -388,11 +399,20 @@ describe("npm package tar listings", () => {
         return { offset: index * 1024, size: 512 };
       });
       oldGnuExtents.push({ offset: oldGnuText.length, size: 0 });
+      const unicodeCompressedPayload = Buffer.from(cleanCompressedPayload);
+      Buffer.from("😀").copy(
+        unicodeCompressedPayload,
+        unicodeCompressedPayload.indexOf("Go/w") - 4,
+      );
       const middle = Math.floor(cleanCompressedPayload.length / 2);
       const cases = [
         {
           name: "brotli",
           files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+        },
+        {
+          name: "unicode-brotli",
+          files: [["runtime.mjs.br", unicodeCompressedPayload, true]],
         },
         {
           name: "mixed-split-brotli",
@@ -541,11 +561,12 @@ describe("npm package tar listings", () => {
               scenario.metadataMarker,
             );
           if (sparse === "0.1-hole") {
-            const hole = contents.indexOf(0);
+            const hole = contents.findIndex(
+              (byte, index) => index > 0 && index % 512 === 0 && byte === 0,
+            );
             expect(hole).toBeGreaterThan(0);
             const stored = Buffer.concat([
               contents.subarray(0, hole),
-              Buffer.alloc((512 - (hole % 512)) % 512),
               contents.subarray(hole + 1),
               scenario.tailMarker
                 ? Buffer.from("go/synthetic-reference")

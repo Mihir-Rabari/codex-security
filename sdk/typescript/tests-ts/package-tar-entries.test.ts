@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   archive,
@@ -19,9 +20,13 @@ type PackageTarEntries = {
     files: Map<string, Buffer>;
     metadata: (Buffer | string)[];
   };
+  assertStoredSparseContents: (
+    archive: ReturnType<PackageTarEntries["readTarArchive"]>,
+    files: Map<string, Buffer>,
+  ) => void;
 };
 
-const { readTarArchive } = (await import(
+const { readTarArchive, assertStoredSparseContents } = (await import(
   new URL("../scripts/package-tar-entries.mjs", import.meta.url).href
 )) as PackageTarEntries;
 const { assertPublicPackageContents } = (await import(
@@ -84,9 +89,7 @@ describe("plain npm tar entries", () => {
   );
 
   test("rejects unsupported entry types and malformed extended headers", () => {
-    for (const type of [
-      0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x4c, 0x67, 0x78,
-    ]) {
+    for (const type of [0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x67, 0x78]) {
       expect(() =>
         plainTarEntries(
           archive(
@@ -98,6 +101,26 @@ describe("plain npm tar entries", () => {
         ),
       ).toThrow(invalidTarEntryError);
     }
+  });
+
+  test("uses GNU long names for one member and scans their complete payload", () => {
+    const path = `package/${"nested/".repeat(16)}README.md`;
+    const records = (tail: string) =>
+      archive(
+        tarRecord(Buffer.from(`${path}\0${tail}`), {
+          name: "././@LongLink",
+          type: 0x4c,
+        }),
+        tarRecord(Buffer.from("readme"), { name: "placeholder" }),
+        tarRecord(Buffer.from("license"), { name: "package/LICENSE" }),
+      );
+    expect(plainTarEntries(records(""))).toEqual([
+      { path, size: 6 },
+      { path: "package/LICENSE", size: 7 },
+    ]);
+    expect(() => plainTarEntries(records("go/example"))).toThrow(
+      internalReferenceError,
+    );
   });
 
   test.each([0x78, 0x67])("accepts POSIX pax metadata typeflag %i", (type) => {
@@ -305,21 +328,67 @@ describe("plain npm tar entries", () => {
     ).toThrow(internalReferenceError);
   });
 
-  test("keeps public Brotli content semantics for a retained sparse extent", () => {
-    const path = "package/runtime.mjs.br";
-    const size = cleanCompressedPayload.length;
+  test.each([false, true])(
+    "keeps public Brotli content semantics across retained sparse extents, split=%j",
+    (split) => {
+      const path = "package/runtime.mjs.br";
+      const size = cleanCompressedPayload.length;
+      const middle = cleanCompressedPayload.indexOf("Go/w") + 2;
+      expect(middle).toBeGreaterThan(2);
+      const bytes = archive(
+        tarRecord(
+          paxRecords({
+            "GNU.sparse.size": String(size),
+            "GNU.sparse.numblocks": split ? "2" : "1",
+            "GNU.sparse.map": split
+              ? `0,${middle},${middle},${size - middle}`
+              : `0,${size}`,
+          }),
+          { name: "PaxHeaders/runtime", type: 0x78 },
+        ),
+        tarRecord(cleanCompressedPayload, { name: path }),
+      );
+      expect(plainTarEntries(bytes)).toEqual([{ path, size }]);
+      expect(() =>
+        assertStoredSparseContents(
+          readTarArchive(bytes),
+          new Map([[path, cleanCompressedPayload]]),
+        ),
+      ).not.toThrow();
+    },
+  );
+
+  test("checks markers crossing discarded padding and retained sparse bytes", () => {
+    const path = "package/logo.png";
+    const logo = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    expect(logo.subarray(387, 390).toString()).toBe("org");
+    const padding = Buffer.alloc(512 - 387);
+    padding.write(".openai.", padding.length - 8);
     const bytes = archive(
       tarRecord(
         paxRecords({
-          "GNU.sparse.size": String(size),
-          "GNU.sparse.numblocks": "1",
-          "GNU.sparse.map": `0,${size}`,
+          "GNU.sparse.size": String(logo.length),
+          "GNU.sparse.numblocks": "2",
+          "GNU.sparse.map": `0,387,387,${logo.length - 387}`,
         }),
-        { name: "PaxHeaders/runtime", type: 0x78 },
+        { name: "PaxHeaders/logo", type: 0x78 },
       ),
-      tarRecord(cleanCompressedPayload, { name: path }),
+      tarRecord(
+        Buffer.concat([logo.subarray(0, 387), padding, logo.subarray(387)]),
+        { name: path },
+      ),
     );
-    expect(plainTarEntries(bytes)).toEqual([{ path, size }]);
+    expect(() =>
+      assertStoredSparseContents(
+        readTarArchive(bytes),
+        new Map([[path, logo]]),
+      ),
+    ).toThrow(internalReferenceError);
   });
 
   test("uses the native GNU sparse name while retaining stored content", () => {
