@@ -21,6 +21,13 @@ deployments; local deduplication uses the database selected by
 
 `@openai/codex-security/server` continues to export `OpenAiFindingEmbedder`,
 `SqliteFindingsStore`, and their storage types for direct storage users.
+
+For direct embedding/storage integrations, `OpenAiFindingEmbedder` accepts a
+static key or `() => string | Promise<string>` as its first argument. It calls
+the callback before each HTTP batch; the caller handles token acquisition.
+Pass `fetch` as the second argument and the full endpoint URL as the third.
+The saved-scan deduplication APIs use environment credentials.
+
 Custom publication, explicit remote deduplication, Cloud publication, the
 plugin MCP server, and Codex app-server are unchanged.
 
@@ -84,13 +91,13 @@ publication step is required:
 codex-security dedupe --scan SCAN_ID --json
 ```
 
+See [local embedding requirements](#local-embeddings-and-backups) for endpoint,
+credential, and vector compatibility.
+
 The CLI prepares missing or stale embeddings for the local repository's stored
 findings, searches them, and saves reviewed duplicate groups in the workbench
-database. Repeated runs reuse compatible vectors. Ordinary scans do not generate
-embeddings automatically. New embeddings still send complete finding JSON to
-the configured embeddings endpoint and require `OPENAI_API_KEY` or `CODEX_API_KEY`
-on the CLI host; ChatGPT login alone is insufficient. Cached vectors avoid those
-requests, but fresh duplicate reviews still need the configured model provider.
+database. Ordinary scans do not generate embeddings automatically. Fresh
+duplicate reviews still need the configured model provider.
 
 Local scope uses the scan's `targetId`, which identifies its local checkout.
 Preparation checks this identity against the approved checkout and existing
@@ -118,13 +125,6 @@ By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service. Explicit
 `--findings-url` retains the existing remote lookup and publication behavior.
 
-`--workflow-id` also works locally and saves review checkpoints and group-write
-retries without running a publication stage. A workflow remains bound to its
-original local database or remote URL; use a new workflow ID to switch backends
-or review changed inputs. Completed workflow results describe that run, not
-findings added afterward. Cancellation can retain completed embedding preparation
-for retry; it does not change sealed scan artifacts.
-
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";
 
@@ -144,7 +144,6 @@ import { deduplicateScanDirectory } from "@openai/codex-security";
 
 const result = await deduplicateScanDirectory("/path/to/completed-scan", {
   repository: "/path/to/repository",
-  findingsUrl: "https://findings.example.com",
   // expectedScanId: "scan_example_001",
   // concurrency: 8,
   // allRepositories: true,
@@ -223,12 +222,25 @@ internal reducer.
 
 ### Resume a findings workflow
 
-Use one workflow ID across scanning, custom publication, and deduplication:
+Use one workflow ID across scanning and local deduplication:
 
 ```bash
 codex-security scan /path/to/repository --workflow-id run-001
-codex-security publish scan --workflow-id run-001 --to custom --findings-url https://findings.example.com
-codex-security dedupe --workflow-id run-001 --findings-url https://findings.example.com --json
+codex-security dedupe --workflow-id run-001 --json
+```
+
+Local workflows save review checkpoints and group-write retries without
+publication. A workflow remains bound to its original local database or remote
+URL; use a new workflow ID to switch backends. Cancellation can retain completed
+embedding preparation for retry; sealed scan artifacts remain unchanged.
+
+For an explicitly selected remote corpus, use `--findings-url` with a separate
+workflow ID:
+
+```bash
+codex-security scan /path/to/repository --workflow-id remote-001
+codex-security publish scan --workflow-id remote-001 --to custom --findings-url https://findings.example.com
+codex-security dedupe --workflow-id remote-001 --findings-url https://findings.example.com --json
 ```
 
 The SDK equivalents are `workflowId` on `ScanOptions`,
@@ -237,9 +249,10 @@ with the same ID after an interruption. Completed scans, acknowledged uploads,
 and validated reviews are reused. This resumes completed stages, not model
 turns inside an unfinished scan. Normal output-directory checks still apply.
 
-A workflow can begin by publishing an existing completed scan. Publication and
-dedupe can use its ID instead of `--scan`; an explicit scan must match. Dedupe
-completes publication if its receipt is missing. Changing the bound scan,
+A remote workflow can begin by publishing an existing completed scan. Publication
+and dedupe can use its ID instead of `--scan`; an explicit scan must match.
+With both `--workflow-id` and `--findings-url`, dedupe completes publication
+only when its receipt is missing. Changing the bound scan,
 destination, or repository scope requires a different ID. Use one coordinating
 process per workflow. Dry runs do not advance it.
 
@@ -273,14 +286,11 @@ entire state directory with no scans or deduplication running. Existing
 append-only migrations retain finding identities and scan history.
 
 New embeddings require `OPENAI_API_KEY` or `CODEX_API_KEY`;
-`OPENAI_API_KEY` takes precedence. `CODEX_SECURITY_EMBEDDINGS_URL` selects a
-compatible embeddings endpoint (default `https://api.openai.com/v1/embeddings`).
-The endpoint receives complete finding JSON and the API key as a bearer token.
-The embedder uses `text-embedding-3-large` with 1,536 dimensions, tokenizes
-complete JSON with `cl100k_base`, and combines vectors from long inputs without
-truncation. Cached compatible vectors avoid new requests.
-
-For renewable credentials, `OpenAiFindingEmbedder` accepts a static key or
-`() => string | Promise<string>` as its first argument. It calls the callback
-before each HTTP batch; the caller handles token acquisition. Pass `fetch` as
-the second argument and the full endpoint URL as the third.
+`OPENAI_API_KEY` takes precedence. ChatGPT login alone is insufficient.
+`CODEX_SECURITY_EMBEDDINGS_URL` selects a
+full embeddings endpoint URL (default `https://api.openai.com/v1/embeddings`).
+The endpoint must support the OpenAI embeddings request and response protocol,
+including `text-embedding-3-large`, 1,536-dimensional float vectors, and token
+array inputs. Requests encode the complete finding JSON with `cl100k_base` and
+send the API key as a bearer token. Long inputs are combined without truncation.
+Cached compatible vectors avoid new requests.
