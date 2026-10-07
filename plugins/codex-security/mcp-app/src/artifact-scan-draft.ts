@@ -2420,8 +2420,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         (!candidateKey || !used.get(key) || used.get(key) === candidateKey))
     ) {
       used.set(key, candidateKey ?? used.get(key));
-      if (candidateKey && previous !== null)
-        candidateIdentities.set(candidateKey, finding);
+      if (candidateKey) candidateIdentities.set(candidateKey, finding);
       return finding;
     }
     const identity = finding.identity as JsonObject;
@@ -2445,8 +2444,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         provenance.preservedIdentity ?? structuredClone(identity),
     };
     used.set(scanFindingIdentity(distinct), candidateKey);
-    if (candidateKey && previous !== null)
-      candidateIdentities.set(candidateKey, distinct);
+    if (candidateKey) candidateIdentities.set(candidateKey, distinct);
     return distinct;
   });
 }

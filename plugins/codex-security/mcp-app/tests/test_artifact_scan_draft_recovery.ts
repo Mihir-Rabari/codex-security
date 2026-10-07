@@ -2726,3 +2726,39 @@ for (const layout of ["worker", "standard"] as const) {
     });
   }
 }
+
+for (const layout of ["standard", "diff"] as const) {
+  test(`${layout}: repeated raw observations retain one identity beside explicit siblings`, async (t) => {
+    const f = await fixture(t, layout);
+    const finding = findingFor("candidate-shared-observation");
+    const explicit = ["first", "second"].map((instance) => ({
+      ...finding,
+      identity: { anchor: "synthetic-review-finding", instance },
+    }));
+    const draft = {
+      ...f.draft(),
+      findings: [...explicit, finding, structuredClone(finding)],
+    };
+    await f.write(draft);
+    const rows = (await readJson(f.root, "findings.json")).findings as {
+      identity: { anchor: string; instance?: string };
+    }[];
+    assert.equal(rows.length, 4);
+    assert.deepEqual(
+      rows.slice(0, 2).map((row) => row.identity),
+      explicit.map((row) => row.identity),
+    );
+    assert.deepEqual(rows[2]!.identity, rows[3]!.identity);
+    assert.equal(
+      new Set(rows.map((row) => JSON.stringify(row.identity))).size,
+      3,
+    );
+    await f.write(draft);
+    assert.deepEqual(
+      (await readJson(f.root, "findings.json")).findings.map(
+        (row: { identity: unknown }) => row.identity,
+      ),
+      rows.map((row) => row.identity),
+    );
+  });
+}
