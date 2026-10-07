@@ -59,7 +59,7 @@ import {
   type ArtifactExportArguments,
 } from "./artifact-export.js";
 export { exportEnvironment } from "./artifact-export.js";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
@@ -195,6 +195,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
@@ -1356,7 +1357,9 @@ export async function runCodexSkillCommand(
         output.appServer === undefined
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
-      const overrides = structuredClone(output.codexOverrides ?? {});
+      const overrides = parseToml(
+        stringifyToml(output.codexOverrides ?? {}),
+      ) as JsonObject;
       const config = deepMerge(ambientConfig, overrides);
       const provider = output.modelProvider ?? scanModelProvider(config);
       // Native Codex ignores configured tables for these built-in providers.
@@ -1372,7 +1375,7 @@ export async function runCodexSkillCommand(
         typeof providerConfiguration?.["env_key"] === "string"
           ? providerConfiguration["env_key"]
           : undefined;
-      const commandAuth = providerConfiguration?.["auth"] !== undefined;
+      const commandAuth = providerConfiguration?.["auth"] != null;
       const explicitChatgpt =
         output.auth === "chatgpt" && !isExternalModelProvider(provider);
       const providerBearer =
@@ -2058,17 +2061,43 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolveCliPath(
+      const requestedRepository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
+      );
+      const repository = await realpath(requestedRepository).catch(
+        () => requestedRepository,
       );
       return presentHistory(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
+            const repositories = value["repositories"] as JsonObject[];
+            let target = repositories.find(
+              (entry) => entry["targetPath"] === requestedRepository,
+            );
+            const canonicalTarget = repositories.find(
               (entry) => entry["targetPath"] === repository,
             );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                requestedRepository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
+            if (target === undefined) {
+              for (const entry of repositories) {
+                const storedPath = entry["targetPath"] as string;
+                if (await sameFile(storedPath, requestedRepository)) {
+                  target = entry;
+                  break;
+                }
+              }
+            }
             const findings =
               target === undefined
                 ? []
@@ -3136,7 +3165,7 @@ export async function main(
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
-        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+        )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
           ...publicationDestination(options, dependencies.environment),
           signal: controller.signal,
         });

@@ -354,7 +354,9 @@ function retainSourceFindings(
     if (originals?.length) {
       for (const original of originals) {
         sources.set(original.id, original.finding);
-        workers.add(original.id.slice(0, original.id.lastIndexOf(":")));
+        const worker = original.id.slice(0, original.id.lastIndexOf(":"));
+        // Legacy aggregate references keep their saved finding owner.
+        if (worker !== "previous") workers.add(worker);
       }
     } else {
       sources.set(`previous:${index}`, finding);

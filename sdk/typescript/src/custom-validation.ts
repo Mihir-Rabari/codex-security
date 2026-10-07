@@ -559,7 +559,7 @@ export async function runCustomValidation(options: {
       const previous = uniqueIdentity
         ? previousDeferred.get(key)?.[0]
         : undefined;
-      if (history.length > 0) {
+      if (history.length > 0 || uniqueIdentity) {
         const baseId = `custom-validation-${candidate.candidateId}`;
         let id = baseId;
         let suffix = 2;

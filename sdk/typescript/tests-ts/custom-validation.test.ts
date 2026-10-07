@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -829,6 +829,7 @@ describe("custom validation", () => {
     siblings?: boolean;
     staleDeferred?: boolean;
     semanticIdentity?: string;
+    stopAfterValidation?: boolean;
   }> = [
     { scenario: "standard", dispositions: ["reportable"] },
     {
@@ -836,7 +837,19 @@ describe("custom validation", () => {
       dispositions: ["deferred"],
       semanticIdentity: "review/auth",
     },
-    { scenario: "diff", dispositions: ["reportable"] },
+    {
+      scenario: "diff",
+      dispositions: ["reportable"],
+      semanticIdentity: "candidate-synthetic",
+    },
+    ...(["suppressed", "not_applicable"] as const).flatMap((disposition) =>
+      [false, true].map((stopAfterValidation) => ({
+        scenario: `diff-${disposition}-${stopAfterValidation ? "stopped" : "completed"}`,
+        dispositions: [disposition] as Parameters<typeof result>,
+        semanticIdentity: "candidate-synthetic",
+        stopAfterValidation,
+      })),
+    ),
     { scenario: "empty", dispositions: [] },
     { scenario: "incomplete", dispositions: ["reportable"] },
     { scenario: "dismissed", dispositions: ["suppressed"] },
@@ -894,8 +907,9 @@ describe("custom validation", () => {
       siblings = false,
       staleDeferred = false,
       semanticIdentity,
+      stopAfterValidation = false,
     }) => {
-      const diff = scenario === "diff";
+      const diff = scenario.startsWith("diff");
       const count = dispositions.length;
       const expectedReported = dispositions.filter(
         (value) => value === "reportable",
@@ -1037,6 +1051,33 @@ describe("custom validation", () => {
                         provisional.findings[0]!.provenance["candidateId"] =
                           semanticIdentity;
                         await save(join(scanDir, "findings.json"), provisional);
+                        if (diff) {
+                          const discovery = join(
+                            scanDir,
+                            "artifacts/02_discovery",
+                          );
+                          await mkdir(discovery, { recursive: true });
+                          await writeFile(
+                            join(discovery, "candidate_ledger.jsonl"),
+                            jsonLines([
+                              {
+                                candidate_id: semanticIdentity,
+                                summary:
+                                  "Synthetic candidate requiring review.",
+                                evidence: "Synthetic source review evidence.",
+                                cwe_ids: [],
+                                locations: [
+                                  {
+                                    path: "src/extract.py",
+                                    start_line: 1,
+                                    end_line: 1,
+                                    role: "evidence",
+                                  },
+                                ],
+                              },
+                            ]) + "\n",
+                          );
+                        }
                       }
                       if (siblings) {
                         for (const [
@@ -1170,6 +1211,10 @@ describe("custom validation", () => {
           },
           runWorkbench: async (_options, args, input) => {
             commands.push(args[0]!);
+            if (stopAfterValidation && args[0] === "prepare-scan-completion")
+              throw new Error(
+                "Synthetic interruption after custom validation.",
+              );
             const value = await workbench(args, input);
             if (args[0] === "register-cli-scan")
               scanId = String(value["scanId"]);
@@ -1188,6 +1233,56 @@ describe("custom validation", () => {
           onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
+        if (stopAfterValidation) {
+          await expect(pending).rejects.toThrow(
+            "Synthetic interruption after custom validation.",
+          );
+          expect(commands).toContain("fail-scan");
+          const assertRetainedDecision = async () => {
+            const saved = await loadResult(scanDir);
+            expect(saved.findings.findings).toHaveLength(0);
+            expect(saved.unresolvedCandidateCount).toBe(0);
+            expect(saved.coverage.surfaces).toContainEqual(
+              expect.objectContaining({
+                candidateId: semanticIdentity,
+                disposition:
+                  dispositions[0] === "suppressed"
+                    ? "rejected"
+                    : "not_applicable",
+                finding: expect.objectContaining({ title: "Fixture 0" }),
+                receiptRefs: [resultName],
+              }),
+            );
+          };
+          await assertRetainedDecision();
+          const checkpoint = JSON.stringify({
+            scanId,
+            complete: false,
+            findings: [],
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                { id: "late-review", reason: "Independent saved review." },
+              ],
+            },
+          });
+          await writeFile(
+            join(
+              scanDir,
+              "checkpoints",
+              `${createHash("sha256").update(checkpoint).digest("hex")}.json`,
+            ),
+            checkpoint,
+          );
+          await workbench(["recover-scan-results", "--scan-id", scanId]);
+          await assertRetainedDecision();
+          expect((await loadResult(scanDir)).coverage.deferred).toContainEqual(
+            expect.objectContaining({ id: "late-review" }),
+          );
+          return;
+        }
         if (scenario === "incomplete") {
           await expect(pending).rejects.toThrow(
             "The validation environment did not start",
@@ -1233,11 +1328,27 @@ describe("custom validation", () => {
         );
         expect(completed.findings.findings).toHaveLength(expectedReported);
         if (semanticIdentity !== undefined) {
-          expect(completed.unresolvedCandidates).toHaveLength(1);
-          expect(completed.unresolvedCandidates[0]!.candidateId).toBe(
-            semanticIdentity,
-          );
-          expect(completed.coverage.completeness).toBe("partial");
+          if (dispositions[0] === "deferred") {
+            expect(completed.unresolvedCandidates).toHaveLength(1);
+            expect(completed.unresolvedCandidates[0]!.candidateId).toBe(
+              semanticIdentity,
+            );
+            expect(completed.coverage.completeness).toBe("partial");
+          } else {
+            expect(completed.unresolvedCandidateCount).toBe(0);
+            if (dispositions[0] !== "reportable")
+              expect(completed.coverage.surfaces).toContainEqual(
+                expect.objectContaining({
+                  candidateId: semanticIdentity,
+                  disposition:
+                    dispositions[0] === "suppressed"
+                      ? "rejected"
+                      : "not_applicable",
+                  finding: expect.objectContaining({ title: "Fixture 0" }),
+                  receiptRefs: [resultName],
+                }),
+              );
+          }
         }
         if (staleDeferred) {
           const expectedPending = dispositions.filter(

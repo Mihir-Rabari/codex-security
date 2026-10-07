@@ -637,3 +637,77 @@ for (const mode of ["standard", "diff"] as const) {
     });
   }
 }
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const independentPending of [false, true]) {
+    test(`retains merged candidate resolutions: ${mode}, independent=${independentPending}`, async (t) => {
+      const f = await fixture(t, mode);
+      const candidateId = "candidate-shared";
+      const pending = (sourceWorkerId: string) => ({
+        id: `${sourceWorkerId}-gap`,
+        candidateId,
+        sourceWorkerId,
+        reason: "Saved proof gap.",
+      });
+      await f.write(
+        f.draft({
+          deferred: [
+            pending("worker-b"),
+            ...(independentPending ? [pending("worker-c")] : []),
+          ],
+        }),
+      );
+      const earlier = {
+        ...finding("shared", "src/handler.ts"),
+        provenance: {
+          source: "local_plugin",
+          candidateId,
+          sourceWorkerId: "worker-b",
+        },
+      };
+      await f.write({ ...f.draft({}, true), findings: [earlier] });
+      const checkpoints = path.join(f.root, "checkpoints");
+      const originalBytes = await Promise.all(
+        (await readdir(checkpoints)).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(checkpoints, name), "utf8"),
+            ] as const,
+        ),
+      );
+      const current = {
+        ...earlier,
+        provenance: { ...earlier.provenance, sourceWorkerId: "worker-a" },
+      };
+      for (let replay = 0; replay < 2; replay++) {
+        await f.write({ ...f.draft({}, true), findings: [current] });
+        const coverage = await f.read();
+        assert.equal(
+          coverage.completeness,
+          independentPending ? "partial" : "complete",
+        );
+        assert.deepEqual(
+          coverage.deferred,
+          independentPending ? [pending("worker-c")] : [],
+        );
+        const saved = JSON.parse(
+          await readFile(path.join(f.root, "findings.json"), "utf8"),
+        );
+        assert.equal(saved.findings.length, 1);
+        assert.equal(saved.findings[0].provenance.sourceWorkerId, "worker-a");
+        assert.ok(
+          saved.findings[0].provenance.previousFindings.some(
+            (row: typeof earlier) =>
+              row.provenance.sourceWorkerId === "worker-b",
+          ),
+        );
+      }
+      for (const [name, bytes] of originalBytes)
+        assert.equal(
+          await readFile(path.join(checkpoints, name), "utf8"),
+          bytes,
+        );
+    });
+  }
+}

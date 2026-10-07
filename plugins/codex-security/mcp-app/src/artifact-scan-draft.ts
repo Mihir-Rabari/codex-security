@@ -855,6 +855,7 @@ async function preserveScanDraft(
         ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
+        if (candidateId !== undefined) resolvedCandidateKeys.add(candidateId);
       } else {
         if (!matches.some((current) => containsSavedFinding(current, finding)))
           result.findings.push(structuredClone(finding));
@@ -869,6 +870,7 @@ async function preserveScanDraft(
     }
     const representedCandidateKeys = new Set(
       [
+        ...resolvedCandidateKeys,
         ...result.findings.map((finding) => findingKey(finding)),
         ...candidateRows
           .filter((item) => !keepsGenericWork(item))
