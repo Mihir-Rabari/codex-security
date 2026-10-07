@@ -2947,7 +2947,20 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     ]
 
 
-@pytest.mark.parametrize("long_path", [False, True], ids=["short-control", "long-real-git-path"])
+@pytest.mark.parametrize(
+    "long_path",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "darwin",
+                reason="macOS cannot represent the real Git pathname beyond its 1024-byte path limit",
+            ),
+        ),
+    ],
+    ids=["short-control", "long-real-git-path"],
+)
 def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     tmp_path: Path,
     long_path: bool,
