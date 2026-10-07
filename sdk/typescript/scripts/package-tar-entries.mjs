@@ -170,14 +170,16 @@ export function readTarArchive(archiveBytes) {
       let start = 386;
       let count = 4;
       for (;;) {
-        for (let index = 0; index < count; index++) {
+        let index = 0;
+        for (; index < count; index++) {
           const field = start + index * 24;
+          if (map[field + 12] === 0) break;
           const offset = octalNumber(map, field, field + 12);
           const size = octalNumber(map, field + 12, field + 24);
           if (offset !== 0 || size !== 0)
             oldSparseExtents.push({ offset, size });
         }
-        if (map[start + count * 24] === 0) break;
+        if (index < count || map[start + count * 24] === 0) break;
         map = archiveBytes.subarray(contentsStart, contentsStart + blockSize);
         if (map.length !== blockSize) invalidTarEntry();
         contentsStart += blockSize;

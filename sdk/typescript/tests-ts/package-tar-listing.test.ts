@@ -437,6 +437,17 @@ describe("npm package tar listings", () => {
           extents: oldGnuExtents,
         },
         {
+          name: "oldgnu-unused-main-slot",
+          files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
+          metadataMarker: "unused",
+        },
+        {
+          name: "oldgnu-unused-continuation-slot",
+          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+          extents: oldGnuExtents,
+          metadataMarker: "unused",
+        },
+        {
           name: "oldgnu-continuation-marker",
           files: [["helpers.mjs", oldGnuText, "oldgnu"]],
           extents: oldGnuExtents,
@@ -497,7 +508,7 @@ describe("npm package tar listings", () => {
         name: string;
         files: [string, Buffer, boolean | "0.1-tail" | "oldgnu"][];
         extents?: { offset: number; size: number }[];
-        metadataMarker?: "continuation" | "boundary";
+        metadataMarker?: "continuation" | "boundary" | "unused";
         globalSparse?: boolean;
         mapMarker?: boolean;
         headerMapMarker?: boolean;

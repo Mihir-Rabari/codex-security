@@ -70,7 +70,7 @@ export function oldGnuSparseRecord(
   contents: Buffer,
   name: string,
   extents = [{ offset: 0, size: contents.length }],
-  metadataMarker?: "continuation" | "boundary",
+  metadataMarker?: "continuation" | "boundary" | "unused",
 ): Buffer {
   const stored = Buffer.concat(
     extents.flatMap(({ offset, size }, index) => [
@@ -104,6 +104,11 @@ export function oldGnuSparseRecord(
       count = 21;
     }
   } while (remaining.length > 0);
+  if (metadataMarker === "unused") {
+    const used =
+      extents.length <= 4 ? extents.length : ((extents.length - 5) % 21) + 1;
+    map.write("public", start + (used + 1) * 24);
+  }
   octal(contents.length, 12).copy(header, 483);
   if (metadataMarker === "continuation")
     continuations.at(-1)!.write("go/test", 505);
