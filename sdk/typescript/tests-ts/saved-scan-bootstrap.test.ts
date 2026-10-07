@@ -772,7 +772,7 @@ connection.close()
       expect(
         (
           db
-            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .query("SELECT MAX(version) AS version FROM schema_migrations")
             .get() as { version: number }
         ).version,
       ).toBeGreaterThan(version);
