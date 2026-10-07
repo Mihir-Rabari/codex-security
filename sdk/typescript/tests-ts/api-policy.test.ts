@@ -1574,7 +1574,11 @@ describe("CodexSecurity policy API", () => {
             : location === "tilde"
               ? { codexOverrides: { sqlite_home: "~/selected-state" } }
               : {},
-        resolveOwnedSessions: runtime.resolveScanSessionPaths,
+        resolveOwnedSessions: async (...args) => {
+          expect(args[3]?.command.command.length).toBeGreaterThan(0);
+          expect(args[3]?.workingDirectory).toBe(f.outputDir);
+          return await runtime.resolveScanSessionPaths(...args);
+        },
         stream: async function* (stage) {
           const id = `policy-${stage}`;
           const directory = join(f.runtime.codexHome, "sessions");
