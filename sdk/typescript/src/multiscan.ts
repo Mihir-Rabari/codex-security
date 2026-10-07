@@ -1246,7 +1246,7 @@ async function loadResumableScan(
   if (!matchesOutcome) return undefined;
   const reportSealed = await hasSealedReport(path, manifest, signal);
   const pythonPath =
-    configuredPythonPath === undefined
+    reportSealed || configuredPythonPath === undefined
       ? undefined
       : relative(
           matchedRoot,
@@ -1584,8 +1584,16 @@ async function checkoutRevision(
         encoding: "buffer",
       },
     );
-    if (input !== undefined) pending.child.stdin!.end(input);
-    return (await pending).stdout;
+    let inputError: Error | undefined;
+    if (input !== undefined) {
+      pending.child.stdin!.on("error", (error: Error) => {
+        inputError = error;
+      });
+      pending.child.stdin!.end(input);
+    }
+    const output = await pending;
+    if (inputError !== undefined) throw inputError;
+    return output.stdout;
   };
   const git = async (...args: string[]): Promise<string> =>
     (await gitOutput(args)).toString("utf8").trim();
@@ -1692,6 +1700,7 @@ async function checkoutRevision(
         "rev-list",
         "--objects",
         "--missing=print",
+        "--no-walk",
         task.revision,
       );
       incompleteObjects = reachable
@@ -1709,6 +1718,7 @@ async function checkoutRevision(
       "--quiet",
       "--no-tags",
       "--depth=1",
+      "--no-auto-gc",
       "--",
       task.repository,
       task.revision,
@@ -1724,9 +1734,13 @@ async function checkoutRevision(
     const aliases = new Set<string>();
     const selectedPaths = new Set<string>();
     for (const requested of restorePaths) {
-      let selected = relative(path, resolve(path, expandHome(requested)))
-        .split(sep)
-        .join("/");
+      let selected =
+        relative(
+          path,
+          await canonicalCreationPath(resolve(path, expandHome(requested))),
+        )
+          .split(sep)
+          .join("/") || ".";
       const visited = new Set<string>();
       for (;;) {
         const name = links.find(
@@ -1747,18 +1761,33 @@ async function checkoutRevision(
       }
       if (!relativePathIsOutside(selected)) selectedPaths.add(selected);
     }
-    const deleted =
-      selectedPaths.size !== 0 || aliases.size !== 0
-        ? await gitOutput([
-            "--literal-pathspecs",
-            "ls-files",
-            "--deleted",
-            "-z",
-            "--",
-            ...selectedPaths,
-            ...aliases,
-          ])
-        : Buffer.alloc(0);
+    const restoreAll = selectedPaths.has(".");
+    const scopes = [...selectedPaths, ...aliases].map((name) =>
+      Buffer.from(name),
+    );
+    const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
+    const selectedDeleted: Buffer[] = [];
+    let start = 0;
+    for (
+      let end = deletedPaths.indexOf(0);
+      end !== -1;
+      end = deletedPaths.indexOf(0, start)
+    ) {
+      const name = deletedPaths.subarray(start, end);
+      if (
+        scopes.some(
+          (scope) =>
+            restoreAll ||
+            name.equals(scope) ||
+            (name[scope.length] === 47 &&
+              name.subarray(0, scope.length).equals(scope)),
+        )
+      ) {
+        selectedDeleted.push(deletedPaths.subarray(start, end + 1));
+      }
+      start = end + 1;
+    }
+    const deleted = Buffer.concat(selectedDeleted);
     if (deleted.length !== 0) {
       await gitOutput(
         [

@@ -23,7 +23,15 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname, homedir } from "node:os";
-import { basename, dirname, join, posix, relative, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  posix,
+  relative,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { zipSync } from "fflate";
@@ -5314,3 +5322,375 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
   ).toBe(false);
   expect(runs).toHaveBeenCalledTimes(2);
 });
+
+async function completedConfiguredPaths(
+  checkout: string,
+  settings: Parameters<SecurityClient["run"]>[1] = {},
+) {
+  const target = await normalizeTarget(checkout, settings.target!);
+  const result = await completedScan(settings.outputDir!, "complete", checkout);
+  result.manifest.scan.scope.includePaths = [...target.paths];
+  await writeFile(
+    join(settings.outputDir!, "scan-manifest.json"),
+    JSON.stringify(result.manifest),
+  );
+  const file = join(settings.outputDir!, "coverage.json");
+  const coverage = JSON.parse(await readFile(file, "utf8"));
+  Object.assign(coverage, {
+    mode: "scoped_path",
+    includePaths: target.paths,
+    inventoryStrategy: "scoped_path",
+  });
+  await writeFile(file, JSON.stringify(coverage));
+  await reseal(settings.outputDir!);
+  return result;
+}
+for (const selection of ["root", "parent alias"] as const) {
+  test(`final snapshot recovery restores accepted configured paths through ${selection}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "configured-snapshot-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const parentAlias = join(paths.root, "campaign-parent");
+    if (selection === "parent alias") {
+      await mkdir(paths.output, { mode: 0o700 });
+      await symlink(paths.output, parentAlias, "junction");
+    }
+    const target =
+      selection === "root"
+        ? [".", "src/app.ts"]
+        : [join(parentAlias, "checkouts", "repo", "src", "app.ts")];
+    const runs = mock(completedConfiguredPaths);
+    const campaign = options(paths, client(runs), {
+      scanOptionsByMode: { standard: { target } },
+    });
+    const initial = await runMultiscan(campaign);
+    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    const ledger = await readFile(initial.resultsPath);
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src", "app.ts"));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(await readFile(initial.resultsPath)).toEqual(ledger);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+for (const missingAncestor of [false, true]) {
+  test(`final snapshot recovery stays offline with missing ancestor objects=${missingAncestor}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "offline-snapshot-source");
+    const ancestorBlob = git(source.path, "rev-parse", "HEAD:src/app.ts");
+    await writeFile(
+      join(source.path, "src", "app.ts"),
+      "Current pinned content.\n",
+    );
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Current pinned snapshot",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    const initial = await runMultiscan(campaign);
+    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    const ledger = await readFile(initial.resultsPath);
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    if (missingAncestor)
+      await rm(
+        join(
+          checkout,
+          ".git",
+          "objects",
+          ancestorBlob.slice(0, 2),
+          ancestorBlob.slice(2),
+        ),
+      );
+    await rename(source.path, join(paths.root, "unavailable-source"));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(await readFile(initial.resultsPath)).toEqual(ledger);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+test("final snapshot recovery skips a sealed report's unavailable interpreter ancestor", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "sealed-python-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+  );
+  const parent = join(paths.root, "python-parent");
+  await mkdir(parent);
+  const interpreter = join(parent, "bin", "python");
+  const runs = mock(
+    async (
+      checkout: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => {
+      const result = await completedScan(
+        settings.outputDir!,
+        "complete",
+        checkout,
+      );
+      result.manifest.scan.artifacts.push({
+        path: "report.md",
+        sha256: "0".repeat(64),
+        mediaType: "text/markdown",
+      });
+      await writeFile(
+        join(settings.outputDir!, "scan-manifest.json"),
+        JSON.stringify(result.manifest),
+      );
+      await reseal(settings.outputDir!);
+      expect(
+        await contract.hasSealedReport(settings.outputDir!, result.manifest),
+      ).toBe(true);
+      return result;
+    },
+  );
+  const campaign = options(paths, client(runs), {
+    config: { pythonPath: interpreter },
+  });
+  const initial = await runMultiscan(campaign);
+  expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+  const ledger = await readFile(initial.resultsPath);
+  await rm(parent, { recursive: true });
+  await writeFile(parent, "Ancestor is now an ordinary file.\n");
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(await readFile(initial.resultsPath)).toEqual(ledger);
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+for (const linked of [false, true]) {
+  test(`final snapshot recovery fetches without maintaining linked server info=${linked}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "maintenance-snapshot-source");
+    for (let i = 0; i < 3; i++) {
+      await writeFile(
+        join(source.path, "src", "app.ts"),
+        `Synthetic version ${i}.\n`,
+      );
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        `Synthetic revision ${i}`,
+      );
+    }
+    const interrupted = join(paths.root, "interrupted");
+    git(paths.root, "clone", "--quiet", source.path, interrupted);
+    await writeFile(
+      join(source.path, "src", "later.ts"),
+      "Pinned later source.\n",
+    );
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Pinned later revision",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    const initial = await runMultiscan(campaign);
+    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    const ledger = await readFile(initial.resultsPath);
+    const checkout = join(paths.output, "checkouts", "repo");
+    await rename(interrupted, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    const objects = git(checkout, "rev-list", "--objects", "HEAD").split("\n");
+    for (let i = 0; i < 3; i++)
+      gitText(
+        [
+          "-C",
+          checkout,
+          "pack-objects",
+          join(checkout, ".git", "objects", "pack", `pack-${i}`),
+        ],
+        { input: objects[i]!.split(" ")[0] + "\n" },
+      );
+    git(checkout, "config", "gc.auto", "1");
+    git(checkout, "config", "gc.autoPackLimit", "1");
+    git(checkout, "config", "gc.autoDetach", "false");
+    const destinations = [
+      join(paths.root, "outside-info"),
+      join(paths.root, "outside-objects-info"),
+    ];
+    if (linked) {
+      for (const [i, name] of ["info", "objects/info"].entries()) {
+        await mkdir(destinations[i]!);
+        const target = join(checkout, ".git", name);
+        await rm(target, { recursive: true });
+        await symlink(destinations[i]!, target, "junction");
+      }
+    }
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    if (linked)
+      for (const destination of destinations)
+        expect(await readdir(destination)).toEqual([]);
+    expect(await readFile(initial.resultsPath)).toEqual(ledger);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+for (const mode of ["many scopes", "early restore exit"] as const) {
+  const selectedTest = mode === "early restore exit" ? testPosix : test;
+  selectedTest(
+    `final snapshot recovery handles ${mode} through actual Git stdin`,
+    async () => {
+      const name = `final snapshot recovery handles ${mode} through actual Git stdin`;
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const paths = await fixture();
+      const source = await repository(paths.root, "stdin-snapshot-source");
+      const names = Array.from(
+        { length: mode === "many scopes" ? 800 : 14000 },
+        (_, i) => `src/file_${i}_${"b".repeat(70)}.ts`,
+      );
+      const blob = git(source.path, "hash-object", "-w", "src/app.ts");
+      gitText(["-C", source.path, "update-index", "--index-info"], {
+        input: names.map((name) => `100644 ${blob}\t${name}\n`).join(""),
+      });
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Tracked restoration paths",
+      );
+      const revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision${mode === "many scopes" ? "" : ",scope"}\nrepo,${source.path},${revision}${mode === "many scopes" ? "" : ",src"}\n`,
+      );
+      const runs = mock(
+        mode === "many scopes" ? completedConfiguredPaths : completeRun,
+      );
+      const campaign = options(
+        paths,
+        client(runs),
+        mode === "many scopes"
+          ? { scanOptionsByMode: { standard: { target: names } } }
+          : {},
+      );
+      const initial = await runMultiscan(campaign);
+      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+      const ledger = await readFile(initial.resultsPath);
+      const checkout = join(paths.output, "checkouts", "repo");
+      git(paths.root, "clone", "--quiet", source.path, checkout);
+      await rm(join(checkout, "src"), { recursive: true });
+      const previousPath = process.env["PATH"];
+      const tools = join(paths.root, "synthetic-tools");
+      if (process.platform !== "win32") {
+        const original = await resolveTrustedExecutable(
+          "git",
+          process.env,
+          process.cwd(),
+        );
+        expect(original).not.toBeNull();
+        await mkdir(tools);
+        // Exercise Windows's process-argument ceiling on Unix; Windows uses its real ceiling.
+        const script = `#!/usr/bin/env node\nconst {spawnSync}=require("node:child_process");const args=process.argv.slice(2);if(args.includes("ls-files")&&args.join(" ").length>32767)process.exit(72);if(${JSON.stringify(mode)}==="early restore exit"&&args.includes("restore"))process.exit(73);const result=spawnSync(${JSON.stringify(original!.executable)},args,{stdio:"inherit"});if(result.error)throw result.error;process.exit(result.status??1);\n`;
+        await writeFile(join(tools, "git"), script, { mode: 0o700 });
+        process.env["PATH"] = tools + delimiter + (previousPath ?? "");
+      }
+      try {
+        if (mode === "early restore exit") {
+          const node = "node";
+          const bundle = join(paths.root, "multiscan-runtime.mjs");
+          const modules = join(paths.root, "node_modules");
+          await symlink(
+            join(dirname(import.meta.path), "..", "node_modules"),
+            modules,
+            "junction",
+          );
+          await symlink(
+            PLUGIN_ROOT,
+            join(paths.root, "_bundled_plugin"),
+            "junction",
+          );
+          execFileSync(process.execPath, [
+            "build",
+            join(dirname(import.meta.path), "..", "src", "multiscan.ts"),
+            "--target=node",
+            "--packages=external",
+            `--outfile=${bundle}`,
+          ]);
+          const entry = join(paths.root, "node-recovery.mjs");
+          await writeFile(
+            entry,
+            `import {runMultiscan} from ${JSON.stringify(bundle)};\nconst options=JSON.parse(process.argv[2]);options.createSecurity=()=>({run:async()=>{throw new Error("Existing receipt must be reused");},close:async()=>{}});try{await runMultiscan(options);process.exitCode=1;}catch(error){console.log("Child failure returned to SDK host",error.code);}console.log("SDK host remained alive");\n`,
+          );
+          const output = execFileSync(
+            node,
+            [
+              entry,
+              JSON.stringify({
+                inputPath: paths.input,
+                outputDir: paths.output,
+                workers: 1,
+                mode: "standard",
+                maxAttempts: 2,
+                config: {},
+              }),
+            ],
+            { encoding: "utf8", env: process.env },
+          );
+          expect(output).toContain("Child failure returned to SDK host 73");
+          expect(output).toContain("SDK host remained alive");
+        } else
+          expect(await runMultiscan(campaign)).toMatchObject({
+            completed: 1,
+            skipped: 1,
+          });
+        expect(await readFile(initial.resultsPath)).toEqual(ledger);
+        expect(runs).toHaveBeenCalledTimes(1);
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+      }
+    },
+  );
+}
