@@ -1230,13 +1230,18 @@ describe("CodexSecurity finding validation", () => {
     { scope: "home", changed: false },
     { scope: "output worktree", changed: true },
     { scope: "output worktree", changed: false },
+    { scope: "output project configuration", changed: true },
+    { scope: "output project configuration", changed: false },
     { scope: "none", changed: false },
   ] as const)(
     "preserves native validation guidance: %p",
     async ({ scope, changed }) => {
       const python = await resolvePluginPython();
       const stateRoot = await temporaryDirectory("native-validation-guidance-");
-      if (scope === "output worktree")
+      if (
+        scope === "output worktree" ||
+        scope === "output project configuration"
+      )
         execFileSync("git", ["init", "-q", stateRoot]);
       let fixture: Awaited<ReturnType<typeof validationClient>>;
       let guide: string | undefined;
@@ -1246,7 +1251,10 @@ describe("CodexSecurity finding validation", () => {
         expect(fixture.captured.codex?.env?.["CODEX_HOME"]).toBe(
           fixture.codexHome,
         );
-        if (scope === "output worktree")
+        if (
+          scope === "output worktree" ||
+          scope === "output project configuration"
+        )
           expect(
             relative(
               stateRoot,
@@ -1259,7 +1267,11 @@ describe("CodexSecurity finding validation", () => {
             report:
               guide === undefined
                 ? "Synthetic assessment."
-                : await readFile(guide, "utf8"),
+                : scope === "output project configuration"
+                  ? parseToml(await readFile(guide, "utf8"))[
+                      "developer_instructions"
+                    ]
+                  : await readFile(guide, "utf8"),
           }),
         );
       }
@@ -1272,10 +1284,17 @@ describe("CodexSecurity finding validation", () => {
           ? join(fixture.codexHome, "AGENTS.md")
           : scope === "output worktree"
             ? join(stateRoot, "AGENTS.md")
-            : undefined;
+            : scope === "output project configuration"
+              ? join(stateRoot, ".codex", "config.toml")
+              : undefined;
       if (guide !== undefined) {
         await mkdir(dirname(guide), { recursive: true });
-        await writeFile(guide, "Original synthetic guidance.");
+        await writeFile(
+          guide,
+          scope === "output project configuration"
+            ? 'developer_instructions = "Original synthetic guidance."\n'
+            : "Original synthetic guidance.",
+        );
       }
       fixture.workbench.mockImplementation(runWorkbench);
       const workflow = new FindingWorkflow(
@@ -1291,7 +1310,13 @@ describe("CodexSecurity finding validation", () => {
         workflowId: workflow.id,
       };
       const first = await client.validate(request);
-      if (changed) await writeFile(guide!, "Updated synthetic guidance.");
+      if (changed)
+        await writeFile(
+          guide!,
+          scope === "output project configuration"
+            ? 'developer_instructions = "Updated synthetic guidance."\n'
+            : "Updated synthetic guidance.",
+        );
       const second = await client.validate(request);
       expect(second.report).toBe(
         changed ? "Updated synthetic guidance." : first.report,

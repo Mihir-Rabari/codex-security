@@ -808,7 +808,10 @@ export class CodexSecurity {
           inputs.outputDir ?? outputRoot,
         );
         for (;;) {
-          candidates.push(...names.map((name) => join(directory, name)));
+          candidates.push(
+            join(directory, ".codex", "config.toml"),
+            ...names.map((name) => join(directory, name)),
+          );
           const parent = dirname(directory);
           if (parent === directory) break;
           directory = parent;
