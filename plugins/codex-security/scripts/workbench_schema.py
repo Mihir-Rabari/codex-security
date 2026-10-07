@@ -869,6 +869,13 @@ MIGRATIONS = (
     ),
     (
         42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
+        43,
         "persist authorized source excerpt scopes",
         """
         ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;
@@ -977,7 +984,7 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 43):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -1132,12 +1139,12 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
-    for preview_version in (34, 40, 41):
+    for preview_version in (34, 40, 41, 42):
         move_pre_release_migration(
-            connection, preview_version, 42, "persist authorized source excerpt scopes"
+            connection, preview_version, 43, "persist authorized source excerpt scopes"
         )
     source_scope_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 42"
+        "SELECT name FROM schema_migrations WHERE version = 43"
     ).fetchone()
     if (
         source_scope_migration is not None
