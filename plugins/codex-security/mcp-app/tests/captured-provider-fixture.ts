@@ -1,5 +1,5 @@
-import { scanPreflightCodexConfig } from "../../../../sdk/typescript/dist/preflight-config.js";
-import { createProviderProfile } from "../../../../sdk/typescript/dist/provider-profile.js";
+import { importSource } from "./import-module.ts";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -28,6 +28,11 @@ export async function testCapturedCustomProviderSettings({
   trustedParentSandbox: DeepWorkerParentSandbox;
   CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
 }) {
+  const { projectWorkerSettings } = await importSource(
+    fileURLToPath(
+      new URL("../src/deep-scan/worker-settings.ts", import.meta.url),
+    ),
+  );
   const originalSpawn = childProcess.spawn;
   const scans = await Promise.all(
     ["openrouter", "fireworks"]
@@ -42,7 +47,7 @@ export async function testCapturedCustomProviderSettings({
       .map(async ({ provider, mode }, index) => {
         const fixture = await fakeCodexFixture();
         const codexHome = path.join(fixture.root, "provider-home");
-        await mkdir(codexHome);
+        await mkdir(codexHome, { mode: 0o700 });
         const configPath = path.join(codexHome, "config.toml");
         const definition = {
           name: "Synthetic provider",
@@ -65,18 +70,15 @@ export async function testCapturedCustomProviderSettings({
           FAKE_CODEX_MARKER: fixture.markerPath,
         };
         if (mode === "current-private") {
-          const nativeProfile = await createProviderProfile(codexHome, {
-            model_provider: provider,
-            model_providers: { [provider]: definition },
-          });
+          const nativeProfile = { name: `codex_security_fixture_${index}` };
+          await writeFile(
+            path.join(codexHome, `${nativeProfile.name}.config.toml`),
+            stringifyToml({ model_providers: { [provider]: definition } }),
+            { mode: 0o600 },
+          );
           await writeFile(
             configPath,
-            stringifyToml(
-              scanPreflightCodexConfig({
-                model_provider: provider,
-                model_providers: { [provider]: definition },
-              }),
-            ),
+            stringifyToml(projectWorkerSettings({ model_provider: provider })),
           );
           const workerConfigPath = path.join(codexHome, "worker-runtime.toml");
           await writeFile(
