@@ -3,6 +3,7 @@ import {
   candidateKey,
   coverageCandidateKey,
   findingCandidateKey,
+  isCurrentCandidateFinding,
   isTerminalCandidateDecision,
   resolvedCandidateKeys,
   surfaceReferenceKey,
@@ -59,6 +60,7 @@ export function refreshDiffCandidateHistory(
   for (const source of sources) {
     const authored = [
       ...source.findings
+        .filter(isCurrentCandidateFinding)
         .filter((finding) => {
           const candidate = ledger.get(findingCandidateKey(finding) ?? "");
           return !candidate || !changedFindingDecision(finding, candidate);
@@ -283,7 +285,9 @@ export function preserveDiffCandidateDecisions(
     findings: currentFindings,
   });
   const currentFindingKeys = new Set(
-    currentFindings.map((finding) => findingCandidateKey(finding)),
+    currentFindings
+      .filter(isCurrentCandidateFinding)
+      .map((finding) => findingCandidateKey(finding)),
   );
   const accepted = new Set(currentFindingKeys);
   accepted.delete(undefined);
@@ -298,12 +302,17 @@ export function preserveDiffCandidateDecisions(
     { section: string; item: JsonObject }
   >();
   const seen = resolvedCandidateKeys({ ...input, findings: [] });
+  for (const finding of currentFindings) {
+    const key = findingCandidateKey(finding);
+    if (key && !isCurrentCandidateFinding(finding)) seen.add(key);
+  }
   for (const source of previous) {
     for (const finding of source.findings) {
       const key = findingCandidateKey(finding);
       const candidate = ledger.get(key ?? "");
       if (
         key &&
+        isCurrentCandidateFinding(finding) &&
         !seen.has(key) &&
         candidate &&
         (object(finding.provenance)?.diffCandidateDecision === undefined ||
@@ -406,7 +415,9 @@ export function preserveUnresolvedDiffCandidates(
   input = structuredClone(input);
   const resolvedKeys = resolvedCandidateKeys(input);
   const confirmed = new Map(
-    input.findings.map((finding) => [findingCandidateKey(finding), finding]),
+    input.findings
+      .filter(isCurrentCandidateFinding)
+      .map((finding) => [findingCandidateKey(finding), finding]),
   );
   const inputSurfaces = input.coverage.surfaces as JsonObject[];
   const decisions = new Map(
@@ -414,6 +425,17 @@ export function preserveUnresolvedDiffCandidates(
       .filter(isTerminalCandidateDecision)
       .map((item) => [coverageCandidateKey(item), item]),
   );
+  for (const finding of submitted.findings) {
+    if (isCurrentCandidateFinding(finding)) continue;
+    const decision = decisions.get(findingCandidateKey(finding));
+    if (decision)
+      decision.previousFindings = exactUnion(
+        Array.isArray(decision.previousFindings)
+          ? decision.previousFindings
+          : [],
+        [finding],
+      );
+  }
   // Resolved rows still carry submitted evidence; archive it before clearing the gap.
   for (const pending of [
     ...(submitted.coverage.deferred as JsonObject[]),

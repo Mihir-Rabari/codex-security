@@ -1907,3 +1907,53 @@ def test_stopped_diff_replacement_archives_prior_terminal_payload(
     else:
         run_workbench(state, "get-scan", "--scan-id", scan_id)
     assert_retained()
+
+
+@pytest.mark.parametrize(
+    "payload,archive", [("candidate", "originalCandidates"), ("finding", "previousFindings")]
+)
+@pytest.mark.parametrize("comparison", ["destination", "archive"])
+def test_stopped_diff_preserves_type_distinct_opaque_candidate_history(
+    tmp_path: Path, payload: str, archive: str, comparison: str
+) -> None:
+    state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    pending = next(row for row in coverage["deferred"] if row.get("candidateId"))
+    boolean = {"opaque": [True, {"value": False}]}
+    numeric = {"opaque": [1, {"value": 0}]}
+    pending[payload] = numeric if comparison == "destination" else boolean
+    pending[archive] = [numeric, copy.deepcopy(numeric)] if comparison == "archive" else []
+    surface = next(row for row in coverage["surfaces"] if row.get("candidateId"))
+    surface.update(disposition="rejected", receiptRefs=[])
+    if comparison == "destination":
+        surface[payload] = boolean
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": []},
+                "coverage": coverage,
+            }
+        )
+    )
+    run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    ledger.unlink()
+    checkpoints = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    run_workbench(state, "fail-scan", "--scan-id", scan_id, "--message", "Synthetic stop.")
+
+    def assert_retained() -> None:
+        saved = json.loads(coverage_path.read_text())
+        terminal = next(row for row in saved["surfaces"] if row.get("candidateId"))
+        values = ([terminal[payload]] if payload in terminal else []) + terminal.get(archive, [])
+        encoded = [json.dumps(value, sort_keys=True) for value in values]
+        assert json.dumps(boolean, sort_keys=True) in encoded
+        assert json.dumps(numeric, sort_keys=True) in encoded
+        assert encoded.count(json.dumps(numeric, sort_keys=True)) == 1
+        assert not any(row.get("candidateId") for row in saved["deferred"])
+        assert all(path.read_bytes() == contents for path, contents in checkpoints.items())
+
+    assert_retained()
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert_retained()

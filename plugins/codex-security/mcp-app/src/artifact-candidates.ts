@@ -80,6 +80,11 @@ export function isTerminalCandidateDecision(
   );
 }
 
+export function isCurrentCandidateFinding(finding: JsonObject): boolean {
+  const provenance = finding.provenance as JsonObject | undefined;
+  return provenance?.candidateReopened !== true;
+}
+
 export function resolvedCandidateKeys(
   input: {
     findings: JsonObject[];
@@ -89,7 +94,9 @@ export function resolvedCandidateKeys(
 ): Set<string> {
   return new Set(
     [
-      ...input.findings.map((finding) => findingCandidateKey(finding, owner)),
+      ...input.findings
+        .filter(isCurrentCandidateFinding)
+        .map((finding) => findingCandidateKey(finding, owner)),
       ...[
         ...(input.coverage.surfaces as JsonObject[]),
         ...(input.coverage.explicitExclusions as JsonObject[]),

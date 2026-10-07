@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -168,7 +169,12 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
         ):
             values = (
                 [row[field]]
-                if field in row and (field not in destination or row[field] != destination[field])
+                if field in row
+                and (
+                    field not in destination
+                    or json.dumps(row[field], sort_keys=True)
+                    != json.dumps(destination[field], sort_keys=True)
+                )
                 else []
             )
             if isinstance(row.get(archive), list):
@@ -177,9 +183,12 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
                 continue
             if not isinstance(destination.get(archive), list):
                 destination[archive] = []
+            archived = {json.dumps(value, sort_keys=True) for value in destination[archive]}
             for value in values:
-                if value not in destination[archive]:
+                encoded = json.dumps(value, sort_keys=True)
+                if encoded not in archived:
                     destination[archive].append(copy.deepcopy(value))
+                    archived.add(encoded)
 
 
 def project_resolved_candidate_rows(

@@ -711,3 +711,195 @@ for (const mode of ["standard", "diff"] as const) {
     });
   }
 }
+
+for (const reopened of [false, true]) {
+  for (const disposition of ["deferred", "suppressed"]) {
+    test(`Diff draft respects recovered candidate status: ${reopened}/${disposition}`, async (t) => {
+      const f = await fixture(t, "diff");
+      const candidateId = "reopened-candidate";
+      const historical = {
+        ...finding("reopened", "src/handler.ts"),
+        provenance: {
+          source: "local_plugin",
+          candidateId,
+          candidateReopened: reopened,
+        },
+      };
+      const pending = {
+        candidateId,
+        reason: "New evidence requires further review.",
+      };
+      const ledger = path.join(
+        f.root,
+        "artifacts",
+        "02_discovery",
+        "candidate_ledger.jsonl",
+      );
+      await mkdir(path.dirname(ledger), { recursive: true });
+      await writeFile(
+        ledger,
+        JSON.stringify({
+          candidate_id: candidateId,
+          summary: "Synthetic candidate review.",
+          evidence: "Saved source evidence.",
+          cwe_ids: [],
+          locations: [
+            {
+              path: "src/handler.ts",
+              start_line: 1,
+              end_line: 2,
+              role: "evidence",
+            },
+          ],
+          validation: { disposition },
+        }) + "\n",
+      );
+      if (reopened)
+        await f.write({
+          ...f.draft(),
+          findings: [
+            {
+              ...historical,
+              provenance: {
+                ...historical.provenance,
+                candidateReopened: false,
+              },
+            },
+          ],
+        });
+      await f.write({
+        ...f.draft({ deferred: [pending] }),
+        findings: [historical],
+      });
+      const dismissed = reopened && disposition === "suppressed";
+      const assertCurrent = async () => {
+        const coverage = await f.read();
+        assert.equal(
+          coverage.deferred.some(
+            (row: { candidateId?: string }) => row.candidateId === candidateId,
+          ),
+          reopened && !dismissed,
+        );
+        assert.equal(
+          coverage.surfaces.some(
+            (row: { candidateId?: string; disposition: string }) =>
+              row.candidateId === candidateId && row.disposition === "rejected",
+          ),
+          dismissed,
+        );
+        const saved = JSON.parse(
+          await readFile(path.join(f.root, "findings.json"), "utf8"),
+        );
+        assert.equal(saved.findings.length, dismissed ? 0 : 1);
+        if (!dismissed)
+          assert.equal(
+            saved.findings[0].provenance.candidateReopened,
+            reopened,
+          );
+        else
+          assert.ok(
+            coverage.surfaces
+              .find(
+                (row: { candidateId?: string }) =>
+                  row.candidateId === candidateId,
+              )
+              .previousFindings.some(
+                (row: unknown) =>
+                  JSON.stringify(row) === JSON.stringify(historical),
+              ),
+          );
+      };
+      await assertCurrent();
+      const checkpoints = path.join(f.root, "checkpoints");
+      const originals = await Promise.all(
+        (await readdir(checkpoints)).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(checkpoints, name), "utf8"),
+            ] as const,
+        ),
+      );
+      await f.write(f.draft());
+      await assertCurrent();
+      for (const [name, contents] of originals)
+        assert.equal(
+          await readFile(path.join(checkpoints, name), "utf8"),
+          contents,
+        );
+    });
+  }
+
+  test(`Deep reducer retains reopened candidate review: ${reopened}`, async (t) => {
+    const f = await fixture(t, "deep");
+    const workerRoot = path.join(
+      f.root,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      "worker-a",
+      "output",
+    );
+    const reducerRoot = path.join(
+      f.root,
+      "artifacts",
+      "deep_discovery",
+      "dedup",
+      "round",
+      "output",
+    );
+    await mkdir(workerRoot, { recursive: true });
+    await mkdir(reducerRoot, { recursive: true });
+    const historical = {
+      ...finding("reopened", "src/handler.ts"),
+      provenance: {
+        source: "local_plugin",
+        candidateId: "candidate-one",
+        candidateReopened: reopened,
+      },
+    };
+    const pending = {
+      candidateId: "candidate-one",
+      reason: "New evidence requires further review.",
+    };
+    const resultPath = path.join(workerRoot, "result.json");
+    const draft = f.draft({ deferred: [pending] });
+    const { handoffClaimToken, ...worker } = draft;
+    const original =
+      JSON.stringify({ ...worker, complete: true, findings: [historical] }) +
+      "\n";
+    await writeFile(resultPath, original);
+    const {
+      getCodexSecurityDeepReducerInputs,
+      recordCodexSecurityDeepReduction,
+    } = await importSource(
+      new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+    );
+    const context = {
+      root: reducerRoot,
+      repoRoot: f.root,
+      scanId: f.context.scanId,
+      layout: "reducer",
+      deepReducer: {
+        scanRoot: f.root,
+        claimedWorkers: [{ id: "worker-a", resultPath }],
+      },
+    };
+    const inputs = await getCodexSecurityDeepReducerInputs(context);
+    const discovery = inputs.discoveries[0].result;
+    const expected = reopened
+      ? [{ ...pending, sourceWorkerId: "worker-a" }]
+      : [];
+    assert.deepEqual(discovery.unresolvedCandidates ?? [], expected);
+    await recordCodexSecurityDeepReduction(context, {
+      scanId: f.context.scanId,
+      findings: discovery.findings,
+    });
+    const saved = JSON.parse(
+      await readFile(path.join(reducerRoot, "result.json"), "utf8"),
+    );
+    assert.deepEqual(saved.unresolvedCandidates ?? [], expected);
+    assert.equal(saved.findings[0].provenance.candidateReopened, reopened);
+    assert.equal(await readFile(resultPath, "utf8"), original);
+  });
+}

@@ -13,6 +13,7 @@ import {
   findingCandidateId,
   findingCandidateKey,
   findingCandidateOwner,
+  isCurrentCandidateFinding,
   isTerminalCandidateDecision,
   resolvedCandidateKeys as collectResolvedCandidateKeys,
   surfaceReferenceKey,
@@ -144,6 +145,7 @@ export async function recordCodexSecurityScanDraft(
           !publishDraft && resolvedDeferred(parsed.coverage).length > 0,
           scanDraftCheckpointName(checkpoint),
           candidates,
+          parsed.findings,
         );
     const reconciled = preserveUnresolvedDiffCandidates(
       preserved.input,
@@ -402,6 +404,7 @@ async function preserveScanDraft(
   saveCheckpoint = true,
   currentCheckpointName = scanDraftCheckpointName(input),
   diffCandidates?: DiffCandidates,
+  currentFindings = input.findings,
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -664,7 +667,9 @@ async function preserveScanDraft(
   // Ledger decisions clear candidate-linked work, not unlinked legacy follow-ups.
   const legacyResolvedFollowUpCandidateKeys = new Set(
     [
-      ...result.findings.map((finding) => findingKey(finding)),
+      ...result.findings
+        .filter(isCurrentCandidateFinding)
+        .map((finding) => findingKey(finding)),
       ...(result.coverage.surfaces as JsonObject[])
         .filter(isTerminalCandidateDecision)
         .map((surface) => coverageKey(surface)),
@@ -674,7 +679,7 @@ async function preserveScanDraft(
     result,
     diffCandidates,
     sources,
-    input.findings,
+    currentFindings,
   );
   const resolvedCandidateKeys = collectResolvedCandidateKeys(result, owner);
   const resolvedSurfaceIds = new Set<string>();
@@ -855,14 +860,21 @@ async function preserveScanDraft(
         ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
-        if (candidateId !== undefined) resolvedCandidateKeys.add(candidateId);
+        if (
+          candidateId !== undefined &&
+          isCurrentCandidateFinding(finding) &&
+          isCurrentCandidateFinding(matches[0]!)
+        )
+          resolvedCandidateKeys.add(candidateId);
       } else {
         if (!matches.some((current) => containsSavedFinding(current, finding)))
           result.findings.push(structuredClone(finding));
       }
     }
     for (const candidateId of [
-      ...result.findings.map((finding) => findingKey(finding)),
+      ...result.findings
+        .filter(isCurrentCandidateFinding)
+        .map((finding) => findingKey(finding)),
       ...dispositions.map((item) => coverageKey(item)),
     ]) {
       if (typeof candidateId === "string")
@@ -871,7 +883,9 @@ async function preserveScanDraft(
     const representedCandidateKeys = new Set(
       [
         ...resolvedCandidateKeys,
-        ...result.findings.map((finding) => findingKey(finding)),
+        ...result.findings
+          .filter(isCurrentCandidateFinding)
+          .map((finding) => findingKey(finding)),
         ...candidateRows
           .filter((item) => !keepsGenericWork(item))
           .map((item) => coverageKey(item)),
