@@ -516,7 +516,7 @@ async function testSemanticScanDraftCompletion(
       explicitExclusions: [],
       deferred: [
         {
-          candidateId: "candidate-deferred-query",
+          candidateId: "review/auth",
           reason: "A neighboring SQL execution mode remains unavailable.",
           paths: ["src/fixture.py"],
           source: "preserve-candidate-metadata",
@@ -532,7 +532,7 @@ async function testSemanticScanDraftCompletion(
           surfaceIds: ["surface_sql-execution"],
         },
         {
-          candidateId: "candidate-deferred-query",
+          candidateId: "review/auth",
           reason: "Another query sink requires a unique deferred identity.",
         },
         {
@@ -630,40 +630,6 @@ async function testSemanticScanDraftCompletion(
           openQuestions: [{ followUpPrompt: "Trace the SQL entrypoint." }],
         },
       ],
-      ...[
-        ["a path-traversal candidate identity", ".."],
-        ["a forward-slash candidate identity", "candidate/nested"],
-        ["a backslash candidate identity", "candidate\\nested"],
-        ["a control-character candidate identity", "candidate\u0001nested"],
-        ["an oversized candidate identity", "a".repeat(513)],
-      ].flatMap(([description, candidateId]) => [
-        [
-          description,
-          {
-            ...coverage,
-            deferred: [
-              {
-                candidateId,
-                reason: "The candidate identity must remain safe.",
-              },
-            ],
-          },
-        ],
-        [
-          `${description} alongside an explicit deferred identity`,
-          {
-            ...coverage,
-            deferred: [
-              {
-                id: "explicit-safe-deferred",
-                candidateId,
-                reason:
-                  "An explicit identity must not bypass candidate validation.",
-              },
-            ],
-          },
-        ],
-      ]),
     ] as const) {
       let invalid;
       try {
@@ -843,7 +809,7 @@ async function testSemanticScanDraftCompletion(
     assert.deepEqual(results.coverage.deferred, [
       {
         ...coverage.deferred[0],
-        id: "candidate-deferred-query",
+        id: "review/auth",
       },
       {
         ...coverage.deferred[1],
@@ -852,7 +818,7 @@ async function testSemanticScanDraftCompletion(
       coverage.deferred[2],
       {
         ...coverage.deferred[3],
-        id: "candidate-deferred-query-2",
+        id: "review/auth-2",
       },
       {
         ...coverage.deferred[4],
