@@ -1016,3 +1016,62 @@ for (const kind of ["missing", "symlinked"] as const) {
     );
   }
 }
+
+test.skipIf(process.platform === "win32")(
+  "latest protects a checkout around inaccessible unrelated history",
+  async () => {
+    const f = await fixture(true);
+    const other = join(f.root, "other-checkout");
+    await mkdir(join(other, ".git"), { recursive: true });
+    const blocked = join(other, "private");
+    await mkdir(blocked);
+    const target = join(blocked, "component");
+    const marker = join(f.root, "inaccessible-target-git-probed");
+    await writeFile(
+      join(other, "git"),
+      '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nprintf "not-git\\n"\n',
+      { mode: 0o700 },
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+        "inaccessible-target",
+        target,
+        "Synthetic target",
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+      );
+      db.query(
+        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+      ).run(target, "inaccessible-target", f.second.scanId);
+    } finally {
+      db.close();
+    }
+    await chmod(blocked, 0);
+    try {
+      const workbench = await savedScanWorkbench("latest", {
+        environment: {
+          ...f.environment,
+          PYTHON: f.python,
+          PATH: other + delimiter + f.environment.PATH,
+          TEST_GIT_PROBE: marker,
+        },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      });
+      expect(
+        (
+          await resolveCompletedScan("latest", {
+            currentDirectory: () => f.repository,
+            runWorkbench: workbench,
+          })
+        ).scanId,
+      ).toBe(f.first.scanId);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await chmod(blocked, 0o700);
+    }
+  },
+);

@@ -788,9 +788,13 @@ export async function gitMarkerRoot(
         : dirname(canonical);
       break;
     } catch (error) {
-      // Executable protection must retain surviving checkout ancestors of stale targets.
+      // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
+      throwIfAborted(signal);
       const code = (error as NodeJS.ErrnoException).code;
-      if (search !== "outermost" || (code !== "ENOENT" && code !== "ENOTDIR"))
+      if (
+        search !== "outermost" ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+      )
         throw error;
       const parent = dirname(candidate);
       if (parent === candidate) throw error;
@@ -825,8 +829,14 @@ async function walkGitMarkers(
       if (search === "nearest") return current;
       root = current;
     } catch (error) {
+      throwIfAborted(signal);
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      if (
+        code !== "ENOENT" &&
+        code !== "ENOTDIR" &&
+        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+      )
+        throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
