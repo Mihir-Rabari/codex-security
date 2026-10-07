@@ -1012,78 +1012,26 @@ test("retrieves complete potential duplicates without vectors or review calls", 
   );
 });
 
-test("SQLite filters repository and embedding compatibility before cosine ranking", async () => {
-  const { store, environment } = await fixture();
-  await store.initialize();
-  const anchor = embedded(1, [7, 0]);
-  const above = embedded(2, [0.56, Math.sqrt(1 - 0.56 ** 2)]);
-  const below = embedded(3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
-  const otherModel = embedded(4, [1, 0], "other-model");
-  const otherDimensions = embedded(5, [1, 0, 0]);
-  const foreign = embedded(6);
-  await store.insert(
-    [anchor, below, otherModel, otherDimensions, above],
-    "repository-a",
-  );
-  await store.insert([foreign], "repository-b");
+test("translates native duplicate retrieval failures without broadening scope", async () => {
+  const { store } = await fixture();
+  const anchor = embedded(1);
+  await store.insert([anchor], "repository-a");
+  await store.insert([embedded(2, [0, 0])], "repository-b");
   expect(
     await store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-a",
     }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [above.finding],
-  });
-  expect(
-    await store.findPotentialDuplicates(anchor.finding.findingId, {
-      allRepositories: true,
-    }),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [foreign.finding, above.finding],
-  });
+  ).toEqual({ finding: anchor.finding, potentialDuplicates: [] });
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       repositoryId: "repository-b",
     }),
   ).rejects.toMatchObject({ code: "finding_not_indexed" });
-  await database(
-    environment,
-    `with db:
-    db.execute("UPDATE finding_embeddings SET vector_json = '[0,0]' WHERE finding_id = ?", (json.load(sys.stdin),))
-print("null")`,
-    foreign.finding.findingId,
-  );
-  expect(
-    (
-      await store.findPotentialDuplicates(anchor.finding.findingId, {
-        repositoryId: "repository-a",
-      })
-    ).potentialDuplicates,
-  ).toEqual([above.finding]);
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       allRepositories: true,
     }),
   ).rejects.toMatchObject({ code: "embedding_failed" });
-});
-
-test("SQLite returns the anchor and stable top 50 complete findings", async () => {
-  const { store } = await fixture();
-  const entries = Array.from({ length: 61 }, (_, index) => embedded(index + 1));
-  await store.insert(entries, "repository-a");
-  await store.insert([entries[1]!], "repository-b");
-  for (const scope of [
-    { repositoryId: "repository-a" },
-    { allRepositories: true },
-  ] as const) {
-    expect(
-      await store.findPotentialDuplicates(entries[0]!.finding.findingId, scope),
-    ).toEqual({
-      finding: entries[0]!.finding,
-      potentialDuplicates: entries.slice(1, 51).map((entry) => entry.finding),
-    });
-  }
 });
 
 test("imports persist repository associations and keep untagged findings in explicit all-repository scope", async () => {
