@@ -1565,8 +1565,11 @@ export class CodexSecurity {
           `Could not track scan activity: ${errorMessage(error)}`,
         );
       };
+      const selectedCodexCommand = () => this.#codexCommand();
       const nativeSessionConfig = {
-        command: this.#codexCommand(),
+        get command() {
+          return selectedCodexCommand();
+        },
         workingDirectory: scanDir,
       };
       const tracker = new ScanCostTracker({
