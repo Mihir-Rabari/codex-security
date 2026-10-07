@@ -165,6 +165,20 @@ def archive_resolved_deferred_payloads(
         and (key := finding_candidate_key(finding)) is not None
         and resolved.get(key) == "reported"
     }
+    for finding in findings:
+        if not isinstance(finding, dict) or not valid_finding(finding):
+            continue
+        sources = finding["provenance"].get("sourceFindings", [])
+        for source in sources if isinstance(sources, list) else []:
+            if (
+                isinstance(source, dict)
+                and isinstance(source.get("finding"), dict)
+                and isinstance(source.get("id"), str)
+                and ":" in source["id"]
+            ):
+                key = finding_candidate_key(source["finding"], source["id"].rsplit(":", 1)[0])
+                if resolved.get(key) == "reported":
+                    states.setdefault(key, ("reported", finding))
     for field in ("surfaces", "explicitExclusions"):
         rows = coverage.get(field)
         for row in rows if isinstance(rows, list) else []:

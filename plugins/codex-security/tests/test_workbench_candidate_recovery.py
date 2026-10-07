@@ -475,6 +475,8 @@ def test_absorbed_source_identity_respects_pending_checkpoint_order(
     candidate = pending["coverage"]["deferred"][0]
     candidate["candidateId"] = candidate["id"]
     candidate["candidate"] = {"title": "Worker-local candidate still needs review."}
+    candidate["originalCandidates"] = [{"title": "Earlier worker candidate evidence."}]
+    candidate["previousFindings"] = [{"title": "Earlier worker finding evidence."}]
     checkpoint = write_checkpoint(output / "checkpoints", pending)
     os.utime(checkpoint, ns=(pending_time, pending_time))
     head = output / "checkpoint-head.json"
@@ -513,6 +515,19 @@ def test_absorbed_source_identity_respects_pending_checkpoint_order(
         row.get("candidateId") == "review" and row.get("sourceWorkerId") == "worker"
         for row in replay[2]["deferred"]
     ) is (pending_time >= 200)
+    if pending_time < 200:
+        for recovered in (first, replay):
+            provenance = recovered[1]["findings"][0]["provenance"]
+            assert candidate["candidate"] in provenance.get("originalCandidates", [])
+            assert candidate["originalCandidates"][0] in provenance.get("originalCandidates", [])
+            assert candidate["previousFindings"][0] in provenance.get("previousFindings", [])
+    else:
+        for recovered in (first, replay):
+            saved = next(
+                row for row in recovered[2]["deferred"] if row.get("candidateId") == "review"
+            )
+            for field in ("candidate", "originalCandidates", "previousFindings"):
+                assert saved[field] == candidate[field]
     assert all(path.read_bytes() == data for path, data in source_bytes.items())
 
 

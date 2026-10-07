@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    run_workbench,
     start_delivered_scan,
     update_progress,
 )
