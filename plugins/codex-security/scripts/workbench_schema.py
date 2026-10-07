@@ -337,15 +337,6 @@ def move_pre_release_migration(
     ).fetchone()
     if migration is None or migration["name"] != name:
         return
-    if (
-        connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = ?", (new_version,)
-        ).fetchone()
-        is not None
-    ):
-        raise SystemExit(
-            "The Codex Security database has an unsupported pre-release migration history."
-        )
     connection.execute(
         "UPDATE schema_migrations SET version = ? WHERE version = ? AND name = ?",
         (new_version, old_version, name),

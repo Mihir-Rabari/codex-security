@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { setImmediate } from "node:timers/promises";
+import { privateDirectoryProof } from "./proof-windows-acl.mjs";
 import { wideProcessProof } from "./proof-windows-wide.mjs";
 import { windowsFileSystem } from "./windows-files.mjs";
 import {
@@ -411,6 +412,7 @@ try {
         nodeApi: 8,
         handles: handleProof(root),
         locks: lockProof(root),
+        privateDirectories: privateDirectoryProof(root, native),
         wideProcessAndPaths: wideProcessProof(root),
         garbageCollectionClosesHandle: await ownershipProof(root),
         fixture: basename(root),

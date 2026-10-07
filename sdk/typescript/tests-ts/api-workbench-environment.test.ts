@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import type { WorkbenchCommandOptions } from "../src/runtime.js";
+import type { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import {
@@ -37,7 +37,8 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
     )!;
     expect(python).not.toBeNull();
     let helperCalls = 0;
-    let observedEnvironment: WorkbenchCommandOptions["environment"] | undefined;
+    let observedEnvironment:
+      Parameters<typeof runWorkbench>[0]["environment"] | undefined;
     const client = new TestClient(
       { codexOverrides: { model: "unpriced-model" } },
       {
@@ -52,7 +53,7 @@ test.each(["runtime", "sqlite override", "database override"] as const)(
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          options: WorkbenchCommandOptions,
+          options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ) => {

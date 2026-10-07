@@ -15,11 +15,7 @@ import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import {
-  prepareScanArtifactRestorer,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { ScanInterruptedError } from "../src/errors.js";
@@ -71,7 +67,7 @@ async function fixture(
     string,
     {
       registration: JsonObject;
-      options: WorkbenchCommandOptions;
+      options: Parameters<typeof runWorkbench>[0];
       mode: string;
       recipe: JsonObject;
     }
@@ -105,7 +101,9 @@ async function fixture(
   let interruptPlugin: string;
   let publicationFailure: unknown;
   const cancellation = new Error("synthetic foreground cancellation");
-  const interruptPublication = async (options: WorkbenchCommandOptions) => {
+  const interruptPublication = async (
+    options: Parameters<typeof runWorkbench>[0],
+  ) => {
     expect(options.signal).toBeUndefined();
     interruptedPublication = undefined;
     controller.abort(cancellation);

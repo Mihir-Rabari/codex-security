@@ -2845,8 +2845,19 @@ def test_public_finding_history_does_not_traverse_internal_passes(
 def test_membership_migration_rebuilds_public_finding_projections(
     tmp_path: Path, workbench_api, already_applied: bool
 ) -> None:
-    from workbench_dashboard import dashboard
-    from workbench_findings import list_stored_findings, store_findings
+    from workbench_finding_index import upsert_finding
+
+    def import_findings(connection, entries, timestamp, repository_id):
+        for entry in entries:
+            upsert_finding(connection, entry["finding"], timestamp, repository_id)
+            connection.execute(
+                "INSERT OR REPLACE INTO finding_embeddings VALUES (?, ?, ?)",
+                (
+                    entry["finding"]["findingId"],
+                    entry["embedding"]["model"],
+                    json.dumps(entry["embedding"]["vector"]),
+                ),
+            )
 
     state, target = _scan_workspace(tmp_path)
     other_target = tmp_path / "other-target"
@@ -2895,7 +2906,7 @@ def test_membership_migration_rebuilds_public_finding_projections(
         index = workbench_api["index_findings"]
         index(connection, public["scanId"], {"findings": [public_finding]}, "2026-01-01")
         connection.commit()
-        store_findings(
+        import_findings(
             connection,
             [
                 {
@@ -2906,7 +2917,7 @@ def test_membership_migration_rebuilds_public_finding_projections(
             "2026-01-01",
             "independent-repository",
         )
-        store_findings(
+        import_findings(
             connection,
             [
                 {
@@ -2928,7 +2939,7 @@ def test_membership_migration_rebuilds_public_finding_projections(
         connection.commit()
         imported = child_findings[2]
         edited = {**child_findings[3], "title": "Independent updated finding"}
-        store_findings(
+        import_findings(
             connection,
             [
                 {"finding": value, "embedding": {"model": "synthetic", "vector": [1.0]}}
@@ -2947,22 +2958,38 @@ def test_membership_migration_rebuilds_public_finding_projections(
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
             connection.execute("DELETE FROM schema_migrations WHERE version = 51")
         connection.commit()
-        assert list_stored_findings(connection, limit=20, offset=0)["total"] == 6
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM findings WHERE details_json IS NOT NULL"
+            ).fetchone()[0]
+            == 6
+        )
         for _ in range(2):
             workbench_api["apply_migrations"](connection)
-            visible = list_stored_findings(connection, limit=20, offset=0)
-            assert {value["findingId"]: value for value in visible["findings"]} == {
+            visible = [
+                json.loads(row[0])
+                for row in connection.execute(
+                    "SELECT details_json FROM findings WHERE details_json IS NOT NULL"
+                )
+            ]
+            assert {value["findingId"]: value for value in visible} == {
                 "shared": public_finding,
                 "imported": imported,
                 "edited": edited,
                 "other-repository": child_findings[4],
                 "imported-before-child": child_findings[5],
             }
-            projected = dashboard(
-                connection, {"view": "findings", "sort": "activity", "limit": 20, "offset": 0}
-            )
-            assert projected["overview"]["findings"] == 5
-            assert {item["id"]: item["repositoryIds"] for item in projected["items"]} == {
+            repositories = {
+                finding["findingId"]: [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT repository_id FROM finding_repositories WHERE finding_id = ? ORDER BY repository_id",
+                        (finding["findingId"],),
+                    )
+                ]
+                for finding in visible
+            }
+            assert repositories == {
                 "shared": [targets[public["scanId"]]],
                 "imported": [targets[child["scanId"]]],
                 "edited": [targets[child["scanId"]]],

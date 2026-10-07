@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ScanCostTrackingError } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { ScanPermissionError } from "../src/scan-execution.js";
-import type { WorkbenchCommandOptions } from "../src/runtime.js";
+import type { runWorkbench } from "../src/runtime.js";
 import {
   cancellationSetup,
   mockWorkbench,
@@ -88,7 +88,7 @@ test.each(["ordinary", "permission", "cost tracking"] as const)(
       {
         ...dependencies,
         runWorkbench: async (
-          options: WorkbenchCommandOptions,
+          options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ) => {

@@ -21,7 +21,7 @@ import {
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { runWorkbench, type WorkbenchCommandOptions } from "../src/runtime.js";
+import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
 const roots: string[] = [];
@@ -99,7 +99,7 @@ await new Promise(() => {});
       SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
     };
     let registration: JsonObject | undefined;
-    let workbenchOptions: WorkbenchCommandOptions | undefined;
+    let workbenchOptions: Parameters<typeof runWorkbench>[0] | undefined;
     const makeClient = (native: boolean, config: JsonObject) =>
       new CodexSecurity(
         { pluginPath: pluginRoot, codexOverrides: config },
