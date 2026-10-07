@@ -40,6 +40,7 @@ import { readThreatModelPath } from "./artifact-export.js";
 import {
   OutputDirectoryNotEmptyError,
   InvalidTargetError,
+  PluginPythonUnavailableError,
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
@@ -1275,48 +1276,73 @@ async function loadResumableScan(
   if (!matchesOutcome) return undefined;
   const reportSealed = await hasSealedReport(path, manifest, signal);
   let pythonPath: string | undefined;
-  if (!reportSealed && configuredPythonPath !== undefined) {
-    let candidates: string[];
-    if (isPythonPathCandidate(configuredPythonPath)) {
-      candidates = [
-        resolve(
-          expandHome(configuredPythonPath) +
-            (process.platform === "win32" &&
-            extname(configuredPythonPath) === ""
-              ? ".exe"
-              : ""),
-        ),
-      ];
-    } else {
-      const inspected = await inspectTrustedExecutable(
-        configuredPythonPath,
-        pluginHelperEnvironment(process.env),
-        matchedRoot,
-      );
-      const suffixes =
-        process.platform !== "win32" ||
-        /\.(?:exe|com)$/iu.test(configuredPythonPath)
-          ? [""]
-          : [".exe", ".com"];
-      candidates =
-        inspected.executable !== null
+  if (!reportSealed) {
+    const automaticAvailable =
+      configuredPythonPath === undefined
+        ? await resolvePluginPythonCommand({
+            protectedRoot: matchedRoot,
+            environment: pluginHelperEnvironment(process.env),
+            signal,
+          }).then(
+            () => true,
+            (error: unknown) => {
+              if (error instanceof PluginPythonUnavailableError) return false;
+              throw error;
+            },
+          )
+        : false;
+    const selections =
+      configuredPythonPath !== undefined
+        ? [configuredPythonPath]
+        : automaticAvailable
           ? []
-          : (inspected.environment["PATH"]?.split(delimiter) ?? []).flatMap(
-              (entry) =>
-                suffixes.map((suffix) =>
-                  join(entry, configuredPythonPath + suffix),
-                ),
-            );
-    }
-    for (const candidate of candidates) {
-      const selected = relative(
-        matchedRoot,
-        await canonicalPythonPath(candidate),
-      );
-      if (!relativePathIsOutside(selected)) {
-        pythonPath = selected;
-        break;
+          : process.platform === "win32"
+            ? ["python", "python3", "py"]
+            : ["python3", "python"];
+    for (const configuredPythonPath of selections) {
+      let candidates: string[];
+      if (isPythonPathCandidate(configuredPythonPath)) {
+        candidates = [
+          resolve(
+            expandHome(configuredPythonPath) +
+              (process.platform === "win32" &&
+              extname(configuredPythonPath) === ""
+                ? ".exe"
+                : ""),
+          ),
+        ];
+      } else {
+        const inspected = await inspectTrustedExecutable(
+          configuredPythonPath,
+          pluginHelperEnvironment(process.env),
+          matchedRoot,
+        );
+        const suffixes =
+          process.platform !== "win32" ||
+          /\.(?:exe|com)$/iu.test(configuredPythonPath)
+            ? [""]
+            : [".exe", ".com"];
+        candidates =
+          inspected.executable !== null
+            ? []
+            : (inspected.environment["PATH"]?.split(delimiter) ?? []).flatMap(
+                (entry) =>
+                  suffixes.map((suffix) =>
+                    join(entry, configuredPythonPath + suffix),
+                  ),
+              );
       }
+      for (const candidate of candidates) {
+        const selected = relative(
+          matchedRoot,
+          await canonicalPythonPath(candidate),
+        );
+        if (!relativePathIsOutside(selected)) {
+          pythonPath = selected;
+          break;
+        }
+      }
+      if (pythonPath !== undefined) break;
     }
   }
 
@@ -1824,6 +1850,7 @@ async function checkoutRevision(
       .filter((entry) => entry.startsWith("120000 "))
       .map((entry) => entry.slice(entry.indexOf("	") + 1));
     const aliases = new Set<string>();
+    const requiredDirectories = new Set<string>();
     const canonicalTrackedPath = async (
       requested: string,
       visited: Set<string>,
@@ -1831,6 +1858,16 @@ async function checkoutRevision(
       for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
         try {
           await realpath(ancestor);
+          for (const traversal of requested.matchAll(
+            /[\\/]\.\.(?=[\\/]|$)/gu,
+          )) {
+            const directory = await canonicalTrackedPath(
+              requested.slice(0, traversal.index),
+              new Set(visited),
+            );
+            if (!relativePathIsOutside(relative(path, directory)))
+              requiredDirectories.add(directory);
+          }
           return canonicalCreationPath(requested);
         } catch (error) {
           undefinedIfMissingFile(error as NodeJS.ErrnoException);
@@ -1974,6 +2011,8 @@ async function checkoutRevision(
         deleted,
       );
     }
+    for (const directory of requiredDirectories)
+      await mkdir(directory, { recursive: true });
   }
   if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
