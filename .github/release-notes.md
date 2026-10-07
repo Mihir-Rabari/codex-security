@@ -66,6 +66,7 @@
 - simplify scan event callback dispatch ([#1354](https://github.com/openai/codex-security/pull/1354))
 - reuse validated inputs and simplify preview sizing ([#1369](https://github.com/openai/codex-security/pull/1369))
 - share note generation and test setup ([#1373](https://github.com/openai/codex-security/pull/1373))
+- update Codex CLI and SDK to 0.162.0-alpha.18 ([#1420](https://github.com/openai/codex-security/pull/1420))
 
 <!-- release-section: highlights:end -->
 
