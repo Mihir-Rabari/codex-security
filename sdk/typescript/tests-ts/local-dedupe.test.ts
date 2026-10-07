@@ -575,7 +575,7 @@ test("local workflow replays a lost group acknowledgement without publication or
   const workbench = async (args: readonly string[], input?: string) => {
     const result = await runWorkbench(f.options, args, input);
     if (
-      args[0] === "local-dedupe" &&
+      args[0] === "store-dedupe-groups" &&
       JSON.parse(input!).action === "commit" &&
       loseAcknowledgement
     ) {
@@ -719,7 +719,13 @@ test("local workbench calls receive cancellation and cannot report success after
             args,
             input,
           );
-          if (args[0] === "local-dedupe") {
+          if (
+            [
+              "local-dedupe",
+              "find-potential-duplicates",
+              "store-dedupe-groups",
+            ].includes(args[0]!)
+          ) {
             const { action } = JSON.parse(input!);
             actions.push(action);
             if (action === "commit") controller.abort(reason);

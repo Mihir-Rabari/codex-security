@@ -1,4 +1,5 @@
 import { environmentEntry } from "../auth.js";
+import { gitProtectionRoots } from "../targets.js";
 import type { Finding } from "../models.js";
 import type {
   FindingNeighborhood,
@@ -129,7 +130,7 @@ export class LocalDeduplication {
     await this.command({ action: "commit", groups, cacheKeys: this.cacheKeys });
   }
 
-  private async command(payload: object) {
+  private async command(payload: { action: string; [key: string]: unknown }) {
     this.signal?.throwIfAborted();
     this.options ??= (async () => {
       const environment = workbenchEnvironment(this.environment);
@@ -143,14 +144,25 @@ export class LocalDeduplication {
         pluginRoot,
         environment,
         signal: this.signal,
+        protectedRoot: [
+          this.repositoryPath,
+          ...(await gitProtectionRoots(this.repositoryPath, this.signal)),
+        ],
         failureMessage: "Could not access local deduplication state",
       };
     })();
     const result = await this.workbench(
       await this.options,
-      ["local-dedupe"],
+      [
+        payload.action === "neighbors"
+          ? "find-potential-duplicates"
+          : payload.action === "commit"
+            ? "store-dedupe-groups"
+            : "local-dedupe",
+      ],
       JSON.stringify({
         ...payload,
+        scope: this.scope,
         space: this.space,
         model: this.embedding.model,
         dimensions: this.embedding.dimensions,

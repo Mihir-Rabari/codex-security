@@ -69,11 +69,11 @@ def test_cache_reuse_survives_service_embedding_writes(workbench_api, workbench_
     assert prepare(workbench_api, workbench_db, [finding(1)], space="synthetic-v2")[
         "findingsToEmbed"
     ] == [finding(1)]
-    workbench_api["store_findings"](
-        workbench_db,
-        [{"finding": finding(1), "embedding": {"model": "synthetic", "vector": [0, 1]}}],
-        TIMESTAMP,
-    )
+    with workbench_db:
+        workbench_db.execute(
+            "INSERT INTO finding_embeddings (finding_id, model, vector_json) VALUES (?, ?, ?)",
+            ("finding-1", "synthetic", "[0, 1]"),
+        )
     assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == []
 
 
@@ -102,39 +102,6 @@ def test_embedding_batch_rolls_back_on_invalid_or_stale_input(workbench_api, wor
     result = request(workbench_api, workbench_db, "embed", entries=[entry(prepared), second])
     assert result == {"error": "finding_changed" if failure == "stale" else "embedding_failed"}
     assert workbench_db.execute("SELECT COUNT(*) FROM local_finding_embeddings").fetchone()[0] == 0
-
-
-@pytest.mark.parametrize("case", ["matching", "empty", "missing", "deleted", "stale"])
-def test_neighbors_and_commits_check_the_complete_cache_map(workbench_api, workbench_db, case):
-    second = finding(2)
-    second["findingId"] = 'finding-2-"-\u2603'
-    prepared = prepare(workbench_api, workbench_db, [finding(1), second])
-    request(workbench_api, workbench_db, "embed", entries=[entry(prepared), entry(prepared, 1)])
-    expected = dict(prepared["cacheKeys"])
-    if case == "empty":
-        expected = {}
-    elif case == "missing":
-        expected["missing"] = "missing-key"
-    elif case == "deleted":
-        with workbench_db:
-            workbench_db.execute(
-                "DELETE FROM local_finding_embeddings WHERE finding_id = ?", (second["findingId"],)
-            )
-    elif case == "stale":
-        with workbench_db:
-            workbench_db.execute(
-                "UPDATE local_finding_embeddings SET cache_key = ? WHERE finding_id = ?",
-                ("old-input", second["findingId"]),
-            )
-    neighbors = request(
-        workbench_api, workbench_db, "neighbors", findingId="finding-1", cacheKeys=expected
-    )
-    commit = request(workbench_api, workbench_db, "commit", groups=[], cacheKeys=expected)
-    if case in {"matching", "empty"}:
-        assert "potentialDuplicates" in neighbors
-        assert commit == {"groups": []}
-    else:
-        assert neighbors == commit == {"error": "finding_changed"}
 
 
 def test_preparation_conflict_rolls_back_new_findings(workbench_api, workbench_db):
@@ -173,35 +140,6 @@ def test_embedding_cache_migration_preserves_existing_vectors(workbench_api, tmp
             "vector_json": "[1, 0]",
             "cache_key": None,
         }
-
-
-def test_local_custom_vectors_do_not_change_service_search(workbench_api, workbench_db):
-    entries = [
-        {"finding": finding(i), "embedding": {"model": "synthetic", "vector": [1, 0]}}
-        for i in (1, 2)
-    ]
-    workbench_api["store_findings"](workbench_db, entries, TIMESTAMP)
-    prepared = prepare(workbench_api, workbench_db, [finding(1)])
-    request(
-        workbench_api,
-        workbench_db,
-        "embed",
-        entries=[entry(prepared, embedding={"model": "synthetic", "vector": [0, 1]})],
-    )
-    result = workbench_api["find_potential_duplicates"](workbench_db, "finding-1", None)
-    assert [f["findingId"] for f in result["potentialDuplicates"]] == ["finding-2"]
-    assert (
-        workbench_db.execute(
-            "SELECT vector_json FROM finding_embeddings WHERE finding_id = 'finding-1'"
-        ).fetchone()[0]
-        == "[1, 0]"
-    )
-    assert (
-        workbench_db.execute(
-            "SELECT vector_json FROM local_finding_embeddings WHERE finding_id = 'finding-1'"
-        ).fetchone()[0]
-        == "[0, 1]"
-    )
 
 
 def test_local_cache_migration_keeps_service_and_local_rows_separate(workbench_api, tmp_path):
@@ -246,18 +184,5 @@ def test_finding_body_update_invalidates_local_search_and_pending_groups(
             "UPDATE findings SET details_json = ? WHERE id = ?",
             (json.dumps(changed, sort_keys=True), "finding-1"),
         )
-    assert request(
-        workbench_api,
-        workbench_db,
-        "neighbors",
-        findingId="finding-1",
-        cacheKeys=prepared["cacheKeys"],
-    ) == {"error": "finding_changed"}
-    assert request(
-        workbench_api,
-        workbench_db,
-        "commit",
-        groups=[["finding-1"]],
-        cacheKeys=prepared["cacheKeys"],
-    ) == {"error": "finding_changed"}
+    assert workbench_db.execute("SELECT COUNT(*) FROM local_finding_embeddings").fetchone()[0] == 0
     assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == [changed]

@@ -13,7 +13,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
-from workbench_findings import find_potential_duplicates, store_dedupe_groups
 from workbench_target_state import stable_target_id
 
 
@@ -25,12 +24,6 @@ def local_dedupe(
     connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str
 ) -> dict[str, Any]:
     action = payload["action"]
-    if action == "neighbors":
-        return find_potential_duplicates(
-            connection, payload["findingId"], payload.get("repositoryId"), payload["cacheKeys"]
-        )
-    if action == "commit":
-        return store_dedupe_groups(connection, payload["groups"], timestamp, payload["cacheKeys"])
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")

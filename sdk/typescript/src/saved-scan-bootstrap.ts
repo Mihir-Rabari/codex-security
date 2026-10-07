@@ -83,6 +83,17 @@ export async function savedScanWorkbench(
     options.currentDirectory,
     options.signal,
   );
+  const protectedRoots = [
+    ...callerRoots,
+    ...targets.map((row) => row.target_path),
+    ...(
+      await Promise.all(
+        targets.map((row) =>
+          gitProtectionRoots(row.target_path, options.signal),
+        ),
+      )
+    ).flat(),
+  ];
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
     args,
@@ -106,7 +117,7 @@ export async function savedScanWorkbench(
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
       environment,
-      protectedRoot: [...callerRoots, ...targets.map((row) => row.target_path)],
+      protectedRoot: protectedRoots,
       signal,
     });
     environment["PYTHON"] = python;
@@ -116,6 +127,7 @@ export async function savedScanWorkbench(
         pluginRoot: options.pluginRoot,
         python,
         signal,
+        protectedRoot: protectedRoots,
         failureMessage: "Could not read Codex Security scan history",
       },
       target ? ["get-scan", "--scan-id", target.id] : args,
@@ -211,7 +223,7 @@ async function readTargets(
       );
     // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
     const compact = trimBoundary(
-      requestedId.replace(/^urn:uuid:/, ""),
+      requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
       "{",
       "}",
     ).replaceAll("-", "");

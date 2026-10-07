@@ -203,11 +203,7 @@ for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
           TEST_PYTHON_PROBE: marker,
           ...(source === "PATH"
             ? {
-                PATH: [
-                  f.repository,
-                  dirname(f.python),
-                  f.environment.PATH,
-                ].join(delimiter),
+                PATH: [f.repository, f.environment.PATH].join(delimiter),
               }
             : { PYTHON: source === "PYTHON" ? executable : linked }),
         };
@@ -231,6 +227,36 @@ for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
     );
   }
 }
+
+test.skipIf(process.platform === "win32")(
+  "saved-scan dedupe excludes repository Node when invoking native findings helpers",
+  async () => {
+    const f = await fixture();
+    const executable = join(f.repository, "node");
+    const marker = join(f.root, "node-probed");
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf probed > "$TEST_NODE_PROBE"\nexit 1\n',
+    );
+    await chmod(executable, 0o700);
+    const result = await deduplicateScanInternal(
+      f.first.scanId,
+      { embedding: f.embedding },
+      {
+        environment: {
+          ...f.environment,
+          PYTHON: f.python,
+          PATH: [f.repository, f.environment.PATH].join(delimiter),
+          TEST_NODE_PROBE: marker,
+        },
+        reviewer: f.reviewer,
+        fetch: rejecting("Unexpected HTTP request"),
+      },
+    );
+    expect(result.deduplicationStatus).toBe("completed");
+    expect(existsSync(marker)).toBe(false);
+  },
+);
 
 test("saved-scan bootstrap supports IDs, prefixes and latest and persists one duplicate group on resume", async () => {
   const f = await fixture();
@@ -264,6 +290,8 @@ test("saved-scan bootstrap supports IDs, prefixes and latest and persists one du
     `{${f.first.scanId.toUpperCase()}}`,
     `{{${f.first.scanId}}}`,
     `urn:uuid:${f.first.scanId}`,
+    `uuid:${f.first.scanId}`,
+    `urn:${f.first.scanId}`,
     "latest",
   ]) {
     const workbench = await savedScanWorkbench(requestedId, {
