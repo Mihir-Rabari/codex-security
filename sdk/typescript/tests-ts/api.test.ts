@@ -70,7 +70,6 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
-  type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
@@ -489,7 +488,7 @@ describe("CodexSecurity finding validation", () => {
     } = {};
     const workbench = mock(
       async (
-        _options: WorkbenchCommandOptions,
+        _options: Parameters<typeof runWorkbench>[0],
         _args: readonly string[],
         _input?: string,
       ): Promise<JsonObject> => ({
@@ -3338,7 +3337,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
@@ -5827,7 +5826,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          workbenchOptions: WorkbenchCommandOptions,
+          workbenchOptions: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
