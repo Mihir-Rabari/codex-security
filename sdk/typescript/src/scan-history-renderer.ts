@@ -446,6 +446,18 @@ export function renderScanHistory(
                 sections.push(`${attributeLabel}: ${detail}`);
               }
             }
+            if (
+              nestedKey === "dataflow" ||
+              nestedKey === "dataFlow" ||
+              nestedKey === "data_flow"
+            ) {
+              appendDescriptions(
+                sections,
+                nestedValue,
+                "transformations",
+                "Transformation",
+              );
+            }
             if (nestedKey === "reachability") {
               appendDescriptions(
                 sections,
@@ -485,16 +497,16 @@ export function renderScanHistory(
       (entry): entry is JsonObject =>
         typeof entry === "object" && entry !== null && !Array.isArray(entry),
     );
-    for (const rootCause of [result["rootCause"], result["root_cause"]]) {
+    const appendEmbeddedCodeEvidence = (section: unknown): void => {
       if (
-        typeof rootCause !== "object" ||
-        rootCause === null ||
-        Array.isArray(rootCause)
+        typeof section !== "object" ||
+        section === null ||
+        Array.isArray(section)
       ) {
-        continue;
+        return;
       }
-      for (const key of ["codeEvidence", "code_evidence"]) {
-        const embedded = rootCause[key];
+      for (const key of ["codeEvidence", "code_evidence"] as const) {
+        const embedded = (section as JsonObject)[key];
         if (!Array.isArray(embedded)) continue;
         for (const entry of embedded) {
           if (
@@ -506,6 +518,16 @@ export function renderScanHistory(
           }
         }
       }
+    };
+    for (const rootCause of [result["rootCause"], result["root_cause"]]) {
+      if (
+        typeof rootCause !== "object" ||
+        rootCause === null ||
+        Array.isArray(rootCause)
+      ) {
+        continue;
+      }
+      appendEmbeddedCodeEvidence(rootCause);
       if (
         typeof rootCause["code"] === "string" &&
         !evidenceEntries.some((entry) => entry["code"] === rootCause["code"])
@@ -514,6 +536,18 @@ export function renderScanHistory(
           label: "Root-cause source",
           code: rootCause["code"],
         });
+      }
+    }
+    appendEmbeddedCodeEvidence(result["validation"]);
+    const attackPath = result["attackPath"];
+    appendEmbeddedCodeEvidence(attackPath);
+    if (
+      typeof attackPath === "object" &&
+      attackPath !== null &&
+      !Array.isArray(attackPath)
+    ) {
+      for (const key of ["dataflow", "dataFlow", "data_flow", "reachability"]) {
+        appendEmbeddedCodeEvidence(attackPath[key]);
       }
     }
     if (evidenceEntries.length > 0) {

@@ -4,6 +4,55 @@ import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each(["dataflow", "dataFlow", "data_flow"])(
+    "renders transformation-only attack paths in %s",
+    (key) => {
+      const output = renderScanHistory(
+        {
+          title: "Synthetic saved finding",
+          severity: { level: "high" },
+          attackPath: {
+            [key]: { transformations: ["Decode payload", "Load sink"] },
+          },
+        },
+        "finding",
+        { color: false },
+      );
+      expect(output).toContain("ATTACK PATH");
+      expect(output).toContain("Decode payload");
+      expect(output).toContain("Load sink");
+    },
+  );
+
+  test.each([
+    "validation",
+    "attackPath",
+    "dataflow",
+    "dataFlow",
+    "data_flow",
+    "reachability",
+  ])("renders supported embedded code-evidence catalogs in %s", (key) => {
+    const evidence = {
+      codeEvidence: [{ code: "synthetic_section_source();" }],
+      code_evidence: [{ code: "synthetic_section_legacy();" }],
+    };
+    const section: JsonObject =
+      key === "validation" || key === "attackPath"
+        ? { [key]: evidence }
+        : { attackPath: { [key]: evidence } };
+    const output = renderScanHistory(
+      {
+        title: "Synthetic saved finding",
+        severity: { level: "high" },
+        ...section,
+      },
+      "finding",
+      { color: false },
+    );
+    expect(output).toContain("synthetic_section_source();");
+    expect(output).toContain("synthetic_section_legacy();");
+  });
+
   test.each(["rootCause", "root_cause"])(
     "renders embedded section evidence in %s alongside its summary",
     (key) => {
