@@ -968,7 +968,10 @@ def test_candidate_normalization_does_not_merge_distinct_findings(tmp_path: Path
 
 
 @pytest.mark.parametrize("historical_version", [False, True])
-def test_retained_identityless_worker_source_is_not_republished(tmp_path: Path, historical_version):
+@pytest.mark.parametrize("source_owner", ["registered", "previous"])
+def test_retained_identityless_worker_source_is_not_republished(
+    tmp_path: Path, historical_version: bool, source_owner: str
+):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True)
     original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
     original.pop("identity")
@@ -981,7 +984,8 @@ def test_retained_identityless_worker_source_is_not_republished(tmp_path: Path, 
     reduced["identity"] = {"anchor": "reduced-finding"}
     if historical_version:
         reduced["provenance"]["candidateId"] = "canonical-candidate"
-    reduced["provenance"]["sourceFindings"] = [{"id": f"{worker_id}:0", "finding": original}]
+    reference = f"{worker_id}:0" if source_owner == "registered" else "previous:0"
+    reduced["provenance"]["sourceFindings"] = [{"id": reference, "finding": original}]
     document["findings"] = [reduced]
     result_path.write_text(json.dumps(document))
     committed_standard_reducer(state, home, scan_dir, scan_id, worker_id, result_path)

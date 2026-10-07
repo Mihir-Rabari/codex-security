@@ -631,7 +631,10 @@ def _saved_worker_owner(provenance: Any, owner: str | None) -> str | None:
 
 
 def _retained_findings(
-    finding: dict[str, Any], owner: str | None = None
+    finding: dict[str, Any],
+    owner: str | None = None,
+    *,
+    source_owners: set[str] | None = None,
 ) -> Iterator[tuple[dict[str, Any], str | None]]:
     """Yield canonical and historical findings with their saved worker context."""
     pending = [(finding, owner, owner is not None)]
@@ -661,17 +664,19 @@ def _retained_findings(
             )
         sources = provenance.get("sourceFindings")
         if isinstance(sources, list):
-            pending.extend(
-                (
-                    source["finding"],
-                    source["id"].rsplit(":", 1)[0]
-                    if isinstance(source.get("id"), str) and ":" in source["id"]
-                    else owner,
-                    bound_owner or (isinstance(source.get("id"), str) and ":" in source["id"]),
+            for source in reversed(sources):
+                if not isinstance(source, dict) or not isinstance(source.get("finding"), dict):
+                    continue
+                reference = source.get("id")
+                source_owner = reference.rsplit(":", 1)[0] if isinstance(reference, str) else None
+                source_bound = source_owners is not None and source_owner in source_owners
+                pending.append(
+                    (
+                        source["finding"],
+                        source_owner if source_bound else owner,
+                        bound_owner or source_bound,
+                    )
                 )
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
 
 
 def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
@@ -1212,6 +1217,7 @@ def merge_saved_results(
         parent_is_canonical |= parent["coverage"].get("documentType") == "codex-security.coverage"
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
+    source_owners = {owner for _, _, owner in all_sources if owner is not None}
     # Older checkpoints can omit IDs already assigned in their published output.
     for field in ("deferred", "surfaces"):
         named_rows: dict[str | None, list[dict[str, Any]]] = {}
@@ -1479,28 +1485,22 @@ def merge_saved_results(
         recovered_observations[observation] = copy.deepcopy(recovered)
         return recovered
 
-    def saved_identity_key(finding: dict[str, Any], owner: str | None) -> str:
-        provenance = finding.get("provenance", {})
-        candidate = finding_candidate_id(finding)
-        return _digest(
-            [
-                _saved_worker_owner(provenance, owner),
-                candidate,
-                _finding_content(finding),
-            ]
-        )
+    def saved_identity_key(finding: dict[str, Any]) -> str:
+        return _digest([finding_candidate_id(finding), _finding_content(finding)])
 
     # Normalize each saved observation and its retained history before indexing it.
-    observations: dict[str, list[tuple[dict[str, Any], str | None]]] = {}
+    observations: dict[str, dict[str | None, list[tuple[dict[str, Any], str | None]]]] = {}
     explicit_identities: dict[str, list[tuple[dict[str, Any], str | None]]] = {}
     for _, draft, owner in all_sources:
         for finding in draft["findings"]:
             if not isinstance(finding, dict):
                 continue
-            for retained, retained_owner in _retained_findings(finding, owner):
+            for retained, retained_owner in _retained_findings(
+                finding, owner, source_owners=source_owners
+            ):
                 if isinstance(retained.get("provenance"), dict):
-                    observations.setdefault(
-                        saved_identity_key(retained, retained_owner), []
+                    observations.setdefault(saved_identity_key(retained), {}).setdefault(
+                        retained_owner, []
                     ).append((retained, retained_owner))
                     if recovered := recovered_finding(retained):
                         key = _finding_key(recovered)
@@ -1523,7 +1523,12 @@ def merge_saved_results(
         if parent_is_canonical and draft == parent
         for finding in draft["findings"]
     }
-    for matches in observations.values():
+    for owners in observations.values():
+        bound = [owner for owner in owners if owner is not None]
+        if len(bound) == 1 and None in owners:
+            # Unowned saved history can reuse the sole matching source context.
+            owners[bound[0]].extend(owners.pop(None))
+    for matches in (group for owners in observations.values() for group in owners.values()):
         raw = next((item for item in matches if "identity" not in item[0]), None)
         if raw is None:
             continue
@@ -2162,6 +2167,7 @@ def merge_saved_results(
                         for retained, owner in _retained_findings(
                             findings[finding_positions[mapped_key]],
                             finding_owners.get(id(findings[finding_positions[mapped_key]])),
+                            source_owners=source_owners,
                         )
                     )
                 ):
