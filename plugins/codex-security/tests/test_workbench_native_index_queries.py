@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ntpath
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,8 +267,15 @@ def test_scan_list_probes_requested_repository_once(
 
 @pytest.mark.parametrize("exact_saved", [False, True])
 @pytest.mark.parametrize("stale_exact", [False, True])
+@pytest.mark.parametrize("device_changed", [False, True])
 def test_repository_findings_match_directory_aliases_after_exact_paths(
-    workbench_api, indexed_collections, tmp_path, monkeypatch, exact_saved, stale_exact
+    workbench_api,
+    indexed_collections,
+    tmp_path,
+    monkeypatch,
+    exact_saved,
+    stale_exact,
+    device_changed,
 ):
     connection, targets = indexed_collections
     alias = tmp_path / "alias"
@@ -285,18 +293,23 @@ def test_repository_findings_match_directory_aliases_after_exact_paths(
             (str(alias), stable_target_id(targets[1])),
         )
     selected = 1 if exact_saved else 0
-    if stale_exact:
+    if stale_exact or device_changed:
         metadata = targets[0].stat()
         connection.execute(
             "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
-            (str(metadata.st_dev + 1), str(metadata.st_ino), SCAN_IDS[selected]),
+            (
+                str(metadata.st_dev + 1 if device_changed else metadata.st_dev),
+                str(metadata.st_ino + 1 if stale_exact else metadata.st_ino),
+                SCAN_IDS[selected],
+            ),
         )
     result = workbench_api["native_indexes"].list_global_findings(
         connection, query_args(repository=str(alias))
     )
-    assert result["projectionAvailable"] is (not stale_exact)
+    available = not stale_exact and (not device_changed or sys.platform == "linux")
+    assert result["projectionAvailable"] is available
     assert [item["scanId"] for item in result["findings"]] == (
-        [] if stale_exact else [SCAN_IDS[selected]]
+        [SCAN_IDS[selected]] if available else []
     )
 
 
