@@ -26,8 +26,12 @@ describe("patch change tracking", () => {
     ["local", "remote"].flatMap((location) =>
       [
         "codex-security",
+        "codex-security/patch-scan-1",
         "codex-security/patch-scan-1/other",
         "codex-security/patch-scan-10",
+        "archive/refs/heads/codex-security",
+        "archive/refs/heads/codex-security/patch-scan-1",
+        "archive/refs/heads/codex-security/patch-scan-1/other",
       ].map((existing) => [location, existing] as const),
     ),
   )(
@@ -39,7 +43,11 @@ describe("patch change tracking", () => {
       else git("branch", existing);
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
-      const blocked = existing !== "codex-security/patch-scan-10";
+      const blocked = [
+        "codex-security",
+        "codex-security/patch-scan-1",
+        "codex-security/patch-scan-1/other",
+      ].includes(existing);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
         async (
