@@ -407,7 +407,7 @@ def _indexed_active_findings(
             for matched in matched_by_target.values()
         ]
         active_occurrence_ids = {
-            representative["occurrence_id"] for _, representative in representatives
+            finding["occurrence_id"] for matched, _ in representatives for finding in matched
         }
         for matched, representative in representatives:
             combined.append(

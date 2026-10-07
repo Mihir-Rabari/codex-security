@@ -1909,40 +1909,30 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                         remediation,
                         require_applied_content=True,
                     )
-        decision_occurrence_id = (
-            indexed_finding["decision_occurrence_id"] if indexed_finding is not None else None
-        )
-        previous_triage = connection.execute(
-            "SELECT status, close_reason, note, "
-            "(SELECT scan_sequence FROM finding_decisions "
-            "WHERE occurrence_id = finding_triage.occurrence_id "
-            "ORDER BY decision_sequence DESC LIMIT 1) AS scan_sequence "
-            "FROM finding_triage WHERE occurrence_id = ?",
-            (decision_occurrence_id or occurrence["id"],),
-        ).fetchone()
         scan_sequence = connection.execute("SELECT COALESCE(MAX(rowid), 0) FROM scans").fetchone()[
             0
         ]
-        changed = (
-            previous_triage is None
-            or (indexed_finding is not None and indexed_finding["status"] != args.status)
-            or previous_triage["scan_sequence"] != scan_sequence
-            or (
-                previous_triage["status"],
-                previous_triage["close_reason"],
-                previous_triage["note"],
-            )
-            != (args.status, close_reason, note)
-        )
         for triaged_occurrence in triaged_occurrences:
-            if (
-                changed
-                or connection.execute(
-                    "SELECT 1 FROM finding_triage WHERE occurrence_id = ?",
-                    (triaged_occurrence["id"],),
-                ).fetchone()
-                is None
-            ):
+            previous_triage = connection.execute(
+                "SELECT status, close_reason, note, "
+                "(SELECT scan_sequence FROM finding_decisions "
+                "WHERE occurrence_id = finding_triage.occurrence_id "
+                "ORDER BY decision_sequence DESC LIMIT 1) AS scan_sequence "
+                "FROM finding_triage WHERE occurrence_id = ?",
+                (triaged_occurrence["id"],),
+            ).fetchone()
+            changed = (
+                previous_triage is None
+                or (indexed_finding is not None and indexed_finding["status"] != args.status)
+                or previous_triage["scan_sequence"] != scan_sequence
+                or (
+                    previous_triage["status"],
+                    previous_triage["close_reason"],
+                    previous_triage["note"],
+                )
+                != (args.status, close_reason, note)
+            )
+            if changed:
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (

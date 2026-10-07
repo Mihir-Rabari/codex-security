@@ -819,6 +819,18 @@ def list_unmatched_scan_pairs(
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
     requested, _replaced_target_id = _requested_repository(connection, repository)
+    if not requested["target_id"]:
+        _, _, related_target_ids, _ = repository_scan_scope(connection, repository)
+        for owner in connection.execute(
+            "SELECT current_path FROM security_targets "
+            "WHERE id IN (SELECT value FROM json_each(?)) ORDER BY length(current_path) DESC",
+            (json.dumps(related_target_ids),),
+        ):
+            if repository.is_relative_to(Path(owner["current_path"])):
+                requested, _replaced_target_id = _requested_repository(
+                    connection, Path(owner["current_path"])
+                )
+                break
     try:
         metadata = repository.stat()
     except OSError:

@@ -1609,3 +1609,183 @@ def test_identical_decision_refreshes_the_scan_admission_boundary(
     )["findings"]
     assert len(findings) == 1
     assert findings[0]["status"] == ("closed" if reaffirm_after_admission else "open")
+
+
+@pytest.mark.parametrize(
+    "nested", [False, True], ids=["registered-root", "unregistered-subdirectory"]
+)
+def test_bulk_matching_uses_registered_checkout_owner_for_same_origin_clones(tmp_path, nested):
+    state, root = tmp_path / "state", tmp_path / "scans"
+    repositories = [tmp_path / "first", tmp_path / "second"]
+    scans = []
+    for repository in repositories:
+        revision = initialize_git_repository(repository)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/synthetic.git",
+            ],
+            check=True,
+        )
+        scans.append(create_cli_scan(state, root, repository, target_revision=revision))
+    requested = repositories[0] / "nested" if nested else repositories[0]
+    requested.mkdir(exist_ok=True)
+    result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(requested))
+    assert result["scanCount"] == 2
+    assert result["batches"][0]["beforeScans"][0]["scanId"] == scans[0]["scanId"]
+    assert result["batches"][0]["afterScanId"] == scans[1]["scanId"]
+
+
+@pytest.mark.parametrize("replace_match", [False, True])
+def test_explicit_reopen_appends_own_decision_before_match_replacement(history, replace_match):
+    state, root, repository = history
+    scans = [
+        create_cli_scan(state, root, repository, identity_anchor=anchor)
+        for anchor in ["a", "b", "c"]
+    ]
+    occurrences = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in scans
+    ]
+    for occurrence in [occurrences[0], occurrences[2]]:
+        run_workbench(
+            state,
+            "set-finding-triage",
+            "--occurrence-id",
+            occurrence,
+            "--status",
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            "Synthetic reviewed decision.",
+        )
+    run_workbench(
+        state, "set-finding-triage", "--occurrence-id", occurrences[1], "--status", "open"
+    )
+    save_scan_matches(state, scans[0], scans[1], confirmed_match(occurrences[0], occurrences[1]))
+    run_workbench(
+        state, "set-finding-triage", "--occurrence-id", occurrences[0], "--status", "open"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        latest = connection.execute(
+            "SELECT status FROM finding_decisions WHERE occurrence_id = ? ORDER BY decision_sequence DESC LIMIT 1",
+            (occurrences[0],),
+        ).fetchone()
+    assert latest == ("open",)
+    if replace_match:
+        save_scan_matches(state, scans[0], scans[1])
+    save_scan_matches(state, scans[0], scans[2], confirmed_match(occurrences[0], occurrences[2]))
+    assert (
+        run_workbench(state, "get-finding", "--occurrence-id", occurrences[0])["scan"]["findings"][
+            0
+        ]["triage"]["status"]
+        == "open"
+    )
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_inherited_fixed_closure_checks_nonrepresentative_active_alias(tmp_path, drift):
+    state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / "src").mkdir()
+    (repository / "src/extract.py").write_text("vulnerable\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Synthetic alias remediation fixture"],
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    first = create_cli_scan(
+        state,
+        root,
+        repository,
+        identity_anchor="first",
+        extra_anchors=("same-owner-alias",),
+        target_revision=revision,
+    )
+    second = create_cli_scan(
+        state, root, linked, identity_anchor="other-owner", target_revision=revision
+    )
+    aliases = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"]
+    other = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][0]
+    ids = [row["occurrenceId"] for row in aliases]
+    hidden = min(ids)
+    save_scan_matches(state, first, second, confirmed_match(ids, other["occurrenceId"]))
+    verified_patch(state, first, hidden, repository, revision)
+    if drift:
+        (repository / "src/extract.py").write_text("Synthetic changed applied contents.\n")
+        direct = run_workbench(
+            state,
+            "set-finding-triage",
+            "--occurrence-id",
+            hidden,
+            "--status",
+            "closed",
+            "--close-reason",
+            "already_fixed",
+            check=False,
+        )
+        assert direct["returncode"] != 0 and "Working-tree contents changed" in direct["stderr"]
+    inherited = run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        other["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        check=False,
+    )
+    assert (inherited["returncode"] != 0) == drift
+    if drift:
+        assert "Working-tree contents changed" in inherited["stderr"]
+
+
+@pytest.mark.parametrize("rediscover", [False, True])
+def test_false_positive_feedback_follows_reopened_matched_group(history, rediscover):
+    state, root, repository = history
+    scans = [
+        create_cli_scan(state, root, repository, identity_anchor=anchor)
+        for anchor in ["previous-alias", "current-finding"]
+    ]
+    occurrences = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in scans
+    ]
+    save_scan_matches(state, *scans, confirmed_match(*occurrences))
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrences[1],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic reviewed false positive.",
+    )
+    if rediscover:
+        create_cli_scan(state, root, repository, identity_anchor="current-finding")
+    current = create_cli_scan(state, root, repository, complete=False)
+    feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
+        "falsePositives"
+    ]
+    assert bool(feedback) is not rediscover

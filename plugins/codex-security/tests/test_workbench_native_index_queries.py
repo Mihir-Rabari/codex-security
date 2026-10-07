@@ -262,4 +262,5 @@ def test_scan_list_probes_requested_repository_once(
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
         ("rev-parse", "--show-toplevel"),
+        ("rev-parse", "--path-format=absolute", "--git-common-dir"),
     ]

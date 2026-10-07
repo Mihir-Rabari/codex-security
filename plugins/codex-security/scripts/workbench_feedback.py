@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -16,10 +17,32 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
+from workbench_finding_results import finding_triage_result
+from workbench_native_indexes import _indexed_findings
+from workbench_scan_history import saved_repository_target_ids
 from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda occurrence_id, finding_id: f"finding:{finding_id}",
+        deterministic=True,
+    )
+    source_ids = {
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM scans WHERE status = 'complete' AND id != ? "
+            "AND target_id IN (SELECT value FROM json_each(?))",
+            (scan["id"], json.dumps(sorted(saved_repository_target_ids(connection, scan)))),
+        )
+    }
+    closed_finding_ids = set()
+    for finding in _indexed_findings(connection, source_ids, allow_cross_target_matches=True):
+        triage = finding_triage_result(connection, finding["occurrence_id"], finding)
+        if triage["status"] == "closed" and triage.get("closeReason") == "false_positive":
+            closed_finding_ids.update(finding["matched_finding_ids"])
     rows = connection.execute(
         """
         WITH ranked_decisions AS (
@@ -52,6 +75,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             WHERE source_scans.target_id = ?
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
+                AND findings.id IN (SELECT value FROM json_each(?))
         )
         SELECT *
         FROM ranked_decisions
@@ -63,7 +87,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
         LIMIT 50
         """,
-        (scan["target_id"], scan["id"]),
+        (scan["target_id"], scan["id"], json.dumps(sorted(closed_finding_ids))),
     )
     false_positives = []
     for row in rows:
