@@ -1164,6 +1164,7 @@ async function readSavedCheckpoints(
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
   if (!checkpointRootMetadata.isDirectory()) {
+    if (skipInvalid && checkpointRootMetadata.isFile()) return [];
     throw new Error(
       `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
     );

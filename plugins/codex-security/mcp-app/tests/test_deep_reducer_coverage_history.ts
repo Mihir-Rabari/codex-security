@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -569,3 +569,223 @@ for (const reopen of [false, true]) {
     }
   });
 }
+
+for (const scenario of [
+  "unusable-checkpoints",
+  "no-archive-control",
+  "missing-receipt",
+  "readable-receipt-control",
+  "merged-receipts",
+  "copied-anonymous-surface",
+  "changed-receipt-control",
+] as const) {
+  test(`accepted direct-file retry preserves source identity (${scenario})`, async () => {
+    const f = await fixture();
+    try {
+      const anonymous =
+        scenario === "copied-anonymous-surface" ||
+        scenario === "changed-receipt-control";
+      const archived =
+        scenario === "unusable-checkpoints" ||
+        scenario === "merged-receipts" ||
+        anonymous;
+      const receipts = path.join(f.output, "artifacts");
+      await mkdir(receipts, { recursive: true });
+      const surface = {
+        ...(anonymous ? {} : { id: "saved-surface" }),
+        label: "Synthetic accepted surface",
+        disposition: "no_issue_found",
+        receiptRefs: ["artifacts/receipt.txt"],
+      };
+      let historical: Buffer | undefined;
+      const archive = path.join(f.workerRoot, "attempts/attempt-01");
+      if (archived) {
+        const pending = scenario === "unusable-checkpoints";
+        const closing = scenario === "merged-receipts";
+        await writeFile(
+          path.join(receipts, "receipt.txt"),
+          "Synthetic receipt.",
+        );
+        const previous = workerDraft([], {
+          complete: !pending && !closing,
+          coverage: {
+            completeness: pending || closing ? "partial" : "complete",
+            surfaces: pending
+              ? []
+              : [
+                  {
+                    ...surface,
+                    disposition: closing ? "needs_follow_up" : "no_issue_found",
+                  },
+                ],
+            explicitExclusions: [],
+            deferred:
+              pending || closing
+                ? [
+                    {
+                      id: "review",
+                      reason: "Synthetic pending proof.",
+                      ...(closing ? { surfaceIds: ["saved-surface"] } : {}),
+                    },
+                  ]
+                : [],
+          },
+        });
+        if (anonymous) {
+          await writeFile(f.resultPath, JSON.stringify(previous));
+          await validateDiscoveryArtifacts(
+            { workersRoot: path.dirname(f.workerRoot) },
+            f.resultPath,
+            scanId,
+          );
+        } else {
+          await recordCodexSecurityWorkerScanDraft(f.workerContext, previous);
+        }
+        await archiveDirectory(f.output, archive);
+        historical = await readFile(path.join(archive, "result.json"));
+        await mkdir(receipts, { recursive: true });
+      }
+      const checkpointFile =
+        scenario === "unusable-checkpoints" ||
+        scenario === "no-archive-control";
+      if (checkpointFile)
+        await writeFile(
+          path.join(f.output, "checkpoints"),
+          "Synthetic unreadable collection.",
+        );
+      if (!checkpointFile && scenario !== "missing-receipt")
+        await writeFile(
+          path.join(receipts, "receipt.txt"),
+          scenario === "changed-receipt-control"
+            ? "Synthetic changed receipt."
+            : "Synthetic receipt.",
+        );
+      const closing = scenario === "merged-receipts";
+      if (closing)
+        await writeFile(
+          path.join(receipts, "new.txt"),
+          "Synthetic new evidence.",
+        );
+      const current = workerDraft([], {
+        complete: true,
+        coverage: {
+          completeness: "complete",
+          surfaces: checkpointFile
+            ? []
+            : [
+                {
+                  ...surface,
+                  ...(closing ? { receiptRefs: ["artifacts/new.txt"] } : {}),
+                },
+              ],
+          explicitExclusions: [],
+          deferred: [],
+          ...(closing
+            ? {
+                resolvedDeferred: [
+                  { id: "review", reason: "Synthetic proof completed." },
+                ],
+              }
+            : {}),
+        },
+      });
+      await writeFile(f.resultPath, JSON.stringify(current));
+      const acceptedBytes = await readFile(f.resultPath);
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const { discoveries } = await readDeepReductionSources(f.context);
+      const coverage = discoveries[0].coverage;
+      assert.equal(
+        coverage.deferred.length,
+        scenario === "unusable-checkpoints" ? 1 : 0,
+      );
+      assert.equal(
+        coverage.surfaces.length,
+        checkpointFile ? 0 : scenario === "changed-receipt-control" ? 2 : 1,
+      );
+      if (!checkpointFile && !anonymous)
+        assert.equal(coverage.surfaces[0].provenance.sourceId, "saved-surface");
+      if (anonymous)
+        assert.ok(
+          coverage.surfaces.every(
+            (row: { provenance: { sourceId?: string } }) =>
+              row.provenance.sourceId === undefined,
+          ),
+        );
+      if (closing) {
+        assert.equal(coverage.resolvedDeferred.length, 1);
+        assert.equal(coverage.surfaces[0].receiptRefs.length, 2);
+      }
+      assert.deepEqual(await readFile(f.resultPath), acceptedBytes);
+      if (historical)
+        assert.deepEqual(
+          await readFile(path.join(archive, "result.json")),
+          historical,
+        );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("ordinary worker writes retain strict checkpoint-directory validation", async () => {
+  const f = await fixture();
+  try {
+    await writeFile(
+      path.join(f.output, "checkpoints"),
+      "Synthetic invalid checkpoint collection.",
+    );
+    await assert.rejects(
+      recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], { complete: true }),
+      ),
+      /destination directory is not a regular directory/u,
+    );
+    assert.equal(
+      await readFile(path.join(f.output, "checkpoints"), "utf8"),
+      "Synthetic invalid checkpoint collection.",
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "accepted retry projection rejects unsafe checkpoint directory links",
+  { skip: process.platform === "win32" },
+  async () => {
+    const f = await fixture();
+    try {
+      await recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], { complete: false }),
+      );
+      await archiveDirectory(
+        f.output,
+        path.join(f.workerRoot, "attempts/attempt-01"),
+      );
+      const target = path.join(f.root, "synthetic-other-checkpoints");
+      await mkdir(target);
+      await symlink(target, path.join(f.output, "checkpoints"), "dir");
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(workerDraft([], { complete: true })),
+      );
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      await assert.rejects(
+        readDeepReductionSources(f.context),
+        /checkpoint set is not a safe directory/u,
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);

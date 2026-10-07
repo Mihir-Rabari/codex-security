@@ -34,6 +34,7 @@ import {
   deepReductionForPersistence,
   parseDeepReduction,
   projectDiscoveryCoverage,
+  matchesSavedCoverageSource,
   parseStoredScanDraft,
   reconcileDeepReduction,
   type DeepReductionInput,
@@ -158,6 +159,29 @@ export async function readDeepReductionSources(
             }
           }),
         );
+        normalizeSavedScanCoverage([result]);
+        for (const { input } of archived) {
+          for (const surface of input.coverage.surfaces as JsonObject[]) {
+            if (surface.id !== undefined) continue;
+            const currentIndex = (
+              originalCoverage.surfaces as JsonObject[]
+            ).findIndex(
+              (current) =>
+                current.id === undefined &&
+                matchesSavedCoverageSource(
+                  "surfaces",
+                  current,
+                  surface,
+                  archivePrefix,
+                  receiptDigests,
+                ),
+            );
+            if (currentIndex !== -1)
+              surface.id = (result.coverage.surfaces as JsonObject[])[
+                currentIndex
+              ]!.id;
+          }
+        }
         normalizeSavedScanCoverage([
           result,
           ...archived.map(({ input }) => input),
