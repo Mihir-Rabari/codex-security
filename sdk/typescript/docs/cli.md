@@ -1305,9 +1305,11 @@ collisions before patching. Separate remote servers cannot be updated atomically
 a remote can change or fail after that check, leaving an earlier push complete.
 
 Publication uses Git's submodule availability check unless `push.recurseSubmodules`
-or `submodule.recurse` is configured. Existing recursion settings pass through to
-Git unchanged. If Git reports an unpublished submodule commit, publish that commit
-from the submodule first, then resume the saved parent commit.
+or `submodule.recurse` is configured. This default also checks retained local
+metadata for changed, deinitialized submodules. These checks use remote-tracking
+refs; they do not fetch or publish child commits. Existing recursion settings pass
+through to Git unchanged. If publication reports an unpublished submodule commit,
+publish that commit from the submodule first, then resume the saved parent commit.
 
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved

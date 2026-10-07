@@ -29,9 +29,18 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
-  test.each(["published", "missing", "push-no", "submodule-false"])(
+  test.each([
+    "published",
+    "missing",
+    "published-deinit",
+    "missing-deinit",
+    "push-no",
+    "submodule-false",
+  ])(
     "publishes assessed nested updates with %s commits/settings",
     async (mode) => {
+      const missing = mode.startsWith("missing");
+      const deinitialized = mode.endsWith("-deinit");
       const { directory, git, remote } = await publicationRepository();
       const nested = join(directory, "nested");
       await mkdir(nested);
@@ -52,12 +61,15 @@ describe("patch change tracking", () => {
       git("add", "nested");
       git("commit", "-m", "Synthetic gitlink");
       git("submodule", "init");
+      git("submodule", "absorbgitdirs", "--", "nested");
+      const nestedGitDirectory = nestedGit("rev-parse", "--absolute-git-dir");
+      const nestedIndexPath = join(nestedGitDirectory, "index");
       if (mode === "push-no") git("config", "push.recurseSubmodules", "no");
       if (mode === "submodule-false")
         git("config", "submodule.recurse", "false");
       const before = nestedGit("rev-parse", "HEAD");
       let after = before;
-      let nestedIndex = await readFile(join(nested, ".git/index"));
+      let nestedIndex = await readFile(nestedIndexPath);
       let assessments = 0;
       let creations = 0;
       const onRepositoryCommand: NonNullable<
@@ -101,22 +113,47 @@ describe("patch change tracking", () => {
             }
             await writeFile(join(nested, "app.ts"), "fixed\n");
             nestedGit("commit", "-am", "Synthetic nested update");
-            if (mode === "published") nestedGit("push", "origin", "main");
+            if (mode.startsWith("published"))
+              nestedGit("push", "origin", "main");
             after = nestedGit("rev-parse", "HEAD");
-            nestedIndex = await readFile(join(nested, ".git/index"));
+            nestedIndex = await readFile(nestedIndexPath);
+            if (deinitialized) {
+              git("add", "nested");
+              git("submodule", "deinit", "--force", "--", "nested");
+            }
             output?.stdout.write("Fixed and checked.");
             return 0;
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(mode === "missing" ? 2 : 0);
+      expect(outcome.exitCode, outcome.stderr).toBe(missing ? 2 : 0);
       const savedCommit = git("rev-parse", "HEAD");
-      if (mode === "missing") {
+      if (missing) {
         expect(outcome.stderr).toContain("--resume-pr");
-        expect(outcome.stderr).toContain("not be found on any remote");
+        expect(outcome.stderr).toContain(
+          deinitialized
+            ? "not available in its remote-tracking refs"
+            : "not be found on any remote",
+        );
         expect(creations).toBe(0);
         expect(git("ls-remote", "origin")).toBe("");
-        nestedGit("push", "origin", "main");
+        if (deinitialized) {
+          const refused = await runWorkflow(
+            ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
+            {
+              currentDirectory: directory,
+              onRepositoryCommand,
+              onCodex: () => {
+                throw new Error("Resuming must reuse the saved commit");
+              },
+            },
+          );
+          expect(refused.exitCode, refused.stderr).toBe(2);
+          expect(git("rev-parse", "HEAD")).toBe(savedCommit);
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(creations).toBe(0);
+        }
+        nestedGit("--git-dir", nestedGitDirectory, "push", "origin", "main");
         const resumed = await runWorkflow(
           ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
           {
@@ -134,7 +171,7 @@ describe("patch change tracking", () => {
       expect(git("config", "--list")).not.toContain(
         "push.recursesubmodules=check",
       );
-      if (mode === "published" || mode === "missing") {
+      if (mode.startsWith("published") || missing) {
         const checkout = await fixtures.create("patch-nested-checkout-");
         git(
           "clone",
@@ -164,8 +201,13 @@ describe("patch change tracking", () => {
       ).toBe(`160000 commit ${after}\tnested`);
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
       expect(git("status", "--porcelain")).toBe("");
-      expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
-      expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+      expect(await readFile(nestedIndexPath)).toEqual(nestedIndex);
+      if (deinitialized)
+        await expect(readFile(join(nested, "app.ts"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      else
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
     },
   );
 

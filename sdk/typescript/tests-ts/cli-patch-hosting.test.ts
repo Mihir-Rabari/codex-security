@@ -501,6 +501,7 @@ describe("patch change tracking", () => {
       "scp-ipv6-userless",
       "scp-ipv6-api",
       "scp-expanded-ipv6-api",
+      "ssh-uri-alias-ipv6-api",
       "scp-ipv6-scoped",
       "scp-ipv6-scoped-userless",
       "scp-percent",
@@ -558,17 +559,18 @@ describe("patch change tracking", () => {
         environment["GIT_SSH_COMMAND"] ??
         coreCommand ??
         (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
-      const alias = transport.includes("ipv6")
-        ? transport.includes("scoped")
-          ? "[fe80::1%lo]"
-          : transport.endsWith("ipv6-api")
-            ? transport.includes("expanded")
-              ? "[0:0:0:0:0:0:0:1]"
-              : "[::1]"
-            : "[2001:db8::1]"
-        : transport.endsWith("-mixed")
-          ? "GitHub-Work"
-          : "github-work";
+      const alias =
+        transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
+          ? transport.includes("scoped")
+            ? "[fe80::1%lo]"
+            : transport.endsWith("ipv6-api")
+              ? transport.includes("expanded")
+                ? "[0:0:0:0:0:0:0:1]"
+                : "[::1]"
+              : "[2001:db8::1]"
+          : transport.endsWith("-mixed")
+            ? "GitHub-Work"
+            : "github-work";
       const localFirst = [
         "local-first",
         "file-first",
@@ -672,7 +674,7 @@ describe("patch change tracking", () => {
                     : `${hostingHost}${apiPort}/example/${transport === "scp-percent" ? "repository%2Dname" : transport === "ssh-uri-percent" ? "repository-name" : "repository"}`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
-        transport.includes("ipv6")
+        alias.startsWith("[")
           ? `${transport.endsWith("userless") ? "" : "git@"}${alias.slice(1, -1)}`
           : transport === "scp-userless"
             ? "github.com"
