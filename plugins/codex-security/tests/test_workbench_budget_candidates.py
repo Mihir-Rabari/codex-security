@@ -51,6 +51,75 @@ def test_budget_completion_retains_each_confirmed_candidate_identity(
 
 
 @pytest.mark.parametrize(
+    ("reopened", "decision", "expected_disposition"),
+    [
+        (True, "deferred", "needs_follow_up"),
+        (False, "deferred", "reported"),
+        (True, "suppressed", "rejected"),
+        (True, "not_applicable", "not_applicable"),
+    ],
+)
+def test_budget_completion_uses_current_candidate_state_after_finding_reopens(
+    tmp_path: Path, reopened: bool, decision: str, expected_disposition: str
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {"disposition": decision}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"][0]["provenance"].update(
+        candidateId=candidate["candidate_id"], candidateReopened=reopened
+    )
+    findings_path.write_text(json.dumps(findings))
+    surface = {
+        "id": "candidate-review",
+        "candidateId": candidate["candidate_id"],
+        "label": "Current candidate review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    pending = {
+        "id": "candidate-proof-gap",
+        "candidateId": candidate["candidate_id"],
+        "candidate": candidate,
+        "reason": "Current proof gap still needs validation.",
+        "surfaceIds": [surface["id"]],
+    }
+    other_surface = {**surface, "id": "other-owner-review", "sourceWorkerId": "worker-other"}
+    other_pending = {
+        **pending,
+        "id": "other-owner-proof-gap",
+        "sourceWorkerId": "worker-other",
+        "reason": "Independent proof gap for another worker.",
+        "surfaceIds": [other_surface["id"]],
+    }
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(
+        completeness="partial",
+        surfaces=[surface, other_surface],
+        deferred=[pending, other_pending],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    saved = json.loads(coverage_path.read_text())
+    still_pending = expected_disposition == "needs_follow_up"
+    assert (pending in saved["deferred"]) is still_pending
+    retained = next(row for row in saved["surfaces"] if row["id"] == surface["id"])
+    assert retained["disposition"] == expected_disposition
+    assert other_pending in saved["deferred"]
+    assert other_surface in saved["surfaces"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["candidates"]["unresolved"] == 1 + int(still_pending)
+
+
+@pytest.mark.parametrize(
     "decision",
     [
         "reported",

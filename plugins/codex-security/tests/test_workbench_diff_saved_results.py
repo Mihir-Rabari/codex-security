@@ -1007,9 +1007,9 @@ def test_stopped_diff_preserves_canonical_reopened_candidate_state(
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("ledger_state", ["missing", "matching"])
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
-@pytest.mark.parametrize("revised", [False, True])
+@pytest.mark.parametrize("revision", ["unchanged", "with-history", "file-authored"])
 def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
-    tmp_path: Path, ledger_state: str, termination: str, revised: bool
+    tmp_path: Path, ledger_state: str, termination: str, revision: str
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate_id = checkpoint["coverage"]["deferred"][0]["candidateId"]
@@ -1037,8 +1037,9 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
     publish(original)
     reopened = copy.deepcopy(original)
     reopened["provenance"]["candidateReopened"] = True
-    if revised:
+    if revision != "unchanged":
         reopened["summary"] = "Revised evidence needs further validation."
+    if revision == "with-history":
         reopened["provenance"]["previousFindings"] = [original]
     coverage.update(
         completeness="partial",
@@ -1050,7 +1051,14 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
             }
         ],
     )
-    publish(reopened)
+    if revision == "file-authored":
+        findings_path = scan_dir / "findings.json"
+        document = json.loads(findings_path.read_text())
+        document["findings"] = [reopened]
+        findings_path.write_text(json.dumps(document))
+        coverage_path.write_text(json.dumps(coverage))
+    else:
+        publish(reopened)
     if ledger_state == "missing":
         ledger.unlink()
     else:
@@ -1077,7 +1085,7 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
         )
         assert pending["finding"]["summary"] == reopened["summary"]
         assert pending["finding"]["provenance"]["candidateReopened"] is True
-        if revised:
+        if revision == "with-history":
             assert original in pending["finding"]["provenance"]["previousFindings"]
         assert all(path.read_bytes() == value for path, value in originals.items())
         return pending

@@ -775,18 +775,14 @@ def _stopped_diff_candidate_decisions(
         for item in unresolved_candidates(current_coverage, current_findings)
         if candidate_owner(item.get("sourceWorkerId")) is None
     }
+    reopened = {
+        key
+        for finding in current_findings
+        if finding["provenance"].get("candidateReopened") is True
+        and (key := finding_candidate_key(finding)) is not None
+        and key[0] is None
+    }
     demoted_findings = {}
-    for finding in current_findings:
-        if (
-            finding["provenance"].get("candidateReopened") is True
-            and (key := finding_candidate_key(finding)) is not None
-            and key[0] is None
-        ):
-            demoted_findings.setdefault(key, []).extend(
-                retained
-                for retained in _retained_findings(finding)
-                if finding_candidate_key(retained) == key
-            )
     # Inspect all pending and terminal payloads for retained demoted findings.
     for field in ("deferred", "surfaces", "explicitExclusions"):
         items = current_coverage.get(field, [])
@@ -843,7 +839,7 @@ def _stopped_diff_candidate_decisions(
     finding_ids = {finding_candidate_id(finding) for finding in findings}
 
     def was_demoted(finding: dict[str, Any]) -> bool:
-        return any(
+        return finding_candidate_key(finding) in reopened or any(
             isinstance(retained.get("provenance"), dict)
             and retained["provenance"].get("diffCandidateDecision")
             == finding["provenance"]["diffCandidateDecision"]

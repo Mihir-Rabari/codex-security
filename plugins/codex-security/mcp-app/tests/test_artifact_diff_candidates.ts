@@ -2529,18 +2529,16 @@ const { recordCodexSecurityScanDraftViaWorkbench } = await loadModule(
   "artifact-scan-draft.ts",
 );
 const { createScanArtifactContext } = await loadModule("artifact-context.ts");
-for (const termination of ["complete-scan", "cancel-scan"] as const) {
-  for (const receipt of ["missing", "valid", "none"] as const) {
-    test(`workbench Diff ${termination} retains recovered candidate with ${receipt} receipt`, async (t) => {
-      const directory = await fixture(t);
-      const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
-      const python = process.env.PYTHON?.trim() || "python3";
-      const initialized = JSON.parse(
-        execFileSync(
-          python,
-          [
-            "-c",
-            `
+async function workbenchDiffFixture(t: TestContext) {
+  const directory = await fixture(t);
+  const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const python = process.env.PYTHON?.trim() || "python3";
+  const initialized = JSON.parse(
+    execFileSync(
+      python,
+      [
+        "-c",
+        `
 import json, sys, uuid
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -2551,35 +2549,42 @@ revision = initialize_git_repository(target)
 workspace = str(uuid.uuid4())
 run_workbench(state, "create-workspace", "--workspace-id", workspace)
 run_workbench(state, "save-workspace", "--workspace-id", workspace, "--target-path", str(target),
-              "--scope", ".", "--mode", "diff", "--diff-target-kind", "commit", "--diff-head-revision", revision)
+          "--scope", ".", "--mode", "diff", "--diff-target-kind", "commit", "--diff-head-revision", revision)
 started = start_delivered_scan(state, "--workspace-id", workspace, "--scan-root", str(root / "scans"))["results"]
 print(json.dumps(started))
 `,
-            path.join(pluginRoot, "tests"),
-            directory.root,
-          ],
-          { encoding: "utf8" },
-        ),
-      );
-      const workbench = async (args: string[]) =>
-        JSON.parse(
-          execFileSync(
-            python,
-            [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
-            {
-              encoding: "utf8",
-              env: {
-                ...process.env,
-                CODEX_SECURITY_STATE_DIR: path.join(directory.root, "state"),
-              },
-            },
-          ),
-        );
-      const context = await createScanArtifactContext(
-        initialized.scanId,
-        workbench,
-        { requireRunning: true },
-      );
+        path.join(pluginRoot, "tests"),
+        directory.root,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  const workbench = async (args: string[]) =>
+    JSON.parse(
+      execFileSync(
+        python,
+        [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: path.join(directory.root, "state"),
+          },
+        },
+      ),
+    );
+  const context = await createScanArtifactContext(
+    initialized.scanId,
+    workbench,
+    { requireRunning: true },
+  );
+  return { context, workbench };
+}
+
+for (const termination of ["complete-scan", "cancel-scan"] as const) {
+  for (const receipt of ["missing", "valid", "none"] as const) {
+    test(`workbench Diff ${termination} retains recovered candidate with ${receipt} receipt`, async (t) => {
+      const { context, workbench } = await workbenchDiffFixture(t);
       const savedCandidate = candidate("receipt-review");
       await writeLedger(context, [savedCandidate]);
       const receiptPath = "artifacts/review/synthetic-receipt.txt";
@@ -3686,6 +3691,143 @@ for (const payload of [
         (entry: FixtureObject) => entry.candidateId === current.candidate_id,
       );
       assert.deepEqual(row.originalCandidates, [payload]);
+    }
+  });
+}
+
+const { recordCodexSecurityDiscoveryCandidates } = await loadModule(
+  "artifact-discovery.ts",
+);
+for (const resolution of ["pending", "accepted", "rejected"] as const) {
+  test(`workbench Diff rediscovery preserves reopened proof until ${resolution}`, async (t) => {
+    const { context, workbench } = await workbenchDiffFixture(t);
+    context.pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
+      ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
+      : fileURLToPath(
+          new URL(
+            "../../../../sdk/typescript/_bundled_plugin/",
+            import.meta.url,
+          ),
+        );
+    const discovery = {
+      candidates: [
+        {
+          cwe_ids: [],
+          locations: [
+            { path: "README.md", start_line: 1, end_line: 1, role: "evidence" },
+          ],
+          summary: "Synthetic candidate for phase recovery.",
+          evidence: "Synthetic source evidence.",
+        },
+      ],
+    };
+    const directory = path.join(context.root, "artifacts/02_discovery");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "in_scope_files.txt"), "README.md\n");
+    await recordCodexSecurityDiscoveryCandidates(discovery, context);
+    const candidate = JSON.parse(
+      (
+        await readFile(path.join(directory, "candidate_ledger.jsonl"), "utf8")
+      ).trim(),
+    );
+    const original = finding(candidate.candidate_id);
+    original.locations = [{ path: "README.md", startLine: 1 }];
+    const publish = (input = draft()) =>
+      recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        { ...input, scanId: context.scanId, complete: false },
+        workbench,
+      );
+    await publish({ ...draft(), findings: [original] });
+    await recordCodexSecurityCandidateValidations(context, {
+      validations: [
+        {
+          candidateId: candidate.candidate_id,
+          validation: {
+            disposition: "deferred",
+            method: "source review",
+            confidence: "low",
+            confidence_rationale: "Synthetic review.",
+            rubric: "Source review",
+            evidence: "Synthetic evidence.",
+            counterevidence_or_proof_gap: "Synthetic new proof gap.",
+            remaining_uncertainty: "Synthetic new proof gap.",
+          },
+        },
+      ],
+    });
+    await publish();
+    const before = (await readCoverage(context)).deferred.find(
+      (row: FixtureObject) => row.candidateId === candidate.candidate_id,
+    );
+    assert.ok(before);
+    await recordCodexSecurityDiscoveryCandidates(discovery, context);
+    await publish();
+    const pending = (await readCoverage(context)).deferred.find(
+      (row: FixtureObject) => row.candidateId === candidate.candidate_id,
+    );
+    assert.ok(
+      pending,
+      "Rediscovery alone must not resolve the saved proof gap.",
+    );
+    assert.ok(
+      pending.originalCandidates.some((saved: unknown) =>
+        isDeepStrictEqual(saved, before.candidate),
+      ),
+      "Rediscovery retains the prior validation and proof gap.",
+    );
+    assert.equal(pending.finding.title, original.title);
+    if (resolution === "accepted")
+      await publish({ ...draft(), findings: [original] });
+    if (resolution === "rejected") {
+      const input = draft();
+      input.coverage.surfaces.push({
+        candidateId: candidate.candidate_id,
+        label: "Later review",
+        disposition: "rejected",
+        notes: "Later review dismissed the candidate.",
+      });
+      await publish(input);
+    }
+    const checkpoints = path.join(context.root, "checkpoints");
+    const originals = await Promise.all(
+      (await readdir(checkpoints)).map(
+        async (name) =>
+          [name, await readFile(path.join(checkpoints, name), "utf8")] as const,
+      ),
+    );
+    await workbench(["cancel-scan", "--scan-id", context.scanId]);
+    for (const replay of [false, true]) {
+      if (replay)
+        await workbench(["preserve-scan-results", "--scan-id", context.scanId]);
+      const scan = await workbench(["get-scan", "--scan-id", context.scanId]);
+      const coverage = await readCoverage(context);
+      assert.equal(
+        scan.scan.progress.candidates.unresolved,
+        resolution === "pending" ? 1 : 0,
+      );
+      const current = coverage.deferred.find(
+        (row: FixtureObject) => row.candidateId === candidate.candidate_id,
+      );
+      assert.equal(Boolean(current), resolution === "pending");
+      if (current)
+        assert.ok(
+          current.originalCandidates.some((saved: unknown) =>
+            isDeepStrictEqual(saved, before.candidate),
+          ),
+        );
+      const findings = JSON.parse(
+        await readFile(path.join(context.root, "findings.json"), "utf8"),
+      );
+      assert.ok(
+        JSON.stringify({ findings, coverage }).includes(original.summary),
+        "Historical finding evidence survives.",
+      );
+      for (const [name, contents] of originals)
+        assert.equal(
+          await readFile(path.join(checkpoints, name), "utf8"),
+          contents,
+        );
     }
   });
 }

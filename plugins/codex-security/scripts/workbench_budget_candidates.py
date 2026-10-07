@@ -299,7 +299,12 @@ def preserve_budget_candidates(
     findings_by_candidate = {
         key
         for finding in findings
-        if isinstance(finding, dict) and (key := finding_candidate_key(finding)) is not None
+        if isinstance(finding, dict)
+        and not (
+            isinstance(provenance := finding.get("provenance"), dict)
+            and provenance.get("candidateReopened") is True
+        )
+        and (key := finding_candidate_key(finding)) is not None
     }
 
     candidates_by_surface_id = {

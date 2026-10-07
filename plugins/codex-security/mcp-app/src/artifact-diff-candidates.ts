@@ -94,6 +94,19 @@ export function refreshDiffCandidateHistory(
     const result = structuredClone(source);
     const deferred = result.coverage.deferred as JsonObject[];
     const closed = new Set<string>();
+    // Rediscovery can restore old phase values without resolving a saved proof gap.
+    for (const pending of deferred) {
+      const key = coverageCandidateKey(pending);
+      const candidate = ledger.get(key ?? "");
+      if (
+        key &&
+        candidate &&
+        !authoredResolutions.has(key) &&
+        candidateDisposition(candidate) === undefined &&
+        !reopened.has(key)
+      )
+        reopened.set(key, pending);
+    }
     for (const finding of result.findings) {
       const key = findingCandidateKey(finding);
       const candidate = ledger.get(key ?? "");
@@ -101,18 +114,18 @@ export function refreshDiffCandidateHistory(
         !candidate ||
         authoredResolutions.has(key!) ||
         candidateDisposition(candidate) !== undefined ||
-        !changedFindingDecision(finding, candidate)
+        (!changedFindingDecision(finding, candidate) && !reopened.has(key!))
       )
         continue;
-      const pending = deferred.find(
-        (item) => coverageCandidateKey(item) === key,
-      ) ?? {
-        candidateId: candidate.candidate_id,
-        candidate,
-        reason: candidateReason(candidate),
-        finding,
-      };
-      if (!deferred.includes(pending)) deferred.push(pending);
+      const pending = reopened.get(key!) ??
+        deferred.find((item) => coverageCandidateKey(item) === key) ?? {
+          candidateId: candidate.candidate_id,
+          candidate,
+          reason: candidateReason(candidate),
+          finding,
+        };
+      if (!reopened.has(key!) && !deferred.includes(pending))
+        deferred.push(pending);
       if (!reopened.has(key!)) reopened.set(key!, pending);
       Object.assign(result.coverage, candidatePartialCoverage(result.coverage));
     }
@@ -207,7 +220,7 @@ export function refreshDiffCandidateHistory(
   for (const source of refreshed) {
     source.findings = source.findings.filter((finding) => {
       const pending = reopened.get(findingCandidateKey(finding) ?? "");
-      if (!pending) return true;
+      if (!pending || !isCurrentCandidateFinding(finding)) return true;
       if (object(pending.finding)) {
         if (object((pending.finding as JsonObject).provenance))
           preserveFindingDetails(pending.finding as JsonObject, finding);
