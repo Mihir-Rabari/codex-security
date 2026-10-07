@@ -8142,7 +8142,9 @@ test.each([
   "relative",
   "tilde",
   "inherited-relative",
+  "inherited-tilde",
   "inherited-padded",
+  "inherited-whitespace",
   "default",
   "native-provider",
 ])(
@@ -8154,7 +8156,7 @@ test.each([
       scanDir = join(root, "scan"),
       stateDirectory = join(root, "state");
     const sqliteHome =
-      location === "default"
+      location === "default" || location === "inherited-whitespace"
         ? codexHome
         : location === "relative" || location === "inherited-relative"
           ? join(scanDir, "selected-state")
@@ -8163,13 +8165,16 @@ test.each([
             : location === "tilde"
               ? join(root, "selected-state")
               : join(root, "selected-state");
+    const nativeSqliteHome =
+      location === "inherited-padded" ? sqliteHome.trim() : sqliteHome;
     await Promise.all([
       mkdir(repository),
       mkdir(codexHome),
       mkdir(scanDir, { mode: 0o700 }),
       mkdir(stateDirectory),
     ]);
-    if (sqliteHome !== codexHome) await mkdir(sqliteHome, { recursive: true });
+    if (nativeSqliteHome !== codexHome)
+      await mkdir(nativeSqliteHome, { recursive: true });
     const python = await runtime.resolvePluginPython({
       environment: process.env,
     });
@@ -8184,7 +8189,9 @@ test.each([
         ? { codexOverrides: sqliteProviderConfig }
         : location === "default" ||
             location === "inherited-relative" ||
-            location === "inherited-padded"
+            location === "inherited-tilde" ||
+            location === "inherited-padded" ||
+            location === "inherited-whitespace"
           ? {}
           : {
               codexOverrides: {
@@ -8213,9 +8220,13 @@ test.each([
               CODEX_SQLITE_HOME:
                 location === "inherited-relative"
                   ? "selected-state"
-                  : location === "inherited-padded"
-                    ? " selected-state "
-                    : join(root, "ambient-unselected-state"),
+                  : location === "inherited-tilde"
+                    ? "~/selected-state"
+                    : location === "inherited-padded"
+                      ? " selected-state "
+                      : location === "inherited-whitespace"
+                        ? "   "
+                        : join(root, "ambient-unselected-state"),
             }),
       },
       prepareRuntime: async () => ({
@@ -8233,9 +8244,13 @@ test.each([
                 CODEX_SQLITE_HOME:
                   location === "inherited-relative"
                     ? "selected-state"
-                    : location === "inherited-padded"
-                      ? " selected-state "
-                      : join(root, "ambient-unselected-state"),
+                    : location === "inherited-tilde"
+                      ? "~/selected-state"
+                      : location === "inherited-padded"
+                        ? " selected-state "
+                        : location === "inherited-whitespace"
+                          ? "   "
+                          : join(root, "ambient-unselected-state"),
               }),
         },
       }),
@@ -8259,7 +8274,7 @@ test.each([
         } catch (error) {
           let diagnostics: string;
           try {
-            const nativeSqliteHome = await nativeConfig?.sqliteHome;
+            const selectedNativeSqliteHome = await nativeConfig?.sqliteHome;
             diagnostics = execFileSync(
               python,
               [
@@ -8279,14 +8294,14 @@ test.each([
                 ].join("\n"),
                 join(options.pluginRoot, "scripts"),
                 threadId,
-                sqliteHome,
+                nativeSqliteHome,
               ],
               {
                 env: {
                   ...options.environment,
-                  ...(nativeSqliteHome === undefined
+                  ...(selectedNativeSqliteHome === undefined
                     ? {}
-                    : { CODEX_SQLITE_HOME: nativeSqliteHome }),
+                    : { CODEX_SQLITE_HOME: selectedNativeSqliteHome }),
                 },
                 encoding: "utf8",
               },
@@ -8320,7 +8335,7 @@ test.each([
                   "c=sqlite3.connect(sys.argv[2]); c.execute('CREATE TABLE threads (id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)'); c.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)'); c.execute('INSERT INTO threads VALUES (?,?)',('thread-1',sys.argv[3])); c.commit(); c.close()",
                 ].join("\n"),
                 join(stateDirectory, "workbench.sqlite3"),
-                join(sqliteHome, "state_7.sqlite"),
+                join(nativeSqliteHome, "state_7.sqlite"),
                 rollout,
               ]);
               return { events: completedEvents() };
@@ -8334,9 +8349,17 @@ test.each([
       expect(result).toMatchObject({ threadId: "thread-1" });
       expect(ownershipChecks).toBe(1);
       expect(selectedEnvironment?.["CODEX_SQLITE_HOME"]).toBe(
-        location === "default" || native !== null ? undefined : sqliteHome,
+        location === "default" || native !== null
+          ? undefined
+          : location === "inherited-whitespace"
+            ? "   "
+            : sqliteHome,
       );
       expect(selectedEnvironment?.["CODEX_HOME"]).toBe(codexHome);
+      if (location === "inherited-tilde")
+        expect(
+          (await stat(join(nativeSqliteHome, "state_5.sqlite"))).isFile(),
+        ).toBe(true);
       if (native !== null)
         expect(await readFile(native.transcript, "utf8")).toContain(
           '"method":"config/read"',

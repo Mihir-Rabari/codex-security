@@ -5693,11 +5693,34 @@ describe("live scan cost tracking", () => {
         "2026-07-26T12:01:00Z",
         true,
       );
+      const detail = (text: string) => ({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text }],
+        },
+      });
+      const before = detail("Before archival");
+      const after = detail("After archival");
+      const events: unknown[] = [];
+      await appendFile(
+        archived === "root" ? root : worker,
+        jsonLines([before]) + "\n",
+      );
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
         scanDirectory: home,
         maxCostUsd: 1,
+        onSessionEvent: ({ threadId, event }) => {
+          if (
+            threadId ===
+              (archived === "root" ? "scan-thread" : "worker-thread") &&
+            event["type"] === "response_item"
+          )
+            events.push(event);
+        },
         resolveOwnedSessionPaths: async () =>
           new Map([
             [root, "scan-thread"],
@@ -5714,6 +5737,7 @@ describe("live scan cost tracking", () => {
       await fsPromises.rename(archived === "root" ? root : worker, moved);
       if (archived === "root") root = moved;
       else worker = moved;
+      await appendFile(moved, jsonLines([after]) + "\n");
       if (!polled) tracker.start("scan-thread");
       const snapshot = await tracker.stop(rootUsage);
       expect(snapshot.cost).toMatchObject({
@@ -5721,6 +5745,7 @@ describe("live scan cost tracking", () => {
         outputTokens: 15,
         estimatedUsd: 0.0009,
       });
+      expect(events).toEqual([before, after]);
     },
   );
 
@@ -6535,6 +6560,63 @@ test.each([
     expect(formatTokenUsage(completed.usage)).toContain(
       `${expectedWrites ?? "unavailable"} cache writes`,
     );
+  },
+);
+
+test.each(["continuous", "reset"] as const)(
+  "preserves known cumulative cache writes across an omitted field: %s",
+  async (epoch) => {
+    const home = await codexHome();
+    const initial = {
+      input_tokens: 100,
+      cache_write_input_tokens: 40,
+      output_tokens: 0,
+    };
+    const missing = {
+      input_tokens: epoch === "reset" ? 50 : 200,
+      output_tokens: 0,
+    };
+    const final = {
+      input_tokens: epoch === "reset" ? 100 : 300,
+      cache_write_input_tokens: epoch === "reset" ? 20 : 60,
+      output_tokens: 0,
+    };
+    const expected = {
+      input_tokens: epoch === "reset" ? 200 : 300,
+      cache_write_input_tokens: 60,
+      output_tokens: 0,
+    };
+    const expectedCost = estimateScanCost("gpt-5.6-sol", expected)!;
+    const path = await writeSession(home, "scan-thread", initial);
+    const costs: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: expectedCost.estimatedUsd,
+      resolveOwnedSessionPaths: async () => new Map([[path, "scan-thread"]]),
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+    });
+    try {
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      await appendFile(path, jsonLines([accountingEvent(missing)]) + "\n");
+      await tracker.refresh();
+      await appendFile(
+        path,
+        jsonLines([
+          accountingEvent(final),
+          { type: "event_msg", payload: { type: "task_complete" } },
+        ]) + "\n",
+      );
+      const snapshot = await tracker.stop(final);
+      expect(snapshot.usage).toMatchObject(expected);
+      expect(snapshot.cost?.estimatedUsd).toBe(expectedCost.estimatedUsd);
+      expect(costs.every((value) => value <= expectedCost.estimatedUsd)).toBe(
+        true,
+      );
+    } finally {
+      await tracker.stop().catch(() => {});
+    }
   },
 );
 

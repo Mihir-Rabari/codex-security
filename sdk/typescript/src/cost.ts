@@ -375,13 +375,13 @@ export class ScanCostTracker {
     return result;
   }
 
-  async #hasCompleteCopy(
+  async #completeCopyPath(
     path: string,
     partial: SessionUsage,
     present: ReadonlySet<string>,
     ownedPaths?: ReadonlyMap<string, string>,
-  ): Promise<boolean> {
-    if (this.#options.maxCostUsd === undefined) return false;
+  ): Promise<string | null> {
+    if (this.#options.maxCostUsd === undefined) return null;
     for (const [completePath, complete] of this.#sessions) {
       if (
         completePath !== path &&
@@ -400,9 +400,9 @@ export class ScanCostTracker {
           present.has(path),
         ))
       )
-        return true;
+        return completePath;
     }
-    return false;
+    return null;
   }
 
   async #readSessions(ownedPaths?: ReadonlyMap<string, string>): Promise<void> {
@@ -444,15 +444,24 @@ export class ScanCostTracker {
     // Native archival can move a file after polling has already read it.
     if (ownedPaths !== undefined) {
       for (const [path, session] of this.#sessions) {
-        if (
-          !presentSessions.has(path) &&
-          (await this.#hasCompleteCopy(
-            path,
+        const completePath = presentSessions.has(path)
+          ? null
+          : await this.#completeCopyPath(
+              path,
+              session,
+              presentSessions,
+              ownedPaths,
+            );
+        if (completePath !== null) {
+          // Keep drained observer state and read only the new verified suffix.
+          await readSessionUsage(
+            completePath,
             session,
-            presentSessions,
-            ownedPaths,
-          ))
-        ) {
+            this.#options.model,
+            this.#options.repository,
+            true,
+          );
+          this.#sessions.set(completePath, session);
           this.#sessions.delete(path);
         }
       }
@@ -628,7 +637,7 @@ export class ScanCostTracker {
         }
         if (
           session.pendingLine.length > 0 &&
-          !(await this.#hasCompleteCopy(
+          !(await this.#completeCopyPath(
             path,
             session,
             presentSessions,
@@ -1210,7 +1219,18 @@ function readSessionEvent(
     );
   }
   if (usage === null) return;
-  session.previousRawUsage = usage;
+  // An omitted field does not reset a known cumulative count in this epoch.
+  session.previousRawUsage =
+    usage.cache_write_input_tokens_reported === false &&
+    session.previousRawUsage !== null &&
+    usage.input_tokens >= session.previousRawUsage.input_tokens &&
+    usage.output_tokens >= session.previousRawUsage.output_tokens
+      ? {
+          ...usage,
+          cache_write_input_tokens:
+            session.previousRawUsage.cache_write_input_tokens,
+        }
+      : usage;
   if (accumulated !== null) session.accumulatedOwnUsage = accumulated;
   for (const candidate of [
     ownUsage === null ? null : { usage: ownUsage, cost },

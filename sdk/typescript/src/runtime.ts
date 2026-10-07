@@ -1666,13 +1666,20 @@ async function readNativeSqliteHome(
 ): Promise<string | undefined> {
   const { providerPreflightCommand, readNativeSessionSqliteHome } =
     await import("./provider-profile.js");
-  return await readNativeSessionSqliteHome(
+  const configured = await readNativeSessionSqliteHome(
     await providerPreflightCommand(config.command, config.config ?? {}),
     options.environment,
     config.workingDirectory,
     options.signal,
     config.config,
   );
+  if (configured !== undefined) return configured;
+  // config/read omits the native environment fallback, which trims this value.
+  const inherited =
+    process.platform === "win32"
+      ? environmentValue(options.environment, "CODEX_SQLITE_HOME")
+      : options.environment["CODEX_SQLITE_HOME"]?.trim();
+  return inherited || undefined;
 }
 
 const workbenchComparisonSupport = new Map<
