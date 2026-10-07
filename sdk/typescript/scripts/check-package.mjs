@@ -228,6 +228,7 @@ const allowedFiles = new Set([
     "deduplication/records-protocol",
     "deduplication/review",
     "saved-scan",
+    "saved-scan-bootstrap",
     "server/embeddings",
     "server/dashboard",
     "server/dashboard-types",

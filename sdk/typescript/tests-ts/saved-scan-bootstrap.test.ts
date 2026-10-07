@@ -379,3 +379,35 @@ test.skipIf(process.platform === "win32")(
     ).toBe(f.second.scanId);
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "Python rediscovery keeps protecting the caller checkout when a saved target is supplied",
+  async () => {
+    const f = await fixture();
+    const caller = join(f.root, "caller-checkout");
+    await mkdir(caller);
+    const python = join(caller, "python3");
+    const marker = join(f.root, "caller-probed");
+    await writeFile(
+      python,
+      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(python, 0o700);
+    const source = new URL("../src/runtime.ts", import.meta.url).href;
+    const script = `
+    const { resolvePluginPython } = await import(${JSON.stringify(source)});
+    try {
+      await resolvePluginPython({ environment: process.env, protectedRoot: ${JSON.stringify(f.repository)} });
+      process.exitCode = 1;
+    } catch (error) {
+      if (!String(error).includes("PYTHON interpreter is unavailable or unusable")) throw error;
+    }
+  `;
+    execFileSync(process.execPath, ["-e", script], {
+      cwd: caller,
+      env: { ...f.environment, PYTHON: python, TEST_PYTHON_PROBE: marker },
+      stdio: "pipe",
+    });
+    expect(existsSync(marker)).toBe(false);
+  },
+);

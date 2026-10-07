@@ -2875,7 +2875,12 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const protectedRoot = options.protectedRoot ?? process.cwd();
+  const protectedRoot = [
+    process.cwd(),
+    ...(typeof options.protectedRoot === "string"
+      ? [options.protectedRoot]
+      : (options.protectedRoot ?? [])),
+  ];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

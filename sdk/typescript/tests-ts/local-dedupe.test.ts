@@ -1,5 +1,6 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
+import { once } from "node:events";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -730,3 +731,39 @@ test("local workbench calls receive cancellation and cannot report success after
   ).rejects.toBe(reason);
   expect(actions).toEqual(["prepare", "embed", "neighbors", "commit"]);
 });
+
+test.skipIf(process.platform === "win32")(
+  "local preparation cancels an active Python probe",
+  async () => {
+    const f = await fixture();
+    const python = join(f.root, "slow-python");
+    const marker = join(f.root, "probe-started");
+    await writeFile(
+      python,
+      '#!/bin/sh\nprintf started > "$TEST_PYTHON_PROBE"\nexec sleep 10\n',
+    );
+    await chmod(python, 0o700);
+    const controller = new AbortController();
+    const watcher = watch(f.root);
+    try {
+      const started = once(watcher, "change");
+      const local = new LocalDeduplication(
+        { ...f.environment, PYTHON: python, TEST_PYTHON_PROBE: marker },
+        { repositoryId: f.targetId },
+        f.repository,
+        controller.signal,
+        undefined,
+        f.embedding,
+      );
+      const outcome = local
+        .prepare(f.document.findings, f.targetId)
+        .catch((error: unknown) => error);
+      await started;
+      controller.abort();
+      expect(await outcome).toMatchObject({ name: "AbortError" });
+    } finally {
+      controller.abort();
+      watcher.close();
+    }
+  },
+);
