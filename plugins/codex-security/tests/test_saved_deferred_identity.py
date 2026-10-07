@@ -1062,6 +1062,74 @@ def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     assert documents[1] == replay[1]
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("identifier", ["reportId", "ledgerRowId"])
+@pytest.mark.parametrize("reversed_rows", [False, True])
+@pytest.mark.parametrize("with_independent", [False, True])
+def test_claimed_report_does_not_resolve_an_independent_recovery_match(
+    tmp_path, saved_results, identifier, reversed_rows, with_independent
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "title": "First independent report",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        "extensions": {identifier: "report-1"},
+    }
+    independent = {
+        **{key: value for key, value in first.items() if key != "extensions"},
+        "title": "Second independent report",
+        "locations": [{"path": "src/example.py", "startLine": 2}],
+        "provenance": {"source": "local_plugin", "candidateId": "candidate-2"},
+    }
+    latest = {
+        **first,
+        "title": "New report at second location",
+        "locations": independent["locations"],
+        "identity": {"anchor": "new-report"},
+    }
+    initial_rows = [first, independent] if with_independent else [first]
+    latest_rows = [first, latest]
+    if reversed_rows:
+        initial_rows.reverse()
+        latest_rows.reverse()
+    initial = saved_draft("identity-scan", findings=initial_rows)
+    terminal = saved_draft("identity-scan", findings=latest_rows, complete=True)
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, terminal], initial)
+    output = Path(worker["artifact_dir"])
+    os.utime(output / "result.json", ns=(150, 150))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(initial)}.json"}))
+    os.utime(head, ns=(150, 150))
+    sources = {path: path.read_bytes() for path in output.rglob("*.json")}
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    expected = {row["title"] for row in [*initial_rows, latest]}
+    for manifest, findings, _ in (documents, replay):
+        manifest["scan"]["id"] = "identity-scan"
+        findings["scanId"] = "identity-scan"
+        warnings = []
+        _recover_unsealed_findings(
+            manifest,
+            findings,
+            Path(__file__).resolve().parents[1] / "schemas",
+            tmp_path,
+            warnings,
+        )
+        assert {row["title"] for row in findings["findings"]} == expected
+        assert len(findings["findings"]) == len(expected)
+        assert warnings == []
+    assert documents[1] == replay[1]
+    assert all(path.read_bytes() == original for path, original in sources.items())
+
+
 @pytest.mark.parametrize("reverse_checkpoints", [False, True])
 def test_latest_eligible_worker_revision_survives_out_of_scope_result(
     tmp_path, saved_results, monkeypatch, reverse_checkpoints

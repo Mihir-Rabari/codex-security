@@ -730,6 +730,9 @@ async function preserveScanDraft(
         matches.length === 1 &&
         source.findings.filter(
           (current) =>
+            (finding.identity === undefined ||
+              matches[0]!.identity === undefined ||
+              current.identity !== undefined) &&
             (current === finding ||
               unmatchedFindings.has(current) ||
               (current.identity !== undefined &&

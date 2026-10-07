@@ -2016,9 +2016,9 @@ def merge_saved_results(
                         or (
                             rank == 0
                             and not (
-                                finding_candidate_id(value)
+                                _identity_candidate(value)
                                 and any(
-                                    finding_candidate_id(previous) == finding_candidate_id(value)
+                                    _identity_candidate(previous) == _identity_candidate(value)
                                     for previous in group["rows"]
                                 )
                             )

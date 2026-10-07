@@ -599,53 +599,100 @@ for (const layout of ["standard", "diff"] as const) {
   });
 }
 
-test("deep: explicit worker identity survives candidate enrichment", async (t) => {
-  const normal = await fixture(t, "deep"),
-    recovered = await fixture(t, "deep");
-  const nwroot = path.join(normal.root, "reviewer"),
-    rwroot = path.join(recovered.root, "reviewer");
-  await mkdir(nwroot);
-  await mkdir(rwroot);
-  const nw = draftFixture(nwroot, "worker"),
-    rw = draftFixture(rwroot, "worker");
-  const first = finding("First review", {
-    identity: { anchor: "authored-review" },
-  });
-  const second = {
-    ...first,
-    provenance: { ...first.provenance, candidateId: "candidate-1" },
-  };
-  await nw.write({ ...nw.draft(), findings: [first] });
-  await rw.write({ ...rw.draft(), findings: [first] });
-  await nw.write({ ...nw.draft(), findings: [second] });
-  await draftApi.saveScanDraftCheckpoint(
-    rw.context,
-    { ...rw.draft(), findings: [second] },
-    false,
-  );
-  const result = JSON.parse(
-    await readFile(path.join(nwroot, "result.json"), "utf8"),
-  );
-  await normal.write({
-    ...normal.draft(),
-    findings: result.findings.map((row: FixtureFinding) => ({
-      ...row,
-      provenance: { ...row.provenance, workerId: "reviewer" },
-    })),
-  });
-  const comparison = await recoverAndFinalize(normal, recovered, [
-    {
-      id: "reviewer",
-      kind: "discovery",
-      artifact_dir: rwroot,
-      result_manifest_path: null,
-      attempt: 1,
-    },
-  ]);
-  assert.equal(comparison.normal.length, 1);
-  assert.deepEqual(comparison.recovered, comparison.normal);
-  assert.deepEqual(comparison.warnings, []);
-});
+for (const variant of [
+  "unchanged",
+  "candidate-collision",
+  "no-candidate-enrichment",
+  "no-sibling",
+] as const) {
+  for (const reversed of [false, true]) {
+    test(`deep: explicit worker identity survives ${variant} revision (reverse=${reversed})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const nwroot = path.join(normal.root, "reviewer"),
+        rwroot = path.join(recovered.root, "reviewer");
+      await mkdir(nwroot);
+      await mkdir(rwroot);
+      const nw = draftFixture(nwroot, "worker"),
+        rw = draftFixture(rwroot, "worker");
+      const first = finding("First review", {
+        identity: { anchor: "authored-review" },
+      });
+      const sibling = finding("Second review", {
+        provenance: { source: "local_plugin", candidateId: "shared-review" },
+        locations: [{ path: "src/other.py", startLine: 2 }],
+      });
+      const withSibling = variant !== "unchanged" && variant !== "no-sibling";
+      const ordered = (current: FixtureFinding) => {
+        const rows = withSibling ? [current, sibling] : [current];
+        return reversed ? rows.toReversed() : rows;
+      };
+      const second = {
+        ...first,
+        ...(variant === "unchanged"
+          ? {}
+          : { title: "Revised first review", summary: "Revised evidence." }),
+        provenance: {
+          ...first.provenance,
+          ...(variant === "no-candidate-enrichment"
+            ? {}
+            : { candidateId: "shared-review" }),
+        },
+      };
+      await nw.write({ ...nw.draft(), findings: ordered(first) });
+      await rw.write({ ...rw.draft(), findings: ordered(first) });
+      await nw.write({ ...nw.draft(), findings: ordered(second) });
+      await draftApi.saveScanDraftCheckpoint(
+        rw.context,
+        { ...rw.draft(), findings: ordered(second) },
+        false,
+      );
+      const result = JSON.parse(
+        await readFile(path.join(nwroot, "result.json"), "utf8"),
+      );
+      await normal.write({
+        ...normal.draft(),
+        findings: result.findings.map((row: FixtureFinding) => ({
+          ...row,
+          provenance: { ...row.provenance, workerId: "reviewer" },
+        })),
+      });
+      const comparison = await recoverAndFinalize(normal, recovered, [
+        {
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: rwroot,
+          result_manifest_path: null,
+          attempt: 1,
+        },
+      ]);
+      assert.equal(comparison.normal.length, withSibling ? 2 : 1);
+      assert.deepEqual(comparison.recovered, comparison.normal);
+      assert.deepEqual(comparison.warnings, []);
+      assert.deepEqual(
+        comparison.normal.map((row) => row.title).sort(),
+        ordered(second)
+          .map((row) => row.title)
+          .sort(),
+      );
+      const revised = result.findings.find(
+        (row: FixtureFinding) => row.title === second.title,
+      );
+      assert.deepEqual(revised.identity, first.identity);
+      if (variant !== "unchanged") {
+        assert.deepEqual(revised.provenance.previousFindings, [first]);
+      }
+      if (withSibling) {
+        assert.deepEqual(
+          result.findings.find(
+            (row: FixtureFinding) => row.title === sibling.title,
+          ),
+          sibling,
+        );
+      }
+    });
+  }
+}
 
 for (const layout of ["standard", "diff", "worker"] as const) {
   for (const variant of [
