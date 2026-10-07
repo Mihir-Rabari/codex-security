@@ -540,7 +540,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
-    junction_prefixes: dict[str, bool] = {}
+    linked_prefixes: dict[str, bool] = {}
     listing_args: list[str] = []
     inventory_pathspec = pathspec
     if scope_depth:
@@ -587,21 +587,24 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
         path = target.joinpath(*relative.parts[scope_depth:])
         try:
-            # Git can list descendants of a junction; snapshots retain the link.
+            # The index can retain descendants of a directory replaced by a link.
+            # Keep the link's identity in snapshots without following its contents.
             prefix = target
             for component in path.relative_to(target).parts[:-1]:
                 prefix /= component
                 key = str(prefix)
-                if key not in junction_prefixes:
-                    junction_prefixes[key] = bool(
-                        getattr(prefix.lstat(), "st_reparse_tag", 0) & 0x20000000
+                if key not in linked_prefixes:
+                    prefix_metadata = prefix.lstat()
+                    linked_prefixes[key] = bool(
+                        stat.S_ISLNK(prefix_metadata.st_mode)
+                        or getattr(prefix_metadata, "st_reparse_tag", 0) & 0x20000000
                     )
-                if junction_prefixes[key]:
+                if linked_prefixes[key]:
                     path = prefix
                     break
             metadata = path.lstat()
-        except FileNotFoundError:
-            # The index can retain a path that was staged and then deleted.
+        except (FileNotFoundError, NotADirectoryError):
+            # The index can retain deleted paths, including directory-to-file replacements.
             continue
         paths.append(path)
         if (
