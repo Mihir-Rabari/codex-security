@@ -28,23 +28,33 @@ const temporaryDirectories = createTemporaryDirectories();
 afterEach(temporaryDirectories.cleanup);
 const vector = [1, ...Array<number>(EMBEDDING_DIMENSIONS - 1).fill(0)];
 
-test.skipIf(process.platform === "win32")(
-  "directory dedupe rejects repository Python before probing it from another directory",
-  async () => {
-    const f = await fixture();
-    const python = join(f.repository, "python3");
-    const marker = join(f.root, "python-probed");
-    await writeFile(
-      python,
-      '#!/bin/sh\nprintf "probed" > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(python, 0o700);
-    expect(process.cwd()).not.toBe(f.repository);
-    await expect(
-      deduplicateScanDirectoryInternal(
-        f.scanDir,
-        { repository: f.repository },
-        {
+for (const mode of ["direct", "fresh workflow", "resumed workflow"]) {
+  test.skipIf(process.platform === "win32")(
+    `directory dedupe rejects repository Python before probing it from another directory (${mode})`,
+    async () => {
+      const f = await fixture();
+      const options = {
+        repository: f.repository,
+        ...(mode === "direct" ? {} : { workflowId: "protected-python" }),
+      };
+      if (mode === "resumed workflow") {
+        await deduplicateScanDirectoryInternal(f.scanDir, options, {
+          environment: f.environment,
+          embedder: { embed: f.embed },
+          reviewer: emptyNeighborhoodReviewer(),
+        });
+        f.embed.mockClear();
+      }
+      const python = join(f.repository, "python3");
+      const marker = join(f.root, "python-probed");
+      await writeFile(
+        python,
+        '#!/bin/sh\nprintf "probed" > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+      );
+      await chmod(python, 0o700);
+      expect(process.cwd()).not.toBe(f.repository);
+      await expect(
+        deduplicateScanDirectoryInternal(f.scanDir, options, {
           environment: {
             ...f.environment,
             PYTHON: python,
@@ -53,13 +63,13 @@ test.skipIf(process.platform === "win32")(
           runWorkbench: rejecting("Repository Python reached the workbench"),
           embedder: { embed: f.embed },
           reviewer: emptyNeighborhoodReviewer(),
-        },
-      ),
-    ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
-    expect(existsSync(marker)).toBe(false);
-    expect(f.embed).not.toHaveBeenCalled();
-  },
-);
+        }),
+      ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+      expect(existsSync(marker)).toBe(false);
+      expect(f.embed).not.toHaveBeenCalled();
+    },
+  );
+}
 
 function duplicateReviewer() {
   return {

@@ -195,7 +195,13 @@ async function deduplicateResolvedScan(
   const workflow =
     options.workflowId === undefined
       ? undefined
-      : new FindingWorkflow(options.workflowId, environment, workbench);
+      : new FindingWorkflow(
+          options.workflowId,
+          environment,
+          workbench,
+          undefined,
+          repositoryPath,
+        );
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
     await workflow.bind({
