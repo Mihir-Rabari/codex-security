@@ -1,6 +1,10 @@
 import { rm } from "node:fs/promises";
 import { readJson, writeJson } from "./support/json.ts";
-import { assertFlagPair } from "./assertions.ts";
+import {
+  assertFlagPair,
+  assertConfigOverrides,
+  nativeConfigOverrides,
+} from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -2985,37 +2989,6 @@ function assertWorkerSubagentPolicy(
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
-}
-
-function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
-}
-
-function assertConfigOverrides(
-  args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
-) {
-  const overrides = nativeConfigOverrides(args).map((value) =>
-    parseToml(value),
-  );
-  for (const [key, value] of Object.entries(values)) {
-    const supplied = overrides.map((config) =>
-      key
-        .split(".")
-        .reduce<unknown>(
-          (current, part) =>
-            (current as Record<string, unknown> | undefined)?.[part],
-          config,
-        ),
-    );
-    assert.deepEqual(
-      supplied.findLast((item) => item !== undefined),
-      value,
-      key,
-    );
-  }
 }
 
 async function withWorkerFixture<Result>(
