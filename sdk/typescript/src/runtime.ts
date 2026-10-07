@@ -183,6 +183,7 @@ export interface WorkbenchCommandOptions {
   pluginRoot: string;
   environment: ProcessEnvironment;
   stateDirectory?: string;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1578,6 +1579,7 @@ export async function runWorkbench(
       ? (node?.executable ?? process.execPath)
       : (options.python ??= await resolvePluginPython({
           environment: options.environment,
+          protectedRoot: options.protectedRoot,
           signal: options.signal,
         }));
     const result = await runCodexCommand(
@@ -3375,8 +3377,12 @@ function nullIfMissingFileError(error: unknown): null {
 
 /** @internal */
 export function workbenchEnvironment(environment: ProcessEnvironment) {
+  const python = environmentValue(environment, "PYTHON");
   return {
     ...environment,
+    ...(python && isPythonPathCandidate(python)
+      ? { PYTHON: resolve(expandHome(python, environment)) }
+      : {}),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
   };
 }
