@@ -139,10 +139,17 @@ async function run() {
       }
     } else {
       assert.equal(layout, "reducer");
-      const inputs = await server.call(
-        "get_codex_security_deep_reducer_inputs",
-        {},
-      );
+      let document = "";
+      let cursor;
+      do {
+        const page = await server.call(
+          "get_codex_security_deep_reducer_inputs",
+          { maxBytes: 4096, ...(cursor === undefined ? {} : { cursor }) },
+        );
+        document += page.json;
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      const inputs = JSON.parse(document);
       assert.ok(inputs.discoveries.length > 0);
       await server.call("record_codex_security_deep_reduction", {
         scanId: env.CODEX_SECURITY_SCAN_ID,
