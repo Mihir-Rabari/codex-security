@@ -1454,6 +1454,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             windowsSandbox,
             webSearch,
             features,
+            agents:
+              index === 0
+                ? undefined
+                : {
+                    max_depth: index + 2,
+                    reviewer: {
+                      description: `Synthetic reviewer ${index}`,
+                      config_file: path.join(
+                        fixture.root,
+                        `reviewer-${index}.toml`,
+                      ),
+                    },
+                  },
             skills:
               index === 0
                 ? undefined
@@ -1540,6 +1553,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         skills: entry.skills,
                         otel: entry.otel,
                         features: entry.features,
+                        agents: entry.agents,
                       },
               }),
             ),
@@ -1619,6 +1633,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          const subagents = kind === "discovery" ? 3 : 0;
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
@@ -1634,6 +1649,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               return executor.run(
                 workerRequest(promptPath, fixture.root, {
                   kind,
+                  subagents,
                   resumeThreadId,
                   artifactContext: {
                     root: fixture.root,
@@ -1847,12 +1863,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...workerConfigurations[index].features,
               multi_agent_v2: {
                 enabled: false,
-                max_concurrent_threads_per_session: 1,
+                max_concurrent_threads_per_session: subagents + 1,
               },
-              enable_fanout: false,
+              ...(subagents === 0 ? { enable_fanout: false } : {}),
             });
             assertReadOnlyWorkerPolicy(invocation.argv);
-            assertWorkerSubagentPolicy(invocation.argv, 0);
+            assertConfigOverrides(invocation.argv, {
+              "agents.max_threads": subagents > 0 ? subagents : undefined,
+              "agents.max_depth": workerConfigurations[index].agents?.max_depth,
+              "agents.reviewer.description":
+                workerConfigurations[index].agents?.reviewer.description,
+              "agents.reviewer.config_file":
+                workerConfigurations[index].agents?.reviewer.config_file,
+            });
           }
           for (const launch of launches.filter(({ args }) =>
             args.includes("app-server"),

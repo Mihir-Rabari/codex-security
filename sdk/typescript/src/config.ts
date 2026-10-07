@@ -291,16 +291,7 @@ export async function readCodexFileProfile(
         nativeProfile[key] = resolve(profileHome, path);
       }
     }
-    const agents = nativeProfile["agents"];
-    if (isObject(agents)) {
-      for (const agent of Object.values(agents)) {
-        if (!isObject(agent)) continue;
-        const path = agent["config_file"];
-        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-          agent["config_file"] = resolve(profileHome, path);
-        }
-      }
-    }
+    resolveAgentPaths(nativeProfile, profileHome);
     const skills = nativeProfile["skills"];
     if (isObject(skills) && Array.isArray(skills["config"])) {
       for (const skill of skills["config"]) {
@@ -315,6 +306,19 @@ export async function readCodexFileProfile(
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
   return nativeProfile;
+}
+
+/** @internal Preserve agent file origins when a native config changes directories. */
+export function resolveAgentPaths(config: JsonObject, directory: string): void {
+  const agents = config["agents"];
+  if (!isObject(agents)) return;
+  for (const agent of Object.values(agents)) {
+    if (!isObject(agent)) continue;
+    const path = agent["config_file"];
+    if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+      agent["config_file"] = resolve(directory, path);
+    }
+  }
 }
 
 /** @internal Preserve TLS file origins when a native config changes directories. */

@@ -319,7 +319,7 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0 ? { "agents.max_threads": subagents } : {}),
     features: {
       ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {

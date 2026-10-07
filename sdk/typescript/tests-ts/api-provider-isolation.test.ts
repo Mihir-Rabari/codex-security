@@ -219,6 +219,23 @@ test.each([
         const scan = join(root, `scan-${index}`);
         await mkdir(scan, { mode: 0o700 });
         const fileProfile = selection.startsWith("file ");
+        const agentFile = fileProfile
+          ? join(sourceHome, `reviewer-${index}.toml`)
+          : join(scan, "reviewer.toml");
+        await writeFile(agentFile, 'model_reasoning_effort = "high"\n');
+        const agents = {
+          max_depth: index + 2,
+          reviewer: {
+            description: `Synthetic reviewer ${index}`,
+            config_file: fileProfile
+              ? `reviewer-${index}.toml`
+              : "reviewer.toml",
+          },
+        };
+        const resolvedAgents = {
+          ...agents,
+          reviewer: { ...agents.reviewer, config_file: agentFile },
+        };
         const providerKey =
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
@@ -277,6 +294,7 @@ test.each([
                 },
               },
               features: featureOverrides,
+              agents,
               web_search: webSearch,
             }),
           );
@@ -291,6 +309,7 @@ test.each([
                     model_provider: "openrouter",
                     web_search: selection === "root" ? webSearch : "live",
                     features: selection === "root" ? featureOverrides : {},
+                    agents: selection === "root" ? agents : {},
                     ...(selection === "profile only"
                       ? {}
                       : {
@@ -316,6 +335,7 @@ test.each([
                           profiles: {
                             selected: {
                               features: featureOverrides,
+                              agents,
                               web_search: webSearch,
                               ...(selection === "null profile"
                                 ? {
@@ -396,8 +416,12 @@ test.each([
                     expect(workerSnapshot["worker_runtime"]).toMatchObject({
                       environment: workerEnvironment,
                       features: featureOverrides,
+                      agents: resolvedAgents,
                       web_search: webSearch,
                     });
+                    expect(options.config!["agents"]).toEqual(
+                      fileProfile ? resolvedAgents : agents,
+                    );
                     expect(options.config!["web_search"]).toBe(webSearch);
                     expect(options.config!["features"]).toMatchObject(
                       featureOverrides,
@@ -424,6 +448,7 @@ test.each([
                       featureOverrides,
                     );
                     expect(settings.config["web_search"]).toBe(webSearch);
+                    expect(settings.config["agents"]).toEqual(resolvedAgents);
                     // Native SQLite probes share a home; keep the scans concurrent.
                     const probe = nativeProbe.then(() =>
                       effectiveProvider(

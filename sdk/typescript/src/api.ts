@@ -65,6 +65,7 @@ import {
   readCodexFileProfile,
   resolveCodexProfile,
   resolveCommandAuthConfig,
+  resolveAgentPaths,
   resolveOtelPaths,
   scanApprovalPolicy,
   scanCyberAccessConfig,
@@ -5015,6 +5016,7 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
+  resolveAgentPaths(resolved, workingDirectory);
   resolveOtelPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
   const providerEnvironmentNames = isRecord(providers)
@@ -5057,6 +5059,7 @@ function selectedWorkerRuntimeConfig(
     ...Object.fromEntries(
       [
         "features",
+        "agents",
         "model_instructions_file",
         "model_catalog_json",
         "experimental_compact_prompt_file",
