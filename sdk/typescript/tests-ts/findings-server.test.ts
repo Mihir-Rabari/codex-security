@@ -11,7 +11,9 @@ import {
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
+import { build } from "esbuild";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 import {
@@ -264,18 +266,41 @@ test.each(["explicit", "PATH", "Path"])(
     const second = join(directory, "second", "nested");
     await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
     const python = await resolvePluginPython();
-    const pythonDirectory = relative(first, dirname(python));
+    let pythonDirectory = relative(first, dirname(python));
+    if (process.platform !== "win32" && configuration !== "explicit") {
+      const link = join(directory, "python-link");
+      await symlink(dirname(python), link, "dir");
+      pythonDirectory = `${configuration === "PATH" ? link : relative(first, link)}/../${basename(dirname(python))}`;
+    }
     const searchPath = [
       process.platform === "win32" ? `"${pythonDirectory}"` : pythonDirectory,
       "",
       dirname(Bun.which("node")!),
     ].join(delimiter);
+    const storeModule = join(directory, "sqlite-store.cjs");
+    await build({
+      entryPoints: [
+        fileURLToPath(
+          new URL("../src/server/sqlite-store.ts", import.meta.url),
+        ),
+      ],
+      outfile: storeModule,
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      define: {
+        "import.meta.url": JSON.stringify(
+          new URL("../src/runtime.ts", import.meta.url).href,
+        ),
+      },
+    });
     const result = Bun.spawnSync(
       [
-        process.execPath,
+        Bun.which("node")!,
+        "--input-type=module",
         "--eval",
         `const assert = await import("node:assert/strict");
-const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const { SqliteFindingsStore } = await import(${JSON.stringify(pathToFileURL(storeModule).href)});
 const environment = { ...process.env };
 if (${JSON.stringify(configuration)} !== "explicit") {
   for (const key of Object.keys(environment)) if (key.toUpperCase() === "PATH") delete environment[key];
