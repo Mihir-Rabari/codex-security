@@ -85,6 +85,9 @@ export async function savedScanWorkbench(
     signal = options.signal,
   ) => {
     signal?.throwIfAborted();
+    // Return the selected ID directly: probing Python must not revisit unrelated history.
+    if (requestedId === "latest" && args[0] === "list-scans")
+      return { scans: targets.map((target) => ({ scanId: target.id })) };
     const target =
       args[0] === "get-scan"
         ? latest
@@ -229,8 +232,20 @@ async function latestTargets(
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
   const current = await pathKey(directory);
+  const columns = new Set(
+    (
+      database.prepare("PRAGMA table_info(scans)").all() as { name: string }[]
+    ).map((column) => column.name),
+  );
+  // The workbench migrates after discovery; schemas before v16 have no target registry.
+  const hasTargets =
+    database.prepare("PRAGMA table_info(security_targets)").all().length > 0;
   const registered = database
-    .prepare("SELECT id, current_path AS target_path FROM security_targets")
+    .prepare(
+      hasTargets
+        ? "SELECT id, current_path AS target_path FROM security_targets"
+        : "SELECT DISTINCT target_path AS id, target_path FROM scans",
+    )
     .all() as ScanTarget[];
   const related = new Set<string>();
   for (const target of registered)
@@ -261,7 +276,7 @@ async function latestTargets(
             environment,
             protectedRoots,
           );
-    // Keep workbench matching on this host Git without changing Python's PATH.
+    // Keep subsequent workbench operations on this host Git without changing Python's PATH.
     for (const key of Object.keys(environment))
       if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];
     environment["CODEX_SECURITY_GIT"] = inspected.executable ?? "";
@@ -301,19 +316,23 @@ async function latestTargets(
   }
   const scans = database
     .prepare(
-      "SELECT id, target_path, target_id FROM scans WHERE status = 'complete' AND canceled_at IS NULL",
+      `SELECT scans.id, scans.target_path,
+        ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
+      FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
+      ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
+        scans.started_at DESC, scans.id`,
     )
     .all() as ScanTarget[];
-  const matches: ScanTarget[] = [];
   for (const scan of scans) {
     signal?.throwIfAborted();
     if (
       related.has(scan.target_id ?? "") ||
       (await pathKey(scan.target_path)) === current
     )
-      matches.push(scan);
+      return [scan];
   }
-  return matches;
+  return [];
 }
 
 async function pathKey(path: string): Promise<string> {

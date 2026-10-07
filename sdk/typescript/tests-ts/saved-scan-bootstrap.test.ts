@@ -509,7 +509,7 @@ test.skipIf(process.platform === "win32")(
 
 for (const selector of ["latest", "workflow"] as const) {
   test(`bootstrap ${selector} ignores unrelated history enclosing trusted Python`, async () => {
-    const f = await fixture();
+    const f = await fixture(true);
     const workflowId = "scoped-bootstrap";
     await deduplicateScanInternal(
       f.first.scanId,
@@ -520,9 +520,16 @@ for (const selector of ["latest", "workflow"] as const) {
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
+      db.prepare("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+        "unrelated-target",
+        dirname(f.python),
+        "Unrelated synthetic target",
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+      );
       db.prepare(
-        "UPDATE scans SET target_path = ?, target_id = NULL WHERE id = ?",
-      ).run(dirname(f.python), f.second.scanId);
+        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+      ).run(dirname(f.python), "unrelated-target", f.second.scanId);
     } finally {
       db.close();
     }
@@ -704,3 +711,102 @@ test.skipIf(process.platform === "win32")(
     expect(existsSync(marker)).toBe(false);
   },
 );
+
+for (const version of [1, 15]) {
+  test(`latest upgrades schema ${version} after selecting a trusted target`, async () => {
+    const f = await fixture();
+    const state = join(f.root, `legacy-${version}`);
+    await mkdir(state);
+    const database = join(state, "workbench.sqlite3");
+    const script = `
+import sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_schema import MIGRATIONS
+connection = sqlite3.connect(sys.argv[2])
+connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)")
+for version, name, sql in MIGRATIONS:
+    if version > int(sys.argv[4]): break
+    connection.executescript(sql)
+    connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)", (version, name, "2026-01-01T00:00:00Z"))
+connection.execute("ATTACH DATABASE ? AS source", (sys.argv[3],))
+for table in ["workspaces", "scans", "scan_progress"]:
+    columns = ",".join(row[1] for row in connection.execute(f"PRAGMA main.table_info({table})"))
+    connection.execute(f"INSERT INTO main.{table} ({columns}) SELECT {columns} FROM source.{table}")
+connection.commit()
+connection.close()
+`;
+    execFileSync(f.python, [
+      "-I",
+      "-c",
+      script,
+      join(PLUGIN_ROOT, "scripts"),
+      database,
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      String(version),
+    ]);
+    const workbench = await savedScanWorkbench("latest", {
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_STATE_DIR: state,
+        PYTHON: f.python,
+      },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: f.repository,
+    });
+    expect(
+      (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId,
+    ).toBe(f.second.scanId);
+    const db = new Database(database, { readonly: true });
+    try {
+      expect(
+        (
+          db
+            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .get() as { version: number }
+        ).version,
+      ).toBeGreaterThan(version);
+      expect(db.prepare("SELECT id FROM security_targets").all()).toHaveLength(
+        1,
+      );
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test("latest follows progress timestamps and excludes canceled scans", async () => {
+  const f = await fixture();
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    db.prepare(
+      "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z' WHERE scan_id = ?",
+    ).run(f.first.scanId);
+    async function latest() {
+      const workbench = await savedScanWorkbench("latest", {
+        environment: { ...f.environment, PYTHON: f.python },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      });
+      return (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId;
+    }
+    expect(await latest()).toBe(f.first.scanId);
+    db.prepare(
+      "UPDATE scans SET canceled_at = '2099-01-02T00:00:00Z' WHERE id = ?",
+    ).run(f.first.scanId);
+    expect(await latest()).toBe(f.second.scanId);
+  } finally {
+    db.close();
+  }
+});
