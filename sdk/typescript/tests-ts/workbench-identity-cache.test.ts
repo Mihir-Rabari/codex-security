@@ -511,7 +511,7 @@ with ExitStack() as stack:
             mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
             mocks.enter_context(patch.object(Path, "mkdir"))
             mocks.enter_context(patch.object(Path, "resolve", lambda path, *a, **k: path))
-            mocks.enter_context(patch.object(deep_workbench.tempfile, "mkdtemp", return_value=str(root / "artifacts" / "deep")))
+            mocks.enter_context(patch.object(scan_start.tempfile, "mkdtemp", return_value=str(root / "artifacts" / "deep")))
             deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
                 target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
                 user_context=None, model=None, reasoning_effort=None,
