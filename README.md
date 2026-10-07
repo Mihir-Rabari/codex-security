@@ -145,11 +145,6 @@ in containers and can connect to a separately deployed findings service.
 
 ## Findings storage and deduplication
 
-Saved-scan deduplication works directly with local SQLite:
-`npx @openai/codex-security dedupe --scan SCAN_ID --json`. It prepares and caches
-embeddings without starting a findings service. Embedding and review APIs still
-require their provider credentials and network access when new work is needed.
-
 The [findings guide](sdk/typescript/docs/findings-service.md) covers local
 storage, deduplication, and compatibility with independently operated endpoints
 through `publish scan --to custom` and explicit `--findings-url`. The local
