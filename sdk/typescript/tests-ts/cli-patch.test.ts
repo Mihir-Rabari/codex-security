@@ -6789,9 +6789,9 @@ describe("patch change tracking", () => {
           currentDirectory: directory,
           result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
-              const output = runGitRepositoryCommand(
+              const output = await runGitRepositoryCommand(
                 command,
                 args,
                 cwd,
