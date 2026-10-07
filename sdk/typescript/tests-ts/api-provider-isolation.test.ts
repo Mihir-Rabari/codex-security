@@ -223,6 +223,10 @@ test.each([
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
+        const canonicalHeader: Record<string, string> =
+          selection === "root"
+            ? { OPENROUTER_API_KEY: ` synthetic-canonical-header-${index} ` }
+            : {};
         const provider = {
           name: `Synthetic ${index}`,
           base_url: `https://provider-${index}.example.test/v1`,
@@ -230,6 +234,9 @@ test.each([
           env_key: providerKey,
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+            ...(selection === "root"
+              ? { "X-Synthetic-Canonical": "OPENROUTER_API_KEY" }
+              : {}),
             "X-Synthetic-Missing": "SYNTHETIC_UNSET",
           },
           ...(index === 1
@@ -242,11 +249,12 @@ test.each([
           unified_exec: false,
           view_image: index === 0,
         };
-        const providerEnvironment = {
+        const providerEnvironment: Record<string, string> = {
           [providerKey]: fileProfile
             ? `synthetic-key-${index}`
             : ` synthetic-key-${index} `,
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+          ...canonicalHeader,
           SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
         };
         // Authentication trims the selected API key; other inherited provider
@@ -437,6 +445,14 @@ test.each([
                     expect(environment[providerKey]).toBe(
                       workerEnvironment[providerKey],
                     );
+                    expect(environment["SYNTHETIC_CUSTOM_HEADER"]).toBe(
+                      workerEnvironment["SYNTHETIC_CUSTOM_HEADER"],
+                    );
+                    for (const [name, value] of Object.entries(
+                      canonicalHeader,
+                    )) {
+                      expect(environment[name]).toBe(value);
+                    }
                     const saved = await readFile(
                       join(sharedHome, "config.toml"),
                       "utf8",
@@ -485,8 +501,12 @@ test.each([
 const fileProviderKeyCases = [
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
   ["fireworks", "default", "FIREWORKS_API_KEY"],
   ["fireworks", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "custom Codex key", "CODEX_API_KEY"],
   ["openrouter", "other external key", "FIREWORKS_API_KEY"],
 ] as const;
@@ -525,7 +545,7 @@ test.each(["openrouter", "fireworks"] as const)(
 
 for (const mode of ["standard", "deep"] as const) {
   test.each(fileProviderKeyCases)(
-    `file provider %s uses its %s key for ${mode} preflight and children`,
+    `file provider %s preserves %s authentication for ${mode} preflight and children`,
     async (providerId, _selection, providerKey) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -536,11 +556,43 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(scan, { mode: 0o700 });
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
+      const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const headerEnvironment =
+        _selection === "canonical header" ||
+        _selection === "missing custom primary"
+          ? { [canonicalKey]: " synthetic-header-key " }
+          : {};
+      const inheritedEnvironment = {
+        ...(_selection === "custom Codex key" ||
+        _selection === "other external key"
+          ? Object.fromEntries(
+              [
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "FIREWORKS_API_KEY",
+              ]
+                .filter((name) => name !== providerKey)
+                .map((name) => [name, "synthetic-unrelated-key"]),
+            )
+          : {}),
+        ...headerEnvironment,
+        ...(_selection === "missing custom primary"
+          ? {}
+          : { [providerKey]: "synthetic-file-key" }),
+      };
+      const workerEnvironment = {
+        ...headerEnvironment,
+        [providerKey]: "synthetic-file-key",
+      };
       const provider = {
         name: "Synthetic file provider",
         wire_api: "responses",
         base_url: "https://provider.example.test/v1",
         env_key: providerKey,
+        ...(_selection === "canonical header"
+          ? { env_http_headers: { "X-Synthetic-Token": canonicalKey } }
+          : {}),
       };
       const original = stringifyToml({
         model: "synthetic-model",
@@ -556,20 +608,7 @@ for (const mode of ["standard", "deep"] as const) {
           environment: {
             CODEX_HOME: sourceHome,
             CODEX_SECURITY_STATE_DIR: join(root, "state"),
-            ...(_selection === "custom Codex key" ||
-            _selection === "other external key"
-              ? Object.fromEntries(
-                  [
-                    "OPENAI_API_KEY",
-                    "CODEX_API_KEY",
-                    "OPENROUTER_API_KEY",
-                    "FIREWORKS_API_KEY",
-                  ]
-                    .filter((name) => name !== providerKey)
-                    .map((name) => [name, "synthetic-unrelated-key"]),
-                )
-              : {}),
-            [providerKey]: "synthetic-file-key",
+            ...inheritedEnvironment,
           },
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scan,
@@ -589,16 +628,17 @@ for (const mode of ["standard", "deep"] as const) {
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
                   ]) {
-                    if (name !== providerKey)
-                      expect(environment[name]).toBeUndefined();
+                    expect(environment[name]).toBe(
+                      name === providerKey || name === canonicalKey
+                        ? inheritedEnvironment[name]
+                        : undefined,
+                    );
                   }
                   if (mode === "deep") {
                     const settings = await (
                       await loadWorkerSettings(root)
                     )(environment);
-                    expect(settings.environment).toEqual({
-                      [providerKey]: "synthetic-file-key",
-                    });
+                    expect(settings.environment).toEqual(workerEnvironment);
                     expect(
                       await effectiveProvider(
                         environment,
@@ -623,7 +663,7 @@ for (const mode of ["standard", "deep"] as const) {
                     );
                     expect(
                       JSON.parse(await readFile(report, "utf8")).recovered,
-                    ).toEqual({ [providerKey]: "synthetic-file-key" });
+                    ).toEqual(workerEnvironment);
                     const snapshot =
                       environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
                     if (process.platform !== "win32")
@@ -643,6 +683,7 @@ for (const mode of ["standard", "deep"] as const) {
                     }),
                   ]) {
                     expect(text).not.toContain("synthetic-file-key");
+                    expect(text).not.toContain("synthetic-header-key");
                   }
                   throw new Error("synthetic file provider child checked");
                 },
@@ -652,6 +693,16 @@ for (const mode of ["standard", "deep"] as const) {
         },
       );
       try {
+        if (_selection === "missing custom primary") {
+          await expect(client.preflight(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          await expect(client.run(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          expect(launched).toBe(false);
+          return;
+        }
         const preflight = await client.preflight(repository, { mode });
         expect(preflight.authentication).toEqual({
           method: "api_key",
