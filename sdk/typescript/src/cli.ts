@@ -5651,9 +5651,14 @@ export async function main(
         const scan =
           scanId === undefined
             ? undefined
-            : ((await history(["get-scan", "--scan-id", scanId]))[
-                "scan"
-              ] as ScanLogSource);
+            : ((
+                await history(
+                  ["get-scan", "--scan-id", scanId],
+                  undefined,
+                  undefined,
+                  options.includeLogs,
+                )
+              )["scan"] as ScanLogSource);
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {

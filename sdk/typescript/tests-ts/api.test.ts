@@ -7179,6 +7179,9 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                 prepareRuntime: async () => ({
                   ...preparedRuntime(codexHome),
                   configPath,
+                  ...(mode === "deep"
+                    ? { deepScanConfigPath: join(codexHome, "deep-scan.toml") }
+                    : {}),
                   environment: {
                     ...fake.environment,
                     FIXTURE_SCAN_VALUE: name,

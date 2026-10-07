@@ -13,6 +13,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -123,6 +124,9 @@ async function fixture(name, pluginRoot, executable) {
         }
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
+    PACKAGE_DEEP_TOML_MODULE: pathToFileURL(
+      createRequire(join(installedRoot, "package.json")).resolve("smol-toml"),
+    ).href,
   });
   return { directory, target, home, env, pluginRoot };
 }

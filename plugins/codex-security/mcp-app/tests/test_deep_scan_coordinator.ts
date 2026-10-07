@@ -3390,14 +3390,8 @@ async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
     return outcome;
   };
   const completed: ScanDraftInput[] = [];
-  const coordinator = new DeepScanCoordinator({
-    run: fixture.run,
-    store,
-    executor,
-    pluginRoot: fixture.pluginRoot,
-    clock: immediateClock,
-    onComplete: async (draft: ScanDraftInput) =>
-      void completed.push(structuredClone(draft)),
+  const terminal = await runCoordinator(fixture, store, executor, {
+    onComplete: async (draft) => void completed.push(structuredClone(draft)),
   });
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
@@ -3561,8 +3555,7 @@ async function testResumeDoesNotRequireHistoricalWorkerPrompt(
   const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
   });
-  coordinator.start();
-  const terminal = await coordinator.wait(undefined, 5_000);
+
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(executor.discoveryCalls, 2);
