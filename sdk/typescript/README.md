@@ -39,8 +39,9 @@ cs login
 
 `cs` is a short alias for `codex-security`; both commands run the same CLI.
 The installation creates both commands in npm's global executable directory,
-which must be on your `PATH`. If `cs` already names another tool, use
-`codex-security` instead.
+which must be on your `PATH`. If `cs` already resolves to another tool, use
+`codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
+`npx @openai/codex-security` without a global installation.
 
 From your repository directory, optionally draft security guidance before scanning:
 
