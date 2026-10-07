@@ -835,7 +835,8 @@ def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpo
     result = add_worker(workbench_db, scan, status="canceled")
     original = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(original))
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
@@ -867,7 +868,7 @@ def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpo
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
         with pytest.raises(OSError, match="Synthetic publication interruption"):
-            workbench_api["recover_scan_results"](workbench_db, args)
+            saved.recover_scan_results(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
     retained = workbench_db.execute(
         "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
     ).fetchone()[0]
@@ -881,7 +882,7 @@ def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpo
             "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE artifact_dir = ?",
             (str(unselected), str(result.parent)),
         )
-    workbench_api["recover_scan_results"](workbench_db, args)
+    saved.recover_scan_results(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["threatModel"]["summary"] == "Latest accepted model."
     assert (
