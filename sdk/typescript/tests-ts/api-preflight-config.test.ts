@@ -9,6 +9,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
+  mergedCodexConfig,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelProvider,
@@ -70,6 +71,31 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([undefined, "low"])(
+    "preserves resolved file-profile worker settings and explicit verbosity: %s",
+    async (verbosity) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_instructions_file = "instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(verbosity === undefined ? {} : { model_verbosity: verbosity }),
+          },
+        },
+        home,
+      );
+      expect(scanPreflightCodexConfig(config)).toMatchObject({
+        model_instructions_file: join(home, "instructions.md"),
+        model_verbosity: verbosity ?? "high",
+        web_search: "disabled",
+      });
+    },
+  );
+
   test.each([
     ["standard", "openai.gpt-daybreak-blue-5.6-sol"],
     ["deep", "openai.gpt-daybreak-blue-5.6-sol"],

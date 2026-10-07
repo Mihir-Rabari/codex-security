@@ -4729,6 +4729,16 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     return result;
   };
+  const copyWorkerSettings = (result: JsonObject, source: JsonObject): void => {
+    for (const key of [
+      "model_instructions_file",
+      "model_verbosity",
+      "web_search",
+    ]) {
+      const value = source[key];
+      if (typeof value === "string") result[key] = value;
+    }
+  };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
     for (const key of [
@@ -4741,6 +4751,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       const value = source[key];
       if (safeString(value)) result[key] = value;
     }
+    copyWorkerSettings(result, source);
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
     const agents = source["agents"];
@@ -4763,6 +4774,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const result = executionConfig(config);
   // Keep effective worker settings even when preflight filters the profile name.
   const resolved = resolveCodexProfile(config);
+  copyWorkerSettings(result, resolved);
   for (const key of ["model_reasoning_summary", "service_tier"]) {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;

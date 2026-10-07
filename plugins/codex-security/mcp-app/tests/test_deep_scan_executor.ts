@@ -1129,6 +1129,11 @@ async function testWorkerRuntimeSettings() {
       "concise",
       true,
     ],
+    [
+      'model_reasoning_summary = "concise"\nmodel_instructions_file = "profile-instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n[features]\nshell_tool = false\nunified_exec = false\n',
+      "concise",
+      true,
+    ],
   ];
   const saved = [
     "PYTHON",
@@ -1250,6 +1255,32 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
         // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
+      const instructions = configuration.includes("model_instructions_file");
+      const scanConfigPaths = await Promise.all(
+        settings.map(async (_, index) => {
+          if (!instructions) return configPath;
+          const selected = path.join(fixture.root, `scan-${index}.toml`);
+          await writeFile(
+            selected,
+            configuration
+              .replace(
+                '"profile-instructions.md"',
+                JSON.stringify(
+                  path.join(fixture.root, `instructions-${index}.md`),
+                ),
+              )
+              .replace(
+                'model_verbosity = "high"',
+                `model_verbosity = ${JSON.stringify(index % 2 === 0 ? "high" : "low")}`,
+              )
+              .replace(
+                'web_search = "disabled"',
+                `web_search = ${JSON.stringify(index % 2 === 0 ? "disabled" : "cached")}`,
+              ),
+          );
+          return selected;
+        }),
+      );
       const providerKeys = settings.map((_, index) =>
         index < 2 ? `synthetic-gateway-key-${index}` : undefined,
       );
@@ -1273,6 +1304,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           await Promise.all(
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
+              process.env.CODEX_SECURITY_CONFIG_PATH = scanConfigPaths[index];
               if (providerKeys[index] === undefined) {
                 delete process.env.SYNTHETIC_GATEWAY_KEY;
               } else {
@@ -1330,7 +1362,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
-              configPath!,
+              scanConfigPaths[index],
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
@@ -1355,6 +1387,20 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
+              model_instructions_file: instructions
+                ? path.join(fixture.root, `instructions-${index}.md`)
+                : undefined,
+              model_verbosity: instructions
+                ? index % 2 === 0
+                  ? "high"
+                  : "low"
+                : undefined,
+              web_search: instructions
+                ? index % 2 === 0
+                  ? "disabled"
+                  : "cached"
+                : undefined,
+
               "features.shell_tool": commandAuth ? false : undefined,
               "features.unified_exec": commandAuth ? false : undefined,
             });
@@ -1383,7 +1429,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               invocation.argv.includes("resume"),
               resumeThreadId !== undefined,
             );
-            assert.equal(invocation.configPath, configPath);
+            assert.equal(invocation.configPath, scanConfigPaths[index]);
             assert.deepEqual(invocation.gitEnvironment, gitEnvironment);
             for (const [name, value] of Object.entries(gitEnvironment)) {
               assert.equal(process.env[name], value);
@@ -1411,7 +1457,9 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               workerPermissionProfileOverride(workerLaunches[0].args),
             );
           }
-          await writeFile(configPath, 'model_reasoning_summary = "detailed"\n');
+          for (const selected of new Set(scanConfigPaths)) {
+            await writeFile(selected, 'model_reasoning_summary = "detailed"\n');
+          }
         }
       }
     }

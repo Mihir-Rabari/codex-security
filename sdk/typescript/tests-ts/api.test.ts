@@ -1692,7 +1692,13 @@ describe("CodexSecurity orchestration", () => {
     const scenarios: [JsonObject, string, string | undefined][] = [
       [{}, "none", undefined],
       [
-        { model_reasoning_summary: "auto", service_tier: "flex" },
+        {
+          model_reasoning_summary: "auto",
+          service_tier: "flex",
+          model_instructions_file: join(root, "instructions-1.md"),
+          model_verbosity: "high",
+          web_search: "disabled",
+        },
         "auto",
         "flex",
       ],
@@ -1700,7 +1706,13 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           profiles: {
-            cloud: { model_reasoning_summary: "concise", service_tier: "fast" },
+            cloud: {
+              model_reasoning_summary: "concise",
+              service_tier: "fast",
+              model_instructions_file: join(root, "instructions-2.md"),
+              model_verbosity: "low",
+              web_search: "cached",
+            },
           },
         },
         "concise",
@@ -1791,6 +1803,16 @@ describe("CodexSecurity orchestration", () => {
                   expect(resolveCodexProfile(config)["service_tier"]).toBe(
                     expectedTier,
                   );
+                  const requested = resolveCodexProfile(overrides);
+                  for (const key of [
+                    "model_instructions_file",
+                    "model_verbosity",
+                    "web_search",
+                  ]) {
+                    expect(resolveCodexProfile(config)[key]).toBe(
+                      requested[key],
+                    );
+                  }
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );

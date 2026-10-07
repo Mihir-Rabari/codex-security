@@ -52,6 +52,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  configuration?: Record<string, string>;
   reasoningSummary?: string;
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
@@ -120,6 +121,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
         config: {
+          ...runtimeSettings.configuration,
           ...(runtimeSettings.reasoningSummary === undefined
             ? {}
             : { model_reasoning_summary: runtimeSettings.reasoningSummary }),
@@ -500,6 +502,17 @@ async function workerRuntimeSettings(
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
     ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
+  for (const key of [
+    "model_instructions_file",
+    "model_verbosity",
+    "web_search",
+  ]) {
+    const value =
+      isRecord(profile) && profile[key] !== undefined
+        ? profile[key]
+        : config[key];
+    if (typeof value === "string") (settings.configuration ??= {})[key] = value;
+  }
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
     settings.cyberAccessProgram =
