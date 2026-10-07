@@ -499,7 +499,7 @@ def _read_rollout_usage(
             )
             delta["cachedInputTokens"] = min(
                 delta["cachedInputTokens"],
-                max(0, delta["inputTokens"] - delta["cacheWriteInputTokens"]),
+                max(0, cache_write_capacity - delta["cacheWriteInputTokens"]),
             )
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]

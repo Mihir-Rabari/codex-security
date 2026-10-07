@@ -6503,13 +6503,14 @@ test("includes the price source and rates with each estimate", () => {
 });
 
 test.each([
-  [undefined, undefined],
-  [0, 0],
-  [12, undefined],
-  [undefined, 12],
+  [undefined, undefined, 30],
+  [undefined, undefined, 60],
+  [0, 0, 30],
+  [12, undefined, 30],
+  [undefined, 12, 30],
 ] as const)(
-  "preserves cache-write usage through SDK normalization: log %p, receipt %p",
-  async (writes, receiptWrites) => {
+  "preserves cache-write usage through SDK normalization: log %p, receipt %p, reads %p",
+  async (writes, receiptWrites, receiptReads) => {
     const home = await codexHome();
     const usage = {
       input_tokens: 120,
@@ -6531,7 +6532,11 @@ test.each([
       });
       yield JSON.stringify({
         type: "turn.completed",
-        usage: { ...usage, cache_write_input_tokens: receiptWrites },
+        usage: {
+          ...usage,
+          cached_input_tokens: receiptReads,
+          cache_write_input_tokens: receiptWrites,
+        },
       });
     };
     const receipt = (await thread.run("Scan the repository.")).usage;
@@ -6617,6 +6622,221 @@ test.each(["continuous", "reset"] as const)(
     } finally {
       await tracker.stop().catch(() => {});
     }
+  },
+);
+
+test.each(
+  ["cache_write_input_tokens", "cache_write_tokens"].flatMap((field) =>
+    ["growing", "growing-cheaper", "same-total", "reset"].flatMap((scenario) =>
+      ["batched", "incremental"].map((mode) => [field, scenario, mode]),
+    ),
+  ),
+)(
+  "preserves cache reads when later writes classify input: %s / %s / %s",
+  async (field, scenario, mode) => {
+    const home = await codexHome();
+    const timestamp = "2026-07-26T12:02:00.250Z";
+    const reset = scenario === "reset";
+    const finalInput =
+      scenario === "growing" ? 200 : scenario === "growing-cheaper" ? 150 : 100;
+    const finalWrites = scenario === "growing" ? 100 : reset ? 20 : 50;
+    const finalReads =
+      scenario === "growing"
+        ? 50
+        : scenario === "growing-cheaper"
+          ? 70
+          : reset
+            ? 10
+            : 20;
+    const expectedInput = reset ? 300 : finalInput;
+    const expectedWrites = reset ? 60 : finalWrites;
+    const expectedReads = reset ? 40 : finalReads;
+    const expectedUsd = reset
+      ? 0.001116
+      : scenario === "growing"
+        ? 0.00072
+        : scenario === "growing-cheaper"
+          ? 0.000398
+          : 0.000378;
+    const limit = reset
+      ? 0.002
+      : mode === "batched" && scenario === "same-total"
+        ? 0.00039
+        : mode === "batched" && scenario === "growing-cheaper"
+          ? 0.000399
+          : 0.0008;
+    const initial = {
+      input_tokens: reset ? 200 : 100,
+      output_tokens: 0,
+      total_tokens: reset ? 200 : 100,
+      cached_input_tokens: reset ? 30 : 0,
+      ...(reset ? { [field!]: 40 } : {}),
+    };
+    const final = {
+      input_tokens: finalInput,
+      output_tokens: 0,
+      total_tokens: finalInput,
+      cached_input_tokens: finalReads,
+      [field!]: finalWrites,
+    };
+    const token = (usage: Record<string, number>) => ({
+      ...accountingEvent(usage),
+      timestamp,
+    });
+    const complete = {
+      type: "event_msg",
+      timestamp,
+      payload: { type: "task_complete" },
+    };
+    const parent = await writeUsageSession(home, scanThreadId, {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_write_input_tokens: 0,
+    });
+    await appendFile(parent, jsonLines([complete]) + "\n");
+    const child = join(home, "sessions", "cache-classification.jsonl");
+    await writeFile(
+      child,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: {
+            id: childUuid7Thread,
+            timestamp,
+            source: {
+              subagent: { thread_spawn: { parent_thread_id: scanThreadId } },
+            },
+          },
+        },
+        {
+          type: "event_msg",
+          timestamp,
+          payload: {
+            type: "task_started",
+            turn_id: higherUuid7Turn,
+            started_at: 1_785_067_320,
+          },
+        },
+        token(initial),
+      ]) + "\n",
+    );
+    const costs: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: limit,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [parent, scanThreadId],
+          [child, childUuid7Thread],
+        ]),
+    });
+    try {
+      if (mode === "batched") {
+        await appendFile(child, jsonLines([token(final), complete]) + "\n");
+      }
+      tracker.start(scanThreadId);
+      if (mode === "incremental") {
+        await tracker.refresh();
+        await appendFile(child, jsonLines([token(final), complete]) + "\n");
+      }
+      const snapshot = await tracker.stop({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_write_input_tokens: 0,
+      });
+      expect({
+        sdk: snapshot.usage,
+        python: readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, child),
+      }).toMatchObject({
+        sdk: {
+          input_tokens: expectedInput,
+          cached_input_tokens: expectedReads,
+          cache_write_input_tokens: expectedWrites,
+          output_tokens: 0,
+        },
+        python: {
+          usage: {
+            inputTokens: expectedInput,
+            cachedInputTokens: expectedReads,
+            cacheWriteInputTokens: expectedWrites,
+            outputTokens: 0,
+          },
+          warnings: [],
+        },
+      });
+      expect(snapshot.cost?.estimatedUsd).toBeCloseTo(expectedUsd, 12);
+      expect(costs.every((cost) => cost <= limit)).toBe(true);
+    } finally {
+      await tracker.stop().catch(() => {});
+    }
+  },
+);
+
+test.each([
+  ["complete-first", 0, 0],
+  ["complete-last", 0, 0],
+  ["complete-first", 0, 20],
+  ["complete-last", 0, 20],
+  ["complete-first", 50, 20],
+  ["complete-last", 50, 20],
+] as const)(
+  "prefers complete cache classification over an exact older prefix: %s / %p writes / %p reads",
+  async (order, writes, reads) => {
+    const home = await codexHome();
+    const oldPath = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 0,
+    });
+    const directory = join(home, "sessions");
+    const completePath = join(
+      directory,
+      order === "complete-first" ? "a-complete.jsonl" : "z-complete.jsonl",
+    );
+    const prefixPath = join(
+      directory,
+      order === "complete-first" ? "z-prefix.jsonl" : "a-prefix.jsonl",
+    );
+    await fsPromises.rename(oldPath, completePath);
+    await writeFile(prefixPath, await fsPromises.readFile(completePath));
+    const usage = {
+      input_tokens: 100,
+      output_tokens: 0,
+      cached_input_tokens: reads,
+      cache_write_input_tokens: writes,
+    };
+    await appendFile(
+      completePath,
+      jsonLines([
+        accountingEvent(usage),
+        { type: "event_msg", payload: { type: "task_complete" } },
+      ]) + "\n",
+    );
+    const costs: number[] = [];
+    const limit = reads === 0 ? 0.00041 : 0.00039;
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: limit,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+      resolveOwnedSessionPaths: async () =>
+        new Map([[completePath, "scan-thread"]]),
+    });
+    tracker.start("scan-thread");
+    const live = await tracker.refresh();
+    const final = await tracker.stop(usage);
+    for (const snapshot of [live, final]) {
+      expect(snapshot.usage).toMatchObject(usage);
+      expect(snapshot.usage).not.toHaveProperty(
+        "cache_write_input_tokens_reported",
+      );
+      expect(snapshot.cost?.estimatedUsd).toBeCloseTo(
+        reads === 0 ? 0.0004 : writes === 0 ? 0.000328 : 0.000378,
+        12,
+      );
+    }
+    expect(costs.every((cost) => cost <= limit)).toBe(true);
   },
 );
 

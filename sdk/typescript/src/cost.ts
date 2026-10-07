@@ -274,12 +274,14 @@ export class ScanCostTracker {
       this.#options.model,
       observed.completedRoot,
       suppliedRoot,
+      true,
     );
     observed.completedRoot = completedRoot;
     const rootUsage = higherCostUsage(
       this.#options.model,
       observed.root,
       completedRoot,
+      true,
     );
     let completedUsage: unknown = rootUsage;
     const workerUsage = observed.workers;
@@ -292,6 +294,10 @@ export class ScanCostTracker {
     }
     const snapshot =
       this.#snapshot.usage !== null &&
+      !completesCacheClassification(
+        tokenUsage(this.#snapshot.usage),
+        tokenUsage(completedUsage),
+      ) &&
       ((rootUsage === null && workerUsage === null) ||
         (this.#snapshot.cost !== null &&
           (cost === null ||
@@ -649,6 +655,7 @@ export class ScanCostTracker {
           this.#options.model,
           session.accounting?.usage ?? null,
           this.#completedThreadUsage.get(session.threadId) ?? null,
+          true,
         );
         threadUsages.set(
           session.threadId,
@@ -697,7 +704,13 @@ export class ScanCostTracker {
       const cost = estimateScanCost(this.#options.model, usage);
       if (
         this.#snapshot.cost === null ||
-        (cost !== null && cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
+        completesCacheClassification(tokenUsage(this.#snapshot.usage), usage) ||
+        (cost !== null &&
+          !completesCacheClassification(
+            usage,
+            tokenUsage(this.#snapshot.usage),
+          ) &&
+          cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
       ) {
         this.#snapshot = { usage, cost };
       }
@@ -1237,12 +1250,14 @@ function readSessionEvent(
     const previous = session.accounting;
     if (
       previous === null ||
-      (candidate.cost !== null
-        ? previous.cost === null ||
-          candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
-        : previous.cost === null &&
-          higherCostUsage(model, previous.usage, candidate.usage) ===
-            candidate.usage)
+      completesCacheClassification(previous.usage, candidate.usage) ||
+      (!completesCacheClassification(candidate.usage, previous.usage) &&
+        (candidate.cost !== null
+          ? previous.cost === null ||
+            candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
+          : previous.cost === null &&
+            higherCostUsage(model, previous.usage, candidate.usage) ===
+              candidate.usage))
     ) {
       session.accounting = candidate;
     }
@@ -1374,10 +1389,26 @@ function sessionContentText(
     .join("\n");
 }
 
+function completesCacheClassification(
+  previous: ScanTokenUsage | null,
+  next: ScanTokenUsage | null,
+): boolean {
+  return (
+    previous?.cache_write_input_tokens_reported === false &&
+    next !== null &&
+    next.cache_write_input_tokens_reported !== false &&
+    previous.input_tokens <= next.input_tokens &&
+    previous.output_tokens <= next.output_tokens &&
+    next.cached_input_tokens >= previous.cached_input_tokens &&
+    next.cache_write_input_tokens >= previous.cache_write_input_tokens
+  );
+}
+
 function higherCostUsage(
   model: string,
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage | null,
+  nextIsSdkReceipt = false,
 ): ScanTokenUsage | null {
   if (next === null) return previous;
   const previousCost = estimateScanCost(model, previous);
@@ -1390,6 +1421,7 @@ function higherCostUsage(
   }
   // SDK receipts insert zero for omitted cache writes; retain equally counted rollout evidence.
   if (
+    nextIsSdkReceipt &&
     previous !== null &&
     next.cache_write_input_tokens === 0 &&
     previous.input_tokens === next.input_tokens &&
@@ -1397,6 +1429,13 @@ function higherCostUsage(
     previousCost?.estimatedUsd === nextCost?.estimatedUsd
   )
     return previous;
+  // A receipt's synthesized zero does not establish complete cache writes.
+  if (
+    (!nextIsSdkReceipt || next.cache_write_input_tokens > 0) &&
+    completesCacheClassification(previous, next)
+  )
+    return next;
+  if (completesCacheClassification(next, previous)) return previous;
   return previousCost !== null &&
     nextCost !== null &&
     previousCost.estimatedUsd > nextCost.estimatedUsd
@@ -1481,7 +1520,9 @@ function accumulateTokenUsage(
   const cacheWriteDelta =
     cacheWriteRaw > cacheWriteCapacity ? cacheWriteCapacity : cacheWriteRaw;
   const remainingInputDelta =
-    inputDelta > cacheWriteDelta ? inputDelta - cacheWriteDelta : 0n;
+    cacheWriteCapacity > cacheWriteDelta
+      ? cacheWriteCapacity - cacheWriteDelta
+      : 0n;
   const cachedRaw = fieldDelta("cached_input_tokens");
   const cachedDelta =
     cachedRaw > remainingInputDelta ? remainingInputDelta : cachedRaw;
