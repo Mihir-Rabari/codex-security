@@ -1096,7 +1096,6 @@ function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
   } catch {
     value = undefined;
   }
-  const cost = isReceiptRecord(value) ? value["cost"] : undefined;
   if (
     !isReceiptRecord(value) ||
     !["id", "repository", "revision", "outputDir"].every(
@@ -1122,22 +1121,7 @@ function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
       (field) => value[field] === undefined || typeof value[field] === "string",
     ) ||
     (value["coverage"] !== undefined &&
-      !["complete", "partial", "unknown"].includes(
-        value["coverage"] as string,
-      )) ||
-    (cost !== undefined &&
-      (!isReceiptRecord(cost) ||
-        typeof cost["model"] !== "string" ||
-        ![
-          "inputTokens",
-          "cachedInputTokens",
-          "cacheWriteInputTokens",
-          "outputTokens",
-          "estimatedUsd",
-        ].every(
-          (field) =>
-            typeof cost[field] === "number" && Number.isFinite(cost[field]),
-        )))
+      !["complete", "partial", "unknown"].includes(value["coverage"] as string))
   ) {
     throw new Error(
       `Multiscan recovery is required: results line ${lineNumber} is not a valid receipt.`,

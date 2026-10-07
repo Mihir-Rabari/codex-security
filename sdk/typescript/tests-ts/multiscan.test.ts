@@ -6889,3 +6889,54 @@ for (const scenario of [
         });
     }
   });
+
+test.each([
+  "missing-cache-write",
+  "valid",
+  "absent",
+  "invalid-authority",
+] as const)(
+  "validates receipt authority independently of optional cost metadata %s",
+  async (variation) => {
+    const { paths } = await repositoryFixture("optional-receipt-cost");
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 20,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      estimatedUsd: 0.01,
+    };
+    let scans = 0;
+    const security = client(async (_target, settings = {}) => {
+      scans += 1;
+      return Object.assign(await completedScan(settings.outputDir!), { cost });
+    });
+    const first = await runMultiscan(options(paths, security));
+    const [receipt] = await results(first.resultsPath);
+    if (variation === "missing-cache-write") {
+      delete (receipt!["cost"] as Record<string, unknown>)[
+        "cacheWriteInputTokens"
+      ];
+    } else if (variation === "absent") {
+      delete receipt!["cost"];
+    } else if (variation === "invalid-authority") {
+      receipt!["status"] = "unsupported";
+    }
+    const bytes = JSON.stringify(receipt) + "\n";
+    await writeFile(first.resultsPath, bytes);
+    if (variation === "invalid-authority") {
+      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+        "Multiscan recovery is required",
+      );
+    } else {
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toBe(1);
+      expect(await readFile(first.resultsPath, "utf8")).toBe(bytes);
+    }
+  },
+);
