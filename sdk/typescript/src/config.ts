@@ -233,7 +233,7 @@ export async function readCodexFileProfile(
 ): Promise<JsonObject> {
   let nativeProfile: JsonObject = {};
   const profileName = overrides["profile"];
-  if (profileName !== undefined && typeof profileName !== "string") {
+  if (profileName != null && typeof profileName !== "string") {
     throw new ConfigurationError("Codex profile must be a name.");
   }
   if (

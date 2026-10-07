@@ -711,6 +711,104 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBe(true);
   });
 
+  test.each([
+    ["inline", "account"],
+    ["file", "account"],
+    ["inline", "api-key login"],
+    ["file", "api-key login"],
+    ["inline", "logout"],
+    ["file", "logout"],
+  ])(
+    "loads %s provider metadata for the %s authentication command",
+    async (selection, operation) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "model-home");
+      const state = join(root, "state");
+      const script = join(root, "synthetic-codex.mjs");
+      const observed = join(root, "native-arguments.jsonl");
+      await mkdir(home, { mode: 0o700 });
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        requires_openai_auth: true,
+        http_headers: { "X-Synthetic": "synthetic-provider-header" },
+      };
+      const configuration = {
+        model_provider: "synthetic_gateway",
+        model_providers: { synthetic_gateway: provider },
+      };
+      await writeFile(
+        join(home, "review.config.toml"),
+        stringify(configuration),
+      );
+      await writeFile(
+        script,
+        `
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(observed)}, JSON.stringify(args) + "\\n");
+if (args.includes("--with-api-key")) {
+  for await (const _chunk of process.stdin) {}
+}
+console.log("Logged in using ChatGPT");
+`,
+      );
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides:
+            selection === "file" ? { profile: "review" } : configuration,
+        },
+        {
+          environment: {
+            PATH: process.env["PATH"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: state,
+          },
+          resolveCodexCommand: () => ({ ...nodeCommand(), args: [script] }),
+        },
+      );
+      try {
+        if (operation === "account") {
+          expect((await client.account()).authenticated).toBe(true);
+        } else if (operation === "api-key login") {
+          await client.loginApiKey("synthetic-login-token");
+        } else {
+          await client.logout();
+        }
+        const arguments_ = (await readFile(observed, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[])
+          .find((args) =>
+            args.includes(operation === "logout" ? "logout" : "login"),
+          );
+        expect(arguments_).toBeDefined();
+        const definitions = arguments_!.find((argument) =>
+          argument.startsWith("model_providers="),
+        );
+        expect(definitions).toBeDefined();
+        expect(parseToml(definitions!)).toEqual({
+          model_providers: {
+            synthetic_gateway: {
+              name: "Synthetic",
+              wire_api: "responses",
+              requires_openai_auth: true,
+            },
+          },
+        });
+        expect(arguments_!.join("\n")).not.toContain(
+          "synthetic-provider-header",
+        );
+        expect(arguments_!.join("\n")).not.toContain("synthetic-login-token");
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("recognizes ambient credentials during account() on a fresh instance", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");

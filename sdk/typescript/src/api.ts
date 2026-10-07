@@ -3114,7 +3114,11 @@ export class CodexSecurity {
   async #providerPreflightCommand(config?: JsonObject): Promise<CodexCommand> {
     return await providerPreflightCommand(
       this.#codexCommand(),
-      config ?? (await mergedCodexConfig(this.config)),
+      config ??
+        (await mergedCodexConfig(
+          this.config,
+          configuredCodexHome(this.#dependencies.environment),
+        )),
     );
   }
 

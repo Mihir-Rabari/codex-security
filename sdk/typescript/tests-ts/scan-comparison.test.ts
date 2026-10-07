@@ -134,13 +134,19 @@ describe("semantic scan comparison", () => {
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
 
-  test.each(["synthetic.gateway", "fireworks", "amazon-bedrock", "command"])(
+  test.each([
+    "synthetic.gateway",
+    "fireworks",
+    "amazon-bedrock",
+    "command",
+    "file-command-shadow",
+  ])(
     "automatic matching retains the per-scan %s provider",
     async (selection) => {
       const home = await temporaryDirectory();
-      await writeFile(join(home, "config.toml"), "");
-      const providerName =
-        selection === "command" ? "synthetic.command" : selection;
+      const commandProfile =
+        selection === "command" || selection === "file-command-shadow";
+      const providerName = commandProfile ? "synthetic.command" : selection;
       const provider = {
         ...(selection === "amazon-bedrock"
           ? { aws: { region: "us-east-1" } }
@@ -151,7 +157,7 @@ describe("semantic scan comparison", () => {
             }),
         base_url: "https://provider.example.test/v1",
         http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
-        ...(selection === "command"
+        ...(commandProfile
           ? {
               auth: {
                 command: "synthetic-auth",
@@ -163,6 +169,34 @@ describe("semantic scan comparison", () => {
             ? {}
             : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
       };
+      const homeConfig =
+        selection === "file-command-shadow"
+          ? stringify({
+              profiles: {
+                review: {
+                  model_provider: providerName,
+                  model_providers: {
+                    [providerName]: {
+                      ...provider,
+                      auth: {
+                        command: "synthetic-ambient-auth",
+                      },
+                    },
+                  },
+                },
+              },
+            })
+          : "";
+      await writeFile(join(home, "config.toml"), homeConfig);
+      if (selection === "file-command-shadow") {
+        await writeFile(
+          join(home, "review.config.toml"),
+          stringify({
+            model_provider: providerName,
+            model_providers: { [providerName]: provider },
+          }),
+        );
+      }
       const parentProfile =
         selection === "fireworks"
           ? await providerProfiles.createProviderProfile(home, {
@@ -208,14 +242,18 @@ describe("semantic scan comparison", () => {
           },
           config: {
             codexOverrides: {
-              profile: "selected",
-              profiles: {
-                selected: {
-                  model_provider: providerName,
-                  model_providers: { [providerName]: provider },
-                },
-              },
-              model_providers: { [providerName]: provider },
+              ...(selection === "file-command-shadow"
+                ? { profile: "review" }
+                : {
+                    profile: "selected",
+                    profiles: {
+                      selected: {
+                        model_provider: providerName,
+                        model_providers: { [providerName]: provider },
+                      },
+                    },
+                    model_providers: { [providerName]: provider },
+                  }),
               default_permissions: "codex_security_scan",
               permissions: {
                 codex_security_scan: { filesystem: { [home]: "write" } },
@@ -309,7 +347,7 @@ describe("semantic scan comparison", () => {
         ]) {
           expect(captured?.config).not.toHaveProperty(key);
         }
-        if (selection === "command") {
+        if (commandProfile) {
           expect(captured?.apiKey).toBeUndefined();
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
         }
@@ -319,7 +357,9 @@ describe("semantic scan comparison", () => {
         });
         expect(calls.threadOptions?.sandboxMode).toBeUndefined();
         expect(saved).toBe(true);
-        expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          homeConfig,
+        );
       } finally {
         nativeCommand.mockRestore();
         profileClient.spy.mockRestore();

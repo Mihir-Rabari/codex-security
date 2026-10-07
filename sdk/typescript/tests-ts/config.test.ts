@@ -33,6 +33,25 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
+test.each([
+  ["absent", undefined],
+  ["null", null],
+])(
+  "omits an optional %s profile selector before native configuration",
+  async (_name, profile) => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        ...(profile === undefined ? {} : { profile }),
+        model: "synthetic-selected-model",
+      },
+    });
+    expect(resolveCodexProfile(config)).toMatchObject({
+      model: "synthetic-selected-model",
+    });
+    expect(resolveCodexProfile(config)).not.toHaveProperty("profile");
+  },
+);
+
 test("inline Codex overrides omit optional null fields like the file writer", async () => {
   for (const value of [null, { args: ["fixture", null] }]) {
     expect(() => inlineToml(value)).toThrow(ConfigurationError);

@@ -10,7 +10,6 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
-import { parse, stringify } from "smol-toml";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   accountStatus,
@@ -565,7 +564,7 @@ async function startReadOnlyCodexThread(
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
   const providerConfig = resolveCommandAuthConfig(
-    deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
+    deepMerge(homeConfig, resolveCodexProfile(config ?? {})),
     configuredCodexHome(source),
   );
   const suppliedConfig = resolveCodexProfile(
