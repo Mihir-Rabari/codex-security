@@ -187,3 +187,24 @@ for (const resume of [false, true]) {
     }
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    test(`worker-local receipts win parent collisions during ${resume ? "reconstruction" : "live retry"} and ${outcome}`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "worker-receipt-collision-"),
+      );
+      try {
+        await publishCoverageFixture(root, "complete", {
+          receiptRetry: true,
+          receiptCollision: true,
+          stopAfterDraft: outcome === "recovery",
+          stopBeforeDraft: outcome === "no parent",
+          resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}

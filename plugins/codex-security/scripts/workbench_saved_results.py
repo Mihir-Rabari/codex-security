@@ -1206,8 +1206,7 @@ def merge_saved_results(
         if directory.name == "checkpoints":
             directory = directory.parent
         output = Path(worker["artifact_dir"]).relative_to(scan_dir)
-        worker_root = output.parent if output.name == "output" else output
-        worker_prefix = worker_root.as_posix() + "/"
+        worker_prefix = (output.parent if output.name == "output" else output).as_posix() + "/"
         active_prefix = output.as_posix() + "/"
         if directory != output:
             refs = [
@@ -1225,16 +1224,16 @@ def merge_saved_results(
             os.close(descriptor)
             return True
 
-        return [
-            Path(f"{directory.as_posix()}/{ref}").as_posix()
-            if isinstance(ref, str)
-            and not Path(ref).as_posix().startswith(worker_prefix)
-            and not scan_receipt(Path(ref).as_posix())
-            else Path(ref).as_posix()
-            if isinstance(ref, str)
-            else ref
-            for ref in refs
-        ]
+        def qualified_receipt(ref: Any) -> Any:
+            if not isinstance(ref, str):
+                return ref
+            ref = Path(ref).as_posix()
+            if ref.startswith(worker_prefix):
+                return ref
+            local_ref = Path(f"{directory}/{ref}").as_posix()
+            return local_ref if scan_receipt(local_ref) or not scan_receipt(ref) else ref
+
+        return [qualified_receipt(ref) for ref in refs]
 
     def canonical_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any]:
         refs = item.get("receiptRefs", [])
@@ -1277,7 +1276,7 @@ def merge_saved_results(
     def project_missing_record(
         field: str, item: dict[str, Any], index: int, worker: Any, source: dict[str, Any]
     ) -> dict[str, Any]:
-        # Match projectDiscoveryCoverage so recovered holes retain source ownership.
+        # Retain projectDiscoveryCoverage worker ownership.
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
 
         def accepted_positions(surface: dict[str, Any]) -> list[int]:
@@ -1360,6 +1359,8 @@ def merge_saved_results(
                     if owner == worker["id"] and accepted:
                         source_surface_ids.setdefault(source_id, accepted[0])
                 for source_id, (offset, surface) in source_surface_ids.items():
+                    if source_id not in item["surfaceIds"]:
+                        continue
                     if (worker["id"], source_id) in reconciled_surface_ids:
                         surface_ids[source_id] = reconciled_surface_ids[(worker["id"], source_id)]
                         continue

@@ -1447,6 +1447,16 @@ async function readArchivedWorkerCheckpoints(
             if (ref.startsWith(archivePrefix)) return ref;
             if (!ref.startsWith(activePrefix)) {
               try {
+                await requireRegularFile(
+                  join(attemptRoot, ref),
+                  attemptRoot,
+                  true,
+                );
+                return `${archivePrefix}${attempt.name}/${ref}`;
+              } catch {
+                // An explicit shared receipt remains at the scan root.
+              }
+              try {
                 await requireRegularFile(join(scanRoot, ref), scanRoot, true);
                 return ref;
               } catch {

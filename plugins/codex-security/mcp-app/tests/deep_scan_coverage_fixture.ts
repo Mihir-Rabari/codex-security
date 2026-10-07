@@ -34,6 +34,7 @@ interface CoverageFixtureOptions {
     | "equivalent shared scan";
   activeReceiptSpelling?: "worker" | "scan" | "equivalent scan";
   sharedReceipt?: boolean;
+  receiptCollision?: boolean;
   emptyReceipt?: boolean;
   retryPending?: boolean;
   retryCoverage?: JsonObject[];
@@ -105,6 +106,7 @@ export async function publishCoverageFixture(
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
     sharedReceipt = false,
+    receiptCollision = false,
     emptyReceipt = false,
     retryPending = false,
     retryCoverage,
@@ -207,6 +209,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       path.join(artifactDir, "artifacts", "prior.txt"),
       emptyReceipt ? "" : "Archived receipt.\n",
     );
+    if (receiptCollision) {
+      await mkdir(path.join(run.scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(run.scanDir, "artifacts", "prior.txt"),
+        "Synthetic unrelated parent review.\n",
+      );
+    }
     const archivedRef = `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`;
     const sharedPrior = "artifacts/01_context/false_positive_feedback.json";
     const sharedPriorReceipt =
@@ -357,6 +366,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       path.join(artifactDir, "artifacts", "review.md"),
       emptyReceipt ? "" : "Synthetic review evidence.\n",
     );
+    if (receiptCollision) {
+      await mkdir(path.join(run.scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(run.scanDir, "artifacts", "review.md"),
+        "Synthetic unrelated parent review.\n",
+      );
+    }
     const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
     const sharedRef = "artifacts/01_context/false_positive_feedback.json";
     if (sharedReceipt) {

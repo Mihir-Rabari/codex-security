@@ -1957,12 +1957,12 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("source", ["worker", "shared", "worker-collision"])
 @pytest.mark.parametrize("equivalent", [False, True])
 @pytest.mark.parametrize("parent", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 def test_shared_scan_receipts_preserve_existing_context_evidence(
-    workbench_api, workbench_db, publication_scan, monkeypatch, shared, equivalent, parent, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, source, equivalent, parent, retry
 ):
     scan = publication_scan()
     initial = add_worker(workbench_db, scan)
@@ -1975,7 +1975,12 @@ def test_shared_scan_receipts_preserve_existing_context_evidence(
             "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
             (str(output), str(result), worker_id),
         )
+    shared = source == "shared"
     ref = "artifacts/01_context/false_positive_feedback.json" if shared else "artifacts/review.txt"
+    if source == "worker-collision":
+        parent_receipt = scan.scan_dir / ref
+        parent_receipt.parent.mkdir(exist_ok=True, parents=True)
+        parent_receipt.write_text("Synthetic unrelated parent review.\n")
     receipt = (scan.scan_dir if shared else output) / ref
     receipt.parent.mkdir(exist_ok=True, parents=True)
     receipt.write_text("Synthetic completed source review.\n")
@@ -2020,4 +2025,56 @@ def test_shared_scan_receipts_preserve_existing_context_evidence(
             (scan.scan_dir / name).unlink()
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert coverage["surfaces"] == [projected]
+    assert result.read_bytes() == original
+
+
+def test_deferred_projection_preserves_each_referenced_source_surface(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surfaces = [
+        {
+            "id": f"source-{index}",
+            "label": f"Source boundary {index}",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [],
+        }
+        for index in range(12)
+    ]
+    deferred = [
+        {"id": f"task-{index}", "reason": f"Verify source {index}.", "surfaceIds": [surface["id"]]}
+        for index, surface in enumerate(surfaces)
+    ]
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": deferred,
+        },
+    }
+    result.write_text(json.dumps(draft))
+    original = result.read_bytes()
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    projected = {row["provenance"]["sourceId"]: row for row in coverage["surfaces"]}
+    assert set(projected) == {surface["id"] for surface in surfaces}
+    pending = {
+        row["provenance"]["sourceId"]: row for row in coverage["deferred"] if row.get("surfaceIds")
+    }
+    assert set(pending) == {row["id"] for row in deferred}
+    for task in deferred:
+        row = pending[task["id"]]
+        assert row["surfaceIds"] == [projected[task["surfaceIds"][0]]["id"]]
+        assert row["provenance"]["workerId"] == worker_id
     assert result.read_bytes() == original

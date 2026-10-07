@@ -112,6 +112,16 @@ export async function readDeepReductionSources(
             const normalized = posix.normalize(ref);
             try {
               await requireRegularFile(
+                join(dirname(worker.resultPath), normalized),
+                dirname(worker.resultPath),
+                true,
+              );
+              continue;
+            } catch {
+              // Shared receipts are a fallback when no valid worker-local file was found.
+            }
+            try {
+              await requireRegularFile(
                 join(bound.artifacts.scanDir, normalized),
                 bound.artifacts.scanDir,
                 true,
