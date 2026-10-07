@@ -176,6 +176,7 @@ for (const kind of [
       },
     }),
   );
+  assert.deepEqual(JSON.parse(output.text()).files, ["app.ts"]);
   outcomes.push({
     kind,
     exitCode,

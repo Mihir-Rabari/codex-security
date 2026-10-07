@@ -5332,6 +5332,7 @@ export async function main(
                 ...options,
                 protectedRoots: [
                   repository,
+                  gitRepository,
                   ...(options?.protectedRoots ?? []),
                 ],
                 directory: commandDirectory,
@@ -5419,11 +5420,8 @@ export async function main(
               commandDirectory = gitRepository;
             commandEnvironment = commandContext.environment;
           }
-          const { files } = await changedPatchFiles(
-            repository,
-            patchBase,
-            gitDependencies,
-          );
+          const { files, rootFiles: publicationFiles } =
+            await changedPatchFiles(repository, patchBase, gitDependencies);
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -5431,7 +5429,10 @@ export async function main(
             files:
               options.assessPatchRisk || options.createPr
                 ? files.map((file) =>
-                    relative(repository, resolve(gitRepository, file))
+                    relative(
+                      commandContext!.directory,
+                      resolve(gitRepository, file),
+                    )
                       .split(sep)
                       .join("/"),
                   )
@@ -5471,7 +5472,7 @@ export async function main(
             await createPatchPullRequest(
               gitRepository,
               publication,
-              files,
+              publicationFiles.length > 0 ? publicationFiles : files,
               errorOutput,
               dependencies,
               patchRisk?.summary,
@@ -7336,6 +7337,16 @@ async function preparePatchPublication(
   dependencies: CliDependencies,
   context?: GitPatchState["context"],
 ): Promise<PatchPublication> {
+  if (context !== undefined) {
+    dependencies = (
+      await bindPatchCommandContext(
+        context.directory,
+        repository,
+        context,
+        dependencies,
+      )
+    ).dependencies;
+  }
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const refs = branch
     .split("/")
@@ -7920,22 +7931,6 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
-  const indexPath = await run([
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-path",
-    "index",
-  ]);
-  const index = await readFile(indexPath).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    },
-  );
-  const restoreIndex = () =>
-    index === undefined
-      ? rm(indexPath, { force: true })
-      : writeFile(indexPath, index);
   const temporaryIndex = await mkdtemp(
     join(tmpdir(), "codex-security-patch-index-"),
   );
@@ -8011,7 +8006,6 @@ async function createPatchPullRequest(
         committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
         if (committed) await syncIndex();
         else {
-          await restoreIndex();
           try {
             await run(
               previousBranch === "HEAD"
@@ -8028,7 +8022,6 @@ async function createPatchPullRequest(
               throw restoreError;
           }
           await run(["branch", "-D", branch]);
-          await restoreIndex();
         }
       } catch (restoreError) {
         throw new CodexSecurityError(
@@ -8088,13 +8081,13 @@ async function changedPatchFiles(
   base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
   dirtyFiles?: Set<string>,
-): Promise<{ files: string[] }> {
+): Promise<{ files: string[]; rootFiles: string[] }> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
     const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
-    return { files };
+    return { files, rootFiles: files };
   }
   const root = base.root;
   const bound = await bindPatchCommandContext(
@@ -8134,63 +8127,87 @@ async function changedPatchFiles(
     [
       "--literal-pathspecs",
       "diff",
-      "--relative=",
       "--name-only",
+      "--no-relative",
       "--no-renames",
       "-z",
       base.tree,
       head.tree,
-      "--",
     ],
     root,
-    { trim: false, directory: repository },
+    { trim: false },
   );
-  const files = new Set(output.split("\0").filter(Boolean));
-  const before = new Map(base.files);
-  const after = new Map(head.files);
-  const hydrate = async (
-    state: GitPatchState,
-    other: GitPatchState,
-    directory: string,
-    commit: string,
-    entries: Map<string, string>,
-  ): Promise<void> => {
-    let committed = [state, other]
-      .map((snapshot) => snapshot.gitlinks.get(directory))
-      .find(
-        (gitlink) => gitlink?.commit === commit && gitlink.committed !== null,
-      )?.committed;
-    if (committed === undefined || committed === null) {
-      const tree = await patchGitlinkTree(
-        state,
-        other,
-        directory,
-        commit,
-        dependencies,
-      );
-      if (tree === undefined) return;
-      committed = await patchTreeEntries(root, root, tree, dependencies);
+  const rootFiles = output.split("\0").filter(Boolean);
+  const files = new Set(rootFiles);
+  {
+    const before = new Map(base.files);
+    const after = new Map(head.files);
+    const hydrate = async (
+      state: GitPatchState,
+      other: GitPatchState,
+      directory: string,
+      commit: string,
+      entries: Map<string, string>,
+    ): Promise<void> => {
+      let committed = [state, other]
+        .map((snapshot) => snapshot.gitlinks.get(directory))
+        .find(
+          (gitlink) => gitlink?.commit === commit && gitlink.committed !== null,
+        )?.committed;
+      if (committed === undefined || committed === null) {
+        const tree = await patchGitlinkTree(
+          state,
+          other,
+          directory,
+          commit,
+          dependencies,
+        );
+        if (tree === undefined) return;
+        committed = await patchTreeEntries(root, root, tree, dependencies);
+      }
+      for (const [path, entry] of committed) {
+        const nestedPath = `${directory}/${path}`;
+        entries.set(nestedPath, entry);
+        if (entry.startsWith("160000 "))
+          await hydrate(
+            state,
+            other,
+            nestedPath,
+            entry.split(" ")[2]!,
+            entries,
+          );
+      }
+    };
+    for (const [directory, previous] of base.gitlinks) {
+      const current = head.gitlinks.get(directory);
+      if (current === undefined) continue;
+      if (!previous.initialized && current.initialized)
+        await hydrate(base, head, directory, previous.commit, before);
+      if (!current.initialized && previous.initialized)
+        await hydrate(head, base, directory, current.commit, after);
     }
-    for (const [path, entry] of committed) {
-      const nestedPath = `${directory}/${path}`;
-      entries.set(nestedPath, entry);
-      if (entry.startsWith("160000 "))
-        await hydrate(state, other, nestedPath, entry.split(" ")[2]!, entries);
+    for (const path of new Set([...before.keys(), ...after.keys()])) {
+      if (before.get(path) !== after.get(path)) files.add(path);
     }
-  };
-  for (const [directory, previous] of base.gitlinks) {
-    const current = head.gitlinks.get(directory);
-    if (current === undefined) continue;
-    if (!previous.initialized && current.initialized)
-      await hydrate(base, head, directory, previous.commit, before);
-    if (!current.initialized && previous.initialized)
-      await hydrate(head, base, directory, current.commit, after);
   }
-  for (const path of new Set([...before.keys(), ...after.keys()])) {
-    if (before.get(path) !== after.get(path)) files.add(path);
+  const publicationFiles = new Set(rootFiles);
+  for (const file of files) {
+    const owner = [...head.gitlinks]
+      .filter(([directory]) => file.startsWith(`${directory}/`))
+      .sort(([left], [right]) => right.length - left.length)[0];
+    if (
+      owner !== undefined &&
+      (owner[1].committed === null ||
+        owner[1].committed.get(file.slice(owner[0].length + 1)) !==
+          head.files.get(file))
+    ) {
+      for (const rootFile of rootFiles) {
+        if (file.startsWith(`${rootFile}/`)) publicationFiles.delete(rootFile);
+      }
+      publicationFiles.add(file);
+    }
   }
-
-  return { files: [...files].sort() };
+  return { files: [...files].sort(), rootFiles: [...publicationFiles].sort() };
 }
 
 async function snapshotPatchState(
@@ -8479,7 +8496,8 @@ async function nestedPatchGitDependencies(
           "-C",
           directory,
           "--git-dir",
-          join(checkout, ".git").replaceAll(sep, "/"),
+          // Git resolves relative gitfile contents from the last slash in this path.
+          join(checkout, ".git").split(sep).join("/"),
           "--work-tree",
           checkout,
           ...args,
@@ -8805,12 +8823,11 @@ async function assessPatchRisk(
       const checkout = join(repositoryRoot, directory);
       const fragment = join(root, "fragment.diff");
       const args = [
-        ...(repositoryRoot === request.repository
-          ? []
-          : ["-C", repositoryRoot]),
+        "-C",
+        repositoryRoot,
         "--literal-pathspecs",
         "diff",
-        ...(request.directory === undefined ? [] : ["--relative="]),
+        "--no-relative",
       ];
       const selected =
         request.files === undefined

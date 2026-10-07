@@ -180,7 +180,9 @@
     "shell.test.ts": 0.082,
     "suggest-owners.test.ts": 3.669,
     "test-shards.test.ts": 2.342,
-    "workflow-quality.test.ts": 0.197
+    "workflow-quality.test.ts": 0.197,
+    "cli-patch-hosting.test.ts": 49.288,
+    "cli-patch-nested.test.ts": 61.671
   },
   "windows": {
     "api-attribution-concurrency.test.ts": 27.364,
@@ -353,6 +355,8 @@
     "shell.test.ts": 0.087,
     "suggest-owners.test.ts": 23.573,
     "test-shards.test.ts": 3.448,
-    "workflow-quality.test.ts": 0.0
+    "workflow-quality.test.ts": 0.0,
+    "cli-patch-hosting.test.ts": 410.687,
+    "cli-patch-nested.test.ts": 469.988
   }
 }
