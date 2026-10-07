@@ -414,7 +414,7 @@ describe("additional SCA input contracts", () => {
     },
   );
 
-  test("distinguishes Composer registry distribution metadata from local origin", () => {
+  test("distinguishes Composer archives from local and source-only Git origins", () => {
     const result = inspect(
       JSON.stringify({
         packages: [
@@ -439,6 +439,15 @@ describe("additional SCA input contracts", () => {
               url: "git@example.invalid:synthetic/library.git",
             },
           },
+          {
+            name: "synthetic/source-only",
+            version: "v1.2.3",
+            source: {
+              type: "git",
+              url: "https://example.invalid/synthetic-fork.git",
+              reference: "0123456789012345678901234567890123456789",
+            },
+          },
         ],
         "packages-dev": [],
       }),
@@ -456,6 +465,12 @@ describe("additional SCA input contracts", () => {
         name: "synthetic/archive",
         version: "v1.2.3",
         resolution: "archives/library.zip",
+      }),
+      expect.objectContaining({
+        ecosystem: "Packagist",
+        name: "synthetic/source-only",
+        version: "v1.2.3",
+        resolution: "https://example.invalid/synthetic-fork.git",
       }),
     ]);
   });

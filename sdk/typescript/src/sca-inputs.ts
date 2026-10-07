@@ -615,17 +615,21 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
           "Composer package entries require a name and version.",
         );
       }
-      // composerlock.go:43 retains only name/version/dist.reference. A normal
-      // registry archive URL or Git source metadata does not imply local code.
+      // composerlock.go:43 retains only name/version/dist.reference. Source-only
+      // Git packages lose their origin; archives may also include Git metadata.
       for (const originKey of ["dist", "source"]) {
         const origin = value[originKey];
         if (!record(origin)) continue;
         const local = localDistribution(origin["url"]);
-        if (origin["type"] === "path" || local) {
+        const sourceOnlyGit =
+          originKey === "source" &&
+          origin["type"] === "git" &&
+          !record(value["dist"]);
+        if (origin["type"] === "path" || local || sourceOnlyGit) {
           const resolution =
             typeof origin["url"] === "string" && origin["url"]
               ? origin["url"]
-              : `${originKey}:path`;
+              : `${originKey}:${origin["type"]}`;
           addReference(
             result,
             sourcePath,

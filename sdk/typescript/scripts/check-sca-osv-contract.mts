@@ -946,6 +946,32 @@ snapshots:
       ),
     );
   }
+  for (const version of ["1.2.0", "9.0.0"]) {
+    const sourceOnlyComposer = await scan(`composer-source-only-${version}`, {
+      "composer.lock": JSON.stringify({
+        packages: [
+          {
+            name: ecosystemFixtures.composer.name,
+            version,
+            source: {
+              type: "git",
+              url: "https://example.invalid/synthetic-fork.git",
+              reference: "0123456789012345678901234567890123456789",
+            },
+          },
+        ],
+        "packages-dev": [],
+      }),
+    });
+    assert.equal(sourceOnlyComposer.status, "partial");
+    assert.equal(sourceOnlyComposer.coverage.status, "partial");
+    assert.equal(sourceOnlyComposer.coverage.unresolvedPackages, 1);
+    assertEcosystemFacts(
+      sourceOnlyComposer,
+      ecosystemFixtures.composer,
+      version,
+    );
+  }
   const skippedComposer = await scan("ecosystem-composer-short-commit", {
     "composer.lock": JSON.stringify({
       packages: [
