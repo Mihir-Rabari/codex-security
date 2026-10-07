@@ -140,6 +140,7 @@ export function readTarArchive(archiveBytes) {
   const archiveFiles = new Map();
   const archiveMetadata = [];
   const sparseFiles = new Map();
+  let npmManifest;
   let offset = 0;
   const globalAttributes = new Map();
   const nextAttributes = new Map();
@@ -247,6 +248,9 @@ export function readTarArchive(archiveBytes) {
         archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
       else {
         const contents = archiveBytes.subarray(contentsStart, contentsEnd);
+        // npm ignores old-GNU sparse entries and GNU sparse name overrides.
+        const npmPath = oldSparse ? undefined : (nextNpmPath ?? headerPath);
+        if (npmPath === "package/package.json") npmManifest = contents;
         archiveMetadata.push(archiveBytes.subarray(offset, contentsStart));
         const paxSparseMap = nextAttributes.get("GNU.sparse.map");
         if (
@@ -260,8 +264,7 @@ export function readTarArchive(archiveBytes) {
             ...(oldSparse
               ? { contents, extents: oldSparseExtents, dataOffset: 0 }
               : sparseMap(contents, paxSparseMap)),
-            // npm ignores old-GNU sparse entries and GNU sparse name overrides.
-            npmPath: oldSparse ? undefined : (nextNpmPath ?? headerPath),
+            npmPath,
           });
           // Retain sparse framing in order with the surrounding headers and padding.
           archiveMetadata.push(path);
@@ -297,5 +300,6 @@ export function readTarArchive(archiveBytes) {
     metadata: archiveMetadata,
     sparseFiles,
     deferredFiles,
+    npmManifest,
   };
 }

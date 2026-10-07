@@ -291,14 +291,8 @@ function extractedArchiveFiles() {
 }
 
 const archiveFiles = extractedArchiveFiles();
-function archiveFile(path) {
-  const contents = archiveFiles.get(path);
-  if (contents === undefined) invalidTarEntry();
-  return contents;
-}
-const packageJson = JSON.parse(
-  archiveFile("package/package.json").toString("utf8"),
-);
+if (storedArchive.npmManifest === undefined) invalidTarEntry();
+const packageJson = JSON.parse(storedArchive.npmManifest.toString("utf8"));
 if (
   packageJson.name !== "@openai/codex-security" ||
   packageJson.license !== "Apache-2.0"

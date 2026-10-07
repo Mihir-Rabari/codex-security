@@ -51,6 +51,7 @@ function packageTar({
   readmeSparse,
   readmeLongName = false,
   additionalRecords = [],
+  overrides = new Map(),
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
@@ -63,6 +64,7 @@ function packageTar({
   readmeSparse?: "0.0" | "1.0";
   readmeLongName?: boolean;
   additionalRecords?: Buffer[];
+  overrides?: ReadonlyMap<string, Buffer>;
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -81,6 +83,8 @@ function packageTar({
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
   const records = paths.map((path) => {
+    const override = overrides.get(path);
+    if (override !== undefined) return override;
     if (path === "package/README.md" && readmeSparse !== undefined) {
       const contents = Buffer.alloc(512, 0x78);
       const map = Buffer.alloc(512);
@@ -181,6 +185,56 @@ function commandPath(command: string): string {
     throw new Error(`Could not resolve ${command}.`);
   }
   return path;
+}
+
+function installPackage(
+  root: string,
+  archivePath: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  const consumer = join(root, "consumer");
+  mkdirSync(consumer);
+  writeFileSync(
+    join(consumer, "package.json"),
+    JSON.stringify({ name: "synthetic-consumer", private: true }),
+  );
+  const resolved = spawnSync(
+    commandPath("node"),
+    [
+      "--input-type=module",
+      "-e",
+      `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
+    ],
+    { encoding: "utf8", env: environment, windowsHide: true },
+  );
+  expect({ status: resolved.status, stderr: resolved.stderr }).toEqual({
+    status: 0,
+    stderr: "",
+  });
+  const npm = JSON.parse(resolved.stdout) as {
+    command: string;
+    args: string[];
+  };
+  return spawnSync(
+    npm.command,
+    [
+      ...npm.args,
+      "install",
+      "--offline",
+      "--ignore-scripts",
+      "--package-lock=false",
+      "--no-audit",
+      "--no-fund",
+      archivePath,
+    ],
+    {
+      cwd: consumer,
+      env: environment,
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+    },
+  );
 }
 
 describe("npm package tar listings", () => {
@@ -486,54 +540,13 @@ describe("npm package tar listings", () => {
           shippedExact: [...pluginContract.shippedExact, "logo.png"],
         }),
       );
-      const consumer = join(root, "consumer");
-      mkdirSync(consumer);
-      writeFileSync(
-        join(consumer, "package.json"),
-        JSON.stringify({ name: "synthetic-consumer", private: true }),
-      );
       const environment: NodeJS.ProcessEnv = {
         ...process.env,
         npm_config_cache: join(root, "npm-cache"),
       };
       delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const resolved = spawnSync(
-        commandPath("node"),
-        [
-          "--input-type=module",
-          "-e",
-          `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
-        ],
-        { encoding: "utf8", env: environment, windowsHide: true },
-      );
-      expect({ status: resolved.status, stderr: resolved.stderr }).toEqual({
-        status: 0,
-        stderr: "",
-      });
-      const npm = JSON.parse(resolved.stdout) as {
-        command: string;
-        args: string[];
-      };
-      const installed = spawnSync(
-        npm.command,
-        [
-          ...npm.args,
-          "install",
-          "--offline",
-          "--ignore-scripts",
-          "--package-lock=false",
-          "--no-audit",
-          "--no-fund",
-          archivePath,
-        ],
-        {
-          cwd: consumer,
-          env: environment,
-          encoding: "utf8",
-          timeout: 30_000,
-          windowsHide: true,
-        },
-      );
+      const installed = installPackage(root, archivePath, environment);
+      const consumer = join(root, "consumer");
       expect({
         status: installed.status,
         stderr: installed.status === 0 ? "" : installed.stderr,
@@ -577,6 +590,173 @@ describe("npm package tar listings", () => {
         status: checked.status,
         stderr: compatible ? checked.stderr : "",
       }).toEqual({ status: compatible ? 0 : 1, stderr: "" });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  test.each([
+    "oldgnu-manifest",
+    "pax-map-prefix",
+    "overwrite-json",
+    "overwrite-metadata",
+    "overwrite-git-head",
+    "pax-full",
+    "pax-path",
+    "oldgnu-readme",
+  ])("validates the manifest npm installs: %s", (representation) => {
+    const root = mkdtempSync(join(tmpdir(), "codex-package-npm-manifest-"));
+    try {
+      const path = "package/package.json";
+      const gitHead = "a".repeat(40);
+      const metadata = {
+        name: "@openai/codex-security",
+        version: "1.0.0",
+        license: "Apache-2.0",
+        gitHead,
+      };
+      const manifest = Buffer.from(JSON.stringify(metadata));
+      const overrides = new Map([[path, tarRecord(manifest, { name: path })]]);
+      if (representation.startsWith("oldgnu")) {
+        const oldPath =
+          representation === "oldgnu-manifest" ? path : "package/README.md";
+        overrides.set(
+          oldPath,
+          oldGnuSparseRecord(
+            oldPath === path ? manifest : Buffer.from("fixture\n"),
+            oldPath,
+          ),
+        );
+      } else {
+        const overwrite = representation.startsWith("overwrite");
+        const logicalPath = overwrite ? "package/README.md" : path;
+        let stored = overwrite
+          ? Buffer.from(
+              representation === "overwrite-json"
+                ? "fixture\n"
+                : JSON.stringify({
+                    ...metadata,
+                    ...(representation === "overwrite-metadata"
+                      ? { license: "MIT" }
+                      : { gitHead: "b".repeat(40) }),
+                  }),
+            )
+          : manifest;
+        const attributes: Record<string, string> = {
+          "GNU.sparse.size": String(stored.length),
+          "GNU.sparse.numblocks": "1",
+          "GNU.sparse.map": `0,${stored.length}`,
+          "GNU.sparse.name": logicalPath,
+        };
+        if (representation === "pax-map-prefix") {
+          const map = Buffer.alloc(512);
+          map.write(`1\n0\n${stored.length}\n`);
+          for (const key of Object.keys(attributes)) delete attributes[key];
+          Object.assign(attributes, {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.name": path,
+            "GNU.sparse.realsize": String(stored.length),
+          });
+          stored = Buffer.concat([map, stored]);
+        }
+        if (representation === "pax-path") attributes["path"] = path;
+        overrides.set(
+          logicalPath,
+          Buffer.concat([
+            tarRecord(paxRecords(attributes), {
+              name: "PaxHeaders/manifest",
+              type: 0x78,
+            }),
+            tarRecord(stored, {
+              name:
+                representation === "pax-path"
+                  ? "package/synthetic-storage.json"
+                  : path,
+            }),
+          ]),
+        );
+      }
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(archivePath, gzipSync(packageTar({ overrides })));
+      const extracted = spawnSync("tar", ["-xOzf", archivePath, path], {
+        encoding: "buffer",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      expect({
+        status: extracted.status,
+        stderr: extracted.stderr.toString(),
+      }).toEqual({ status: 0, stderr: "" });
+      expect(extracted.stdout.equals(manifest)).toBe(true);
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        npm_config_cache: join(root, "npm-cache"),
+        CODEX_SECURITY_EXPECTED_GIT_HEAD: gitHead,
+      };
+      const installed = installPackage(root, archivePath, environment);
+      const invalidJson = [
+        "oldgnu-manifest",
+        "pax-map-prefix",
+        "overwrite-json",
+      ].includes(representation);
+      expect(installed.error).toBeUndefined();
+      if (invalidJson) expect(installed.status).not.toBe(0);
+      else {
+        expect({
+          status: installed.status,
+          stderr: installed.status === 0 ? "" : installed.stderr,
+        }).toEqual({ status: 0, stderr: "" });
+        const actual = JSON.parse(
+          readFileSync(
+            join(
+              root,
+              "consumer",
+              "node_modules",
+              "@openai",
+              "codex-security",
+              "package.json",
+            ),
+            "utf8",
+          ),
+        );
+        expect(actual.license).toBe(
+          representation === "overwrite-metadata" ? "MIT" : metadata.license,
+        );
+        expect(actual.gitHead).toBe(
+          representation === "overwrite-git-head" ? "b".repeat(40) : gitHead,
+        );
+      }
+      const compatible = ["pax-full", "pax-path", "oldgnu-readme"].includes(
+        representation,
+      );
+      const contractPath = join(root, "contract.json");
+      writeFileSync(contractPath, JSON.stringify(pluginContract));
+      const checked = spawnSync(
+        commandPath("node"),
+        [
+          fileURLToPath(
+            new URL("../scripts/check-package.mjs", import.meta.url),
+          ),
+          archivePath,
+          contractPath,
+        ],
+        {
+          cwd: root,
+          env: environment,
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect({
+        status: checked.status,
+        stderr: compatible ? checked.stderr : "",
+      }).toEqual({ status: compatible ? 0 : 1, stderr: "" });
+      if (representation === "overwrite-metadata")
+        expect(checked.stderr).toContain("expected public metadata");
+      if (representation === "overwrite-git-head")
+        expect(checked.stderr).toContain("gitHead must match release commit");
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
