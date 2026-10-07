@@ -58,6 +58,7 @@
 - simplify inventory checks and build fixtures ([#1389](https://github.com/openai/codex-security/pull/1389))
 - simplify command preparation and transactions ([#1390](https://github.com/openai/codex-security/pull/1390))
 - share published version history and remove duplicate checks ([#1381](https://github.com/openai/codex-security/pull/1381))
+- preserve per-scan runtime and worker settings ([#1281](https://github.com/openai/codex-security/pull/1281))
 
 <!-- release-section: highlights:end -->
 
