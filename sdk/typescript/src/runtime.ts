@@ -182,6 +182,8 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  stateDirectory?: string;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
   /** Read committed Deep settings through the existing private workbench channel. */
@@ -1555,7 +1557,7 @@ const workbenchComparisonSupport = new Map<
 >();
 
 export async function runWorkbench(
-  options: WorkbenchCommandOptions,
+  options: Omit<WorkbenchCommandOptions, "python"> & { python?: string },
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
@@ -1564,24 +1566,51 @@ export async function runWorkbench(
     arguments_: readonly string[],
     input?: string,
   ): Promise<string> => {
+    const native = arguments_[0] === "database-info";
+    const node =
+      native && process.versions["bun"]
+        ? await resolveTrustedExecutable(
+            "node",
+            options.environment,
+            options.protectedRoot ?? process.cwd(),
+          )
+        : undefined;
+    if (node === null) {
+      throw new Error("Node.js is not available on a trusted PATH.");
+    }
+    const command = native
+      ? (node?.executable ?? process.execPath)
+      : (options.python ??= await resolvePluginPython({
+          environment: options.environment,
+          protectedRoot: options.protectedRoot,
+          signal: options.signal,
+        }));
     const result = await runCodexCommand(
-      { command: options.python },
-      [
-        "-I",
-        "-X",
-        "utf8",
-        "-B",
-        ...(options.withExecutionSettings
-          ? [
-              "-c",
-              "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))",
-            ]
-          : []),
-        script,
-        ...arguments_,
-      ],
-      pluginHelperEnvironment(options.environment),
-      input,
+      { command },
+      native
+        ? [join(options.pluginRoot, "mcp", "helpers.mjs"), ...arguments_]
+        : [
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            ...(options.withExecutionSettings
+              ? [
+                  "-c",
+                  "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))",
+                ]
+              : []),
+            script,
+            ...arguments_,
+          ],
+      pluginHelperEnvironment(node?.environment ?? options.environment),
+      // The SDK owns configuration normalization; the helper receives its resolved location.
+      native
+        ? JSON.stringify(
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
+          )
+        : input,
       options.signal,
     );
     if (!result.success) {
@@ -1638,7 +1667,8 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
@@ -3367,8 +3397,12 @@ function nullIfMissingFileError(error: unknown): null {
 
 /** @internal */
 export function workbenchEnvironment(environment: ProcessEnvironment) {
+  const python = environmentValue(environment, "PYTHON");
   return {
     ...environment,
+    ...(python && isPythonPathCandidate(python)
+      ? { PYTHON: resolve(expandHome(python, environment)) }
+      : {}),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
   };
 }
