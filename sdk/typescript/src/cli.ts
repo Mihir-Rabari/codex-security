@@ -7952,7 +7952,7 @@ export function skillCommandFailure(
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
-    /\bauthorizationrequired\b/iu.test(detail)
+    /\b(?:authorizationrequired|token_expired)\b/iu.test(detail)
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
