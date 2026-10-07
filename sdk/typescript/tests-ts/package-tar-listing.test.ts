@@ -50,6 +50,7 @@ function packageTar({
   mtime = 0,
   readmeSparse,
   readmeLongName = false,
+  additionalRecords = [],
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
@@ -61,6 +62,7 @@ function packageTar({
   mtime?: number;
   readmeSparse?: "0.0" | "1.0";
   readmeLongName?: boolean;
+  additionalRecords?: Buffer[];
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -144,6 +146,7 @@ function packageTar({
       ]);
     return record;
   });
+  records.push(...additionalRecords);
   if (compatibleLayout) {
     const directories = new Set<string>();
     for (const path of paths) {
@@ -384,6 +387,201 @@ describe("npm package tar listings", () => {
     }
   });
 
+  test.each([
+    "pax-full",
+    "pax-map-prefix",
+    "pax-hole",
+    "oldgnu",
+    "sparse-name",
+    "pax-path",
+    "global-path",
+    "pax-then-long-name",
+    "long-name-then-pax",
+    "pax-then-wrong-long-name",
+  ])("validates sparse assets as npm installs them: %s", (representation) => {
+    const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
+    try {
+      const logo = readFileSync(
+        new URL(
+          "../../../plugins/codex-security/assets/logo.png",
+          import.meta.url,
+        ),
+      );
+      const path = "package/_bundled_plugin/logo.png";
+      const renamed =
+        representation === "sparse-name" || representation === "pax-path";
+      const wrongPath = "package/synthetic-storage.png";
+      const orderedPath = representation.includes("then");
+      const attributes: Record<string, string> = {
+        "GNU.sparse.size": String(logo.length),
+        "GNU.sparse.numblocks": "1",
+        "GNU.sparse.map": `0,${logo.length}`,
+      };
+      let stored = logo;
+      if (representation === "pax-map-prefix") {
+        const map = Buffer.alloc(512);
+        map.write(`1\n0\n${logo.length}\n`);
+        stored = Buffer.concat([map, logo]);
+        for (const key of Object.keys(attributes)) delete attributes[key];
+        Object.assign(attributes, {
+          "GNU.sparse.major": "1",
+          "GNU.sparse.minor": "0",
+          "GNU.sparse.name": path,
+          "GNU.sparse.realsize": String(logo.length),
+        });
+      } else if (representation === "pax-hole") {
+        const hole = logo.findIndex(
+          (byte, index) => index > 0 && index % 512 === 0 && byte === 0,
+        );
+        expect(hole).toBeGreaterThan(0);
+        stored = Buffer.concat([
+          logo.subarray(0, hole),
+          logo.subarray(hole + 1),
+        ]);
+        attributes["GNU.sparse.numblocks"] = "2";
+        attributes["GNU.sparse.map"] =
+          `0,${hole},${hole + 1},${logo.length - hole - 1}`;
+      }
+      if (renamed || orderedPath || representation === "global-path")
+        attributes["GNU.sparse.name"] = path;
+      if (representation === "pax-path" || orderedPath)
+        attributes["path"] =
+          representation === "pax-then-long-name" ? wrongPath : path;
+      const longName = tarRecord(
+        Buffer.from(
+          `${representation === "pax-then-long-name" ? path : wrongPath}\0`,
+        ),
+        { name: "././@LongLink", type: 0x4c },
+      );
+      const record =
+        representation === "oldgnu"
+          ? oldGnuSparseRecord(logo, path)
+          : Buffer.concat([
+              ...(representation === "global-path"
+                ? [
+                    tarRecord(paxRecords({ path: wrongPath }), {
+                      name: "GlobalHead",
+                      type: 0x67,
+                    }),
+                  ]
+                : []),
+              ...(representation === "long-name-then-pax" ? [longName] : []),
+              tarRecord(paxRecords(attributes), {
+                name: "PaxHeaders/asset",
+                type: 0x78,
+              }),
+              ...(representation.startsWith("pax-then") ? [longName] : []),
+              tarRecord(stored, { name: renamed ? wrongPath : path }),
+            ]);
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(packageTar({ additionalRecords: [record] })),
+      );
+      const contractPath = join(root, "contract.json");
+      writeFileSync(
+        contractPath,
+        JSON.stringify({
+          ...pluginContract,
+          shippedExact: [...pluginContract.shippedExact, "logo.png"],
+        }),
+      );
+      const consumer = join(root, "consumer");
+      mkdirSync(consumer);
+      writeFileSync(
+        join(consumer, "package.json"),
+        JSON.stringify({ name: "synthetic-consumer", private: true }),
+      );
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        npm_config_cache: join(root, "npm-cache"),
+      };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      const resolved = spawnSync(
+        commandPath("node"),
+        [
+          "--input-type=module",
+          "-e",
+          `import { resolveNpm } from ${JSON.stringify(new URL("../scripts/package-smoke-npm.mjs", import.meta.url).href)}; console.log(JSON.stringify(await resolveNpm()));`,
+        ],
+        { encoding: "utf8", env: environment, windowsHide: true },
+      );
+      expect({ status: resolved.status, stderr: resolved.stderr }).toEqual({
+        status: 0,
+        stderr: "",
+      });
+      const npm = JSON.parse(resolved.stdout) as {
+        command: string;
+        args: string[];
+      };
+      const installed = spawnSync(
+        npm.command,
+        [
+          ...npm.args,
+          "install",
+          "--offline",
+          "--ignore-scripts",
+          "--package-lock=false",
+          "--no-audit",
+          "--no-fund",
+          archivePath,
+        ],
+        {
+          cwd: consumer,
+          env: environment,
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect({
+        status: installed.status,
+        stderr: installed.status === 0 ? "" : installed.stderr,
+      }).toEqual({ status: 0, stderr: "" });
+      const installedLogo = join(
+        consumer,
+        "node_modules",
+        "@openai",
+        "codex-security",
+        "_bundled_plugin",
+        "logo.png",
+      );
+      const compatible = [
+        "pax-full",
+        "pax-path",
+        "global-path",
+        "pax-then-long-name",
+        "long-name-then-pax",
+      ].includes(representation);
+      expect(
+        existsSync(installedLogo) && readFileSync(installedLogo).equals(logo),
+      ).toBe(compatible);
+      const checked = spawnSync(
+        commandPath("node"),
+        [
+          fileURLToPath(
+            new URL("../scripts/check-package.mjs", import.meta.url),
+          ),
+          archivePath,
+          contractPath,
+        ],
+        {
+          cwd: root,
+          env: environment,
+          encoding: "utf8",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect({
+        status: checked.status,
+        stderr: compatible ? checked.stderr : "",
+      }).toEqual({ status: compatible ? 0 : 1, stderr: "" });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   test("checks reconstructed sparse binary assets and their discarded metadata", () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-assets-"));
     try {
@@ -490,6 +688,7 @@ describe("npm package tar listings", () => {
         {
           name: "pax-sparse-zero-byte-hole-png",
           files: [["logo.png", logo, "0.1-hole"]],
+          error: "npm tarball contains an unexpected PNG asset",
         },
         {
           name: "pax-sparse-zero-byte-hole-tail",
@@ -501,8 +700,13 @@ describe("npm package tar listings", () => {
         {
           name: "oldgnu-brotli",
           files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
+          error: "npm tarball contains an invalid tar entry",
         },
-        { name: "oldgnu-png", files: [["logo.png", logo, "oldgnu"]] },
+        {
+          name: "oldgnu-png",
+          files: [["logo.png", logo, "oldgnu"]],
+          error: "npm tarball contains an invalid tar entry",
+        },
         {
           name: "oldgnu-continuations",
           files: [["helpers.mjs", oldGnuText, "oldgnu"]],
@@ -512,6 +716,7 @@ describe("npm package tar listings", () => {
           name: "oldgnu-unused-main-slot",
           files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
           metadataMarker: "unused",
+          error: "npm tarball contains an invalid tar entry",
         },
         {
           name: "oldgnu-unused-continuation-slot",
@@ -559,14 +764,14 @@ describe("npm package tar listings", () => {
         },
         {
           name: "sparse-header-map-boundary-marker",
-          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+          files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
           headerMapMarker: true,
           error: "npm tarball contains an internal reference.",
         },
         {
           name: "sparse-tail-header-boundary-marker",
           files: [
-            ["runtime.mjs.br", cleanCompressedPayload, true],
+            ["runtime.mjs.br", cleanCompressedPayload, "1.0"],
             ["extra.mjs", Buffer.from("Public contents."), false],
           ],
           tailBoundaryMarker: true,
@@ -575,20 +780,24 @@ describe("npm package tar listings", () => {
         },
         {
           name: "map-padding-marker",
-          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+          files: [["runtime.mjs.br", cleanCompressedPayload, "1.0"]],
           mapMarker: true,
           error: "npm tarball contains an internal reference.",
         },
         {
           name: "discarded-tail-marker",
-          files: [["logo.png", logo, true]],
+          files: [["logo.png", logo, "1.0"]],
           tailMarker: true,
           error:
             /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
         },
       ] satisfies {
         name: string;
-        files: [string, Buffer, boolean | "0.1-tail" | "0.1-hole" | "oldgnu"][];
+        files: [
+          string,
+          Buffer,
+          boolean | "1.0" | "0.1-tail" | "0.1-hole" | "oldgnu",
+        ][];
         extents?: { offset: number; size: number }[];
         metadataMarker?: "continuation" | "boundary" | "unused";
         globalSparse?: boolean;
@@ -631,6 +840,19 @@ describe("npm package tar listings", () => {
                 { name: "PaxHeaders/asset", type: 0x78 },
               ),
               tarRecord(stored, { name: path }),
+            ]);
+          }
+          if (sparse === true) {
+            return Buffer.concat([
+              tarRecord(
+                paxRecords({
+                  "GNU.sparse.size": String(contents.length),
+                  "GNU.sparse.numblocks": "1",
+                  "GNU.sparse.map": `0,${contents.length}`,
+                }),
+                { name: "PaxHeaders/asset", type: 0x78 },
+              ),
+              tarRecord(contents, { name: path }),
             ]);
           }
           if (sparse === "0.1-tail") {
@@ -698,8 +920,7 @@ describe("npm package tar listings", () => {
                     ),
                   ]
                 : []),
-              packageTar(),
-              ...records,
+              packageTar({ additionalRecords: records }),
             ]),
           ),
         );

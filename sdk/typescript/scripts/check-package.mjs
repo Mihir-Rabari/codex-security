@@ -311,11 +311,12 @@ assertExpectedGitHead(
 );
 
 assertPublicPackageContents(archiveFiles);
-for (const path of storedArchive.sparseFiles.keys()) {
-  storedArchive.deferredFiles.set(path, archiveFile(path));
+assertStoredSparseContents(storedArchive, archiveFiles);
+for (const [path, { contents, npmPath }] of storedArchive.sparseFiles) {
+  if (npmPath !== path) invalidTarEntry();
+  storedArchive.deferredFiles.set(path, contents);
 }
 assertPublicPackageContents(storedArchive.deferredFiles);
-assertStoredSparseContents(storedArchive, archiveFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(

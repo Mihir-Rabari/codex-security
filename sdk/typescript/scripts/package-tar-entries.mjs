@@ -144,6 +144,7 @@ export function readTarArchive(archiveBytes) {
   const globalAttributes = new Map();
   const nextAttributes = new Map();
   let nextName;
+  let nextNpmPath;
 
   while (offset + blockSize <= archiveBytes.byteLength) {
     const header = archiveBytes.subarray(offset, offset + blockSize);
@@ -179,11 +180,12 @@ export function readTarArchive(archiveBytes) {
       nextAttributes.has(key)
         ? nextAttributes.get(key) || undefined
         : globalAttributes.get(key);
+    const headerPath = prefix === "" ? name : `${prefix}/${name}`;
     const path =
       attribute("GNU.sparse.name") ??
       attribute("path") ??
       nextName ??
-      (prefix === "" ? name : `${prefix}/${name}`);
+      headerPath;
     if (!extended && (path === "" || path.endsWith("/") !== directory))
       invalidTarEntry();
     assertPublicText(path);
@@ -225,11 +227,16 @@ export function readTarArchive(archiveBytes) {
     if (extended) {
       const contents = archiveBytes.subarray(contentsStart, contentsEnd);
       archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
-      if (longName) nextName = headerText(contents, 0, contents.length);
-      else {
+      if (longName) {
+        nextName = headerText(contents, 0, contents.length);
+        nextNpmPath = nextName;
+      } else {
         const destination =
           header[156] === 0x67 ? globalAttributes : nextAttributes;
         for (const [key, value] of paxAttributes(contents)) {
+          // npm merges local PAX paths and GNU long names in record order.
+          if (destination === nextAttributes && key === "path")
+            nextNpmPath = value || undefined;
           if (destination === globalAttributes && value === "")
             destination.delete(key);
           else destination.set(key, value);
@@ -249,12 +256,13 @@ export function readTarArchive(archiveBytes) {
               1) &&
           /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
         ) {
-          sparseFiles.set(
-            path,
-            oldSparse
+          sparseFiles.set(path, {
+            ...(oldSparse
               ? { contents, extents: oldSparseExtents, dataOffset: 0 }
-              : sparseMap(contents, paxSparseMap),
-          );
+              : sparseMap(contents, paxSparseMap)),
+            // npm ignores old-GNU sparse entries and GNU sparse name overrides.
+            npmPath: oldSparse ? undefined : (nextNpmPath ?? headerPath),
+          });
           // Retain sparse framing in order with the surrounding headers and padding.
           archiveMetadata.push(path);
         } else {
@@ -266,6 +274,7 @@ export function readTarArchive(archiveBytes) {
       entries.push({ path, size });
       nextAttributes.clear();
       nextName = undefined;
+      nextNpmPath = undefined;
     }
     offset = nextOffset;
   }
