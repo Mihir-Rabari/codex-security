@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
@@ -1148,26 +1149,16 @@ describe("CLI workbench", () => {
           onMatch: (input, options) =>
             matchScanFindings(input, {
               ...options,
-              codex: {
-                startThread() {
-                  return {
-                    async run() {
-                      return {
-                        finalResponse: JSON.stringify({
-                          matches: [],
-                          uncertain: ["uncertain", "earlier-uncertain"].map(
-                            (beforeOccurrenceId) => ({
-                              beforeOccurrenceId,
-                              afterOccurrenceId: "after",
-                              reason: "Possibly the same root cause.",
-                            }),
-                          ),
-                        }),
-                      };
-                    },
-                  };
-                },
-              },
+              codex: jsonCodex(() => ({
+                matches: [],
+                uncertain: ["uncertain", "earlier-uncertain"].map(
+                  (beforeOccurrenceId) => ({
+                    beforeOccurrenceId,
+                    afterOccurrenceId: "after",
+                    reason: "Possibly the same root cause.",
+                  }),
+                ),
+              })),
             }),
         }),
       ),
@@ -1235,11 +1226,7 @@ describe("CLI workbench", () => {
             onMatch: (input, options) =>
               matchScanFindings(input, {
                 ...options,
-                codex: {
-                  startThread: () => ({
-                    run,
-                  }),
-                },
+                codex: codexWithRun(run),
               }),
           }),
         ),

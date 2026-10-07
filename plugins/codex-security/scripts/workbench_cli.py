@@ -126,6 +126,9 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_finding = subparsers.add_parser("get-finding")
     get_finding.add_argument("--occurrence-id", required=True)
+    rename_scan = subparsers.add_parser("rename-scan")
+    rename_scan.add_argument("--scan-id", required=True)
+    rename_scan.add_argument("--name", required=True)
 
     get_scan_feedback = subparsers.add_parser("get-scan-feedback")
     get_scan_feedback.add_argument("--scan-id", required=True)

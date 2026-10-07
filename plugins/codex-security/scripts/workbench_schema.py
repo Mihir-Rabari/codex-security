@@ -869,6 +869,13 @@ MIGRATIONS = (
     ),
     (
         42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
+        43,
         "preserve finding decision append chronology",
         """
         ALTER TABLE finding_decisions
@@ -889,7 +896,7 @@ MIGRATIONS = (
         """,
     ),
     (
-        43,
+        44,
         "bind new finding decisions to admitted scans",
         """
         ALTER TABLE finding_decisions
@@ -1154,6 +1161,8 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    move_pre_release_migration(connection, 43, 44, "bind new finding decisions to admitted scans")
+    move_pre_release_migration(connection, 42, 43, "preserve finding decision append chronology")
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
