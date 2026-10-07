@@ -1579,19 +1579,31 @@ export async function resolveScanSessionPaths(
     "        roots = usage._scan_root_thread_ids(connection, scan, sys.argv[3])",
     "    finally:",
     "        connection.close()",
-    "try:",
-    "    database = usage._codex_state_database()",
-    "    if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
-    "    warnings = set()",
-    "    sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
-    "    if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
-    "        raise RuntimeError('Scan session ownership is incomplete.')",
-    "except (sqlite3.Error, OSError, ValueError, RuntimeError):",
-    `    print('{"unverifiedDatabase":true}')`,
-    "    raise",
+    "database = usage._codex_state_database()",
+    "if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
+    "warnings = set()",
+    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
+    "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
+    "    raise RuntimeError('Scan session ownership is incomplete.')",
     "print(json.dumps([str(session.path) for session in sessions], allow_nan=False))",
   ].join("\n");
   try {
+    if (
+      nativeConfig !== undefined &&
+      !options.environment?.["CODEX_STATE_DB"]
+    ) {
+      const sqliteHome = await (nativeConfig.sqliteHome ??=
+        readNativeSqliteHome(nativeConfig, options));
+      if (sqliteHome !== undefined) {
+        options = {
+          ...options,
+          environment: {
+            ...options.environment,
+            CODEX_SQLITE_HOME: sqliteHome,
+          },
+        };
+      }
+    }
     const { stdout } = await execFile(
       options.python,
       [
@@ -1621,38 +1633,6 @@ export async function resolveScanSessionPaths(
     return new Set(paths);
   } catch (error) {
     if (options.signal?.aborted) throw error;
-    if (
-      nativeConfig !== undefined &&
-      !options.environment?.["CODEX_STATE_DB"] &&
-      !options.environment?.["CODEX_SQLITE_HOME"] &&
-      isRecord(error) &&
-      typeof error["stdout"] === "string" &&
-      error["stdout"].trim() === '{"unverifiedDatabase":true}'
-    ) {
-      try {
-        const sqliteHome = await (nativeConfig.sqliteHome ??=
-          readNativeSqliteHome(nativeConfig, options));
-        if (sqliteHome !== undefined) {
-          return await resolveScanSessionPaths(
-            {
-              ...options,
-              environment: {
-                ...options.environment,
-                CODEX_SQLITE_HOME: sqliteHome,
-              },
-            },
-            scanId,
-            rootThreadId,
-          );
-        }
-      } catch (cause) {
-        if (options.signal?.aborted) throw cause;
-        error = new AggregateError(
-          [error, cause],
-          "Native Codex session ownership could not be verified.",
-        );
-      }
-    }
     throw new CodexSecurityError(
       "The scan session ownership could not be verified.",
       { cause: error },
@@ -1671,6 +1651,7 @@ async function readNativeSqliteHome(
     options.environment,
     config.workingDirectory,
     options.signal,
+    config.config,
   );
 }
 

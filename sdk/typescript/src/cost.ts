@@ -560,6 +560,7 @@ export class ScanCostTracker {
       error: unknown;
       rootOnlyRecoverable: boolean;
     }> = [];
+    let missingSession = false;
     if (this.#options.maxCostUsd !== undefined) {
       for (const [path, session] of this.#sessions) {
         if (
@@ -567,6 +568,7 @@ export class ScanCostTracker {
           included.has(session.threadId) &&
           !presentSessions.has(path)
         ) {
+          missingSession = true;
           readFailures.push({
             session,
             error: new Error(
@@ -688,6 +690,15 @@ export class ScanCostTracker {
     }
     const readFailure = readFailures[0];
     if (readFailure !== undefined) {
+      if (
+        missingSession &&
+        ownedPaths === undefined &&
+        this.#options.resolveOwnedSessionPaths !== undefined
+      ) {
+        return await this.#readSessions(
+          await this.#options.resolveOwnedSessionPaths(rootThreadId),
+        );
+      }
       this.#rootOnlyReadError =
         readFailures.every(
           (failure) =>

@@ -606,7 +606,7 @@ describe("scan cost", () => {
 
 describe("live scan cost tracking", () => {
   test.each([null, 40, 80])(
-    "counts SDK-completed validation and its workers once with rollout usage %s",
+    "counts SDK-completed validation and its workers once with rollout usage %p",
     async (validationInput) => {
       const home = await codexHome();
       const rootUsage = { input_tokens: 100, output_tokens: 10 };
@@ -4875,7 +4875,7 @@ describe("live scan cost tracking", () => {
   });
 
   test.each([undefined, 100, 1_000, 1_500])(
-    "reconciles the parent receipt with worker usage when logged parent tokens are %s",
+    "reconciles the parent receipt with worker usage when logged parent tokens are %p",
     async (parentTokens) => {
       const home = await codexHome();
       if (parentTokens !== undefined) {
@@ -5647,7 +5647,72 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each(["missing", "divergent", "unreadable"])(
+  test("reconciles an archived worker during the next live cost poll", async () => {
+    const home = await codexHome();
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const root = await writeSession(
+      home,
+      "scan-thread",
+      rootUsage,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    let worker = await writeSession(
+      home,
+      "worker-thread",
+      { input_tokens: 50, output_tokens: 5 },
+      "scan-thread",
+      undefined,
+      undefined,
+      true,
+    );
+    const errors: unknown[] = [];
+    const controller = new AbortController();
+    let ownershipCalls = 0;
+    let finishPoll!: () => void;
+    const polled = new Promise<void>((resolve) => {
+      finishPoll = resolve;
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+      resolveOwnedSessionPaths: async () => {
+        ownershipCalls += 1;
+        finishPoll();
+        return new Set([root, worker]);
+      },
+      onError: (error) => {
+        errors.push(error);
+        controller.abort(error);
+        finishPoll();
+      },
+    });
+    try {
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      expect(ownershipCalls).toBe(0);
+      const archive = join(home, "archived-worker.jsonl");
+      await fsPromises.rename(worker, archive);
+      worker = archive;
+      await polled;
+      await tracker.refresh().catch((error) => errors.push(error));
+      expect(controller.signal.aborted).toBe(false);
+      expect(errors).toEqual([]);
+      expect(ownershipCalls).toBeGreaterThan(0);
+      expect((await tracker.stop(rootUsage)).cost).toMatchObject({
+        inputTokens: 150,
+        outputTokens: 15,
+        estimatedUsd: 0.0009,
+      });
+    } finally {
+      await tracker.stop().catch(() => {});
+    }
+  });
+
+  test.each(["missing", "divergent", "unreadable", "unowned"])(
     "rejects a %s authoritative archive replacement after polling",
     async (replacement) => {
       const home = await codexHome();
@@ -5675,7 +5740,8 @@ describe("live scan cost tracking", () => {
         codexHome: home,
         model: "gpt-5.6-sol",
         maxCostUsd: 1,
-        resolveOwnedSessionPaths: async () => new Set([root, archive]),
+        resolveOwnedSessionPaths: async () =>
+          new Set(replacement === "unowned" ? [root] : [root, archive]),
       });
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -5686,10 +5752,11 @@ describe("live scan cost tracking", () => {
           archive,
           contents.replace('"input_tokens":50', '"input_tokens":49'),
         );
-      } else {
+      } else if (replacement !== "unowned") {
         await rm(archive);
         if (replacement === "unreadable") await mkdir(archive);
       }
+      await expect(tracker.refresh()).rejects.toThrow();
       await expect(tracker.stop(rootUsage)).rejects.toThrow();
     },
   );

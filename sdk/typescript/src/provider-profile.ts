@@ -197,8 +197,10 @@ export async function readNativeSessionSqliteHome(
   environment: ProcessEnvironment,
   cwd: string,
   signal?: AbortSignal,
+  nativeConfig: JsonObject = {},
 ): Promise<string | undefined> {
   const preflight = await nativePermissionPreflight();
+  const sqliteHome = resolveCodexProfile(nativeConfig)["sqlite_home"];
   const env = bundledCodexSdkEnvironment(
     command.command,
     Object.fromEntries(
@@ -215,7 +217,10 @@ export async function readNativeSessionSqliteHome(
       env,
       signal: signal ?? new AbortController().signal,
       context: "helper",
-      configOverrides: [],
+      configOverrides:
+        typeof sqliteHome === "string"
+          ? [`sqlite_home=${inlineToml(sqliteHome)}`]
+          : [],
     });
     return typeof config.sqlite_home === "string"
       ? config.sqlite_home

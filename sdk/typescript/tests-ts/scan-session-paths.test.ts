@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
@@ -72,15 +72,17 @@ async function fixture(label: string, response = "selected") {
       'import { createInterface } from "node:readline";',
       'import { appendFileSync } from "node:fs";',
       `const transcript = ${JSON.stringify(transcript)};`,
+      "const sqliteOverride=process.argv.find((arg)=>arg.startsWith('sqlite_home='));",
+      `const sqliteHome=sqliteOverride ? JSON.parse(sqliteOverride.slice('sqlite_home='.length)) : ${response === "environment" ? "process.env.CODEX_SQLITE_HOME" : JSON.stringify(sqliteHome)};`,
       "for await (const line of createInterface({input:process.stdin})) {",
       "const request=JSON.parse(line);",
-      'appendFileSync(transcript, JSON.stringify({request,cwd:process.cwd(),home:process.env.CODEX_HOME,argv:process.argv.slice(1)})+"\\n");',
+      'appendFileSync(transcript, JSON.stringify({request,cwd:process.cwd(),home:process.env.CODEX_HOME,sqliteHome:process.env.CODEX_SQLITE_HOME,argv:process.argv.slice(1)})+"\\n");',
       'if(request.method==="initialize") process.stdout.write(JSON.stringify({id:request.id,result:{}})+"\\n");',
       response === "blocked"
         ? ""
         : response === "error"
           ? 'if(request.method==="config/read") process.stdout.write(JSON.stringify({id:request.id,error:{message:"Synthetic native configuration failure"}})+"\\n");'
-          : `if(request.method==="config/read") process.stdout.write(JSON.stringify({id:request.id,result:{config:{sqlite_home:${JSON.stringify(sqliteHome)}}}})+"\\n");`,
+          : `if(request.method==="config/read") process.stdout.write(JSON.stringify({id:request.id,result:{config:{sqlite_home:sqliteHome}}})+"\\n");`,
       "}",
     ].join("\n"),
   );
@@ -93,7 +95,10 @@ async function fixture(label: string, response = "selected") {
   delete environment["CODEX_STATE_DB"];
   delete environment["CODEX_SQLITE_HOME"];
   const options = { python, pluginRoot: PLUGIN_ROOT, environment };
-  const native = { command: nodeCommand(), workingDirectory: directory };
+  const native = {
+    command: { ...nodeCommand(), args: ["--"] },
+    workingDirectory: directory,
+  };
   return {
     root,
     home,
@@ -146,9 +151,12 @@ test("resolves native SQLite ownership for concurrent fresh and resumed Deep wor
 });
 
 test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
-  "preserves explicit %s ownership without querying native configuration",
+  "preserves explicit %s ownership",
   async (key) => {
-    const f = await fixture("explicit", "error");
+    const f = await fixture(
+      "explicit",
+      key === "CODEX_STATE_DB" ? "error" : "environment",
+    );
     f.options.environment[key] =
       key === "CODEX_STATE_DB"
         ? join(f.sqliteHome, "state_7.sqlite")
@@ -163,9 +171,15 @@ test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
         )),
       ].sort(),
     ).toEqual([...f.paths].sort());
-    await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    if (key === "CODEX_STATE_DB") {
+      await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } else {
+      expect(await readFile(f.transcript, "utf8")).toContain(
+        '"method":"config/read"',
+      );
+    }
   },
 );
 
@@ -241,10 +255,54 @@ test.each(["unrelated", "schema"])(
   },
 );
 
+test.each(["absent", "incomplete", "readable"])(
+  "uses native SQLite configuration before a %s environment fallback",
+  async (database) => {
+    const f = await fixture("native-precedence-" + database);
+    execFileSync(f.options.python, [
+      "-I",
+      "-B",
+      "-c",
+      "import sqlite3,json,sys;c=sqlite3.connect(sys.argv[1]);ids=json.loads(sys.argv[2]);c.executemany('INSERT INTO thread_spawn_edges VALUES (?,?)',[(ids[0],worker) for worker in ids[1:]]);c.commit();c.close()",
+      join(f.sqliteHome, "state_7.sqlite"),
+      JSON.stringify(f.ids),
+    ]);
+    if (database !== "absent") {
+      execFileSync(f.options.python, [
+        "-I",
+        "-B",
+        "-c",
+        "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT NOT NULL)');c.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT NOT NULL,child_thread_id TEXT NOT NULL)');" +
+          (database === "readable"
+            ? "c.execute('INSERT INTO threads VALUES (?,?)',(sys.argv[2],sys.argv[3]));"
+            : "") +
+          "c.commit();c.close()",
+        join(f.home, "state_7.sqlite"),
+        f.ids[0]!,
+        f.paths[0]!,
+      ]);
+    }
+    f.options.environment["CODEX_SQLITE_HOME"] = f.home;
+    expect(
+      [
+        ...(await resolveScanSessionPaths(
+          f.options,
+          null,
+          f.ids[0]!,
+          f.native,
+        )),
+      ].sort(),
+    ).toEqual([...f.paths].sort());
+    expect(await readFile(f.transcript, "utf8")).toContain(
+      '"method":"config/read"',
+    );
+  },
+);
+
 test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
-  "does not replace an incomplete explicit %s with native fallback",
+  "rejects incomplete ownership at the selected %s database",
   async (key) => {
-    const f = await fixture("explicit-incomplete");
+    const f = await fixture("explicit-incomplete", "environment");
     const database = join(f.home, "state_7.sqlite");
     execFileSync(f.options.python, [
       "-I",
@@ -257,8 +315,64 @@ test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
     await expect(
       resolveScanSessionPaths(f.options, "scan", f.ids[0]!, f.native),
     ).rejects.toThrow("scan session ownership");
-    await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    if (key === "CODEX_STATE_DB") {
+      await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } else {
+      expect(await readFile(f.transcript, "utf8")).toContain(
+        '"method":"config/read"',
+      );
+    }
+  },
+);
+
+test.each(["direct", "profile"])(
+  "preserves the caller's %s SQLite override during native ownership lookup",
+  async (selection) => {
+    const f = await fixture("caller-override-" + selection);
+    const callerHome = join(f.root, "caller sqlite");
+    await mkdir(callerHome);
+    await copyFile(
+      join(f.sqliteHome, "state_7.sqlite"),
+      join(callerHome, "state_7.sqlite"),
+    );
+    const callerRollout = join(callerHome, "caller-root.jsonl");
+    await writeFile(
+      callerRollout,
+      JSON.stringify({ type: "session_meta", payload: { id: f.ids[0] } }) +
+        "\n",
+    );
+    execFileSync(f.options.python, [
+      "-I",
+      "-B",
+      "-c",
+      "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('UPDATE threads SET rollout_path=? WHERE id=?',(sys.argv[2],sys.argv[3]));c.commit();c.close()",
+      join(callerHome, "state_7.sqlite"),
+      callerRollout,
+      f.ids[0]!,
+    ]);
+    f.options.environment["CODEX_SQLITE_HOME"] = callerHome;
+    const config =
+      selection === "direct"
+        ? { sqlite_home: callerHome }
+        : {
+            profile: "chosen",
+            profiles: { chosen: { sqlite_home: callerHome } },
+          };
+    expect([
+      ...(await resolveScanSessionPaths(f.options, null, f.ids[0]!, {
+        ...f.native,
+        config,
+      })),
+    ]).toEqual([callerRollout]);
+    const requests = (await readFile(f.transcript, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests[0].sqliteHome).toBe(callerHome);
+    expect(requests[0].argv).toContain(
+      `sqlite_home=${JSON.stringify(callerHome)}`,
+    );
   },
 );
