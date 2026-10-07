@@ -8118,8 +8118,8 @@ async function changedPatchFiles(
       )
     ).split("\0");
     for (let index = 0; index + 2 < renamed.length; index += 3) {
-      if (dirtyFiles.has(join(renamed[index + 1]!)))
-        dirtyFiles.add(join(renamed[index + 2]!));
+      if (dirtyFiles.has(renamed[index + 1]!))
+        dirtyFiles.add(renamed[index + 2]!);
     }
   }
   const output = await dependencies.runRepositoryCommand(
