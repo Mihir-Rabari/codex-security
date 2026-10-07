@@ -4382,6 +4382,7 @@ describe("CodexSecurity orchestration", () => {
     );
     const requests: number[] = [];
     const commands: Array<readonly string[]> = [];
+    const ownedSessions = new Map<string, string>();
     const startThread = mock(() => {
       return {
         id: null,
@@ -4398,6 +4399,8 @@ describe("CodexSecurity orchestration", () => {
               { input_tokens: 100, output_tokens: 0 },
               { parent: "scan-thread", parentField: "parent_thread_id" },
             );
+            ownedSessions.set(path, "scan-thread");
+            ownedSessions.set(workerPath, "worker-thread");
             await firstApproval;
             await appendUsage(path, 1_700);
             await secondApproval;
@@ -4428,6 +4431,7 @@ describe("CodexSecurity orchestration", () => {
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands),
+      resolveScanSessionPaths: async () => ownedSessions,
       createCodex: () => ({
         startThread,
       }),
