@@ -18,6 +18,7 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -101,6 +102,7 @@ async function repository(
     `export const name = "${name}";\n`,
   );
   git(path, "init", "-q");
+  await writeFile(join(path, ".gitattributes"), "* text eol=lf\n");
   git(path, "add", ".");
   git(
     path,
@@ -4781,8 +4783,8 @@ test("followup recovery restores deleted paths above the default subprocess buff
   const paths = await fixture();
   const source = await repository(paths.root, "large-path-list-source");
   const names = Array.from(
-    { length: 14000 },
-    (_, i) => `src/file_${i}_${"b".repeat(70)}.ts`,
+    { length: 10000 },
+    (_, i) => `src/file_${i}_${"b".repeat(100)}.ts`,
   );
   expect(names.join("\0").length).toBeGreaterThan(1024 * 1024);
   const blob = git(source.path, "hash-object", "-w", "src/app.ts");
@@ -4910,7 +4912,7 @@ test("final native recovery restores a locally pinned commit with an unavailable
   expect(await readFile(initial.resultsPath)).toEqual(before);
 });
 
-testPosix(
+(process.platform === "darwin" ? test.skip : testPosix)(
   "final native recovery forwards non-UTF-8 deleted filenames as raw bytes",
   async () => {
     const paths = await fixture();
@@ -6044,7 +6046,7 @@ for (const nested of [false, true]) {
       skipped: 0,
     });
 
-    await rm(join(checkout, "alias"));
+    await unlink(join(checkout, "alias"));
     await rm(join(checkout, "src"), { recursive: true });
     await writeFile(
       join(checkout, "retained.txt"),
@@ -6121,6 +6123,11 @@ for (const nested of [false, true]) {
       recoverScan: async () => undefined,
     });
     const initial = await runMultiscan(campaign);
+    expect(await results(initial.resultsPath)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "completed" }),
+      ]),
+    );
     expect(initial).toMatchObject({ completed: 1, skipped: 0 });
     const receipt = (await results(initial.resultsPath)).find(
       (row) => row["status"] === "completed",

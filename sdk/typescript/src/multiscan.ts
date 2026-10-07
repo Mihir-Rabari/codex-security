@@ -1287,7 +1287,10 @@ async function loadResumableScan(
             () => true,
             (error: unknown) => {
               if (error instanceof PluginPythonUnavailableError) return false;
-              throw error;
+              signal?.throwIfAborted();
+              throw new Error(
+                `Multiscan report recovery is required: ${errorMessage(error)}`,
+              );
             },
           )
         : false;
