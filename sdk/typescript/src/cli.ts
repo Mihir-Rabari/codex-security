@@ -8072,6 +8072,7 @@ interface GitPatchState {
       initialized: boolean;
       committed: Map<string, string> | null;
       committedTree?: string;
+      gitDirectory?: string;
     }
   >;
 }
@@ -8196,7 +8197,7 @@ async function changedPatchFiles(
       .filter(([directory]) => file.startsWith(`${directory}/`))
       .sort(([left], [right]) => right.length - left.length)[0];
     if (
-      owner !== undefined &&
+      owner?.[1].initialized === true &&
       (owner[1].committed === null ||
         owner[1].committed.get(file.slice(owner[0].length + 1)) !==
           head.files.get(file))
@@ -8270,6 +8271,7 @@ async function retainPatchTrees(
   checkout: string,
   trees: string[],
   dependencies: CliDependencies,
+  gitDirectory?: string,
 ): Promise<void> {
   if (checkout === repository) return;
   const objects = await dependencies.runRepositoryCommand(
@@ -8284,6 +8286,7 @@ async function retainPatchTrees(
     repository,
     dependencies,
     checkout,
+    gitDirectory,
   );
   await nested.runRepositoryCommand(
     "git",
@@ -8313,10 +8316,15 @@ async function patchGitlinkTree(
   )
     return undefined;
   const checkout = join(state.root, directory);
+  const gitDirectory = existsSync(join(checkout, ".git"))
+    ? undefined
+    : (state.gitlinks.get(directory)?.gitDirectory ??
+      other.gitlinks.get(directory)?.gitDirectory);
   const nested = await nestedPatchGitDependencies(
     state.root,
     dependencies,
     checkout,
+    gitDirectory,
   );
   const tree = await nested.runRepositoryCommand(
     "git",
@@ -8324,7 +8332,13 @@ async function patchGitlinkTree(
     checkout,
   );
   if (!tree) return undefined;
-  await retainPatchTrees(state.root, checkout, [tree], dependencies);
+  await retainPatchTrees(
+    state.root,
+    checkout,
+    [tree],
+    dependencies,
+    gitDirectory,
+  );
   return tree;
 }
 
@@ -8376,6 +8390,7 @@ async function snapshotGitPatchState(
           initialized: false,
           committed: null as Map<string, string> | null,
           committedTree: undefined as string | undefined,
+          gitDirectory: undefined as string | undefined,
         };
         gitlinks.set(nestedPath, gitlink);
         if (!existsSync(join(nested, ".git"))) continue;
@@ -8386,8 +8401,8 @@ async function snapshotGitPatchState(
         );
         const worktree = await enclosingGitWorktreeRoot(nested, undefined, {
           requireIfPresent: true,
-          runGit: async (args) =>
-            (
+          runGit: async (args) => {
+            const output = (
               await nestedDependencies.runRepositoryCommand(
                 "git",
                 args,
@@ -8396,7 +8411,11 @@ async function snapshotGitPatchState(
                   trim: false,
                 },
               )
-            ).replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, ""),
+            ).replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
+            if (args.at(-1) === "--absolute-git-dir")
+              gitlink.gitDirectory = output;
+            return output;
+          },
         });
         if (worktree !== null) {
           if (isOutsidePath(relative(repositoryRoot, worktree)))
@@ -8470,6 +8489,7 @@ async function nestedPatchGitDependencies(
   repository: string,
   dependencies: CliDependencies,
   checkout: string,
+  gitDirectory?: string,
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
@@ -8497,7 +8517,7 @@ async function nestedPatchGitDependencies(
           directory,
           "--git-dir",
           // Git resolves relative gitfile contents from the last slash in this path.
-          join(checkout, ".git").split(sep).join("/"),
+          (gitDirectory ?? join(checkout, ".git")).split(sep).join("/"),
           "--work-tree",
           checkout,
           ...args,

@@ -4781,9 +4781,16 @@ describe("patch publication integrity", () => {
     ["uncommitted", "root"],
     ["committed", "component"],
     ["uncommitted", "component"],
+    ["deinitialized", "root"],
+    ["deinitialized", "component"],
+    ["deinitialized and assessed", "root"],
+    ["deinitialized and assessed", "component"],
   ])(
     "preserves supplied-issue submodule publication with %s changes from %s",
     async (state, invocation) => {
+      const deinitialized = state.startsWith("deinitialized");
+      const assessed = state.endsWith("assessed");
+      const committed = state !== "uncommitted";
       const directory = await fixtures.create("patch-submodule-publication-");
       const checkout = join(directory, "checkout");
       const nested = join(checkout, "dependency");
@@ -4809,7 +4816,24 @@ describe("patch publication integrity", () => {
       inner("commit", "-m", "Synthetic nested fix");
       const fixed = inner("rev-parse", "HEAD");
       inner("checkout", original);
+      if (deinitialized) {
+        git(
+          "config",
+          "-f",
+          ".gitmodules",
+          "submodule.dependency.path",
+          "dependency",
+        );
+        git(
+          "config",
+          "-f",
+          ".gitmodules",
+          "submodule.dependency.url",
+          "https://github.example.test/example/dependency.git",
+        );
+      }
       git("add", ".");
+      if (deinitialized) git("submodule", "absorbgitdirs", "dependency");
       git("commit", "-m", "Synthetic parent baseline");
       git("config", "diff.relative", "true");
       const head = git("rev-parse", "HEAD");
@@ -4818,8 +4842,15 @@ describe("patch publication integrity", () => {
       git("init", "--bare", remote);
       git("remote", "add", "origin", remote);
       let published = false;
+      let assessments = 0;
       const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        [
+          "patch",
+          "Synthetic issue",
+          "--create-pr",
+          ...(assessed ? ["--assess-patch-risk"] : []),
+          "--json",
+        ],
         {
           currentDirectory,
           onRepositoryCommand: (command, args, cwd, options) => {
@@ -4829,32 +4860,58 @@ describe("patch publication integrity", () => {
             published = true;
             return "https://github.example.test/example/repository/pull/1";
           },
-          onCodex: async () => {
-            if (state === "committed") inner("checkout", fixed);
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              assessments++;
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; changedFiles: string[] };
+              const patch = await readFile(artifact.path, "utf8");
+              expect(artifact.changedFiles).toContain("dependency/app.ts");
+              expect(patch).toContain(`-Subproject commit ${original}`);
+              expect(patch).toContain(`+Subproject commit ${fixed}`);
+              expect(patch).toContain("-original\n+fixed\n");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            if (committed) inner("checkout", fixed);
             else await writeFile(join(nested, "app.ts"), "fixed\n");
+            if (deinitialized) {
+              git("add", "dependency");
+              git("submodule", "deinit", "-f", "--", "dependency");
+            }
             return 0;
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(
-        state === "committed" ? 0 : 2,
-      );
+      expect(outcome.exitCode, outcome.stderr).toBe(committed ? 0 : 2);
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         applied: true,
-        files: (state === "committed"
+        files: (committed
           ? ["dependency", "dependency/app.ts"]
           : ["dependency/app.ts"]
         ).map((file) =>
           relative(currentDirectory, join(checkout, file)).split(sep).join("/"),
         ),
       });
-      expect(published).toBe(state === "committed");
-      if (state === "committed") {
+      expect(published).toBe(committed);
+      expect(assessments).toBe(assessed ? 1 : 0);
+      if (committed) {
         expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
           "dependency",
         );
         expect(git("rev-parse", "HEAD:dependency")).toBe(fixed);
         expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+        if (deinitialized)
+          expect(git("submodule", "status", "--", "dependency")).toStartWith(
+            "-",
+          );
       } else {
         expect(outcome.stderr).toContain("submodule");
         expect(git("branch", "--show-current")).toBe("main");
