@@ -24,6 +24,7 @@ interface BootstrapDatabase {
   exec(sql: string): unknown;
   prepare(sql: string): {
     all(...parameters: (string | number)[]): unknown[];
+    finalize?(): void;
   };
   close(): void;
 }
@@ -186,18 +187,19 @@ async function readTargets(
     );
     database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {
-      const columns = database
-        .prepare("PRAGMA table_info(finding_workflows)")
-        .all() as { name: string }[];
+      const columns = readRows<{ name: string }>(
+        database,
+        "PRAGMA table_info(finding_workflows)",
+      );
       const scanId = columns.some((column) => column.name === "scan_id")
         ? "workflow.scan_id"
         : "json_extract(workflow.state_json, '$.scanId')";
-      return database
-        .prepare(
-          `SELECT scans.id, scans.target_path FROM scans
+      return readRows<ScanTarget>(
+        database,
+        `SELECT scans.id, scans.target_path FROM scans
         JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
-        )
-        .all(requestedId.workflowId) as ScanTarget[];
+        requestedId.workflowId,
+      );
     }
     if (requestedId === "latest")
       return await latestTargets(
@@ -216,19 +218,22 @@ async function readTargets(
       const id = compact
         .toLowerCase()
         .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
-      return database
-        .prepare("SELECT id, target_path FROM scans WHERE id = ?")
-        .all(id) as ScanTarget[];
+      return readRows<ScanTarget>(
+        database,
+        "SELECT id, target_path FROM scans WHERE id = ?",
+        id,
+      );
     }
     if (requestedId.length < 8)
       throw new CodexSecurityError(
         "Scan ID prefixes must be at least eight characters.",
       );
-    return database
-      .prepare(
-        "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
-      )
-      .all(requestedId.length, requestedId.toLowerCase()) as ScanTarget[];
+    return readRows<ScanTarget>(
+      database,
+      "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+      requestedId.length,
+      requestedId.toLowerCase(),
+    );
   } catch (error) {
     signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;
@@ -241,6 +246,21 @@ async function readTargets(
   }
 }
 
+function readRows<T>(
+  database: BootstrapDatabase,
+  sql: string,
+  ...parameters: (string | number)[]
+): T[] {
+  const statement = database.prepare(sql);
+  try {
+    return statement.all(...parameters) as T[];
+  } finally {
+    // Bun's manually prepared statements otherwise retain Windows file locks after close.
+    // Node finalizes its statements when DatabaseSync.close() runs.
+    statement.finalize?.();
+  }
+}
+
 async function latestTargets(
   database: BootstrapDatabase,
   directory: string,
@@ -249,20 +269,19 @@ async function latestTargets(
 ): Promise<ScanTarget[]> {
   const current = await pathKey(directory);
   const columns = new Set(
-    (
-      database.prepare("PRAGMA table_info(scans)").all() as { name: string }[]
-    ).map((column) => column.name),
+    readRows<{ name: string }>(database, "PRAGMA table_info(scans)").map(
+      (column) => column.name,
+    ),
   );
   // The workbench migrates after discovery; schemas before v16 have no target registry.
   const hasTargets =
-    database.prepare("PRAGMA table_info(security_targets)").all().length > 0;
-  const registered = database
-    .prepare(
-      hasTargets
-        ? "SELECT id, current_path AS target_path FROM security_targets"
-        : "SELECT DISTINCT target_path AS id, target_path FROM scans",
-    )
-    .all() as ScanTarget[];
+    readRows(database, "PRAGMA table_info(security_targets)").length > 0;
+  const registered = readRows<ScanTarget>(
+    database,
+    hasTargets
+      ? "SELECT id, current_path AS target_path FROM security_targets"
+      : "SELECT DISTINCT target_path AS id, target_path FROM scans",
+  );
   const related = new Set<string>();
   for (const target of registered)
     if ((await pathKey(target.target_path)) === current) related.add(target.id);
@@ -331,16 +350,15 @@ async function latestTargets(
         related.add(target.id);
     }
   }
-  const scans = database
-    .prepare(
-      `SELECT scans.id, scans.target_path,
+  const scans = readRows<ScanTarget>(
+    database,
+    `SELECT scans.id, scans.target_path,
         ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
       ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
         scans.started_at DESC, scans.id`,
-    )
-    .all() as ScanTarget[];
+  );
   for (const scan of scans) {
     signal?.throwIfAborted();
     if (

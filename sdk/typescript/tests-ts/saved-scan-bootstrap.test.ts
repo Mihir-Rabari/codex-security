@@ -524,14 +524,14 @@ for (const selector of ["latest", "workflow"] as const) {
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
-      db.prepare("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
         "unrelated-target",
         dirname(f.python),
         "Unrelated synthetic target",
         "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:00Z",
       );
-      db.prepare(
+      db.query(
         "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
       ).run(dirname(f.python), "unrelated-target", f.second.scanId);
     } finally {
@@ -582,7 +582,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
-      db.prepare(
+      db.query(
         "UPDATE scans SET status = 'failed', target_path = ?, target_id = NULL WHERE id = ?",
       ).run(join(inaccessible, "checkout"), f.second.scanId);
     } finally {
@@ -675,11 +675,11 @@ test.skipIf(process.platform === "win32")(
       db.exec(
         "CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT NOT NULL); CREATE TABLE finding_workflows (id TEXT PRIMARY KEY, state_json TEXT NOT NULL)",
       );
-      db.prepare("INSERT INTO scans VALUES (?, ?)").run(
+      db.query("INSERT INTO scans VALUES (?, ?)").run(
         f.first.scanId,
         f.repository,
       );
-      db.prepare("INSERT INTO finding_workflows VALUES (?, ?)").run(
+      db.query("INSERT INTO finding_workflows VALUES (?, ?)").run(
         "legacy-workflow",
         JSON.stringify({ scanId: f.first.scanId }),
       );
@@ -766,7 +766,7 @@ connection.close()
         })
       ).scanId,
     ).toBe(f.second.scanId);
-    const db = new Database(database, { readonly: true });
+    const db = new Database(database, { readwrite: true, create: false });
     try {
       expect(
         (
@@ -775,9 +775,7 @@ connection.close()
             .get() as { version: number }
         ).version,
       ).toBeGreaterThan(version);
-      expect(db.prepare("SELECT id FROM security_targets").all()).toHaveLength(
-        1,
-      );
+      expect(db.query("SELECT id FROM security_targets").all()).toHaveLength(1);
     } finally {
       db.close();
     }
@@ -790,7 +788,7 @@ test("latest follows progress timestamps and excludes canceled scans", async () 
     join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
   );
   try {
-    db.prepare(
+    db.query(
       "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z' WHERE scan_id = ?",
     ).run(f.first.scanId);
     async function latest() {
@@ -807,7 +805,7 @@ test("latest follows progress timestamps and excludes canceled scans", async () 
       ).scanId;
     }
     expect(await latest()).toBe(f.first.scanId);
-    db.prepare(
+    db.query(
       "UPDATE scans SET canceled_at = '2099-01-02T00:00:00Z' WHERE id = ?",
     ).run(f.first.scanId);
     expect(await latest()).toBe(f.second.scanId);
@@ -832,14 +830,14 @@ test.skipIf(process.platform === "win32")(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
     try {
-      db.prepare("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
         "non-git-target",
         other,
         "Synthetic non-Git target",
         "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:00Z",
       );
-      db.prepare(
+      db.query(
         "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
       ).run(other, "non-git-target", f.second.scanId);
     } finally {
@@ -885,7 +883,7 @@ test.skipIf(process.platform === "win32")(
     );
     try {
       db.exec("PRAGMA wal_autocheckpoint = 0");
-      db.prepare("UPDATE scans SET target_path = ? WHERE id = ?").run(
+      db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
         target,
         f.first.scanId,
       );
