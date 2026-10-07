@@ -1143,6 +1143,7 @@ interface SelectedFindings {
 
 interface PatchRiskRequest {
   state?: GitPatchState;
+  readonly scope?: string;
   readonly auth?: ScanAuthMode;
   readonly environment?: NodeJS.ProcessEnv;
   readonly directory?: string;
@@ -5207,11 +5208,6 @@ export async function main(
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
             patchResult = { ...patchResult, patches };
-            const patchContext = patchRiskBase?.context ?? publication?.context;
-            const verifiedFiles =
-              patchContext === undefined || exitCode !== 0
-                ? []
-                : await verifiedPatchFiles(selected, patches, patchContext);
             const { files } = await changedPatchFiles(
               selected.repository,
               patchBase,
@@ -5231,6 +5227,11 @@ export async function main(
                 `Patch did not complete successfully; ${files.length} files changed. Review the patch results before retrying.`,
               );
             }
+            const patchContext = patchRiskBase?.context ?? publication?.context;
+            const verifiedFiles =
+              patchContext === undefined
+                ? []
+                : await verifiedPatchFiles(selected, patches, patchContext);
             errorOutput.write(
               `Patch applied. Files changed: ${files.length}.\n`,
             );
@@ -5240,6 +5241,7 @@ export async function main(
                 patchRisk = await runPatchRiskAssessment(
                   {
                     repository: patchRiskBase.root,
+                    scope: patchRiskBase.context.directory,
                     directory: selected.repository,
                     base: patchRiskBase.tree,
                     state: patchRiskBase,
@@ -7687,6 +7689,7 @@ function patchChangeSources(
   root: string,
   repository: string,
   files: readonly string[],
+  scope = repository,
 ): { files: string[]; transferred: Set<string>; deleted: Set<string> } {
   const selected = new Set(files);
   const transferred = new Set<string>();
@@ -7701,7 +7704,7 @@ function patchChangeSources(
     ) {
       transferred.add(source);
       if (status.startsWith("R")) {
-        if (isOutsidePath(source))
+        if (isOutsidePath(relative(scope, resolve(repository, source))))
           throw new CodexSecurityError(
             "Patch files must remain inside the scanned repository.",
           );
@@ -8819,6 +8822,7 @@ async function assessPatchRisk(
               checkout,
               request.repository,
               request.files,
+              request.scope,
             ).files;
       const files = selected?.some(
         (file) =>
