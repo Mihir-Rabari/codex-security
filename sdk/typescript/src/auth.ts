@@ -76,9 +76,13 @@ export function codexSecurityPrivatePaths(
     join(homedir(), ".config", "gh"),
     ...[process.env, environment].flatMap((source) => {
       const appData = environmentEntry(source, "AppData");
-      return process.platform === "win32" && appData
-        ? [join(appData, "GitHub CLI")]
-        : [];
+      const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
+      return [
+        ...(xdg ? [join(xdg, "gh")] : []),
+        ...(process.platform === "win32" && appData
+          ? [join(appData, "GitHub CLI")]
+          : []),
+      ];
     }),
     githubConfigDirectory || join(homedir(), ".config", "gh"),
     githubConfigDirectory ||

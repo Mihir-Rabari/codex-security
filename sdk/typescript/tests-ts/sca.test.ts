@@ -548,6 +548,7 @@ test.each(["api key", "command"] as const)(
     let preload: string;
     const f = await fixture({
       turns: ["completed", "completed"],
+      gitHubConfig: "explicit",
       mcpConfig: initialConfig,
       codexOverrides: providerConfig,
       codexFactory: (options) =>
@@ -606,6 +607,21 @@ process.exit(0);
     ]);
     for (const child of children) {
       expect(child.home).toBe(f.codexHome);
+      const permissions = child.argv.find((argument) =>
+        argument.startsWith("permissions.codex_security_dependencies="),
+      );
+      const profile = parseToml(permissions!)["permissions"] as Record<
+        string,
+        JsonObject
+      >;
+      const filesystem = profile["codex_security_dependencies"]![
+        "filesystem"
+      ] as JsonObject;
+      expect(filesystem[f.environment.GH_CONFIG_DIR!]).toEqual({ ".": "deny" });
+      expect(filesystem[join(f.environment.XDG_CONFIG_HOME!, "gh")]).toEqual({
+        ".": "deny",
+      });
+
       expect(child.argv).toContain('model_provider="synthetic.provider"');
       const providerOverrides = child.argv.filter((arg) =>
         arg.startsWith("model_providers="),
