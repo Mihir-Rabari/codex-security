@@ -112,7 +112,7 @@
     case_id: github-default-rest
     source_type: github_repo
   vars:
-    case_id: github-default-rest
+    case_id: github-request-7
     target_repo: https://github.com/promptfoo/promptfoo
     source_type_under_test: github_repo
     finding_input: "Source requested: code scanning."
