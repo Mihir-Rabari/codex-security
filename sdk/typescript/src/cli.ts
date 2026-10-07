@@ -7292,16 +7292,14 @@ async function preparePatchPublication(
     .map(
       (_, index, parts) => `refs/heads/${parts.slice(0, index + 1).join("/")}`,
     );
+  const conflicts = (ref: string) =>
+    refs.includes(ref) || ref.startsWith(`refs/heads/${branch}/`);
   const local = await dependencies.runRepositoryCommand(
     "git",
     ["for-each-ref", "--format=%(refname)", ...refs],
     repository,
   );
-  let existing = local
-    .split("\n")
-    .some(
-      (ref) => refs.includes(ref) || ref.startsWith(`refs/heads/${branch}/`),
-    );
+  let existing = local.split("\n").some(conflicts);
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -7311,52 +7309,53 @@ async function preparePatchPublication(
     existing = Boolean(destination.existing);
     for (const remote of destination.remotes) {
       if (existing) break;
-      existing = Boolean(
-        await withResolvedPatchRemote(
-          remote,
-          repository,
-          dependencies,
-          async (token, include, name) => {
-            const config = await dependencies.runRepositoryCommand(
-              "git",
-              [
-                "rev-parse",
-                "--sq-quote",
-                ...destination.settings.map((entry) =>
-                  entry
-                    .replace(/^remote\.origin\./u, `remote.${name}.`)
-                    .replace("\n", "="),
-                ),
-                `remote.${name}.url=${token}`,
-              ],
-              repository,
-            );
-            return dependencies.runRepositoryCommand(
-              "git",
-              [
-                "ls-remote",
-                "--heads",
-                "--",
-                name,
-                ...refs,
-                `refs/heads/${branch}/*`,
-              ],
-              repository,
-              {
-                environment: {
-                  GIT_CONFIG_PARAMETERS: [
-                    dependencies.environment["GIT_CONFIG_PARAMETERS"],
-                    config,
-                    include,
-                  ]
-                    .filter(Boolean)
-                    .join(" "),
-                },
+      const remoteRefs = await withResolvedPatchRemote(
+        remote,
+        repository,
+        dependencies,
+        async (token, include, name) => {
+          const config = await dependencies.runRepositoryCommand(
+            "git",
+            [
+              "rev-parse",
+              "--sq-quote",
+              ...destination.settings.map((entry) =>
+                entry
+                  .replace(/^remote\.origin\./u, `remote.${name}.`)
+                  .replace("\n", "="),
+              ),
+              `remote.${name}.url=${token}`,
+            ],
+            repository,
+          );
+          return dependencies.runRepositoryCommand(
+            "git",
+            [
+              "ls-remote",
+              "--heads",
+              "--",
+              name,
+              ...refs,
+              `refs/heads/${branch}/*`,
+            ],
+            repository,
+            {
+              environment: {
+                GIT_CONFIG_PARAMETERS: [
+                  dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                  config,
+                  include,
+                ]
+                  .filter(Boolean)
+                  .join(" "),
               },
-            );
-          },
-        ),
+            },
+          );
+        },
       );
+      existing = remoteRefs
+        .split("\n")
+        .some((line) => conflicts(line.split("\t")[1] ?? ""));
     }
   }
   if (existing) {

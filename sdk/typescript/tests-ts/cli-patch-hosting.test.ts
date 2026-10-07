@@ -28,6 +28,9 @@ describe("patch change tracking", () => {
         "codex-security",
         "codex-security/patch-scan-1/other",
         "codex-security/patch-scan-10",
+        "topic/refs/heads/codex-security",
+        "topic/refs/heads/codex-security/patch-scan-1",
+        "topic/refs/heads/codex-security/patch-scan-1/nested",
       ].map((existing) => [location, existing] as const),
     ),
   )(
@@ -39,7 +42,9 @@ describe("patch change tracking", () => {
       else git("branch", existing);
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
-      const blocked = existing !== "codex-security/patch-scan-10";
+      const blocked =
+        existing === "codex-security" ||
+        existing === "codex-security/patch-scan-1/other";
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
         async (
@@ -71,6 +76,20 @@ describe("patch change tracking", () => {
         expect(git("rev-parse", "HEAD")).toBe(head);
         expect(git("branch", "--show-current")).toBe("main");
         expect(git("ls-remote", remote)).toBe(before);
+      } else {
+        expect(
+          git(
+            "--git-dir",
+            remote,
+            "show",
+            "refs/heads/codex-security/patch-scan-1:src/finding-1.ts",
+          ),
+        ).toBe("fixed");
+        expect(
+          location === "remote"
+            ? git("ls-remote", remote, `refs/heads/${existing}`)
+            : git("rev-parse", `refs/heads/${existing}`),
+        ).toContain(head);
       }
     },
   );
