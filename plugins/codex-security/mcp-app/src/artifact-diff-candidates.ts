@@ -406,7 +406,17 @@ export function preserveUnresolvedDiffCandidates(
       .map((item) => [coverageCandidateKey(item), item]),
   );
   // Resolved rows still carry submitted evidence; archive it before clearing the gap.
-  for (const pending of submitted.coverage.deferred as JsonObject[]) {
+  for (const pending of [
+    ...(submitted.coverage.deferred as JsonObject[]),
+    ...[
+      ...(submitted.coverage.surfaces as JsonObject[]),
+      ...(submitted.coverage.explicitExclusions as JsonObject[]),
+    ].filter(
+      (row) =>
+        isTerminalCandidateDecision(row) &&
+        confirmed.has(coverageCandidateKey(row)),
+    ),
+  ]) {
     const key = coverageCandidateKey(pending);
     const finding = confirmed.get(key ?? "");
     if (finding) {
@@ -498,10 +508,21 @@ export function preserveUnresolvedDiffCandidates(
         typeof candidateId === "string" ? pending.get(candidateId) : undefined;
       if (!candidate) return item;
       const previous = object(item.candidate);
+      const snapshot = candidateSnapshot(previous, candidate);
       return {
         ...item,
+        ...(previous && !isDeepStrictEqual(previous, snapshot)
+          ? {
+              originalCandidates: exactUnion(
+                Array.isArray(item.originalCandidates)
+                  ? item.originalCandidates
+                  : [],
+                [previous],
+              ),
+            }
+          : {}),
         candidateId: candidate.candidate_id,
-        candidate: candidateSnapshot(previous, candidate),
+        candidate: snapshot,
         reason:
           item.reason === candidateReason(previous ?? candidate)
             ? candidateReason(candidate)

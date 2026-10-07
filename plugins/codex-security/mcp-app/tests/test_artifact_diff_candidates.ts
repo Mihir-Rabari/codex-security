@@ -2976,90 +2976,110 @@ for (const multiple of [false, true]) {
 }
 
 for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
-  for (const payload of [
-    "candidate",
-    "finding",
-    "previousFindings",
-    "originalCandidates",
+  for (const section of [
+    "deferred",
+    "surfaces",
+    "explicitExclusions",
   ] as const) {
-    test(`first Diff submission archives ${payload} evidence on ${outcome}`, async (t) => {
-      const reviewed = candidate("first-submission", "reportable");
-      const context = await fixture(t, [reviewed]);
-      const evidence = {
-        title: "Saved submission annotation",
-        evidence: "Original evidence only in this submission.",
-        authoredNote: "Keep original diagnostic text.",
-      };
-      const otherEvidence = {
-        ...evidence,
-        evidence: "Independent second evidence in this submission.",
-      };
-      const pending = {
-        id: "original-proof-gap",
-        candidateId: reviewed.candidate_id,
-        reason: "Original source review.",
-        [payload]:
-          payload === "previousFindings" || payload === "originalCandidates"
-            ? [evidence]
-            : evidence,
-      };
-      const otherPending = {
-        ...pending,
-        id: "independent-proof-gap",
-        reason: "Independent source review.",
-        [payload]:
-          payload === "previousFindings" || payload === "originalCandidates"
-            ? [otherEvidence]
-            : otherEvidence,
-      };
-      const input = draft([pending, otherPending]);
-      input.coverage.completeness = "partial";
-      if (outcome === "finding")
-        input.findings = [finding(reviewed.candidate_id)];
-      else
-        input.coverage.surfaces = [
-          {
-            id: "authored-terminal",
-            candidateId: reviewed.candidate_id,
-            label: "Authored final review",
-            disposition: outcome,
+    if (section !== "deferred" && outcome !== "finding") continue;
+    for (const payload of [
+      "candidate",
+      "finding",
+      "previousFindings",
+      "originalCandidates",
+    ] as const) {
+      test(`first Diff submission archives ${payload} ${section} evidence on ${outcome}`, async (t) => {
+        const reviewed = candidate("first-submission", "reportable");
+        const context = await fixture(t, [reviewed]);
+        const evidence = {
+          title: "Saved submission annotation",
+          evidence: "Original evidence only in this submission.",
+          authoredNote: "Keep original diagnostic text.",
+        };
+        const otherEvidence = {
+          ...evidence,
+          evidence: "Independent second evidence in this submission.",
+        };
+        const pending = {
+          id: "original-proof-gap",
+          candidateId: reviewed.candidate_id,
+          reason: "Original source review.",
+          [payload]:
+            payload === "previousFindings" || payload === "originalCandidates"
+              ? [evidence]
+              : evidence,
+        };
+        const otherPending = {
+          ...pending,
+          id: "independent-proof-gap",
+          reason: "Independent source review.",
+          [payload]:
+            payload === "previousFindings" || payload === "originalCandidates"
+              ? [otherEvidence]
+              : otherEvidence,
+        };
+        const input = draft(
+          section === "deferred" ? [pending, otherPending] : [],
+        );
+        if (section !== "deferred")
+          input.coverage[section] = [pending, otherPending].map((row) => ({
+            ...row,
+            label: "Original terminal review",
+            pattern: "src/handler.ts",
+            disposition: "rejected",
             receiptRefs: [],
-          },
-        ];
-      await recordCodexSecurityScanDraft(context, input);
-      const canonical =
-        outcome === "finding"
-          ? JSON.parse(
-              await readFile(path.join(context.root, "findings.json"), "utf8"),
-            )
-          : await readCoverage(context);
-      const contains = (value: unknown, expected: unknown): boolean => {
-        if (isDeepStrictEqual(value, expected)) return true;
-        if (Array.isArray(value))
-          return value.some((child) => contains(child, expected));
-        return (
-          value !== null &&
-          typeof value === "object" &&
-          Object.values(value).some((child) => contains(child, expected))
-        );
-      };
-      for (const expected of [evidence, otherEvidence])
-        assert.ok(contains(canonical, expected));
-      const checkpointRoot = path.join(context.root, "checkpoints");
-      for (const name of await readdir(checkpointRoot)) {
-        const saved = JSON.parse(
-          await readFile(path.join(checkpointRoot, name), "utf8"),
-        );
+          }));
+        input.coverage.completeness = "partial";
+        if (outcome === "finding")
+          input.findings = [finding(reviewed.candidate_id)];
+        else
+          input.coverage.surfaces = [
+            {
+              id: "authored-terminal",
+              candidateId: reviewed.candidate_id,
+              label: "Authored final review",
+              disposition: outcome,
+              receiptRefs: [],
+            },
+          ];
+        await recordCodexSecurityScanDraft(context, input);
+        const canonical =
+          outcome === "finding"
+            ? JSON.parse(
+                await readFile(
+                  path.join(context.root, "findings.json"),
+                  "utf8",
+                ),
+              )
+            : await readCoverage(context);
+        const contains = (value: unknown, expected: unknown): boolean => {
+          if (isDeepStrictEqual(value, expected)) return true;
+          if (Array.isArray(value))
+            return value.some((child) => contains(child, expected));
+          return (
+            value !== null &&
+            typeof value === "object" &&
+            Object.values(value).some((child) => contains(child, expected))
+          );
+        };
         for (const expected of [evidence, otherEvidence])
-          assert.ok(contains(saved, expected));
-      }
-      assert.equal(
-        (await readCoverage(context)).deferred.some(
-          (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
-        ),
-        false,
-      );
-    });
+          assert.ok(contains(canonical, expected));
+        const checkpointRoot = path.join(context.root, "checkpoints");
+        for (const name of await readdir(checkpointRoot)) {
+          const saved = JSON.parse(
+            await readFile(path.join(checkpointRoot, name), "utf8"),
+          );
+          for (const expected of [evidence, otherEvidence])
+            assert.ok(contains(saved, expected));
+        }
+        assert.equal(
+          (await readCoverage(context)).deferred.some(
+            (row: FixtureObject) => row.candidateId === reviewed.candidate_id,
+          ),
+          false,
+        );
+      });
+    }
   }
 }
 
@@ -3384,5 +3404,55 @@ for (const decision of ["suppressed", "not_applicable"] as const) {
       ),
       false,
     );
+  });
+}
+
+for (const variant of ["identical", "evidence", "phases"] as const) {
+  test(`first pending Diff submission retains authored candidate snapshot: ${variant}`, async (t) => {
+    const current = candidate("pending-snapshot", "deferred");
+    const context = await fixture(t, [current]);
+    const original = structuredClone(current);
+    if (variant === "evidence")
+      original.evidence = "Original authored evidence only in this submission.";
+    if (variant === "phases") {
+      original.validation = {
+        disposition: "reportable",
+        evidence: "Earlier validation details.",
+      };
+      original.attack_path = {
+        decision: "reportable",
+        evidence: "Earlier attack-path details.",
+      };
+    }
+    const input = draft([
+      {
+        candidateId: current.candidate_id,
+        candidate: original,
+        reason: "Authored proof remains pending.",
+      },
+    ]);
+    input.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, input);
+    const published = await readCoverage(context);
+    const pending = published.deferred.find(
+      (row: FixtureObject) => row.candidateId === current.candidate_id,
+    );
+    assert.deepEqual(pending.candidate, current);
+    assert.deepEqual(
+      pending.originalCandidates ?? [],
+      variant === "identical" ? [] : [original],
+    );
+    for (const name of await readdir(path.join(context.root, "checkpoints"))) {
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
+      );
+      const row = saved.coverage.deferred.find(
+        (entry: FixtureObject) => entry.candidateId === current.candidate_id,
+      );
+      assert.deepEqual(
+        row.originalCandidates ?? [],
+        variant === "identical" ? [] : [original],
+      );
+    }
   });
 }

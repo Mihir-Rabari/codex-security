@@ -129,6 +129,7 @@ export async function recordCodexSecurityScanDraft(
     const checkpoint = preserveUnresolvedDiffCandidates(
       preserveDiffCandidateDecisions(parsed, candidates),
       candidates,
+      parsed,
     );
     if (!publishDraft && resolvedDeferred(checkpoint.coverage).length === 0)
       await saveScanDraftCheckpoint(context, checkpoint, false);

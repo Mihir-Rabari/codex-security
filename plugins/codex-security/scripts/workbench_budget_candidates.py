@@ -84,6 +84,27 @@ def project_resolved_candidate_rows(
     return retained
 
 
+def archive_resolved_deferred_payloads(
+    coverage: dict[str, Any], findings: list[dict[str, Any]], resolved: dict[Any, str]
+) -> None:
+    states = {
+        key: ("reported", finding)
+        for finding in findings
+        if (key := finding_candidate_key(finding)) is not None and resolved.get(key) == "reported"
+    }
+    for field in ("surfaces", "explicitExclusions"):
+        rows = coverage.get(field)
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and (key := coverage_candidate_key(row)) is not None:
+                if (
+                    resolved.get(key) in ("rejected", "not_applicable")
+                    and row.get("disposition") == resolved[key]
+                ):
+                    states[key] = (resolved[key], row)
+    # Preserve the evidence before the caller removes resolved proof gaps.
+    project_resolved_candidate_rows(coverage["deferred"], "deferred", None, states)
+
+
 def archive_resolved_diff_payloads(
     coverage: dict[str, Any], findings: list[dict[str, Any]], submitted_coverage: dict[str, Any]
 ) -> None:

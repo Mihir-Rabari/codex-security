@@ -59,6 +59,7 @@ from workbench_budget_candidates import (
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
     archive_candidate_payloads,
+    archive_resolved_deferred_payloads,
     archive_resolved_diff_payloads,
     project_resolved_candidate_rows,
     recover_candidate_receipts,
@@ -2604,6 +2605,7 @@ def merge_saved_results(
                     output.append(copy.deepcopy(item))
 
     if isinstance(coverage.get("deferred"), list):
+        archive_resolved_deferred_payloads(coverage, findings, resolved)
         coverage["deferred"] = [
             item
             for item in coverage["deferred"]
