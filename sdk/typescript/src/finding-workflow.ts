@@ -69,6 +69,7 @@ export class FindingWorkflow {
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     private readonly pythonPath?: string,
+    private readonly protectedRoot?: string,
   ) {
     if (!id.trim())
       throw new CodexSecurityError("workflowId must be a nonempty string.");
@@ -188,6 +189,7 @@ export class FindingWorkflow {
       python: await resolvePluginPython({
         environment: this.environment,
         configuredPath: this.pythonPath,
+        protectedRoot: this.protectedRoot,
       }),
       environment: workbenchEnvironment(this.environment),
       failureMessage: "Could not save or resume the findings workflow",
