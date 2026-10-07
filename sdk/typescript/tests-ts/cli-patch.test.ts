@@ -3640,6 +3640,7 @@ describe("patch change tracking", () => {
         "move",
         "copy",
         "different",
+        "vanished",
         "empty",
         "generated-template",
         "generated-build",
@@ -3659,6 +3660,10 @@ describe("patch change tracking", () => {
           : change === "generated-build"
             ? "export const answer = 42;\n"
             : "SYNTHETIC_LOCAL_CONTENT\n";
+    const publishedContent =
+      change === "different" || change === "vanished"
+        ? "New independent content\n"
+        : content;
     const source =
       change === "generated-template"
         ? ".cache/template.ts"
@@ -3686,6 +3691,7 @@ describe("patch change tracking", () => {
       });
     }
     const permissions = unreadable ? await stat(unreadable) : undefined;
+    let removed = false;
     const before = git("rev-parse", "HEAD");
     const index = await readFile(join(directory, ".git/index"));
     const result = resultWithFindings(["high"]);
@@ -3699,20 +3705,33 @@ describe("patch change tracking", () => {
       {
         currentDirectory: directory,
         onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "git") {
+            const result = await runGitRepositoryCommand(
+              command,
+              args,
+              cwd,
+              options,
+            );
+            if (
+              change === "vanished" &&
+              !removed &&
+              args[0] === "ls-files" &&
+              args.includes("--ignored")
+            ) {
+              await rm(join(directory, source));
+              removed = true;
+            }
+            return result;
+          }
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
         onCodex: async (_args, output) => {
           if (change === "move")
             await rename(join(directory, source), join(directory, "new.ts"));
-          else
-            await writeFile(
-              join(directory, "new.ts"),
-              change === "different" ? "New independent content\n" : content,
-            );
+          else await writeFile(join(directory, "new.ts"), publishedContent);
           output?.stdout.write(
             JSON.stringify({
               patches: [
@@ -3729,6 +3748,7 @@ describe("patch change tracking", () => {
         },
       },
     );
+    if (change === "vanished") expect(removed).toBe(true);
     if (unreadable && permissions) {
       expect(await stat(unreadable)).toMatchObject({
         mode: permissions.mode,
@@ -3757,7 +3777,7 @@ describe("patch change tracking", () => {
       expect(git("ls-remote", "origin")).toBe("");
     }
     expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
-      change === "different" ? "New independent content\n" : content,
+      publishedContent,
     );
   });
 

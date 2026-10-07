@@ -7153,7 +7153,10 @@ async function preparePatchPublication(
     for (const path of ignored.split("\0").filter(Boolean)) {
       const digest = await hashPublicationFile(root, path).catch(
         (error: unknown) => {
-          if (isJsonObject(error) && error["code"] === "EACCES")
+          if (
+            isJsonObject(error) &&
+            (error["code"] === "EACCES" || error["code"] === "ENOENT")
+          )
             return undefined;
           throw error;
         },
