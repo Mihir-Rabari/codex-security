@@ -5033,6 +5033,8 @@ function selectedWorkerRuntimeConfig(
     ...Object.fromEntries(
       [
         "features",
+        "model_auto_compact_token_limit",
+        "model_context_window",
         "model_instructions_file",
         "sqlite_home",
         "model_verbosity",
