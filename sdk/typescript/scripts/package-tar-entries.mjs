@@ -140,7 +140,7 @@ export function readTarArchive(archiveBytes) {
   const archiveFiles = new Map();
   const archiveMetadata = [];
   const sparseFiles = new Map();
-  let npmManifest;
+  const npmFiles = new Map();
   let offset = 0;
   const globalAttributes = new Map();
   const nextAttributes = new Map();
@@ -250,7 +250,7 @@ export function readTarArchive(archiveBytes) {
         const contents = archiveBytes.subarray(contentsStart, contentsEnd);
         // npm ignores old-GNU sparse entries and GNU sparse name overrides.
         const npmPath = oldSparse ? undefined : (nextNpmPath ?? headerPath);
-        if (npmPath === "package/package.json") npmManifest = contents;
+        if (npmPath !== undefined) npmFiles.set(npmPath, contents);
         archiveMetadata.push(archiveBytes.subarray(offset, contentsStart));
         const paxSparseMap = nextAttributes.get("GNU.sparse.map");
         if (
@@ -287,10 +287,8 @@ export function readTarArchive(archiveBytes) {
   const deferredStreams = new Set(
     [...sparseFiles.keys()].map((path) => path.replace(/\.part-[0-9]+$/iu, "")),
   );
-  const deferredFiles = new Map();
-  for (const [path, contents] of archiveFiles) {
+  for (const path of archiveFiles.keys()) {
     if (deferredStreams.has(path.replace(/\.part-[0-9]+$/iu, ""))) {
-      deferredFiles.set(path, contents);
       archiveFiles.delete(path);
     }
   }
@@ -299,7 +297,6 @@ export function readTarArchive(archiveBytes) {
     files: archiveFiles,
     metadata: archiveMetadata,
     sparseFiles,
-    deferredFiles,
-    npmManifest,
+    npmFiles,
   };
 }

@@ -291,8 +291,9 @@ function extractedArchiveFiles() {
 }
 
 const archiveFiles = extractedArchiveFiles();
-if (storedArchive.npmManifest === undefined) invalidTarEntry();
-const packageJson = JSON.parse(storedArchive.npmManifest.toString("utf8"));
+const npmManifest = storedArchive.npmFiles.get("package/package.json");
+if (npmManifest === undefined) invalidTarEntry();
+const packageJson = JSON.parse(npmManifest.toString("utf8"));
 if (
   packageJson.name !== "@openai/codex-security" ||
   packageJson.license !== "Apache-2.0"
@@ -306,11 +307,10 @@ assertExpectedGitHead(
 
 assertPublicPackageContents(archiveFiles);
 assertStoredSparseContents(storedArchive, archiveFiles);
-for (const [path, { contents, npmPath }] of storedArchive.sparseFiles) {
+for (const [path, { npmPath }] of storedArchive.sparseFiles) {
   if (npmPath !== path) invalidTarEntry();
-  storedArchive.deferredFiles.set(path, contents);
 }
-assertPublicPackageContents(storedArchive.deferredFiles);
+assertPublicPackageContents(storedArchive.npmFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(

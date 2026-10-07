@@ -452,6 +452,8 @@ describe("npm package tar listings", () => {
     "pax-then-long-name",
     "long-name-then-pax",
     "pax-then-wrong-long-name",
+    "overwrite-text",
+    "overwrite-logo",
   ])("validates sparse assets as npm installs them: %s", (representation) => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
     try {
@@ -466,12 +468,14 @@ describe("npm package tar listings", () => {
         representation === "sparse-name" || representation === "pax-path";
       const wrongPath = "package/synthetic-storage.png";
       const orderedPath = representation.includes("then");
+      const overwrite = representation.startsWith("overwrite");
+      let stored =
+        representation === "overwrite-text" ? Buffer.from("fixture\n") : logo;
       const attributes: Record<string, string> = {
-        "GNU.sparse.size": String(logo.length),
+        "GNU.sparse.size": String(stored.length),
         "GNU.sparse.numblocks": "1",
-        "GNU.sparse.map": `0,${logo.length}`,
+        "GNU.sparse.map": `0,${stored.length}`,
       };
-      let stored = logo;
       if (representation === "pax-map-prefix") {
         const map = Buffer.alloc(512);
         map.write(`1\n0\n${logo.length}\n`);
@@ -498,6 +502,7 @@ describe("npm package tar listings", () => {
       }
       if (renamed || orderedPath || representation === "global-path")
         attributes["GNU.sparse.name"] = path;
+      if (overwrite) attributes["GNU.sparse.name"] = "package/README.md";
       if (representation === "pax-path" || orderedPath)
         attributes["path"] =
           representation === "pax-then-long-name" ? wrongPath : path;
@@ -530,8 +535,27 @@ describe("npm package tar listings", () => {
       const archivePath = join(root, "package.tgz");
       writeFileSync(
         archivePath,
-        gzipSync(packageTar({ additionalRecords: [record] })),
+        gzipSync(
+          packageTar({
+            overrides: overwrite
+              ? new Map([["package/README.md", Buffer.alloc(0)]])
+              : undefined,
+            additionalRecords: overwrite
+              ? [tarRecord(logo, { name: path }), record]
+              : [record],
+          }),
+        ),
       );
+      const extracted = spawnSync("tar", ["-xOzf", archivePath, path], {
+        encoding: "buffer",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      expect({
+        status: extracted.status,
+        stderr: extracted.stderr.toString(),
+      }).toEqual({ status: 0, stderr: "" });
+      expect(extracted.stdout.equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
@@ -565,10 +589,13 @@ describe("npm package tar listings", () => {
         "global-path",
         "pax-then-long-name",
         "long-name-then-pax",
+        "overwrite-logo",
       ].includes(representation);
       expect(
         existsSync(installedLogo) && readFileSync(installedLogo).equals(logo),
       ).toBe(compatible);
+      if (overwrite)
+        expect(readFileSync(installedLogo).equals(stored)).toBe(true);
       const checked = spawnSync(
         commandPath("node"),
         [
