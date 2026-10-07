@@ -14,7 +14,12 @@ from candidate_identity import (
     finding_candidate_key,
     surface_reference_key,
 )
-from finalize_scan_contract import _recover_unsealed_coverage
+from finalize_scan_contract import (
+    ContractError,
+    _recover_unsealed_coverage,
+    _require_portable_relative_path,
+    _require_scan_local_file,
+)
 
 
 def recover_candidate_receipts(
@@ -43,6 +48,43 @@ def recover_candidate_receipts(
         directory = scan_dir / Path(source).parent
         scan_dir = directory.parent if directory.name == "checkpoints" else directory
     parent = copy.deepcopy(parent)
+    if source is not None:
+        coverage = parent["coverage"]
+        for index, row in enumerate(coverage["surfaces"]):
+            if not isinstance(row, dict) or row.get("disposition") not in (
+                "rejected",
+                "not_applicable",
+            ):
+                continue
+            refs = row.get("receiptRefs", [])
+            invalid = not isinstance(row.get("label"), str) or not row["label"]
+            recovered = []
+            if not isinstance(refs, list):
+                warnings.append(
+                    f"Skipped malformed receipt references for coverage surface {index + 1}: expected an array."
+                )
+                invalid = True
+            for position, ref in enumerate(refs if isinstance(refs, list) else []):
+                context = f"coverage.surfaces[{index}].receiptRefs[{position}]"
+                try:
+                    if not isinstance(ref, str):
+                        raise ContractError(f"{context}: expected a string")
+                    ref = _require_portable_relative_path(ref, context)
+                    if not ref.startswith("artifacts/"):
+                        raise ContractError(f"{context}: expected a file under artifacts/")
+                    _require_scan_local_file(scan_dir, ref, context)
+                except ContractError as exc:
+                    warnings.append(
+                        f"Skipped malformed coverage receipt {index + 1}.{position + 1}: {exc}."
+                    )
+                    invalid = True
+                    continue
+                recovered.append(ref)
+            row["receiptRefs"] = recovered
+            if invalid:
+                row["disposition"] = "needs_follow_up"
+                coverage["completeness"] = "partial"
+        return parent
     _recover_unsealed_coverage(
         parent["coverage"],
         Path(__file__).resolve().parent.parent / "schemas",

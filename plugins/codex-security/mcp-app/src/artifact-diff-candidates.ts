@@ -520,13 +520,14 @@ export function preserveUnresolvedDiffCandidates(
       const snapshot = candidateSnapshot(previous, candidate);
       return {
         ...item,
-        ...(previous && !isDeepStrictEqual(previous, snapshot)
+        ...(Object.hasOwn(item, "candidate") &&
+        !isDeepStrictEqual(item.candidate, snapshot)
           ? {
               originalCandidates: exactUnion(
                 Array.isArray(item.originalCandidates)
                   ? item.originalCandidates
                   : [],
-                [previous],
+                [item.candidate],
               ),
             }
           : {}),

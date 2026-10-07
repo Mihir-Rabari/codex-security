@@ -19,6 +19,7 @@ import {
   loadContract,
   ScanResult,
 } from "../src/index.js";
+import type { DeferredCoverage } from "../src/models.js";
 import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -1620,15 +1621,14 @@ for (const candidate of [
     const scanDir = await copyExample();
     const coverage = await readJson(join(scanDir, "coverage.json"));
     coverage["completeness"] = "partial";
-    coverage["deferred"] = [
-      {
-        id: "historical-proof",
-        candidateId: "historical-candidate",
-        reason: "The historical proof gap remains.",
-        candidate,
-        surfaceIds: [coverage["surfaces"][0]["id"]],
-      },
-    ];
+    const deferred: DeferredCoverage = {
+      id: "historical-proof",
+      candidateId: "historical-candidate",
+      reason: "The historical proof gap remains.",
+      candidate,
+      surfaceIds: [coverage["surfaces"][0]["id"]],
+    };
+    coverage["deferred"] = [deferred];
     await writeJson(join(scanDir, "coverage.json"), coverage);
     await reseal(scanDir);
     const original = await readFile(join(scanDir, "coverage.json"));

@@ -340,9 +340,7 @@ export interface CoverageDocument {
     /**
      * Saved candidate details and evidence awaiting a final decision.
      */
-    candidate?: {
-      [k: string]: unknown;
-    };
+    candidate?: unknown;
     [k: string]: unknown;
   }[];
   /**

@@ -889,3 +889,52 @@ def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
     assert replay is not None
     assert (original in replay[2]["deferred"]) is unresolved
     assert all(path.read_bytes() == data for path, data in source_bytes.items())
+
+
+@pytest.mark.parametrize("deferred_id", [False, True])
+@pytest.mark.parametrize("surface_id", [False, True])
+@pytest.mark.parametrize("receipt", ["valid", "missing"])
+def test_worker_receipt_recovery_preserves_optional_semantic_ids(
+    tmp_path: Path, generic_review_recovery, deferred_id: bool, surface_id: bool, receipt: str
+) -> None:
+    module, pending, terminal, binding = generic_review_recovery
+    write_saved_parent(tmp_path, pending, 100)
+    terminal["coverage"].pop("resolvedDeferred")
+    unrelated = {
+        "candidateId": "unrelated",
+        "reason": "Unrelated pending proof.",
+        "candidate": {"evidence": "Unrelated opaque evidence."},
+    }
+    if deferred_id:
+        unrelated["id"] = "unrelated-gap"
+    terminal["coverage"]["deferred"] = [unrelated]
+    terminal["coverage"]["surfaces"] = [
+        {
+            "candidateId": "decision",
+            "label": "Decision review",
+            "disposition": "rejected",
+            "receiptRefs": ["artifacts/review.txt"],
+        }
+    ]
+    if surface_id:
+        terminal["coverage"]["surfaces"][0]["id"] = "decision-surface"
+    output = tmp_path / "worker"
+    output.mkdir()
+    if receipt == "valid":
+        (output / "artifacts").mkdir()
+        (output / "artifacts/review.txt").write_text("Synthetic verified receipt.\n")
+    result = output / "result.json"
+    result.write_text(json.dumps(terminal))
+    os.utime(result, ns=(300, 300))
+    before = result.read_bytes()
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    saved = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert saved is not None
+    unresolved = [row for row in saved[2]["deferred"] if row.get("candidateId") == "unrelated"]
+    assert len(unresolved) == 1 and unresolved[0]["candidate"] == unrelated["candidate"]
+    decisions = [row for row in saved[2]["surfaces"] if row.get("candidateId") == "decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["disposition"] == ("rejected" if receipt == "valid" else "needs_follow_up")
+    assert result.read_bytes() == before

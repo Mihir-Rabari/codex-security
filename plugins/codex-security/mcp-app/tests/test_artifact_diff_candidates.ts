@@ -3652,3 +3652,40 @@ for (const candidate of [
     );
   });
 }
+
+for (const payload of [
+  null,
+  "Original opaque proof.",
+  ["Original trace."],
+  { evidence: "Original object proof." },
+]) {
+  test(`matching Diff ledger archives original opaque candidate ${JSON.stringify(payload)}`, async (t) => {
+    const context = await fixture(t);
+    const current = candidate("opaque-pending");
+    await writeLedger(context, [current]);
+    const input = draft([
+      {
+        id: "opaque",
+        candidateId: current.candidate_id,
+        reason: "Original proof gap.",
+        candidate: payload,
+      },
+    ]);
+    input.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, input);
+    const row = (await readCoverage(context)).deferred.find(
+      (entry: FixtureObject) => entry.candidateId === current.candidate_id,
+    );
+    assert.deepEqual(row.candidate, current);
+    assert.deepEqual(row.originalCandidates, [payload]);
+    for (const name of await readdir(path.join(context.root, "checkpoints"))) {
+      const saved = JSON.parse(
+        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
+      );
+      const row = saved.coverage.deferred.find(
+        (entry: FixtureObject) => entry.candidateId === current.candidate_id,
+      );
+      assert.deepEqual(row.originalCandidates, [payload]);
+    }
+  });
+}

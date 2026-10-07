@@ -154,7 +154,8 @@
             "description": "Stable identity of a saved candidate; omitted for general coverage work."
           },
           "candidate": {
-            "description": "Saved candidate details and evidence awaiting a final decision."
+            "description": "Saved candidate details and evidence awaiting a final decision.",
+            "tsType": "unknown"
           }
         }
       }
