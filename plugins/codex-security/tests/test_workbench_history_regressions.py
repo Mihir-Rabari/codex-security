@@ -1926,3 +1926,37 @@ def test_false_positive_feedback_observes_sealed_stopped_recurrence(history, ter
         "falsePositives"
     ]
     assert bool(feedback) is (terminal == "no-recurrence")
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_scope_expansion_skips_same_target_pairs_but_keeps_linked_comparisons(
+    linked_history, linked
+):
+    state, root, repository, other, revision = linked_history
+    scans = [
+        create_cli_scan(state, root, repository, finding=False, target_revision=revision)
+        for _ in range(3)
+    ]
+    for before, after in ((scans[0], scans[1]), (scans[0], scans[2]), (scans[1], scans[2])):
+        save_scan_matches(state, before, after)
+    if linked:
+        related = create_cli_scan(state, root, other, finding=False, target_revision=revision)
+        save_scan_matches(state, scans[0], related)
+    ns = runpy.run_path(str(SCRIPT), run_name="scope_expansion_comparison_fixture")
+    module = ns["scan_history"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM scans WHERE id=?", (scans[0]["scanId"],)).fetchone()
+        with patch.object(
+            module, "_same_registered_repository", wraps=module._same_registered_repository
+        ) as same:
+            targets = module.saved_repository_target_ids(connection, row)
+        expected = {row["target_id"]}
+        if linked:
+            expected.add(
+                connection.execute(
+                    "SELECT target_id FROM scans WHERE id=?", (related["scanId"],)
+                ).fetchone()[0]
+            )
+        assert targets == expected
+        assert same.call_count == (1 if linked else 0)

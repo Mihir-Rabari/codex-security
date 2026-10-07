@@ -487,9 +487,26 @@ export function renderScanHistory(
     );
     for (const rootCause of [result["rootCause"], result["root_cause"]]) {
       if (
-        typeof rootCause === "object" &&
-        rootCause !== null &&
-        !Array.isArray(rootCause) &&
+        typeof rootCause !== "object" ||
+        rootCause === null ||
+        Array.isArray(rootCause)
+      ) {
+        continue;
+      }
+      for (const key of ["codeEvidence", "code_evidence"]) {
+        const embedded = rootCause[key];
+        if (!Array.isArray(embedded)) continue;
+        for (const entry of embedded) {
+          if (
+            typeof entry === "object" &&
+            entry !== null &&
+            !Array.isArray(entry)
+          ) {
+            evidenceEntries.push(entry);
+          }
+        }
+      }
+      if (
         typeof rootCause["code"] === "string" &&
         !evidenceEntries.some((entry) => entry["code"] === rootCause["code"])
       ) {

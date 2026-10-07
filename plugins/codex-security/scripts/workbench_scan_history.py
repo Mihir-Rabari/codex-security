@@ -1042,6 +1042,7 @@ def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Ro
             JOIN scans AS after ON after.id = comparisons.after_scan_id
             WHERE (before.target_id = ? OR after.target_id = ?)
                 AND before.status = 'complete' AND after.status = 'complete'
+                AND before.target_id != after.target_id
             """,
             (target_id, target_id),
         ):

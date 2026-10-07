@@ -4,6 +4,31 @@ import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test.each(["rootCause", "root_cause"])(
+    "renders embedded section evidence in %s alongside its summary",
+    (key) => {
+      const output = renderScanHistory(
+        {
+          title: "Synthetic saved finding",
+          severity: { level: "high" },
+          [key]: {
+            summary: "Synthetic embedded root cause",
+            codeEvidence: [
+              { id: "root", code: "synthetic_embedded_source();" },
+            ],
+            code_evidence: [
+              { id: "legacy", code: "synthetic_embedded_legacy();" },
+            ],
+          },
+        },
+        "finding",
+        { color: false },
+      );
+      expect(output).toContain("Synthetic embedded root cause");
+      expect(output).toContain("synthetic_embedded_source();");
+      expect(output).toContain("synthetic_embedded_legacy();");
+    },
+  );
   test.each([false, true])(
     "keeps native reachability and complementary root evidence with catalogs %s",
     (catalog) => {
