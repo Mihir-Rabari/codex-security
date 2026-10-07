@@ -5972,10 +5972,17 @@ export async function main(
         for (let index = 0; index < frameworkArguments.length; index++) {
           const argument = frameworkArguments[index]!;
           if (argument === "--token-count") continue;
-          if (/^--token-(?:limit|offset)=/u.test(argument)) continue;
           if (argument === "--token-limit" || argument === "--token-offset") {
-            index++;
-            continue;
+            const value = frameworkArguments[index + 1];
+            // Keep malformed transform values so replay still rejects them.
+            if (
+              value !== undefined &&
+              value.trim() !== "" &&
+              Number.isFinite(Number(value))
+            ) {
+              index++;
+              continue;
+            }
           }
           validationArguments.push(argument);
         }

@@ -308,3 +308,31 @@ test("early token errors do not compare the renderer with installed CLI skills",
     installed.mockRestore();
   }
 });
+
+for (const flag of ["--token-limit", "--token-offset"] as const) {
+  test(`invalid ${flag} diagnostic resembling output truncation never initializes a scanner`, async () => {
+    for (const equals of [false, true]) {
+      let initialized = 0;
+      const stdout = capture();
+      const stderr = capture();
+      const value = "[truncated: showing tokens";
+      const args = equals ? [`${flag}=${value}`] : [flag, value];
+      expect(
+        await main(
+          ["scan", ".", "--json", ...args],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onConfig: () => {
+              initialized++;
+              throw new Error("Scanner initialized for invalid arguments");
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(initialized).toBe(0);
+      expect(stderr.text()).toContain(flag);
+      expect(stderr.text()).toContain(value);
+    }
+  });
+}
