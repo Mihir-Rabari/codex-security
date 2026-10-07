@@ -1,5 +1,6 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
+import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
@@ -905,3 +906,44 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test("saved-scan bootstrap waits for a concurrent database writer", async () => {
+  const f = await fixture();
+  const writer = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+    const { Database } = require("bun:sqlite");
+    const database = new Database(${JSON.stringify(join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"))});
+    database.exec("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE");
+    process.stdout.write("locked");
+    setTimeout(() => {
+      database.exec("COMMIT");
+      database.close();
+    }, 1000);
+  `,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const closed = once(writer, "close");
+  try {
+    await Promise.race([
+      once(writer.stdout!, "data"),
+      closed.then(() => {
+        throw new Error("Writer exited before acquiring its lock");
+      }),
+    ]);
+    const workbench = await savedScanWorkbench(f.first.scanId, {
+      environment: f.environment,
+      currentDirectory: f.repository,
+      pluginRoot: PLUGIN_ROOT,
+    });
+    const result = await workbench(["get-scan", "--scan-id", f.first.scanId]);
+    expect((result["scan"] as { scanId: string }).scanId).toBe(f.first.scanId);
+    expect((await closed)[0]).toBe(0);
+  } finally {
+    writer.kill();
+    await closed;
+  }
+});

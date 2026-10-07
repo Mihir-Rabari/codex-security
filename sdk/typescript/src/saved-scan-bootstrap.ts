@@ -185,6 +185,7 @@ async function readTargets(
           }
         : { readOnly: true },
     );
+    database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {
       const columns = readRows<{ name: string }>(
