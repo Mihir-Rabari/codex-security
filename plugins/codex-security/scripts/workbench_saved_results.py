@@ -1284,8 +1284,6 @@ def merge_saved_results(
     def coverage_attempt(field: str, item: dict[str, Any], worker: Any, relative: str) -> int:
         attempt = coverage_source_attempt(relative, worker)
         value = dict(item)
-        if field == "surfaces":
-            value["receiptRefs"] = relative_surface_receipts(item, worker["id"], relative, relative)
         for path, draft, owner in sources:
             prior_attempt = coverage_source_attempt(path, worker)
             if owner != worker["id"] or not 0 < prior_attempt < attempt:
@@ -1300,6 +1298,20 @@ def merge_saved_results(
                     continue
                 prior = dict(record)
                 if field == "surfaces":
+                    refs = relative_surface_receipts(item, worker["id"], relative, relative)
+                    directory = Path(path).parent
+                    if directory.name == "checkpoints":
+                        directory = directory.parent
+                    value["receiptRefs"] = (
+                        [
+                            ref.removeprefix(directory.as_posix() + "/")
+                            if isinstance(ref, str)
+                            else ref
+                            for ref in refs
+                        ]
+                        if isinstance(refs, list)
+                        else refs
+                    )
                     prior["receiptRefs"] = relative_surface_receipts(
                         record, worker["id"], path, path
                     )
@@ -1355,19 +1367,22 @@ def merge_saved_results(
                             and (worker["id"], provenance["attempt"]) in reviewed_attempts
                             and isinstance(provenance.get("sourceId"), str)
                         ):
-                            surface_ids[provenance["sourceId"]] = surface["id"]
+                            surface_ids.setdefault(provenance["sourceId"], surface["id"])
                 surfaces = source.get("surfaces", [])
+                current_surface_ids = {}
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
                         continue
                     retained = retained_coverage_record("surfaces", surface, worker, relative)
-                    surface_ids[surface["id"]] = (
+                    current_surface_ids.setdefault(
+                        surface["id"],
                         retained["id"]
                         if retained is not None and isinstance(retained.get("id"), str)
                         else project_missing_record(
                             "surfaces", surface, offset, worker, source, relative
-                        )["id"]
+                        )["id"],
                     )
+                surface_ids.update(current_surface_ids)
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
@@ -1459,6 +1474,12 @@ def merge_saved_results(
                 or source_order[relative] < worker_result_order
             )
         )
+
+    frozen_parent_projections = {
+        relative: projection
+        for relative, projection in frozen_parent_projections.items()
+        if not source_superseded(relative, None)
+    }
 
     projected_coverages = [
         accepted_coverage,
@@ -1645,6 +1666,10 @@ def merge_saved_results(
         )
         return bool(document["findings"])
 
+    deferred_rows = {
+        relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
+    }
+
     accepted_projected_records: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
     for relative, draft, source_owner in sources:
         if source_owner is None or relative not in current_results | selected_observations.keys():
@@ -1699,9 +1724,6 @@ def merge_saved_results(
         return None
 
     source_order["parent"] = (0, parent_modified)
-    deferred_rows = {
-        relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
-    }
     # A legacy source can contain independent tasks with the same explicit ID.
     # Later rewrites cannot make an ID-only closure identify one of those tasks.
     ambiguous_deferred: set[tuple[str | None, str]] = set()
@@ -1836,6 +1858,25 @@ def merge_saved_results(
     def finding_owner(owner: str | None, finding: dict[str, Any]) -> str | None:
         provenance = finding.get("provenance")
         if owner is None and isinstance(provenance, dict):
+            originals = provenance.get("sourceFindings")
+            candidate = finding_candidate_id(finding)
+            owners = (
+                {
+                    source["id"].rsplit(":", 1)[0]
+                    for source in originals
+                    if isinstance(originals, list)
+                    and isinstance(source, dict)
+                    and isinstance(source.get("id"), str)
+                    and ":" in source["id"]
+                    and source["id"].rsplit(":", 1)[0] in workers_by_id
+                    and isinstance(source.get("finding"), dict)
+                    and finding_candidate_id(source["finding"]) == candidate
+                }
+                if isinstance(originals, list)
+                else set()
+            )
+            if len(owners) == 1:
+                return next(iter(owners))
             retained = provenance.get("workerId")
             if isinstance(retained, str) and retained in workers_by_id:
                 return retained
