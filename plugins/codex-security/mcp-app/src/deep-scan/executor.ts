@@ -135,6 +135,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? { model: this.modelSettings.model }
           : {}),
       };
+      // The preflight file has catalog defaults; the private profile owns routing.
+      if (runtimeSettings.nativeProfile !== undefined)
+        delete modelConfig.model_providers;
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
       const configOverrides = [
