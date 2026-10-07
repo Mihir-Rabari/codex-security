@@ -112,39 +112,6 @@ def test_rank_input_keeps_large_generated_python(tmp_path: Path, mode: str) -> N
     assert rows[1]["preview"] == "value = 1"
 
 
-@pytest.mark.parametrize("mode", ["repo", "revisions", "local-patch"])
-@pytest.mark.parametrize(
-    "source",
-    ['{"\\ud800":1}', '{"value":' + "1" * 4301 + "}"],
-    ids=["surrogate", "integer-limit"],
-)
-def test_rank_input_samples_json_without_a_renderable_outline(
-    tmp_path: Path, mode: str, source: str
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    git(repo, "commit", "--allow-empty", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    (repo / "data.json").write_text(source, encoding="utf-8")
-    output = tmp_path / "rank.jsonl"
-    if mode == "repo":
-        arguments = ["make-repo-rank-input", "--repo", str(repo)]
-    else:
-        arguments = ["make-diff-rank-input", "--repo", str(repo), "--mode", mode, "--base", base]
-        if mode == "revisions":
-            git(repo, "add", ".")
-            git(repo, "commit", "-qm", "change")
-            arguments.extend(["--head", "HEAD"])
-
-    run_cli(*arguments, "--preview-bytes", "128", "--out", str(output))
-
-    rows = read_jsonl(output)
-    assert len(rows) == 1
-    assert rows[0]["path"] == "data.json"
-    assert rows[0]["preview"] == source[:128]
-
-
 def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -171,7 +138,10 @@ def test_revision_previews_use_the_worktree_read_budget(tmp_path: Path) -> None:
         str(output),
     )
 
-    assert read_jsonl(output)[0]["preview"] == "function visible()"
+    preview = read_jsonl(output)[0]["preview"]
+    assert preview.startswith("def visible():\n    pass\n# comment")
+    assert len(preview.encode("utf-8")) <= 1024
+    assert "outside" not in preview
 
 
 def test_revision_rank_input_classifies_bytes_beyond_the_preview_sample(tmp_path: Path) -> None:
@@ -207,7 +177,11 @@ def test_rank_input_streams_classification_and_bounds_previews(
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     source = repo / "src" / "large.py"
-    source.write_bytes(b"def visible():\n    pass\n" + b"# source comment\n" * (128 * 1024))
+    source.write_bytes(
+        b"def visible():\n    pass\n"
+        + b"# source comment\n" * (128 * 1024)
+        + b"def outside():\n    pass\n"
+    )
     output = tmp_path / "rank_input.jsonl"
     arguments = ["make-repo-rank-input", "--repo", str(repo), "--out", str(output)]
     if scope in {"explicit", "overlap"}:
@@ -251,7 +225,10 @@ def test_rank_input_streams_classification_and_bounds_previews(
     rows = read_jsonl(output)
     assert len(rows) == 1
     assert rows[0]["path"] == "src/large.py"
-    assert rows[0]["preview"] == "function visible()"
+    preview = rows[0]["preview"]
+    assert preview.startswith("def visible():\n    pass\n# source comment")
+    assert len(preview.encode("utf-8")) <= 1024
+    assert "outside" not in preview
 
 
 @pytest.mark.parametrize("mode", ["repo", "revisions", "staged", "unstaged"])
@@ -296,7 +273,7 @@ def test_rank_input_includes_source_cases(tmp_path: Path, mode: str) -> None:
         {
             "path": case.path,
             "area": "." if mode == "repo" else "diff",
-            "preview": case.after if case.preview is None else case.preview,
+            "preview": case.after,
         }
         for case in sorted(SOURCE_CASES, key=lambda case: case.path)
     ]
@@ -996,34 +973,3 @@ def test_make_rank_input_decodes_bom_marked_utf16_source(tmp_path: Path, mode: s
     run_cli(*arguments, "--out", str(output))
 
     assert {row["path"]: row["preview"] for row in read_jsonl(output)} == expected
-
-
-def test_revision_preview_uses_the_same_read_window_as_local_files(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    initialize_repo(repo)
-    source = repo / "example.py"
-    source.write_text("def first():\n    pass\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "base")
-    base = git(repo, "rev-parse", "HEAD")
-    source.write_text(
-        "def first():\n    pass\n#" + "x" * 80_000 + "\ndef outside_window():\n    pass\n"
-    )
-    git(repo, "add", ".")
-    git(repo, "commit", "-qm", "long source")
-    output = tmp_path / "preview.jsonl"
-    run_cli(
-        "make-diff-rank-input",
-        "--repo",
-        str(repo),
-        "--base",
-        base,
-        "--head",
-        "HEAD",
-        "--out",
-        str(output),
-    )
-    rows = read_jsonl(output)
-    assert "first" in rows[0]["preview"]
-    assert "outside_window" not in rows[0]["preview"]

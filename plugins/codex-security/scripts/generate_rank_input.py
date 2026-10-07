@@ -10,7 +10,7 @@ This script stays deliberately model-free:
   local working-tree patches.
 
 Candidate selection uses the existing path exclusions and binary detection,
-not a language-extension allowlist. Unknown formats use sampled text previews.
+not a language-extension allowlist. All formats use bounded source previews.
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def parse_args() -> argparse.Namespace:
 
     diff = subparsers.add_parser(
         "make-diff-rank-input",
-        help="Create rank_input.jsonl from Git changed source-like files.",
+        help="Create rank_input.jsonl from Git changed text files.",
     )
     diff.add_argument("--repo", required=True, help="Repository root.")
     diff.add_argument("--base", required=True, help="Git diff base revision.")
@@ -389,6 +389,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    """Return changed regular files from the selected side of each change."""
     result = git_command(
         repo,
         "diff",
@@ -485,7 +486,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             if is_binary:
                 continue
             if status != "D":
-                preview, _ = preview_for_bytes(rel, content, args.preview_bytes)
+                preview, _ = preview_for_bytes(content, args.preview_bytes)
         elif not path.is_symlink() and path.is_file():
             try:
                 path.resolve(strict=True).relative_to(repo)
