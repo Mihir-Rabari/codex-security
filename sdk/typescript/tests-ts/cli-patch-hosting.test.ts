@@ -777,6 +777,7 @@ describe("patch change tracking", () => {
                 pushes++;
                 expect(args).toEqual([
                   "push",
+                  "--recurse-submodules=check",
                   "--set-upstream",
                   `--force-with-lease=refs/heads/${branch}:`,
                   "origin",
@@ -786,6 +787,7 @@ describe("patch change tracking", () => {
                   command,
                   [
                     "push",
+                    "--recurse-submodules=check",
                     "--set-upstream",
                     `--force-with-lease=refs/heads/${branch}:`,
                     remote,

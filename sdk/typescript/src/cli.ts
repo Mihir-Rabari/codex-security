@@ -7185,8 +7185,17 @@ async function publishPatchBranch(
         );
     }
     if (!url) {
+      const configuredRecursion = (
+        await run("git", ["config", "--list", "--name-only"])
+      )
+        .split("\n")
+        .some(
+          (key) =>
+            key === "push.recursesubmodules" || key === "submodule.recurse",
+        );
       await run("git", [
         "push",
+        ...(configuredRecursion ? [] : ["--recurse-submodules=check"]),
         "--set-upstream",
         `--force-with-lease=refs/heads/${branch}:`,
         "origin",
