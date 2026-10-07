@@ -776,7 +776,7 @@ describe("live scan cost tracking", () => {
         home,
         "unrelated-worker",
         {},
-        { parent: "other-scan" },
+        "other-scan",
       );
       const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
@@ -825,8 +825,8 @@ describe("live scan cost tracking", () => {
     trackers.forEach((tracker, index) => tracker.start(`scan-${index}`));
     try {
       await Promise.all(trackers.map((tracker) => tracker.refresh()));
-      await writeSession(home, "worker-0", {}, { parent: "scan-0" });
-      await writeSession(home, "worker-1", {}, { parent: "scan-1" });
+      await writeSession(home, "worker-0", {}, "scan-0");
+      await writeSession(home, "worker-1", {}, "scan-1");
       await waitFor(() => workers.every((events) => events.length === 1));
       expect(workers).toEqual([
         [{ kind: "observed", worker: 1 }],

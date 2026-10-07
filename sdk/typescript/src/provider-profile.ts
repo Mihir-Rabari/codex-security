@@ -20,6 +20,7 @@ import {
   requirePrivateCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
+  type ProcessEnvironment,
 } from "./runtime.js";
 
 export interface ProviderProfile {
@@ -193,12 +194,19 @@ export async function legacyWorkerUsesScanProvider(
 /** @internal */
 export async function readNativeSessionSqliteHome(
   command: CodexCommand,
-  environment: Record<string, string> | undefined,
+  environment: ProcessEnvironment,
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   const preflight = await nativePermissionPreflight();
-  const env = bundledCodexSdkEnvironment(command.command, environment);
+  const env = bundledCodexSdkEnvironment(
+    command.command,
+    Object.fromEntries(
+      Object.entries(environment).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+  );
   return await withCodexPreflightLock(env, signal, async () => {
     const config = await preflight.readDeepScanRuntimeConfig({
       codexPath: executablePathForSpawn(command.command),

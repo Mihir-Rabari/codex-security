@@ -8128,14 +8128,12 @@ test.each([
           _options: unknown,
           scanId: string | null,
           threadId: string,
-          nativeConfig: {
-            command: { command: string };
-            workingDirectory: string;
-          },
+          nativeConfig: Parameters<typeof runtime.resolveScanSessionPaths>[3],
         ) => {
           ownershipChecks += 1;
-          expect(nativeConfig.command.command.length).toBeGreaterThan(0);
-          expect(nativeConfig.workingDirectory).toBe(scanDir);
+          expect(nativeConfig).toBeDefined();
+          expect(nativeConfig!.command.command.length).toBeGreaterThan(0);
+          expect(nativeConfig!.workingDirectory).toBe(scanDir);
           expect(scanId).toBe("scan_example_001");
           expect(threadId).toBe("thread-1");
           return new Set([
