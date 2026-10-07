@@ -267,6 +267,77 @@ access_key_id = "synthetic-secret"
       assert.equal(await readFile(path, "utf8"), legacyBytes);
     }
   }
+  for (const provider of ["openrouter", "fireworks"]) {
+    const providerHome = join(root, `legacy-${provider}`);
+    await mkdir(join(providerHome, "sessions"), { recursive: true });
+    const definition = {
+      name: "Synthetic gateway",
+      base_url: "https://gateway.invalid/v1",
+      env_key: "SYNTHETIC_GATEWAY_KEY",
+      wire_api: "responses",
+    };
+    const environment = {
+      CODEX_HOME: providerHome,
+      CODEX_CLI_PATH: process.execPath,
+    };
+    const recorded = await loadRecordedSettings(
+      providerHome,
+      { workflowVersion: "deep-security-scan/v1" },
+      async () => ({
+        config: {
+          model_provider: provider,
+          model_providers: {
+            [provider]: {
+              ...definition,
+              http_headers: { Authorization: "synthetic-only" },
+            },
+          },
+        },
+      }),
+      environment,
+    );
+    const projected = restoreSettings(
+      recorded,
+      { filesystemDenies: [] },
+      () => environment,
+    );
+    assert.equal(projected.codexOptions.config.model_provider, provider);
+    assert.deepEqual(projected.codexOptions.config.model_providers, {
+      [provider]: definition,
+    });
+    assert.equal(JSON.stringify(recorded).includes("synthetic-only"), false);
+    const threadId = `legacy-${provider}-parent`;
+    await writeFile(
+      join(providerHome, "sessions", `${threadId}.jsonl`),
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-01-01T00:00:00Z",
+        payload: { id: threadId, model_provider: provider },
+      }) + "\n",
+    );
+    const native = await loadRecordedSettings(
+      providerHome,
+      {
+        workflowVersion: "deep-security-scan/v1",
+        usageOwner: { threadId, startedAt: "2026-01-01T00:00:01Z" },
+        createdAt: "2026-01-01T00:00:01Z",
+      },
+      async () => ({ config: {} }),
+      environment,
+    );
+    const nativeRestored = restoreSettings(
+      native,
+      { filesystemDenies: [] },
+      () => environment,
+    );
+    assert.equal(nativeRestored.codexOptions.config.model_provider, provider);
+    assert.equal(
+      nativeRestored.codexOptions.config.model_providers,
+      undefined,
+      "legacy home-owned routing must not be replaced with a generated catalog table",
+    );
+    assert.equal(nativeRestored.codexOptions.env.CODEX_HOME, providerHome);
+  }
   let credential = "synthetic-first";
   const restored = restoreSettings(
     captured,

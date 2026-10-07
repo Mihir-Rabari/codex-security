@@ -516,14 +516,12 @@ export class ScanCostTracker {
         incomplete = true;
     }
     let usage: ScanTokenUsage | null = null;
+    let unmeasuredSession = false;
     for (const value of usages.values()) {
       if (value === null) {
-        if (this.#attribution) {
-          incomplete = true;
-          continue;
-        }
-        this.#snapshot = { usage: null, cost: null };
-        return;
+        incomplete = true;
+        unmeasuredSession ||= this.#attribution === null;
+        continue;
       }
       usage = addTokenUsage(usage, value);
     }
@@ -593,8 +591,10 @@ export class ScanCostTracker {
     const measured = incomplete
       ? { ...reconciled, coverage: "partial" }
       : reconciled;
-    const cost = estimateScanCost(this.#options.model, measured);
-    this.#snapshot = { usage: measured, cost };
+    const cost = unmeasuredSession
+      ? null
+      : estimateScanCost(this.#options.model, measured);
+    this.#snapshot = { usage: unmeasuredSession ? null : measured, cost };
     this.#reportCost(cost, measured, {
       ...usage,
       modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
@@ -1198,7 +1198,11 @@ function reconcileReceiptCounters(session: SessionUsage): void {
     windowTokens = 0,
     baseline = 0,
     expected = 0;
-  let intervals: Array<{ start: number; end: number }> = [];
+  let intervals: Array<{
+    start: number;
+    end: number;
+    timestamp: number | null;
+  }> = [];
   const excluded = new Map<string, { tokens: number; cumulative: number }>();
   for (const { id, record, anchor } of timeline) {
     if (anchor) {
@@ -1211,7 +1215,9 @@ function reconcileReceiptCounters(session: SessionUsage): void {
       continue;
     }
     if (
-      (intervals.length === 0 && record.end < windowTokens) ||
+      (record.end < windowTokens &&
+        (record.timestamp === null ||
+          record.timestamp !== intervals.at(-1)?.timestamp)) ||
       intervals.some(
         (prior) => record.start < prior.end && record.end > prior.start,
       )

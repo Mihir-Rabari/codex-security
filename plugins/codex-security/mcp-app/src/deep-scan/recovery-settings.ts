@@ -257,9 +257,8 @@ export async function loadDeepScanExecutionSettings(
       // can recover selections, but cannot establish an original executable or
       // home. Leave those unknown and retain the existing native launch behavior.
       const context = await readLegacyContext?.();
-      const selected = projectWorkerSettings(
-        resolveWorkerProfile(context?.config ?? {}),
-      );
+      const resolved = resolveWorkerProfile(context?.config ?? {});
+      const selected = projectWorkerSettings(resolved);
       const owner = original.usageOwner ?? context?.usageOwner;
       const home = environment.CODEX_HOME || join(homedir(), ".codex");
       const native = !owner?.threadId
@@ -295,7 +294,9 @@ export async function loadDeepScanExecutionSettings(
         ),
         apiFeatures: apiFeatures(selected.features),
         providerConfig:
-          selected.model_provider === "amazon-bedrock"
+          typeof selected.model_provider === "string" &&
+          isRecord(resolved.model_providers) &&
+          isRecord(resolved.model_providers[selected.model_provider])
             ? (selected.model_providers as JsonObject | undefined)
             : undefined,
       };
@@ -367,6 +368,29 @@ export function restoredDeepScanWorkerSettings(
         ["*", "?", "[", "]"].some((character) => path.includes(character)),
       ),
   );
+  const config = projectWorkerSettings({
+    ...(settings.model === undefined ? {} : { model: settings.model }),
+    ...(settings.reasoningEffort === undefined
+      ? {}
+      : { model_reasoning_effort: settings.reasoningEffort }),
+    ...(settings.modelProvider === undefined
+      ? {}
+      : { model_provider: settings.modelProvider }),
+    ...(settings.reasoningSummary === undefined
+      ? {}
+      : { model_reasoning_summary: settings.reasoningSummary }),
+    ...(settings.serviceTier === undefined
+      ? {}
+      : { service_tier: settings.serviceTier }),
+    ...(settings.apiFeatures === undefined
+      ? {}
+      : { features: settings.apiFeatures }),
+    ...(settings.providerConfig === undefined
+      ? {}
+      : { model_providers: settings.providerConfig }),
+  }) as NonNullable<CodexOptions["config"]>;
+  if (settings.codexHome === undefined && settings.providerConfig === undefined)
+    delete config.model_providers;
   return {
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
@@ -402,27 +426,7 @@ export function restoredDeepScanWorkerSettings(
           ),
         );
       },
-      config: projectWorkerSettings({
-        ...(settings.model === undefined ? {} : { model: settings.model }),
-        ...(settings.reasoningEffort === undefined
-          ? {}
-          : { model_reasoning_effort: settings.reasoningEffort }),
-        ...(settings.modelProvider === undefined
-          ? {}
-          : { model_provider: settings.modelProvider }),
-        ...(settings.reasoningSummary === undefined
-          ? {}
-          : { model_reasoning_summary: settings.reasoningSummary }),
-        ...(settings.serviceTier === undefined
-          ? {}
-          : { service_tier: settings.serviceTier }),
-        ...(settings.apiFeatures === undefined
-          ? {}
-          : { features: settings.apiFeatures }),
-        ...(settings.providerConfig === undefined
-          ? {}
-          : { model_providers: settings.providerConfig }),
-      }) as NonNullable<CodexOptions["config"]>,
+      config,
     },
   };
 }

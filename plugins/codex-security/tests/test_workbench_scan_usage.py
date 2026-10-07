@@ -1385,7 +1385,15 @@ def test_rejected_receipt_preserves_priced_legacy_usage(tmp_path: Path, workbenc
 
 
 @pytest.mark.parametrize(
-    "case", ["history", "history-gap", "pre-window-reset", "counter-categories"]
+    "case",
+    [
+        "history",
+        "history-gap",
+        "pre-window-reset",
+        "counter-categories",
+        "disjoint-reset-gap",
+        "disjoint-reset-complete",
+    ],
 )
 def test_completion_usage_matches_its_admitted_window_and_model_partition(tmp_path, case):
     fixture = _start_scan(tmp_path)
@@ -1421,6 +1429,15 @@ def test_completion_usage_matches_its_admitted_window_and_model_partition(tmp_pa
         ]
         expected = _counts(20, 0, 0)
         partial = case == "history-gap"
+    elif case.startswith("disjoint-reset"):
+        events = [
+            _token_event(start - timedelta(seconds=1), 900, 0),
+            receipt(0, "one", 100, 0, 1000),
+            *([receipt(0.001, "two", 20, 0, 20)] if case.endswith("complete") else []),
+            receipt(0.002, "three", 20, 0, 40),
+        ]
+        expected = _counts(140 if case.endswith("complete") else 120, 0, 0)
+        partial = case.endswith("gap")
     elif case == "pre-window-reset":
         events = [
             _token_event(start - timedelta(seconds=3), 1000, 0),
@@ -1446,7 +1463,7 @@ def test_completion_usage_matches_its_admitted_window_and_model_partition(tmp_pa
     )
     # Exercise complete-scan's public usage validation, not just the private reader.
     usage = _complete_scan(fixture)["scan"]["usage"]
-    assert all(usage[key] == value for key, value in expected.items())
+    assert all(usage[key] == value for key, value in expected.items()), usage
     assert usage["coverage"] == ("partial" if partial else "complete")
     assert usage.get("warnings", []) == (["token_receipts_incomplete"] if partial else [])
     for key in expected:

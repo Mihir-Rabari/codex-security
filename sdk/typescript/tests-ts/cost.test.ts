@@ -3066,6 +3066,8 @@ test.each(["after-completion", "foreign-turn", "owned-turn", "pre-window"])(
 
 test.each([
   "chronological-reset",
+  "disjoint-reset-gap",
+  "disjoint-reset-complete",
   "delayed-before-reset",
   "legacy-baseline-gap",
   "legacy-baseline-complete",
@@ -3143,6 +3145,16 @@ test.each([
       ];
       expected = 2000;
       partial = false;
+    } else if (scenario.startsWith("disjoint-reset")) {
+      events = [
+        ...header,
+        counter(-1, 900),
+        receipt(1, "one", 100, 1000),
+        ...(scenario.endsWith("complete") ? [receipt(2, "two", 20, 20)] : []),
+        receipt(3, "three", 20, 40),
+      ];
+      expected = scenario.endsWith("complete") ? 140 : 120;
+      partial = scenario.endsWith("gap");
     } else if (scenario.startsWith("legacy-baseline")) {
       events = [
         ...header,
@@ -3213,6 +3225,109 @@ test.each([
           partial,
         );
       }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each([
+  { attributed: false, workerHasUsage: false },
+  { attributed: true, workerHasUsage: false },
+  { attributed: false, workerHasUsage: true },
+])(
+  "keeps a known priced lower bound with a metadata-only worker: %p",
+  async ({ attributed, workerHasUsage }) => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "parent", {});
+    const worker = await writeSession(home, "worker", {}, { parent: "parent" });
+    const counter = (input: number) => ({
+      timestamp: "2026-09-01T00:00:02Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: input,
+            output_tokens: 0,
+            total_tokens: input,
+          },
+        },
+      },
+    });
+    await writeFile(
+      parent,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: { id: "parent", model: "gpt-5.6-sol" },
+        },
+        {
+          timestamp: "2026-09-01T00:00:02Z",
+          type: "token_usage_record",
+          payload: {
+            thread_id: "parent",
+            turn_id: "turn",
+            response_id: "known-parent-response",
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: 1000, output_tokens: 0, total_tokens: 1000 },
+          },
+        },
+      ]) + "\n",
+    );
+    await writeFile(
+      worker,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: {
+            id: "worker",
+            model: "gpt-5.6-sol",
+            parent_thread_id: "parent",
+          },
+        },
+        {
+          timestamp: "2026-09-01T00:00:02Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        },
+        ...(workerHasUsage ? [counter(100)] : []),
+      ]) + "\n",
+    );
+    const lowerBounds: Readonly<ScanCost>[] = [];
+    const publicCosts: Readonly<ScanCost>[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCost: (cost) => publicCosts.push(cost),
+      onCostLowerBound: (cost) => lowerBounds.push(cost),
+    });
+    if (attributed)
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        executionThreadIds: ["worker"],
+        owner: {
+          threadId: "parent",
+          turnId: "turn",
+          startedAt: "2026-09-01T00:00:02Z",
+        },
+        startedAt: "2026-09-01T00:00:02Z",
+        completedAt: null,
+      }));
+    tracker.start("parent");
+    try {
+      const snapshot = await tracker.refresh();
+      expect(
+        (lowerBounds.at(-1) ?? publicCosts.at(-1))?.estimatedUsd,
+      ).toBeGreaterThan(0.003);
+      if (!workerHasUsage && !attributed) {
+        expect(snapshot.usage).toBeNull();
+        expect(snapshot.cost).toBeNull();
+        expect(publicCosts).toEqual([]);
+      } else
+        expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(
+          workerHasUsage ? 1100 : 1000,
+        );
     } finally {
       await tracker.stop();
     }

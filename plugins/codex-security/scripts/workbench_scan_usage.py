@@ -765,9 +765,10 @@ def _read_rollout_usage(
                 window_tokens = record.end
                 baseline = offset + record.end
                 continue
-            if (not intervals and record.end < window_tokens) or any(
-                record.start < prior.end and record.end > prior.start for prior in intervals
-            ):
+            if (
+                record.end < window_tokens
+                and (not intervals or record.timestamp != intervals[-1].timestamp)
+            ) or any(record.start < prior.end and record.end > prior.start for prior in intervals):
                 offset += window_tokens
                 window_tokens = 0
                 intervals = []

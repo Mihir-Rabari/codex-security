@@ -2950,6 +2950,25 @@ def _require_current_deep_publication(
         # Generation-one runs predate host publication metadata. Keep their existing
         # draft path; adopted coordinators must carry their generation and selection.
         if publication is None:
+            if run["status"] == "succeeded" and draft["manifest"]["scan"].get("complete") is False:
+                reducer = _latest_successful_reducer(_saved_workers(connection, scan_id))
+                if reducer is not None:
+                    scan_dir = Path(db.require_scan(connection, scan_id)["scan_dir"])
+                    relative = (
+                        Path(reducer["result_manifest_path"]).relative_to(scan_dir).as_posix()
+                    )
+                    accepted, _, _ = _read_saved_result(
+                        scan_dir,
+                        relative,
+                        scan_id,
+                        kind="dedup",
+                        accepted_source_digests=_accepted_source_digests(connection, scan_id),
+                    )
+                    if accepted.get("complete") is True:
+                        raise SystemExit(
+                            "Deep Scan already accepted complete results; retry their publication "
+                            "without replacing them with a partial draft."
+                        )
             return
         reducer = _latest_successful_reducer(_saved_workers(connection, scan_id))
         selected_result = reducer["result_manifest_path"] if reducer is not None else None

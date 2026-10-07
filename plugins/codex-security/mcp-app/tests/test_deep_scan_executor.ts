@@ -3279,52 +3279,94 @@ async function testReducerCoveragePersistenceBinding() {
 async function testCapturedCustomProviderSettings() {
   const originalSpawn = childProcess.spawn;
   const scans = await Promise.all(
-    ["openrouter", "fireworks"].map(async (provider, index) => {
-      const fixture = await fakeCodexFixture();
-      const codexHome = path.join(fixture.root, "provider-home");
-      await mkdir(codexHome);
-      const configPath = path.join(codexHome, "config.toml");
-      const definition = {
-        name: "Synthetic provider",
-        base_url: `http://127.0.0.1:9/scan-${index}/v1`,
-        env_key: `SYNTHETIC_PROVIDER_${index}_KEY`,
-        wire_api: "responses",
-      };
-      await writeFile(
-        configPath,
-        `model_provider = "${provider}"\n[model_providers.${provider}]\n` +
-          Object.entries(definition)
-            .map(([k, v]) => `${k} = ${JSON.stringify(v)}\n`)
-            .join(""),
-      );
-      const environment = {
-        ...process.env,
-        CODEX_HOME: codexHome,
-        CODEX_CLI_PATH: process.execPath,
-        CODEX_SECURITY_CONFIG_PATH: configPath,
-        FAKE_CODEX_MARKER: fixture.markerPath,
-      };
-      const saved = await captureDeepScanExecutionSettings(
-        { model: `fixture-${index}`, usageOwner: null },
-        trustedParentSandbox,
-        environment,
-      );
-      const restored = restoredDeepScanWorkerSettings(
-        saved,
-        trustedParentSandbox,
-        () => environment,
-      );
-      const promptPath = path.join(fixture.root, "prompt.md");
-      await writeFile(promptPath, "Synthetic captured provider worker.");
-      return {
-        fixture,
-        configPath,
-        definition,
-        provider,
-        promptPath,
-        executor: new CodexSdkWorkerExecutor(restored),
-      };
-    }),
+    ["openrouter", "fireworks"]
+      .flatMap((provider) =>
+        ["current", "legacy-recipe", "legacy-native"].map((mode) => ({
+          provider,
+          mode,
+        })),
+      )
+      .map(async ({ provider, mode }, index) => {
+        const fixture = await fakeCodexFixture();
+        const codexHome = path.join(fixture.root, "provider-home");
+        await mkdir(codexHome);
+        const configPath = path.join(codexHome, "config.toml");
+        const definition = {
+          name: "Synthetic provider",
+          base_url: `http://127.0.0.1:9/scan-${index}/v1`,
+          env_key: `SYNTHETIC_PROVIDER_${index}_KEY`,
+          wire_api: "responses",
+        };
+        await writeFile(
+          configPath,
+          `model_provider = "${provider}"\n[model_providers.${provider}]\n` +
+            Object.entries(definition)
+              .map(([k, v]) => `${k} = ${JSON.stringify(v)}\n`)
+              .join(""),
+        );
+        const environment = {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          CODEX_CLI_PATH: process.execPath,
+          CODEX_SECURITY_CONFIG_PATH: configPath,
+          FAKE_CODEX_MARKER: fixture.markerPath,
+        };
+        const threadId = `legacy-provider-${index}`;
+        await mkdir(path.join(codexHome, "sessions"));
+        await writeFile(
+          path.join(codexHome, "sessions", "owner.jsonl"),
+          JSON.stringify({
+            type: "session_meta",
+            timestamp: "2026-01-01T00:00:00Z",
+            payload: { id: threadId, model_provider: provider },
+          }) + "\n",
+        );
+        const saved =
+          mode === "current"
+            ? await captureDeepScanExecutionSettings(
+                { model: `fixture-${index}`, usageOwner: null },
+                trustedParentSandbox,
+                environment,
+              )
+            : await loadDeepScanExecutionSettings(
+                codexHome,
+                {
+                  workflowVersion: "deep-security-scan/v1",
+                  usageOwner:
+                    mode === "legacy-native"
+                      ? { threadId, startedAt: "2026-01-01T00:00:01Z" }
+                      : undefined,
+                  createdAt: "2026-01-01T00:00:01Z",
+                },
+                async () => ({
+                  config:
+                    mode === "legacy-recipe"
+                      ? {
+                          model_provider: provider,
+                          model_providers: { [provider]: definition },
+                        }
+                      : {},
+                }),
+                environment,
+              );
+        const restored = restoredDeepScanWorkerSettings(
+          saved,
+          trustedParentSandbox,
+          () => environment,
+        );
+        const promptPath = path.join(fixture.root, "prompt.md");
+        await writeFile(promptPath, "Synthetic captured provider worker.");
+        return {
+          fixture,
+          configPath,
+          definition,
+          provider,
+          mode,
+          codexHome,
+          promptPath,
+          executor: new CodexSdkWorkerExecutor(restored),
+        };
+      }),
   );
   childProcess.spawn = ((
     command: string,
@@ -3357,14 +3399,31 @@ async function testCapturedCustomProviderSettings() {
             const invocation = JSON.parse(
               await readFile(scan.fixture.markerPath, "utf8"),
             );
+            assert.equal(invocation.argv.includes("resume"), resume);
+            assert.equal(invocation.codexHome, scan.codexHome);
+            assertConfigOverrides(invocation.argv, {
+              model_provider: scan.provider,
+            });
             const providers = parseToml(
               invocation.argv
                 .filter((arg: string) => /^model_providers[.=]/u.test(arg))
                 .join("\n"),
             ).model_providers;
-            assert.deepEqual(JSON.parse(JSON.stringify(providers)), {
-              [scan.provider]: scan.definition,
-            });
+            if (scan.mode === "legacy-native") {
+              assert.equal(
+                providers,
+                undefined,
+                "home-owned routing is resolved by native without a generated override",
+              );
+              const nativeConfig = parseToml(
+                await readFile(scan.configPath, "utf8"),
+              );
+              assert.equal(nativeConfig.model_provider, scan.provider);
+            } else {
+              assert.deepEqual(JSON.parse(JSON.stringify(providers)), {
+                [scan.provider]: scan.definition,
+              });
+            }
           }),
         );
         const failures = results.flatMap((result) =>
@@ -3376,7 +3435,7 @@ async function testCapturedCustomProviderSettings() {
           failures.map((error) => error.stack ?? error.message).join("\n"),
         );
       }
-      for (const scan of scans)
+      for (const scan of scans.filter((scan) => scan.mode !== "legacy-native"))
         await writeFile(scan.configPath, 'model_provider = "openai"\n');
     }
   } finally {
