@@ -2352,7 +2352,8 @@ def preserve_scan_results_locked(
     if raw_frozen_sources is not None:
         retained = json.loads(raw_frozen_sources)
         frozen_source_digests, saved_model_source = _retained_source_state(retained)
-        frozen_source_times = retained.get("sourceTimes")
+        if isinstance(retained.get("sources"), dict):
+            frozen_source_times = retained.get("sourceTimes")
         if saved_model_source is not None:
             model_source.append(saved_model_source)
     if recovery_source_digests is not None:

@@ -16,6 +16,64 @@ from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
 
 
+@pytest.mark.parametrize("source_name", ["ordinary-source.json", "sourceTimes"])
+@pytest.mark.parametrize("replay", ["preserve", "recover"])
+def test_flat_retained_source_name_replays(
+    workbench_api, workbench_db, publication_scan, source_name, replay
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    add_worker(workbench_db, scan, status="canceled")
+    source = scan.scan_dir / source_name
+    source.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": scan.findings,
+                "coverage": scan.coverage,
+            }
+        )
+    )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE scan_id = ?",
+            (str(source), scan.scan_id),
+        )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    stopped = saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped scan."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    retained = json.loads(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    )
+    assert isinstance(retained[source_name], str)
+    if replay == "preserve":
+        replayed = saved.preserve_scan_results(
+            context,
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id,
+                claim_token=None,
+                thread_id=None,
+                coordinator_generation=None,
+            ),
+        )["scan"]
+    else:
+        replayed = saved.recover_scan_results(
+            context, workbench_db, Namespace(scan_id=scan.scan_id)
+        )["scan"]
+    assert replayed["findingCount"] == 1
+    assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == findings
+
+
 def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_path):
     state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
     environment = {"CODEX_HOME": str(home)}
