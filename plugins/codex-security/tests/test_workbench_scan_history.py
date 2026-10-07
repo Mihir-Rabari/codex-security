@@ -1173,7 +1173,10 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
     assert "knownScanIds" not in shown
 
 
-def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reverse", (False, True))
+def test_semantic_scan_comparison_replaces_cached_matches_atomically(
+    tmp_path: Path, reverse: bool
+) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -1190,7 +1193,10 @@ def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: P
     ]
     previous = inputs["before"][0]["occurrenceId"]
     current = inputs["after"][0]["occurrenceId"]
-    save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
+    if reverse:
+        save_scan_matches(state_dir, after, before, confirmed_match(current, previous))
+    else:
+        save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
     compared = save_scan_matches(state_dir, before, after)
 
     assert compared["summary"]["resolved"] == 1
@@ -1200,6 +1206,95 @@ def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: P
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
     shown = get_scan(state_dir, before["scanId"])["scan"]["findings"][0]
     assert "matches" not in shown
+    assert len(run_workbench(state_dir, "list-global-findings")["findings"]) == 2
+
+
+@pytest.mark.parametrize("indirect", (False, True))
+def test_replacing_reverse_comparison_preserves_other_pairs_and_triage(
+    tmp_path: Path, indirect: bool
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scans = [
+        create_cli_scan(state, tmp_path / "results", repository, identity_anchor=f"root-{index}")
+        for index in range(4)
+    ]
+    occurrences = [get_scan(state, scan["scanId"])["scan"]["findings"][0] for scan in scans]
+
+    def match(before: int, after: int) -> None:
+        save_scan_matches(
+            state,
+            scans[before],
+            scans[after],
+            confirmed_match(
+                occurrences[before]["occurrenceId"], occurrences[after]["occurrenceId"]
+            ),
+        )
+
+    match(1, 0)
+    match(2, 3)
+    if indirect:
+        match(0, 2)
+        match(2, 1)
+    set_triage(
+        state,
+        occurrences[0]["occurrenceId"],
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Accepted synthetic risk.",
+    )
+    artifacts = {
+        path: path.read_bytes()
+        for scan in scans
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        for path in (Path(scan["scanDir"]) / name,)
+    }
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        comparisons = connection.execute("SELECT * FROM scan_comparisons ORDER BY 1, 2").fetchall()
+        links = connection.execute("SELECT * FROM scan_comparison_matches ORDER BY 1, 2").fetchall()
+        triage = connection.execute(
+            "SELECT * FROM finding_triage ORDER BY occurrence_id"
+        ).fetchall()
+        stored_occurrences = connection.execute(
+            "SELECT * FROM finding_occurrences ORDER BY id"
+        ).fetchall()
+    old_pair = (scans[1]["scanId"], scans[0]["scanId"])
+
+    save_scan_matches(state, scans[0], scans[1])
+
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        remaining = connection.execute("SELECT * FROM scan_comparisons ORDER BY 1, 2").fetchall()
+        new_pair = (scans[0]["scanId"], scans[1]["scanId"])
+        assert [row for row in remaining if row[:2] != new_pair] == [
+            row for row in comparisons if row[:2] != old_pair
+        ]
+        assert len([row for row in remaining if row[:2] == new_pair]) == 1
+        assert connection.execute(
+            "SELECT * FROM scan_comparison_matches ORDER BY 1, 2"
+        ).fetchall() == [row for row in links if row[:2] != old_pair]
+        assert (
+            connection.execute("SELECT * FROM finding_triage ORDER BY occurrence_id").fetchall()
+            == triage
+        )
+        assert (
+            connection.execute("SELECT * FROM finding_occurrences ORDER BY id").fetchall()
+            == stored_occurrences
+        )
+    findings = run_workbench(state, "list-global-findings")["findings"]
+    groups = {frozenset(finding["knownScanIds"]) for finding in findings}
+    assert groups == (
+        {frozenset(scan["scanId"] for scan in scans)}
+        if indirect
+        else {
+            frozenset([scans[0]["scanId"]]),
+            frozenset([scans[1]["scanId"]]),
+            frozenset([scans[2]["scanId"], scans[3]["scanId"]]),
+        }
+    )
+    assert all(path.read_bytes() == content for path, content in artifacts.items())
 
 
 def test_semantic_scan_comparison_rejects_cross_target_scans(tmp_path: Path) -> None:

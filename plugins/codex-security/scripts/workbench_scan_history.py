@@ -795,8 +795,10 @@ def save_scan_comparison(
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
-            (before["id"], after["id"]),
+            "DELETE FROM scan_comparisons "
+            "WHERE (before_scan_id = ? AND after_scan_id = ?) "
+            "OR (before_scan_id = ? AND after_scan_id = ?)",
+            (before["id"], after["id"], after["id"], before["id"]),
         )
         connection.execute(
             """
