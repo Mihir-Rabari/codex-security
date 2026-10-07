@@ -47,6 +47,7 @@ import {
   createProfileCodex,
   createProviderProfile,
   legacyWorkerUsesScanProvider,
+  isPermissionProfileFallbackError,
   preflightReadOnlyProfileCodex,
   providerPreflightCommand,
   type ProviderProfile,
@@ -938,7 +939,11 @@ export class CodexSecurity {
               throwIfAborted(signal, outputDir);
               const message = errorMessage(error);
               const failure = classifyConnectionFailure(message);
-              if (failure === "unauthorized" || failure === "forbidden")
+              if (
+                failure === "unauthorized" ||
+                failure === "forbidden" ||
+                (await isPermissionProfileFallbackError(error))
+              )
                 throw error;
               result.diagnostics.push(
                 `Static assessment ${match.id}: ${message}`,

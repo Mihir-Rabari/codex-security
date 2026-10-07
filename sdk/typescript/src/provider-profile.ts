@@ -100,6 +100,13 @@ export async function createProfileCodex(
   }) as Codex;
 }
 
+export async function isPermissionProfileFallbackError(
+  error: unknown,
+): Promise<boolean> {
+  const client = await nativeProfileClient();
+  return error instanceof client.PermissionProfileFallbackError;
+}
+
 /** Verify the effective helper policy before starting exec with a private profile. */
 export async function preflightReadOnlyProfileCodex(
   options: CodexOptions,

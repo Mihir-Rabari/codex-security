@@ -666,6 +666,7 @@ test.each(
         "fallback",
         "changed",
         "runtime-fallback",
+        "later-runtime-fallback",
       ] as const
     ).map((policy) => ({ provider, policy })),
   ),
@@ -682,6 +683,12 @@ test.each(
     const fallback = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${id}\` to required value \`:read-only\`.`;
     const f = await fixture({
       codexLauncher: node,
+      turns:
+        policy === "runtime-fallback"
+          ? ["completed", "completed"]
+          : policy === "later-runtime-fallback"
+            ? ["completed", "completed", "completed"]
+            : undefined,
       ...(provider === "custom"
         ? {
             codexOverrides: {
@@ -711,7 +718,7 @@ test.each(
     await writeFile(
       executable,
       `
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { parse } from ${JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve("smol-toml")).href)};
@@ -746,11 +753,12 @@ if (args.includes("app-server")) {
   }
 } else {
   record("exec");
+  const turn = readFileSync(${JSON.stringify(receipt)}, "utf8").trim().split("\\n").map(JSON.parse).filter((call) => call.method === "exec").length;
   for (const event of [
     { type: "thread.started", thread_id: "synthetic-permission-thread" },
-    ...(policy === "runtime-fallback" ? [{ type: "item.completed", item: { type: "error", message: ${JSON.stringify(fallback)} } }] : []),
+    ...((policy === "runtime-fallback" || (policy === "later-runtime-fallback" && turn === 2)) ? [{ type: "item.completed", item: { type: "error", message: ${JSON.stringify(fallback)} } }] : []),
     { type: "item.completed", item: { id: "message", type: "agent_message", text: JSON.stringify({
-      schema_version: "triage-finding/v0", repository: { path: ${JSON.stringify(f.repository)}, revision: "synthetic-revision" }, findings: [${JSON.stringify(triage())}],
+      schema_version: "triage-finding/v0", repository: { path: ${JSON.stringify(f.repository)}, revision: "synthetic-revision" }, findings: [{ ...${JSON.stringify(triage())}, input_id: "match-" + turn, triage_item_id: "triage-" + turn }],
     }) } },
     { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
   ]) console.log(JSON.stringify(event));
@@ -802,11 +810,30 @@ if (args.includes("app-server")) {
         expect(executions[0].lockHeld).toBe(false);
       } else {
         expect(result.status).toBe("partial");
-        expect(result.matches).toHaveLength(1);
-        expect(result.assessments[0]!.status).not.toBe("completed");
+        expect(result.matches).toHaveLength(
+          policy === "runtime-fallback"
+            ? 2
+            : policy === "later-runtime-fallback"
+              ? 3
+              : 1,
+        );
+        if (policy === "later-runtime-fallback") {
+          expect(
+            result.assessments.map((assessment) => assessment.status),
+          ).toEqual(["completed", "failed", "failed"]);
+        } else expect(result.assessments[0]!.status).not.toBe("completed");
         expect(result.diagnostics.join("\n")).toContain(id);
-        expect(executions).toHaveLength(policy === "runtime-fallback" ? 1 : 0);
-        if (policy === "runtime-fallback")
+        expect(executions).toHaveLength(
+          policy === "runtime-fallback"
+            ? 1
+            : policy === "later-runtime-fallback"
+              ? 2
+              : 0,
+        );
+        if (
+          policy === "runtime-fallback" ||
+          policy === "later-runtime-fallback"
+        )
           expect(result.diagnostics.join("\n")).toContain(fallback);
       }
     } finally {
