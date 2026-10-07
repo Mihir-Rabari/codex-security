@@ -60,6 +60,7 @@
 - share published version history and remove duplicate checks ([#1381](https://github.com/openai/codex-security/pull/1381))
 - preserve per-scan runtime and worker settings ([#1281](https://github.com/openai/codex-security/pull/1281))
 - unify structured scan failure responses ([#1080](https://github.com/openai/codex-security/pull/1080))
+- support custom scan names ([#1180](https://github.com/openai/codex-security/pull/1180))
 
 <!-- release-section: highlights:end -->
 
