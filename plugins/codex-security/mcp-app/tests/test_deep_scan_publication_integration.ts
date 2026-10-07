@@ -328,10 +328,23 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
   });
 }
 
-for (const outputFailure of [false, true]) {
-  test(`legacy discovery parent ${outputFailure ? "retains failure after an output write error" : "retains progress before first completion"}`, async (t) => {
+for (const [claimed, outputFailure] of [
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+]) {
+  test(`legacy discovery parent with claimed=${claimed} ${outputFailure ? "retains failure after an output write error" : "retains progress before first completion"}`, async (t) => {
     const fixture = await createFixture(t);
     const { run, store, call, runWorkbench } = fixture;
+    if (claimed) {
+      const claim = await store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: owner,
+      });
+      assert.equal(claim.acquired, true);
+      assert.equal(claim.run.coordinatorGeneration, 2);
+    }
     await commitReducers(fixture, [1, 2], [highId, lowId]);
     const discovery = path.join(run.scanDir, "artifacts", "02_discovery");
     await mkdir(discovery, { recursive: true });
@@ -346,7 +359,7 @@ for (const outputFailure of [false, true]) {
       omittedWorkerIds: [],
     });
     assert.equal(terminal.status, "succeeded");
-    assert.equal(terminal.coordinatorGeneration, 1);
+    assert.equal(terminal.coordinatorGeneration, claimed ? 2 : 1);
     assert.equal(terminal.manifestPath, manifestPath);
     if (!outputFailure) {
       assertSuccess(

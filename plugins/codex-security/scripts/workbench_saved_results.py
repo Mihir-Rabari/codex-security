@@ -2402,14 +2402,20 @@ def _require_current_deep_publication(
         return
     if run is None:
         run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    # Legacy discovery-only runs still need a parent draft. Once finish selects
-    # the canonical parent, only completion may replay it.
+    # Once finish selects the canonical parent, only completion may replay it.
     if publication is None:
         if run["status"] != "running" and run["manifest_path"] == str(
             Path(scan["scan_dir"]) / "scan-manifest.json"
