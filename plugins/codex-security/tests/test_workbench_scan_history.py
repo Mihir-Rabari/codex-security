@@ -2254,3 +2254,459 @@ def test_repository_identity_preserves_directory_aliases(
     assert expected is not None
     assert target_state.repository_identity(selected) == expected
     assert target_state.repository_relative_path(selected) == scope
+
+
+def change_repository_metadata(
+    monkeypatch: pytest.MonkeyPatch, repository: Path, change: str
+) -> None:
+    from types import SimpleNamespace
+
+    import workbench_target_state as target_state
+
+    original_stat = Path.stat
+    original_statvfs = getattr(target_state.os, "statvfs", None)
+    original_birth = target_state._repository_birth_time_ns
+    objects = repository / ".git" / "objects"
+
+    class ChangedMetadata:
+        def __init__(self, metadata: Any, name: str) -> None:
+            self.metadata, self.name = metadata, name
+
+        def __getattr__(self, name: str) -> Any:
+            value = getattr(self.metadata, name)
+            return value + 1 if name == self.name else value
+
+    def metadata(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = original_stat(path, *args, **kwargs)
+        if change in ("device", "legacy-device") and (
+            path == repository or repository in path.parents
+        ):
+            return ChangedMetadata(result, "st_dev")
+        if change == "inode" and path == objects:
+            return ChangedMetadata(result, "st_ino")
+        return result
+
+    def filesystem(path: Path) -> Any:
+        result = original_statvfs(path) if original_statvfs else SimpleNamespace(f_fsid=1)
+        return (
+            ChangedMetadata(result, "f_fsid")
+            if change in ("filesystem", "common-filesystem")
+            and Path(path) == (objects if change == "filesystem" else repository / ".git")
+            else result
+        )
+
+    def birth(path: str, value: Any) -> int | None:
+        result = original_birth(path, value)
+        return (
+            result + 1
+            if result is not None and change == "birth" and Path(path) == objects
+            else result
+        )
+
+    monkeypatch.setattr(Path, "stat", metadata)
+    monkeypatch.setattr(target_state.os, "statvfs", filesystem, raising=False)
+    monkeypatch.setattr(target_state, "_repository_birth_time_ns", birth)
+
+
+@pytest.mark.parametrize(
+    "change", ("device", "legacy-device", "filesystem", "common-filesystem", "inode", "birth")
+)
+def test_repository_history_distinguishes_linux_remount_from_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    import argparse
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_scan_history as history
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    state = tmp_path / "state"
+    scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        if change == "legacy-device":
+            connection.execute("UPDATE security_targets SET repository_identity=NULL")
+            connection.execute("UPDATE scans SET repository_generation=NULL")
+        before = dict(connection.execute("SELECT * FROM scans").fetchone())
+        args = argparse.Namespace(
+            repository=str(repository),
+            scan_root=None,
+            target_id=None,
+            mode=None,
+            status=None,
+            query=None,
+            limit=None,
+            offset=0,
+        )
+        assert [row["scanId"] for row in history.list_scans(connection, args)["scans"]] == [
+            scan["scanId"]
+        ]
+        change_repository_metadata(monkeypatch, repository, change)
+        preserved = (
+            change in ("device", "legacy-device")
+            and sys.platform == "linux"
+            or change in ("filesystem", "common-filesystem")
+            and sys.platform != "linux"
+        )
+        assert [row["scanId"] for row in history.list_scans(connection, args)["scans"]] == (
+            [scan["scanId"]] if preserved else []
+        )
+        if preserved:
+            assert (
+                target_state.ensure_security_target(connection, str(repository))
+                == before["target_id"]
+            )
+        else:
+            with pytest.raises(SystemExit, match="no longer matches"):
+                target_state.ensure_security_target(connection, str(repository))
+        assert dict(connection.execute("SELECT * FROM scans").fetchone()) == before
+
+
+@pytest.mark.parametrize("remounted_before_upgrade", (False, True))
+@pytest.mark.parametrize("stored_binding", (False, True))
+def test_repository_generation_upgrade_requires_the_original_v2_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remounted_before_upgrade: bool,
+    stored_binding: bool,
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_db as workbench
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    state = tmp_path / "state"
+    create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    identity = target_state._repository_identity_details(repository)
+    assert identity is not None
+    previous = identity.previous_value or identity.value
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "UPDATE security_targets SET repository_identity=?",
+            (previous if stored_binding else None,),
+        )
+        connection.execute("UPDATE scans SET repository_generation=?", (previous,))
+        connection.execute("DELETE FROM schema_migrations WHERE version=44")
+        before = dict(connection.execute("SELECT * FROM scans").fetchone())
+        if remounted_before_upgrade:
+            change_repository_metadata(monkeypatch, repository, "device")
+        workbench.apply_migrations(connection)
+        expected = previous if remounted_before_upgrade else identity.value
+        assert connection.execute("SELECT repository_identity FROM security_targets").fetchone()[
+            0
+        ] == (expected if stored_binding else None)
+        assert dict(connection.execute("SELECT * FROM scans").fetchone()) == {
+            **before,
+            "repository_generation": expected,
+        }
+        if remounted_before_upgrade:
+            with pytest.raises(SystemExit, match="no longer matches"):
+                target_state.ensure_security_target(connection, str(repository))
+        else:
+            assert (
+                target_state.ensure_security_target(connection, str(repository))
+                == before["target_id"]
+            )
+
+
+@pytest.mark.parametrize("historical_scan", (False, True))
+@pytest.mark.parametrize("binding", ("authenticated", "unmatched", "remounted"))
+def test_repository_generation_migration_preserves_null_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical_scan: bool, binding: str
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_db as workbench
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    state = tmp_path / "state"
+    if historical_scan:
+        create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    else:
+        state.mkdir()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        workbench.apply_migrations(connection)
+        target_id = target_state.ensure_security_target(connection, str(repository))
+        identity = target_state._repository_identity_details(repository)
+        assert identity is not None
+        previous = identity.previous_value or identity.value
+        if binding == "unmatched":
+            previous = "repository_sha256_" + "0" * 64
+        connection.execute("UPDATE security_targets SET repository_identity=?", (previous,))
+        connection.execute("UPDATE scans SET repository_generation=NULL")
+        connection.execute("DELETE FROM schema_migrations WHERE version=44")
+        before = [dict(row) for row in connection.execute("SELECT * FROM scans")]
+        if binding == "authenticated":
+            scope = target_state.RepositoryIdentityCache(connection).scope(target_id)
+            assert all(scope.contains(row) for row in before)
+        if binding == "remounted":
+            change_repository_metadata(monkeypatch, repository, "device")
+        workbench.apply_migrations(connection)
+        expected = identity.value if binding == "authenticated" else previous
+        assert (
+            connection.execute("SELECT repository_identity FROM security_targets").fetchone()[0]
+            == expected
+        )
+        assert [dict(row) for row in connection.execute("SELECT * FROM scans")] == before
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 44
+        # A completed migration, including an unverifiable binding, does not probe
+        # local repositories again on a database reopen.
+        with monkeypatch.context() as no_probes:
+
+            def unexpected_probe(*args, **kwargs):
+                raise AssertionError("A completed migration reprobed repository identity")
+
+            no_probes.setattr(target_state, "_repository_identity_details", unexpected_probe)
+            workbench.apply_migrations(connection)
+        if binding == "authenticated":
+            registration = target_state.register_security_target(connection, str(repository))
+            assert registration.target_id == target_id
+            assert registration.repository_generation == identity.value
+            if sys.platform == "linux":
+                change_repository_metadata(monkeypatch, repository, "device")
+            scope = target_state.RepositoryIdentityCache(connection).scope(target_id)
+            assert scope.available
+            assert all(scope.contains(row) for row in before)
+        elif historical_scan:
+            with pytest.raises(SystemExit, match="no longer matches"):
+                target_state.ensure_security_target(connection, str(repository))
+        # Unscanned targets retain the existing registration rebind behavior.
+        else:
+            assert target_state.ensure_security_target(connection, str(repository)) == target_id
+
+
+def test_repository_generation_migration_is_atomic_and_preserves_shared_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_db as workbench
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    state = tmp_path / "state"
+    first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    second = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    legacy = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    identity = target_state._repository_identity_details(repository)
+    assert identity is not None
+    previous = identity.previous_value or identity.value
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("UPDATE security_targets SET repository_identity=?", (previous,))
+        connection.execute("UPDATE scans SET repository_generation=?", (previous,))
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id=?", (legacy["scanId"],)
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version=44")
+        connection.commit()
+        before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+        dump = list(connection.iterdump())
+        target_updates = []
+
+        def deny_generation_update(operation, table, column, *_):
+            if (
+                operation == sqlite3.SQLITE_UPDATE
+                and table == "security_targets"
+                and column == "repository_identity"
+            ):
+                target_updates.append(True)
+            return (
+                sqlite3.SQLITE_DENY
+                if operation == sqlite3.SQLITE_UPDATE
+                and table == "scans"
+                and column == "repository_generation"
+                else sqlite3.SQLITE_OK
+            )
+
+        # Only Linux converts the v2 format; other platforms still record the
+        # semantic migration without changing their existing generations.
+        if sys.platform == "linux":
+            connection.set_authorizer(deny_generation_update)
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                workbench.apply_migrations(connection)
+            connection.set_authorizer(None)
+            assert target_updates
+            assert list(connection.iterdump()) == dump
+        # One authenticated checkout can update its shared generation even if a
+        # linked checkout is temporarily absent; no NULL-generation scan is joined.
+        linked.rename(tmp_path / "offline")
+        workbench.apply_migrations(connection)
+        assert {
+            row[0] for row in connection.execute("SELECT repository_identity FROM security_targets")
+        } == {identity.value}
+        assert [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")] == [
+            {
+                **row,
+                "repository_generation": None if row["id"] == legacy["scanId"] else identity.value,
+            }
+            for row in before
+        ]
+        scope = target_state.RepositoryIdentityCache(connection).scope_for_path(str(repository))
+        assert all(
+            scope.contains(
+                connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
+            )
+            for scan in (first, second, legacy)
+        )
+
+
+@pytest.mark.parametrize("old_version", (41, 42))
+def test_repository_generation_migration_keeps_released_null_history_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_version: int
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_db as workbench
+    import workbench_schema as schema
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    state = tmp_path / "state"
+    scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    with (
+        sqlite3.connect(state / "workbench.sqlite3") as source,
+        sqlite3.connect(":memory:") as connection,
+    ):
+        source.row_factory = connection.row_factory = sqlite3.Row
+        schema.apply_migrations(
+            connection,
+            tuple(item for item in schema.MIGRATIONS if item[0] <= old_version),
+            workbench.now,
+            lambda _: None,
+        )
+        for table in ("security_targets", "workspaces", "scans"):
+            columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})")]
+            for row in source.execute(f"SELECT * FROM {table}"):
+                connection.execute(
+                    f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(row[name] for name in columns),
+                )
+        before = dict(connection.execute("SELECT * FROM scans").fetchone())
+        workbench.apply_migrations(connection)
+        after = dict(connection.execute("SELECT * FROM scans").fetchone())
+        assert {name: after[name] for name in before} == before
+        assert after["repository_generation"] is None
+        assert after["completion_sequence"] == 1
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 44
+        scope = target_state.RepositoryIdentityCache(connection).scope_for_path(str(repository))
+        assert scope.available and scope.contains(after)
+        assert after["id"] == scan["scanId"]
+
+
+@pytest.mark.parametrize(
+    "alias_binding", ("unsaved", "stale", "current", "legacy", "unbound-owner")
+)
+def test_repository_generation_returns_after_offline_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_binding: str
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_db as workbench
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    state = tmp_path / "state"
+    scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    if alias_binding == "legacy":
+        create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    identity = target_state._repository_identity_details(repository)
+    assert identity is not None
+    previous = identity.previous_value or identity.value
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        if alias_binding in ("stale", "current"):
+            target_state.ensure_security_target(connection, str(linked))
+        connection.execute(
+            "UPDATE security_targets SET repository_identity=? WHERE current_path=?",
+            (previous, str(repository)),
+        )
+        connection.execute("UPDATE scans SET repository_generation=?", (previous,))
+        if alias_binding == "legacy":
+            connection.execute(
+                "UPDATE security_targets SET repository_identity=NULL WHERE current_path=?",
+                (str(linked),),
+            )
+            connection.execute(
+                "UPDATE scans SET repository_generation=NULL, target_device=NULL, target_inode=NULL WHERE target_path=?",
+                (str(linked),),
+            )
+        elif alias_binding == "stale":
+            connection.execute(
+                "UPDATE security_targets SET repository_identity=? WHERE current_path=?",
+                ("repository_sha256_" + "0" * 64, str(linked)),
+            )
+        if alias_binding == "unbound-owner":
+            connection.execute(
+                "UPDATE security_targets SET repository_identity=NULL WHERE current_path=?",
+                (str(repository),),
+            )
+        connection.execute("DELETE FROM schema_migrations WHERE version=44")
+        offline = tmp_path / "offline"
+        repository.rename(offline)
+        workbench.apply_migrations(connection)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 44
+        assert (
+            connection.execute(
+                "SELECT repository_generation FROM scans WHERE id=?", (scan["scanId"],)
+            ).fetchone()[0]
+            == previous
+        )
+        offline.rename(repository)
+        workbench.apply_migrations(connection)
+        saved = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
+        cache = target_state.RepositoryIdentityCache(connection)
+        assert cache.scope_for_scan(saved).contains(saved)
+        assert cache.scope_for_path(str(repository)).contains(saved)
+        if alias_binding != "stale":
+            assert cache.scope_for_path(str(linked)).contains(saved)
+        with connection:
+            registration = target_state.register_security_target(connection, str(linked))
+        expected = previous if alias_binding == "legacy" else identity.value
+        assert registration.repository_generation == expected
+        new_scan = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+        assert (
+            connection.execute(
+                "SELECT repository_generation FROM scans WHERE id=?", (new_scan["scanId"],)
+            ).fetchone()[0]
+            == expected
+        )
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT repository_generation FROM scans WHERE repository_generation IS NOT NULL"
+            )
+        } == {expected}
+        # An owner that can authenticate the complete binding converts all pending
+        # scans together; a NULL-generation historical scan remains local.
+        with connection:
+            target_state.register_security_target(connection, str(repository))
+        assert {
+            row[0] for row in connection.execute("SELECT repository_identity FROM security_targets")
+        } == (
+            {identity.value, None}
+            if alias_binding in ("legacy", "unbound-owner")
+            else {identity.value}
+        )
+        assert {
+            row[0] for row in connection.execute("SELECT repository_generation FROM scans")
+        } == ({identity.value, None} if alias_binding == "legacy" else {identity.value})
+        if sys.platform == "linux":
+            change_repository_metadata(monkeypatch, repository, "device")
+        updated = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
+        target_state.require_scan_checkout_owner(connection, updated)

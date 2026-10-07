@@ -10,7 +10,10 @@ export interface Migration {
   statements: readonly string[];
 }
 
-export const migrations: readonly Migration[] = history;
+// Repository-dependent migrations run in Python before semantic workbench operations.
+export const migrations: readonly Migration[] = history.filter(
+  (item) => item.version <= 42,
+);
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;
 
@@ -162,6 +165,8 @@ function normalizeHistory(database: DatabaseSync): void {
     ])
       moveMigration(database, from, to, mirrorNames.get(from)!);
   }
+  for (const version of [30, 31, 33, 40, 42])
+    moveMigration(database, version, 43, "persist repository identities");
   moveMigration(
     database,
     33,

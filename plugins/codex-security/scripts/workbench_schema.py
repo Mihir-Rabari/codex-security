@@ -93,6 +93,10 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
+                elif version == 44:
+                    from workbench_target_state import upgrade_linux_repository_generations
+
+                    upgrade_linux_repository_generations(connection)
             if version not in applied:
                 connection.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",

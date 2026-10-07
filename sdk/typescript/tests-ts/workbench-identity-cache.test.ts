@@ -309,6 +309,7 @@ with ExitStack() as stack:
              patch.object(Path, "lstat", recorded_stat), \
              patch.object(Path, "is_dir", lambda path, *a, **k: stat.S_ISDIR(records[str(path)].st_mode)), \
              patch.object(Path, "read_bytes", lambda path: files[str(path)]), \
+             patch.object(state.os, "statvfs", side_effect=lambda path: SimpleNamespace(f_fsid=records[str(path)].st_dev), create=True), \
              patch.object(state, "_repository_birth_time_ns", side_effect=lambda path, value: value.st_birthtime_ns):
             first = real_identity_details(main)
             same = real_identity_details(main)
@@ -1960,7 +1961,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
     expect(result["migrations"]).toEqual(
-      Array.from({ length: 43 }, (_, index) => index + 1),
+      Array.from({ length: 44 }, (_, index) => index + 1),
     );
   },
 );

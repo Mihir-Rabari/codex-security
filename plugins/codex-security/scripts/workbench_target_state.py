@@ -12,7 +12,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -235,6 +235,7 @@ class GitRepositoryIdentity:
     device: int | str
     inode: int | str
     birth_time_ns: int
+    previous_value: str | None = None
 
     @property
     def legacy_value(self) -> str:
@@ -244,10 +245,8 @@ class GitRepositoryIdentity:
         )
 
 
-def _identity_digest(material: str) -> str:
-    return (
-        f"repository_sha256_{hashlib.sha256(material.encode(errors='surrogateescape')).hexdigest()}"
-    )
+def _identity_digest(material: str, prefix: str = "repository_sha256_") -> str:
+    return f"{prefix}{hashlib.sha256(material.encode(errors='surrogateescape')).hexdigest()}"
 
 
 def _repository_worktree_location(target: Path) -> tuple[Path, str] | None:
@@ -304,8 +303,24 @@ def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | 
         f"{serialize_filesystem_identity(object_metadata.st_ino)}\0"
         f"{object_birth_time_ns}\0{relative}"
     )
+    previous_value = None
+    value = _identity_digest(material)
+    if sys.platform == "linux":
+        try:
+            common_filesystem = os.statvfs(common_directory).f_fsid
+            object_filesystem = os.statvfs(object_directory).f_fsid
+        except OSError:
+            return None
+        previous_value = value
+        value = _identity_digest(
+            f"git-generation-v3\0{canonical_directory}\0{common_filesystem}\0{inode}\0"
+            f"{birth_time_ns}\0{object_directory}\0{object_filesystem}\0"
+            f"{serialize_filesystem_identity(object_metadata.st_ino)}\0"
+            f"{object_birth_time_ns}\0{relative}",
+            "repository_v3_sha256_",
+        )
     return GitRepositoryIdentity(
-        _identity_digest(material), relative, canonical_directory, device, inode, birth_time_ns
+        value, relative, canonical_directory, device, inode, birth_time_ns, previous_value
     )
 
 
@@ -362,10 +377,15 @@ class RepositoryTargetState:
     generation_predates_history: bool = False
     has_historical_scans: bool = False
     missing: bool = False
+    previous_generation: str | None = None
 
     @property
     def live_identity(self) -> str | None:
-        return self.repository.value if self.repository is not None else None
+        return (
+            self.previous_generation or self.repository.value
+            if self.repository is not None
+            else None
+        )
 
     @property
     def verified_identity(self) -> str | None:
@@ -442,7 +462,8 @@ def _inspect_repository_target(
             else set()
         )
         generation_conflict = bool(recorded_generations) and (
-            repository is None or recorded_generations != {repository.value}
+            repository is None
+            or recorded_generations not in ({repository.value}, {repository.previous_value})
         )
         if not {"target_device", "target_inode"} <= scan_columns:
             historical_scan = (
@@ -486,17 +507,20 @@ def _inspect_repository_target(
                     strict_owner_matches = False
                     continue
                 recorded_owner = True
-                if not stored_filesystem_identity_matches(
-                    device, metadata.st_dev
-                ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
+                if not stored_filesystem_identity_matches(device, metadata.st_dev):
+                    strict_owner_matches = False
+                    mismatch = mismatch or sys.platform != "linux"
+                if not stored_filesystem_identity_matches(inode, metadata.st_ino):
                     mismatch = True
                     strict_owner_matches = False
             stored_matches = repository is not None and stored_identity in {
                 repository.value,
                 repository.legacy_value,
+                repository.previous_value or repository.value,
             }
             verified_repository = repository is not None and (
-                stored_matches or recorded_generations == {repository.value}
+                stored_matches
+                or recorded_generations in ({repository.value}, {repository.previous_value})
             )
             ownership_matches = not (
                 malformed_owner
@@ -513,6 +537,21 @@ def _inspect_repository_target(
                 and not generation_predates_history
             )
         ownership_matches = ownership_matches and not generation_conflict
+    previous_generation = None
+    if (
+        ownership_matches
+        and repository is not None
+        and repository.previous_value is not None
+        and supports_repository_identity(connection)
+        and "repository_generation" in scan_columns
+        and connection.execute(
+            "SELECT 1 FROM security_targets WHERE repository_identity = ? "
+            "UNION ALL SELECT 1 FROM scans WHERE repository_generation = ? LIMIT 1",
+            (repository.previous_value, repository.previous_value),
+        ).fetchone()
+        is not None
+    ):
+        previous_generation = repository.previous_value
     return RepositoryTargetState(
         target_id,
         target_path,
@@ -524,6 +563,7 @@ def _inspect_repository_target(
         strict_owner_matches,
         generation_predates_history,
         historical_scan,
+        previous_generation=previous_generation,
     )
 
 
@@ -695,6 +735,55 @@ def require_scan_checkout_owner(connection: sqlite3.Connection, scan: sqlite3.Ro
         raise SystemExit("The saved scan no longer matches the selected repository checkout.")
 
 
+def upgrade_linux_repository_generations(connection: sqlite3.Connection) -> None:
+    """Convert only old digests authenticated before their device evidence changes."""
+    if sys.platform != "linux":
+        return
+    targets = connection.execute(
+        "SELECT id, current_path, repository_identity FROM security_targets "
+        "WHERE repository_identity GLOB 'repository_sha256_*' OR EXISTS ("
+        "SELECT 1 FROM scans WHERE (scans.target_id = security_targets.id "
+        "OR scans.target_path = security_targets.current_path) "
+        "AND repository_generation GLOB 'repository_sha256_*')"
+    ).fetchall()
+    for target in targets:
+        state = _inspect_repository_target(
+            connection, target["id"], target["current_path"], target["repository_identity"]
+        )
+        _upgrade_repository_generation(connection, state)
+
+
+def _upgrade_repository_generation(
+    connection: sqlite3.Connection, state: RepositoryTargetState
+) -> RepositoryTargetState:
+    identity = state.repository
+    if (
+        identity is None
+        or identity.previous_value is None
+        or state.stored_identity not in (None, identity.value, identity.previous_value)
+        or not state.ownership_matches
+        or not state.strict_owner_matches
+    ):
+        return state
+    connection.execute(
+        "UPDATE security_targets SET repository_identity = ? WHERE repository_identity = ?",
+        (identity.value, identity.previous_value),
+    )
+    connection.execute(
+        "UPDATE scans SET repository_generation = ? WHERE repository_generation = ?",
+        (identity.value, identity.previous_value),
+    )
+    return replace(
+        state,
+        stored_identity=(
+            identity.value
+            if state.stored_identity == identity.previous_value
+            else state.stored_identity
+        ),
+        previous_generation=None,
+    )
+
+
 def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[str]:
     directory = os.path.normcase(identity.common_directory)
     relative = os.path.normcase(os.fspath(Path(identity.relative_path))).replace(os.sep, "/")
@@ -772,7 +861,12 @@ def normalize_pre_release_repository_identities(connection: sqlite3.Connection) 
         for state in states.values()
         if state.repository is not None
         and state.ownership_matches
-        and state.stored_identity in {state.repository.value, state.repository.legacy_value}
+        and state.stored_identity
+        in {
+            state.repository.value,
+            state.repository.legacy_value,
+            state.repository.previous_value or state.repository.value,
+        }
     }
     for target in targets:
         stored = target["repository_identity"]
@@ -911,7 +1005,7 @@ def register_security_target(
     state = _inspect_repository_target(
         connection, target_id, target_path, existing["repository_identity"]
     )
-    if not state.has_historical_scans and state.live_identity != existing["repository_identity"]:
+    if not state.has_historical_scans and state.live_identity != state.stored_identity:
         _bind_unscanned_repository_identity(
             connection,
             target_id,
@@ -926,6 +1020,7 @@ def register_security_target(
         state = _inspect_repository_target(
             connection, target_id, target_path, existing["repository_identity"]
         )
+    state = _upgrade_repository_generation(connection, state)
     if verify_ownership:
         state.require_owner()
     if existing["repository_identity"] is None:
