@@ -67,6 +67,13 @@
 - reuse validated inputs and simplify preview sizing ([#1369](https://github.com/openai/codex-security/pull/1369))
 - share note generation and test setup ([#1373](https://github.com/openai/codex-security/pull/1373))
 - update Codex CLI and SDK to 0.162.0-alpha.18 ([#1420](https://github.com/openai/codex-security/pull/1420))
+- simplify internal Deep Scan state and finding caches ([#1352](https://github.com/openai/codex-security/pull/1352))
+- simplify evidence grouping and parsing ([#1368](https://github.com/openai/codex-security/pull/1368))
+- reuse repeated workflow steps ([#1385](https://github.com/openai/codex-security/pull/1385))
+- simplify CLI completion and display state ([#1384](https://github.com/openai/codex-security/pull/1384))
+- reuse client construction and scan data ([#1374](https://github.com/openai/codex-security/pull/1374))
+- simplify report formatting and scan completion ([#1366](https://github.com/openai/codex-security/pull/1366))
+- remove duplicate benchmark checks and line collection ([#1359](https://github.com/openai/codex-security/pull/1359))
 
 <!-- release-section: highlights:end -->
 

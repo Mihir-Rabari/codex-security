@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { listenForAbort } from "./cli-signals.js";
-import { isNonEmptyString } from "./value.js";
+import { isNonEmptyString, parseJson } from "./value.js";
 
 import {
   execFile as execFileCallback,
@@ -63,7 +63,6 @@ import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
-  createSecurityInternal,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
@@ -685,7 +684,6 @@ class PublicationProgressPresenter {
       try {
         dashboard.stop();
       } catch {}
-      this.#dashboard = null;
     }
   }
 
@@ -1227,7 +1225,7 @@ interface CliDependencies {
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
-    createSecurityInternal(config, { surface: "cli" }),
+    new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
@@ -1675,14 +1673,10 @@ export async function runCodexSkillCommand(
               }),
             ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
-        let completed = false;
         const complete = (
           code: number | null,
           signal: NodeJS.Signals | null,
         ): void => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
           resolve(
             requestedSignal === "SIGINT" || signal === "SIGINT"
               ? 130
@@ -1692,12 +1686,7 @@ export async function runCodexSkillCommand(
           );
         };
         forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", (error) => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          reject(error);
-        });
+        invocation.once("error", reject);
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
@@ -3376,7 +3365,7 @@ export async function main(
                 createSecurity:
                   dependencies.createPolicySecurity ??
                   ((config) =>
-                    createSecurityInternal(config, { surface: "cli" })),
+                    new CodexSecurity(config, undefined, { surface: "cli" })),
                 chooseAuthentication: (config, auth, signal) =>
                   chooseInteractiveAuthentication(
                     {
@@ -7683,12 +7672,7 @@ export async function readSkillCommandOutput(
 
   for await (const line of createInterface({ input: Readable.from(stream) })) {
     if (line.trim().length === 0) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const event = parseJson(() => line);
     if (typeof event !== "object" || event === null) {
       continue;
     }
@@ -7952,12 +7936,8 @@ function incurErrorMessage(output: string): string {
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
   if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
-  }
+  const parsed = parseJson(() => message);
+  return typeof parsed === "string" ? parsed : message;
 }
 
 async function runExport(
@@ -9541,7 +9521,6 @@ export class Progress {
   #timerLineActive = false;
   #cursorHidden = false;
   #observingStreamErrors = false;
-  #streamErrorsActive = false;
   #streamErrorGeneration = 0;
   readonly #onStreamError = (): void => {};
 
@@ -9609,14 +9588,12 @@ export class Progress {
       }
     } finally {
       if (this.#observingStreamErrors) {
-        this.#streamErrorsActive = false;
         const generation = this.#streamErrorGeneration;
         try {
           this.#stream.write("", () => {
             queueMicrotask(() => {
               if (
                 generation === this.#streamErrorGeneration &&
-                !this.#streamErrorsActive &&
                 this.#observingStreamErrors
               ) {
                 this.#stream.off?.("error", this.#onStreamError);
@@ -9652,7 +9629,6 @@ export class Progress {
   }
 
   #observeStreamErrors(): void {
-    this.#streamErrorsActive = true;
     this.#streamErrorGeneration += 1;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);
