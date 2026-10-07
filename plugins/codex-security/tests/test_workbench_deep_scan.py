@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from test_workbench_setup_and_migrations import EXPECTED_MIGRATIONS
 from workbench_test_support import (
     attach_continuation,
     begin_deep_scan,
@@ -276,7 +277,9 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            EXPECTED_MIGRATIONS[-1][0],
+        )
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)

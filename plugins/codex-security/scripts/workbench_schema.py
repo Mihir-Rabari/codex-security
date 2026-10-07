@@ -992,10 +992,7 @@ def apply_migrations(
             """
         )
         normalize_pre_release_migrations(connection, now())
-        connection.execute(
-            "UPDATE schema_migrations SET version = 43 "
-            "WHERE version = 42 AND name = 'scope severity checkpoints to each scan'"
-        )
+        move_pre_release_migration(connection, 42, 43, "scope severity checkpoints to each scan")
         applied = {
             row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
         }
