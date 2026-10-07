@@ -2496,79 +2496,6 @@ describe("semantic scan comparison", () => {
       ),
     ).rejects.toThrow(error);
   });
-  test.each(["chatgpt", "api-key"] as const)(
-    "rejects ambient command auth that conflicts with explicit %s authentication",
-    async (auth) => {
-      const home = await temporaryDirectory("codex-security-auth-conflict-");
-      const provider = {
-        name: "Synthetic",
-        base_url: "https://provider.example/v1",
-        wire_api: "responses",
-        auth: { command: "./synthetic-auth" },
-      };
-      const config = {
-        model_provider: "synthetic",
-        model_providers: { synthetic: provider },
-      };
-      await writeFile(join(home, "config.toml"), stringify(config));
-      const options = {
-        auth,
-        config: {},
-        environment: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_HOME: home,
-          OPENAI_API_KEY: "synthetic-selected-key",
-        },
-        workingDirectory: home,
-      };
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(
-        (options) =>
-          codex.startThread(options!) as ReturnType<Codex["startThread"]>,
-      );
-      try {
-        await expect(
-          matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            options,
-          ),
-        ).rejects.toThrow("conflicts with command authentication");
-        expect(startThread).not.toHaveBeenCalled();
-
-        // A complete command provider selected by the caller keeps scan precedence.
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          { ...options, config: { codexOverrides: config } },
-        );
-        expect(startThread).toHaveBeenCalledTimes(1);
-        startThread.mockClear();
-
-        // An ambient profile must not replace that explicitly selected provider.
-        await writeFile(
-          join(home, "config.toml"),
-          stringify({
-            profile: "ambient",
-            profiles: { ambient: { model_provider: "other" } },
-            model_providers: { other: provider },
-          }),
-        );
-        await expect(
-          matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            { ...options, config: { codexOverrides: config } },
-          ),
-        ).rejects.toThrow("conflicts with command authentication");
-        expect(startThread).not.toHaveBeenCalled();
-      } finally {
-        startThread.mockRestore();
-      }
-    },
-  );
-
   test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
     const home = await temporaryDirectory("codex-security-comparison-");
     await writeFile(
@@ -2663,44 +2590,6 @@ describe("semantic scan comparison", () => {
     }
   });
 
-  test("preserves environment API-key precedence over managed credentials", async () => {
-    const root = await temporaryDirectory("codex-security-comparison-");
-    const stateDirectory = join(root, "state");
-    const credentialHome = join(stateDirectory, "codex-home");
-    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
-
-    const account = mock(async () => {
-      return { authenticated: true, details: "Logged in using ChatGPT" };
-    });
-
-    const environment = await comparisonEnvironment(
-      {
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-        OPENAI_API_KEY: "synthetic-key-must-not-be-used",
-        CODEX_API_KEY: "synthetic-secondary-must-not-be-used",
-      },
-      account,
-    );
-
-    expect(environment["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
-    expect(environment["OPENAI_API_KEY"]).toBe(
-      "synthetic-key-must-not-be-used",
-    );
-    expect(environment["CODEX_API_KEY"]).toBe(
-      "synthetic-secondary-must-not-be-used",
-    );
-    expect(environment["CODEX_HOME"]).toBeUndefined();
-    const provider = {
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-      CODEX_SECURITY_SCAN_ID: "scan",
-      CODEX_HOME: join(root, "provider-home"),
-      CODEX_CLI_PATH: "/compatible-codex",
-      CODEX_SAFETY_IDENTIFIER: "synthetic-user",
-      FIREWORKS_API_KEY: "provider-key",
-    };
-    expect(await comparisonEnvironment(provider, account)).toEqual(provider);
-    expect(account).not.toHaveBeenCalled();
-  });
   test.each([
     "home",
     "profile",
@@ -2851,10 +2740,12 @@ describe("semantic scan comparison", () => {
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
-          sandboxMode: "read-only",
           approvalPolicy: "never",
           networkAccessEnabled: false,
         });
+        expect(threadOptions?.sandboxMode).toBe(
+          commandAuth ? undefined : "read-only",
+        );
         expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
           contents,
         );

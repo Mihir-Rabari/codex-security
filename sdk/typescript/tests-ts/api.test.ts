@@ -18,7 +18,15 @@ import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  win32,
+} from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -1780,7 +1788,7 @@ describe("CodexSecurity orchestration", () => {
           resolveCodexProfile(overrides)["model_instructions_file"];
         const instructions = `Synthetic instructions for scan ${index}.\n`;
         if (typeof instructionsFile === "string") {
-          await writeFile(join(scanDir, instructionsFile), instructions);
+          await writeFile(resolve(scanDir, instructionsFile), instructions);
         }
         return new TestClient(
           {
@@ -1844,7 +1852,7 @@ describe("CodexSecurity orchestration", () => {
                   );
                   expect(workerConfig["model_instructions_file"]).toBe(
                     typeof instructionsFile === "string"
-                      ? join(scanDir, instructionsFile)
+                      ? resolve(scanDir, instructionsFile)
                       : undefined,
                   );
                   if (typeof instructionsFile === "string") {
