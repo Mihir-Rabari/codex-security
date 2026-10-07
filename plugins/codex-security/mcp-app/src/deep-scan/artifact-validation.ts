@@ -417,10 +417,12 @@ export function projectDiscoveryCoverage(
       ),
     };
   });
-  const surfaceIds = new Map();
+  const surfaceIds = new Map<unknown, string[]>();
   for (const [index, surface] of surfaces.entries()) {
-    if (!surfaceIds.has(surface.id))
-      surfaceIds.set(surface.id, projectedSurfaces[index]!.id);
+    surfaceIds.set(surface.id, [
+      ...(surfaceIds.get(surface.id) ?? []),
+      projectedSurfaces[index]!.id,
+    ]);
   }
   return {
     completeness: coverage.completeness,
@@ -445,8 +447,8 @@ export function projectDiscoveryCoverage(
           ...(item.surfaceIds === undefined
             ? {}
             : {
-                surfaceIds: (item.surfaceIds as string[]).map(
-                  (id) => surfaceIds.get(id) ?? id,
+                surfaceIds: (item.surfaceIds as string[]).flatMap(
+                  (id) => surfaceIds.get(id) ?? [id],
                 ),
               }),
         };

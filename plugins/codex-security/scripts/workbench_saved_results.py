@@ -1298,6 +1298,30 @@ def merge_saved_results(
         prefix = directory.as_posix() + "/"
         return [ref.removeprefix(prefix) if isinstance(ref, str) else ref for ref in refs]
 
+    receipt_digests: dict[str, str | None] = {}
+
+    def surface_receipt_digests(item: dict[str, Any], worker: Any, relative: str) -> Any:
+        refs = coverage_receipts(item, worker, relative)
+        if not isinstance(refs, list):
+            return None
+        digests = []
+        for ref in refs:
+            if not isinstance(ref, str):
+                return None
+            if ref not in receipt_digests:
+                try:
+                    descriptor = open_scan_local_file_descriptor(
+                        scan_dir, ref, "Saved discovery receipt"
+                    )
+                    with os.fdopen(descriptor, "rb") as handle:
+                        receipt_digests[ref] = hashlib.sha256(handle.read()).hexdigest()
+                except (ContractError, OSError):
+                    receipt_digests[ref] = None
+            if receipt_digests[ref] is None:
+                return None
+            digests.append(receipt_digests[ref])
+        return digests
+
     def coverage_attempt(field: str, item: dict[str, Any], worker: Any, relative: str) -> int:
         attempt = coverage_source_attempt(relative, worker)
         value = dict(item)
@@ -1333,6 +1357,12 @@ def merge_saved_results(
                         record, worker["id"], path, path
                     )
                 if prior == value:
+                    if field == "surfaces":
+                        receipts = surface_receipt_digests(item, worker, relative)
+                        if receipts is None or receipts != surface_receipt_digests(
+                            record, worker, path
+                        ):
+                            continue
                     attempt = prior_attempt
                     break
         return attempt
@@ -1384,25 +1414,27 @@ def merge_saved_results(
                             and (worker["id"], provenance["attempt"]) in reviewed_attempts
                             and isinstance(provenance.get("sourceId"), str)
                         ):
-                            surface_ids.setdefault(provenance["sourceId"], surface["id"])
+                            surface_ids.setdefault(provenance["sourceId"], []).append(surface["id"])
                 surfaces = source.get("surfaces", [])
                 current_surface_ids = {}
                 for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
                     if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
                         continue
                     retained = retained_coverage_record("surfaces", surface, worker, relative)
-                    current_surface_ids.setdefault(
-                        surface["id"],
+                    current_surface_ids.setdefault(surface["id"], []).append(
                         retained["id"]
                         if retained is not None and isinstance(retained.get("id"), str)
                         else project_missing_record(
                             "surfaces", surface, offset, worker, source, relative
-                        )["id"],
+                        )["id"]
                     )
                 surface_ids.update(current_surface_ids)
                 result["surfaceIds"] = [
-                    surface_ids.get(value, value) if isinstance(value, str) else value
+                    target
                     for value in item["surfaceIds"]
+                    for target in (
+                        surface_ids.get(value, [value]) if isinstance(value, str) else [value]
+                    )
                 ]
         if field in ("surfaces", "deferred"):
             allocations = allocated_projections.setdefault(field, [])
@@ -1487,7 +1519,7 @@ def merge_saved_results(
             relative not in current_results
             and worker_result_order is not None
             and (
-                relative not in selected_observations
+                (relative not in reducer_paths and relative not in selected_observations)
                 or source_order[relative] < worker_result_order
             )
         )

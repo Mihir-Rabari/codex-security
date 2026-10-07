@@ -167,7 +167,7 @@ for (const unsafe of ["wrong-scan", "linked-checkpoints"]) {
 }
 
 for (const duplicate of [false, true]) {
-  test(`raw saved duplicate surface references retain first target=${duplicate}`, async () => {
+  test(`raw saved surface references retain every matching target=${duplicate}`, async () => {
     const f = await fixture();
     try {
       const coverage = {
@@ -199,7 +199,12 @@ for (const duplicate of [false, true]) {
       );
       const source = (await readDeepReductionSources(f.context)).discoveries[0]
         .coverage;
-      assert.equal(source.deferred[0].surfaceIds[0], source.surfaces[0].id);
+      assert.deepEqual(
+        source.deferred[0].surfaceIds,
+        source.surfaces
+          .slice(0, duplicate ? 2 : 1)
+          .map((surface: { id: string }) => surface.id),
+      );
       assert.notEqual(source.surfaces[0].id, source.surfaces[1].id);
     } finally {
       await rm(f.root, { recursive: true, force: true });

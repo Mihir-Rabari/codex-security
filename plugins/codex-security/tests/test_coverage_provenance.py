@@ -1441,3 +1441,83 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
         is not accepted_worker
     )
     assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("receipt_state", ["copied", "changed", "missing-archive"])
+def test_reconstructed_retry_surface_compares_receipt_bytes(
+    workbench_api, workbench_db, publication_scan, receipt_state
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = 2 WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    archived = output.parent / "attempts" / "attempt-01" / "result.json"
+    archived.parent.mkdir(parents=True)
+    surface = {
+        "id": "review",
+        "label": "Synthetic source evidence",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [
+                {"id": "gap", "reason": "Validate this source.", "surfaceIds": ["review"]}
+            ],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    archived.write_text(json.dumps({**draft, "complete": False}))
+    for directory in (output, archived.parent):
+        receipt = directory / "artifacts/review.txt"
+        receipt.parent.mkdir()
+        receipt.write_text("Original synthetic evidence.\n")
+    if receipt_state == "changed":
+        (output / "artifacts/review.txt").write_text("Changed synthetic evidence.\n")
+    if receipt_state == "missing-archive":
+        (archived.parent / "artifacts/review.txt").unlink()
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "reviews": [
+                    {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                    for attempt in (1, 2)
+                ],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in (result, archived)}
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    expected_attempt = 1 if receipt_state == "copied" else 2
+    assert len(coverage["surfaces"]) == 1
+    retained = coverage["surfaces"][0]
+    assert retained["provenance"]["attempt"] == expected_attempt
+    assert retained["id"] == f"{worker_id}-attempt-{expected_attempt}-surface-1"
+    assert retained["receiptRefs"] == [
+        (output / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
+    ]
+    gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
+    assert gap["surfaceIds"] == [retained["id"]]
+    assert all(path.read_bytes() == data for path, data in originals.items())

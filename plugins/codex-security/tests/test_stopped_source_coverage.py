@@ -607,7 +607,12 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
         second_gap = next(
             item for item in coverage["deferred"] if item.get("reason") == pending[1]["reason"]
         )
-        assert second_gap["surfaceIds"] == [retained_surface["id"]]
+        assert set(second_gap["surfaceIds"]) == {
+            item["id"]
+            for item in coverage["surfaces"]
+            if item.get("provenance", {}).get("sourceId") == surface["id"]
+        }
+        assert len(second_gap["surfaceIds"]) == 2
     assert receipt.read_text() == "Retained source review evidence.\n"
 
 
@@ -1475,7 +1480,7 @@ def test_stopped_retry_copies_keep_one_observation_per_worker(
         assert all(path.read_bytes() == data for path, data in source_bytes.items())
 
 
-@pytest.mark.parametrize("publication", ["interrupted", "completed", "legacy"])
+@pytest.mark.parametrize("publication", ["interrupted", "completed", "legacy", "after-completed"])
 def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
     workbench_api, workbench_db, publication_scan, publication
 ):
@@ -1487,6 +1492,27 @@ def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
         )
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
+    if publication == "after-completed":
+        prior = add_worker(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE result_manifest_path = ?",
+                (str(prior),),
+            )
+        accepted_prior = {
+            "scanId": scan.scan_id,
+            "complete": True,
+            "findings": [],
+            "sourceCoverage": {
+                "completeness": "complete",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+                "reviews": [],
+            },
+        }
+        write_checkpoint(prior.parent / "checkpoints", accepted_prior)
+        prior.write_text(json.dumps(accepted_prior))
     discovery = add_worker(workbench_db, scan)
     discovery.write_text(
         json.dumps(
@@ -1509,7 +1535,10 @@ def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none', status = ? WHERE result_manifest_path = ?",
-            ("failed" if publication == "interrupted" else "succeeded", str(reducer)),
+            (
+                "failed" if publication in ("interrupted", "after-completed") else "succeeded",
+                str(reducer),
+            ),
         )
     reducer.write_text(
         json.dumps(
@@ -1554,7 +1583,7 @@ def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
     }
     if publication != "legacy":
         write_checkpoint(reducer.parent / "checkpoints", accepted)
-    if publication != "interrupted":
+    if publication not in ("interrupted", "after-completed"):
         reducer.write_text(json.dumps(accepted))
     saved = {path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*.json")}
     workbench_api["saved_results"].fail_scan(
