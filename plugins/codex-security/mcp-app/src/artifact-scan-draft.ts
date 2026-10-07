@@ -723,9 +723,8 @@ function reconcileScanDraft(
             );
           })
         : [];
-      if (inferredMatches.length > 0) {
-        for (const current of inferredMatches)
-          preserveFindingDetails(current, finding);
+      if (inferredMatches.length === 1) {
+        preserveFindingDetails(inferredMatches[0]!, finding);
       } else if (
         matches.length === 1 &&
         source.findings.filter((current) => sameSavedFinding(current, finding))
