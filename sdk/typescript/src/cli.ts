@@ -8477,7 +8477,7 @@ async function nestedPatchGitDependencies(
           "-C",
           directory,
           "--git-dir",
-          join(checkout, ".git"),
+          join(checkout, ".git").replaceAll(sep, "/"),
           "--work-tree",
           checkout,
           ...args,

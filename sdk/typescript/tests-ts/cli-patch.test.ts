@@ -8671,6 +8671,7 @@ test.each(["absolute", "relative", "parent primary pool"])(
       await mkdir(nested);
       const inner = repositoryGit(nested);
       inner("init", "--initial-branch=main");
+      inner("config", "maintenance.auto", "false");
       inner("config", "user.name", "Synthetic User");
       inner("config", "user.email", "synthetic@example.test");
       await writeFile(join(nested, "app.ts"), "original\n");
