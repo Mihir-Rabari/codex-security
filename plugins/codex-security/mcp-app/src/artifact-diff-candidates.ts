@@ -636,7 +636,22 @@ export function preserveUnresolvedDiffCandidates(
       return {
         ...surface,
         ...(object(surface.candidate)
-          ? { candidate: candidateSnapshot(surface.candidate, candidate) }
+          ? {
+              candidate: candidateSnapshot(surface.candidate, candidate),
+              ...(!isDeepStrictEqual(
+                surface.candidate,
+                candidateSnapshot(surface.candidate, candidate),
+              )
+                ? {
+                    originalCandidates: exactUnion(
+                      Array.isArray(surface.originalCandidates)
+                        ? surface.originalCandidates
+                        : [],
+                      [surface.candidate],
+                    ),
+                  }
+                : {}),
+            }
           : {}),
         ...(surface.label === oldCandidate.summary
           ? { label: candidate.summary }

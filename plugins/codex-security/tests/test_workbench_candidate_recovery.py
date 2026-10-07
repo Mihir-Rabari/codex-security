@@ -828,3 +828,64 @@ def test_newer_outcome_archives_owned_gap(
         assert result is not None
         assert not any(item.get("candidateId") == "review" for item in result[2]["deferred"])
         assert contains(result[1] if outcome == "reported" else result[2])
+
+
+@pytest.mark.parametrize("receipt", ["none", "valid", "missing", "unsafe", "null"])
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
+    tmp_path: Path, generic_review_recovery, receipt: str, checkpoint: bool
+) -> None:
+    module, pending, terminal, binding = generic_review_recovery
+    original = pending["coverage"]["deferred"][0]
+    original.update(
+        candidateId="review",
+        sourceWorkerId="worker",
+        paths=["app.py"],
+        candidate={"evidence": "Original saved proof gap."},
+    )
+    write_saved_parent(tmp_path, pending, 100)
+    terminal["coverage"].pop("resolvedDeferred")
+    refs = {
+        "none": [],
+        "valid": ["artifacts/review.txt"],
+        "missing": ["artifacts/missing.txt"],
+        "unsafe": ["../outside.txt"],
+        "null": None,
+    }[receipt]
+    terminal["coverage"]["surfaces"] = [
+        {
+            "id": "decision",
+            "candidateId": "review",
+            "label": "API",
+            "disposition": "rejected",
+            "receiptRefs": refs,
+        }
+    ]
+    output = tmp_path / "worker"
+    output.mkdir()
+    if receipt == "valid":
+        (output / "artifacts").mkdir()
+        (output / "artifacts/review.txt").write_text("Synthetic review receipt.\n")
+    result = output / "result.json"
+    result.write_text(json.dumps(terminal))
+    os.utime(result, ns=(300, 300))
+    if checkpoint:
+        saved = write_checkpoint(output / "checkpoints", terminal)
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": saved.name}))
+        os.utime(head, ns=(300, 300))
+    source_bytes = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    unresolved = receipt not in {"none", "valid"}
+    assert (original in first[2]["deferred"]) is unresolved
+    assert len(module.unresolved_candidates(first[2], first[1])) == int(unresolved)
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    assert replay is not None
+    assert (original in replay[2]["deferred"]) is unresolved
+    assert all(path.read_bytes() == data for path, data in source_bytes.items())

@@ -3432,12 +3432,38 @@ for (const variant of ["identical", "evidence", "phases"] as const) {
       },
     ]);
     input.coverage.completeness = "partial";
+    const surfaceOriginal = structuredClone(current);
+    if (variant === "evidence")
+      surfaceOriginal.evidence = "Distinct surface-authored evidence.";
+    if (variant === "phases")
+      surfaceOriginal.validation = {
+        disposition: "reportable",
+        evidence: "Distinct surface validation.",
+      };
+    input.coverage.surfaces = [
+      {
+        id: "pending-surface",
+        candidateId: current.candidate_id,
+        label: current.summary,
+        disposition: "needs_follow_up",
+        candidate: surfaceOriginal,
+      },
+    ];
+    input.coverage.deferred[0].surfaceIds = ["pending-surface"];
     await recordCodexSecurityScanDraft(context, input);
     const published = await readCoverage(context);
     const pending = published.deferred.find(
       (row: FixtureObject) => row.candidateId === current.candidate_id,
     );
     assert.deepEqual(pending.candidate, current);
+    const surface = published.surfaces.find(
+      (row: FixtureObject) => row.candidateId === current.candidate_id,
+    );
+    assert.deepEqual(surface.candidate, current);
+    assert.deepEqual(
+      surface.originalCandidates ?? [],
+      variant === "identical" ? [] : [surfaceOriginal],
+    );
     assert.deepEqual(
       pending.originalCandidates ?? [],
       variant === "identical" ? [] : [original],
@@ -3448,6 +3474,13 @@ for (const variant of ["identical", "evidence", "phases"] as const) {
       );
       const row = saved.coverage.deferred.find(
         (entry: FixtureObject) => entry.candidateId === current.candidate_id,
+      );
+      const surface = saved.coverage.surfaces.find(
+        (entry: FixtureObject) => entry.candidateId === current.candidate_id,
+      );
+      assert.deepEqual(
+        surface.originalCandidates ?? [],
+        variant === "identical" ? [] : [surfaceOriginal],
       );
       assert.deepEqual(
         row.originalCandidates ?? [],
@@ -3587,4 +3620,35 @@ for (const complete of [false, true]) {
       }
     });
   }
+}
+
+for (const candidate of [
+  null,
+  "Historical annotation.",
+  ["Historical trace."],
+  {},
+  { evidence: "Historical opaque trace." },
+]) {
+  test(`preserves opaque historical deferred candidate extensions: ${JSON.stringify(candidate)}`, async (t) => {
+    const context = await fixture(t);
+    const input = draft([
+      {
+        id: "opaque-proof",
+        candidateId: "opaque-candidate",
+        reason: "Saved opaque proof remains pending.",
+        candidate,
+      },
+    ]);
+    input.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, input);
+    assert.deepEqual(
+      (await readCoverage(context)).deferred[0].candidate,
+      candidate,
+    );
+    await recordCodexSecurityScanDraft(context, draft());
+    assert.deepEqual(
+      (await readCoverage(context)).deferred[0].candidate,
+      candidate,
+    );
+  });
 }

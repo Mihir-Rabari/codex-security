@@ -18,7 +18,10 @@ from finalize_scan_contract import _recover_unsealed_coverage
 
 
 def recover_candidate_receipts(
-    parent: dict[str, Any] | None, scan_dir: Path, warnings: list[str]
+    parent: dict[str, Any] | None,
+    scan_dir: Path,
+    warnings: list[str],
+    source: str | None = None,
 ) -> dict[str, Any] | None:
     if parent is None:
         return parent
@@ -36,6 +39,9 @@ def recover_candidate_receipts(
     ):
         return parent
     # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    if source is not None:
+        directory = scan_dir / Path(source).parent
+        scan_dir = directory.parent if directory.name == "checkpoints" else directory
     parent = copy.deepcopy(parent)
     _recover_unsealed_coverage(
         parent["coverage"],

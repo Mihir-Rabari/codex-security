@@ -154,7 +154,6 @@
             "description": "Stable identity of a saved candidate; omitted for general coverage work."
           },
           "candidate": {
-            "type": "object",
             "description": "Saved candidate details and evidence awaiting a final decision."
           }
         }

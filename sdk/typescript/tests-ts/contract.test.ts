@@ -1608,3 +1608,36 @@ for (const sourceWorkerId of [
     expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
   });
 }
+
+for (const candidate of [
+  null,
+  "Historical annotation.",
+  ["Historical trace."],
+  {},
+  { evidence: "Opaque historical evidence." },
+]) {
+  test(`loads sealed v1 deferred historical candidate extension ${JSON.stringify(candidate)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-proof",
+        candidateId: "historical-candidate",
+        reason: "The historical proof gap remains.",
+        candidate,
+        surfaceIds: [coverage["surfaces"][0]["id"]],
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.deferred[0]!["candidate"] as unknown).toEqual(
+      candidate,
+    );
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}

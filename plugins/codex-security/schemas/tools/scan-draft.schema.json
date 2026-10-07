@@ -784,10 +784,7 @@
               "surfaceIds": {
                 "$ref": "#/$defs/textList"
               },
-              "candidate": {
-                "type": "object",
-                "additionalProperties": true
-              }
+              "candidate": {}
             },
             "required": ["reason"],
             "additionalProperties": true
