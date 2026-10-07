@@ -284,7 +284,7 @@ export class CodexReviewRunner {
             cwd: workingDirectory,
             ephemeral: true,
             approvalPolicy:
-              review.model === "gpt-5.6-luna" ? "never" : "on-request",
+              review.stage === "screening" ? "never" : "on-request",
             approvalsReviewer: "auto_review",
             permissions: "codex_security_review",
             threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
@@ -314,7 +314,7 @@ export class CodexReviewRunner {
                 apps: false,
                 memories: false,
                 shell_snapshot: false,
-                ...(review.model === "gpt-5.6-luna"
+                ...(review.stage === "screening"
                   ? { multi_agent: false, multi_agent_v2: false }
                   : {}),
               },

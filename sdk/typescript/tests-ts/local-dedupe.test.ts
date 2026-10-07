@@ -1,9 +1,12 @@
-import { createHash } from "node:crypto";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { LocalDeduplication } from "../src/deduplication/local.js";
+import {
+  LocalDeduplication,
+  type FindingEmbeddingBinding,
+} from "../src/deduplication/local.js";
 import {
   deduplicateScanDirectoryInternal,
   deduplicateScanInternal,
@@ -23,6 +26,7 @@ import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.j
 import { rejecting } from "./support/errors.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { Finding } from "../src/models.js";
+import type { CodexReview } from "../src/deduplication/codex-review.js";
 
 const temporaryDirectories = createTemporaryDirectories();
 afterEach(temporaryDirectories.cleanup);
@@ -35,12 +39,12 @@ for (const mode of ["direct", "fresh workflow", "resumed workflow"]) {
       const f = await fixture();
       const options = {
         repository: f.repository,
+        embedding: f.embedding,
         ...(mode === "direct" ? {} : { workflowId: "protected-python" }),
       };
       if (mode === "resumed workflow") {
         await deduplicateScanDirectoryInternal(f.scanDir, options, {
           environment: f.environment,
-          embedder: { embed: f.embed },
           reviewer: emptyNeighborhoodReviewer(),
         });
         f.embed.mockClear();
@@ -61,7 +65,6 @@ for (const mode of ["direct", "fresh workflow", "resumed workflow"]) {
             TEST_PYTHON_PROBE: marker,
           },
           runWorkbench: rejecting("Repository Python reached the workbench"),
-          embedder: { embed: f.embed },
           reviewer: emptyNeighborhoodReviewer(),
         }),
       ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
@@ -137,23 +140,17 @@ test.each([undefined, "", " \t", "synthetic-primary"])(
 async function fixture() {
   const value = await workflowFixture();
   temporaryDirectories.track(value.root);
-  const hash = (text: string) =>
-    createHash("sha256").update(text).digest("hex");
-  const targetId = `target_sha256_${hash(`local-workspace\0${value.repository}`)}`;
-  for (const finding of value.document.findings) {
-    const fingerprint = `codex-security/v1:sha256:${hash(["codex-security/v1", targetId, finding.ruleId, finding.identity.anchor, finding.identity.instance ?? ""].join("\0"))}`;
-    finding.fingerprints.primary = fingerprint;
-    finding.findingId = `csf_${hash(fingerprint).slice(0, 24)}`;
-    finding.occurrenceId = `occ_${hash([value.document.scanId, fingerprint].join("\0")).slice(0, 24)}`;
-  }
-  const findingsText = JSON.stringify(value.document);
-  await writeFile(join(value.scanDir, "findings.json"), findingsText);
   const manifestPath = join(value.scanDir, "scan-manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const targetId = `target_sha256_${sha256(`local-workspace\0${value.repository}`)}`;
   manifest.scan.target.targetId = targetId;
+  for (const finding of value.document.findings)
+    setFindingIdentity(manifest.scan, finding);
+  const findingsText = JSON.stringify(value.document);
+  await writeFile(join(value.scanDir, "findings.json"), findingsText);
   manifest.scan.artifacts.find(
     (artifact: { path: string }) => artifact.path === "findings.json",
-  ).sha256 = hash(findingsText);
+  ).sha256 = sha256(findingsText);
   await writeFile(manifestPath, JSON.stringify(manifest));
   const options = {
     environment: value.environment,
@@ -163,6 +160,12 @@ async function fixture() {
   const embed = mock(async (findings: readonly Finding[]) =>
     findings.map(() => ({ model: EMBEDDING_MODEL, vector })),
   );
+  const embedding: FindingEmbeddingBinding = {
+    embedder: { embed },
+    model: EMBEDDING_MODEL,
+    dimensions: EMBEDDING_DIMENSIONS,
+    cacheNamespace: "synthetic-default-v1",
+  };
   const local = (
     embedder: FindingEmbedder = { embed },
     allRepositories = false,
@@ -174,13 +177,14 @@ async function fixture() {
       value.repository,
       signal,
       undefined,
-      embedder,
+      { ...embedding, embedder },
     );
   return {
     ...value,
     targetId,
     options,
     embed,
+    embedding,
     local,
     store: new SqliteFindingsStore(value.environment),
   };
@@ -191,13 +195,12 @@ test("local dedupe indexes a sealed directory, reuses vectors and never calls th
   const original = await readFile(join(f.scanDir, "findings.json"), "utf8");
   const dependencies = {
     environment: f.environment,
-    embedder: { embed: f.embed },
     reviewer: emptyNeighborhoodReviewer(),
     fetch: rejecting("Unexpected findings HTTP call"),
   };
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
-    { repository: f.repository },
+    { repository: f.repository, embedding: f.embedding },
     dependencies,
   );
   expect(result.deduplicationStatus).toBe("completed");
@@ -216,7 +219,7 @@ test("local dedupe indexes a sealed directory, reuses vectors and never calls th
   expect(
     await deduplicateScanInternal(
       f.document.scanId,
-      {},
+      { embedding: f.embedding },
       { ...dependencies, runWorkbench: history },
     ),
   ).toEqual(result);
@@ -240,10 +243,9 @@ test("saved-scan local review persists a group with an existing repository findi
   );
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
-    { repository: f.repository },
+    { repository: f.repository, embedding: f.embedding },
     {
       environment: f.environment,
-      embedder: { embed: f.embed },
       fetch: rejecting("Unexpected HTTP call"),
       reviewer: duplicateReviewer(),
     },
@@ -255,6 +257,150 @@ test("saved-scan local review persists a group with an existing repository findi
   expect(await f.store.listDedupeGroups(anchor.findingId)).toHaveLength(1);
   expect(f.embed).toHaveBeenCalledTimes(1);
   expect(f.embed.mock.calls[0]![0]).toHaveLength(2);
+});
+
+test("saved-scan dedupe uses configured Codex models and efforts for both review stages", async () => {
+  const f = await fixture();
+  await mkdir(f.environment.CODEX_HOME);
+  await writeFile(
+    join(f.environment.CODEX_HOME, "config.toml"),
+    'model = "synthetic-configured"\nmodel_reasoning_effort = "medium"\n',
+  );
+  const anchor = f.document.findings[0]!;
+  await f.store.insert(
+    [
+      {
+        finding: {
+          ...anchor,
+          findingId: "csf_neighbor",
+          fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+        },
+        embedding: { model: EMBEDDING_MODEL, vector },
+      },
+    ],
+    f.targetId,
+  );
+  const calls: string[][] = [];
+  await deduplicateScanDirectoryInternal(
+    f.scanDir,
+    { repository: f.repository, embedding: f.embedding },
+    {
+      environment: f.environment,
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          calls.push([review.stage, review.model, review.effort]);
+          return review.validate(
+            review.stage === "screening"
+              ? {
+                  decisions: {
+                    "pair-1": {
+                      decision: "SAME",
+                      rationale: "Review together",
+                    },
+                  },
+                }
+              : { decision: "DISTINCT", rationale: "Independent fixes" },
+          );
+        },
+      },
+    },
+  );
+  expect(calls).toEqual([
+    ["screening", "synthetic-configured", "medium"],
+    ["pair-review", "synthetic-configured", "medium"],
+  ]);
+});
+
+test.each(["model", "dimensions", "cacheNamespace"] as const)(
+  "custom embedding bindings reuse their vectors and invalidate changed %s",
+  async (changed) => {
+    const f = await fixture();
+    const embed = mock(async (findings: readonly Finding[]) =>
+      findings.map(() => ({ model: "synthetic-model", vector: [1, 0, 0] })),
+    );
+    const embedding: FindingEmbeddingBinding = {
+      embedder: { embed },
+      model: "synthetic-model",
+      dimensions: 3,
+      cacheNamespace: "synthetic-provider:preprocessing-v1",
+    };
+    const dependencies = {
+      environment: f.environment,
+      reviewer: emptyNeighborhoodReviewer(),
+    };
+    await deduplicateScanDirectoryInternal(
+      f.scanDir,
+      { repository: f.repository, embedding },
+      dependencies,
+    );
+    await deduplicateScanDirectoryInternal(
+      f.scanDir,
+      { repository: f.repository, embedding },
+      dependencies,
+    );
+    expect(embed).toHaveBeenCalledTimes(1);
+    const before = new LocalDeduplication(
+      f.environment,
+      { repositoryId: f.targetId },
+      f.repository,
+      undefined,
+      undefined,
+      embedding,
+    );
+    await before.prepare(f.document.findings, f.targetId);
+    const next = {
+      ...embedding,
+      ...(changed === "model" ? { model: "synthetic-next-model" } : {}),
+      ...(changed === "dimensions" ? { dimensions: 2 } : {}),
+      ...(changed === "cacheNamespace"
+        ? { cacheNamespace: "synthetic-other-provider:preprocessing-v1" }
+        : {}),
+    };
+    const nextEmbed = mock(async (findings: readonly Finding[]) =>
+      findings.map(() => ({
+        model: next.model,
+        vector: Array.from({ length: next.dimensions }, (_, i) =>
+          i === 0 ? 1 : 0,
+        ),
+      })),
+    );
+    await deduplicateScanDirectoryInternal(
+      f.scanDir,
+      {
+        repository: f.repository,
+        embedding: { ...next, embedder: { embed: nextEmbed } },
+      },
+      dependencies,
+    );
+    expect(nextEmbed).toHaveBeenCalledTimes(1);
+    await expect(
+      before.potentialDuplicates(f.document.findings[0]!.findingId),
+    ).rejects.toThrow("Findings changed");
+    await expect(before.storeDedupeGroups([])).rejects.toThrow(
+      "Findings changed",
+    );
+  },
+);
+
+test("remote dedupe rejects a local embedding binding", async () => {
+  const f = await fixture();
+  await expect(
+    deduplicateScanDirectoryInternal(
+      f.scanDir,
+      {
+        repository: f.repository,
+        findingsUrl: "https://synthetic.invalid",
+        embedding: f.embedding,
+      },
+      {
+        environment: f.environment,
+        fetch: rejecting("Unexpected findings request"),
+      },
+    ),
+  ).rejects.toThrow(
+    "Custom embeddings are only supported for local deduplication",
+  );
+  expect(f.embed).not.toHaveBeenCalled();
 });
 
 test("scope preparation refreshes legacy embeddings, preserves current bodies, and protects concurrent writes", async () => {
@@ -341,7 +487,11 @@ test("embedding writes reject stale content and reuse certified vectors", async 
     f.repository,
     undefined,
     undefined,
-    { embed: rejecting("Missing embedding credentials") },
+    {
+      ...f.embedding,
+      cacheNamespace: "synthetic-other-provider-v1",
+      embedder: { embed: rejecting("Missing embedding credentials") },
+    },
   );
   await expect(
     differentProvider.prepare([finding], f.targetId),
@@ -433,11 +583,14 @@ test("local workflow replays a lost group acknowledgement without publication or
     }
     return result;
   };
-  const options = { repository: f.repository, workflowId: "local-workflow" };
+  const options = {
+    repository: f.repository,
+    workflowId: "local-workflow",
+    embedding: f.embedding,
+  };
   const dependencies = {
     environment: f.environment,
     runWorkbench: workbench,
-    embedder: { embed: f.embed },
     reviewer,
     fetch: rejecting("Unexpected publication"),
   };
@@ -476,7 +629,11 @@ test("local workflow replays a lost group acknowledgement without publication or
   await expect(
     deduplicateScanDirectoryInternal(
       f.scanDir,
-      { ...options, findingsUrl: "http://synthetic.invalid" },
+      {
+        ...options,
+        embedding: undefined,
+        findingsUrl: "http://synthetic.invalid",
+      },
       dependencies,
     ),
   ).rejects.toThrow("different destination");
@@ -504,7 +661,7 @@ test("empty input does not embed unrelated history and cancellation stops prepar
     f.repository,
     controller.signal,
     undefined,
-    { embed: f.embed },
+    f.embedding,
   );
   await expect(local.prepare(f.document.findings, f.targetId)).rejects.toThrow(
     "Canceled",
@@ -528,10 +685,9 @@ test("sealed artifacts cannot select a different local repository corpus", async
   await expect(
     deduplicateScanDirectoryInternal(
       f.scanDir,
-      { repository: differentRepository },
+      { repository: differentRepository, embedding: f.embedding },
       {
         environment: f.environment,
-        embedder: { embed: f.embed },
         reviewer: emptyNeighborhoodReviewer(),
       },
     ),
@@ -547,10 +703,13 @@ test("local workbench calls receive cancellation and cannot report success after
   await expect(
     deduplicateScanDirectoryInternal(
       f.scanDir,
-      { repository: f.repository, signal: controller.signal },
+      {
+        repository: f.repository,
+        signal: controller.signal,
+        embedding: f.embedding,
+      },
       {
         environment: f.environment,
-        embedder: { embed: f.embed },
         reviewer: emptyNeighborhoodReviewer(),
         runWorkbench: async (args, input, signal) => {
           expect(signal).toBe(controller.signal);

@@ -334,6 +334,35 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+For a different embedding provider or model, both saved-scan SDK methods accept
+an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
+`{ model, vector }` per input finding, in input order. The adapter owns its
+credentials, tokenization, chunking, and provider request format.
+
+```typescript
+import { deduplicateScan, type FindingEmbedder } from "@openai/codex-security";
+
+async function dedupeWithEmbeddings(scanId: string, embedder: FindingEmbedder) {
+  return await deduplicateScan(scanId, {
+    embedding: {
+      embedder,
+      model: "example-embedding-model",
+      dimensions: 384,
+      cacheNamespace: "example-provider:document-v1",
+    },
+  });
+}
+```
+
+Choose a stable namespace identifying the actual vector space and preprocessing
+version, including any provider or model revision that changes the vectors.
+Changing the namespace, model, or dimensions refreshes cached vectors. Do not
+put credentials in the namespace. The database keeps one vector per finding;
+switching spaces replaces it, and concurrent runs with different spaces may
+need a retry. `embedding` cannot be combined with `findingsUrl`, whose service
+owns embedding preparation. Without a binding, the existing OpenAI adapter and
+endpoint setting apply.
+
 For a sealed scan directory outside local history, supply the checkout:
 
 ```typescript
@@ -376,9 +405,14 @@ exits successfully after saving the other accepted groups.
 
 ### Reviews, concurrency, and failures
 
-Deduplication retrieves all candidate neighborhoods, screens them with
-`gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
-`gpt-5.6-sol` at `high`. A pair review can start after all screenings that cover
+By default, deduplication retrieves all candidate neighborhoods, screens them
+with `gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
+`gpt-5.6-sol` at `high`. The host's Codex `model` and `model_reasoning_effort`
+settings override these defaults for both stages. Provider selection uses the existing Codex configuration; embedding
+configuration is separate. Screening and pair-review permissions stay attached
+to their stages regardless of model name.
+
+A pair review can start after all screenings that cover
 it finish without a `DISTINCT` decision. Accepted pairs form groups only when
 no reviewed `DISTINCT` decision or refusal contradicts the group.
 

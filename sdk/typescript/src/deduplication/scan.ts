@@ -33,8 +33,8 @@ import {
   reviewSettingsDigest,
 } from "./checkpointed-review.js";
 import { normalizeRepository } from "../targets.js";
-import { LocalDeduplication } from "./local.js";
-import type { FindingEmbedder } from "../server/embeddings.js";
+import { LocalDeduplication, type FindingEmbeddingBinding } from "./local.js";
+import { readCodexHomeConfig } from "../auth.js";
 import { CodexSecurityError } from "../errors.js";
 
 export interface DeduplicateScanOptions {
@@ -42,6 +42,8 @@ export interface DeduplicateScanOptions {
   workflowId?: string;
   /** Optional Findings API. Omit to prepare and deduplicate findings in local SQLite. */
   findingsUrl?: string;
+  /** Custom vector space for local deduplication; cannot be combined with findingsUrl. */
+  embedding?: FindingEmbeddingBinding;
   /** Search all repositories instead of the scan's targetId. Defaults to false. */
   allRepositories?: boolean;
   /** Shared concurrency limit for deduplication jobs. Defaults to 8. */
@@ -81,7 +83,6 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   fetch?: FindingsRequest;
-  embedder?: FindingEmbedder;
 };
 
 /** @internal */
@@ -156,6 +157,10 @@ async function deduplicateResolvedScan(
   bindRepository: boolean,
 ): Promise<DeduplicateScanResult> {
   const environment = dependencies.environment ?? process.env;
+  if (options.embedding !== undefined && options.findingsUrl !== undefined)
+    throw new CodexSecurityError(
+      "Custom embeddings are only supported for local deduplication.",
+    );
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     selectedDirectory,
     {
@@ -182,7 +187,7 @@ async function deduplicateResolvedScan(
           repositoryPath,
           options.signal,
           workbench,
-          dependencies.embedder,
+          options.embedding,
         )
       : undefined;
   const client =
@@ -282,7 +287,10 @@ async function deduplicateResolvedScan(
           client.potentialDuplicates(findingId, scope),
       },
       dependencies.reviewer ??
-        new CodexDeduplicationReviewer(checkpoints ?? runner),
+        new CodexDeduplicationReviewer(
+          checkpoints ?? runner,
+          await readCodexHomeConfig(environment, options.signal),
+        ),
       options.signal,
       options.concurrency,
     );

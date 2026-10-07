@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { environmentEntry } from "../auth.js";
 import type { Finding } from "../models.js";
 import type {
@@ -25,12 +24,21 @@ import { retryDelay, waitForRetry } from "./retry.js";
 // Checkpoint bounded batches so a retry keeps completed work without one process per finding.
 const EMBEDDING_BATCH_SIZE = 64;
 
+/** One vector space and the adapter that produces its embeddings. */
+export interface FindingEmbeddingBinding {
+  readonly embedder: FindingEmbedder;
+  readonly model: string;
+  readonly dimensions: number;
+  /** Identifies the provider/vector space and preprocessing version; exclude credentials. */
+  readonly cacheNamespace: string;
+}
+
 /** Direct workbench adapter. Importing it starts no HTTP or MCP server. */
 export class LocalDeduplication {
   private options?: Promise<WorkbenchCommandOptions>;
   private cacheKeys: Record<string, string> = {};
   private readonly space: string;
-  private readonly embedder: FindingEmbedder;
+  private readonly embedding: FindingEmbeddingBinding;
 
   constructor(
     private readonly environment: NodeJS.ProcessEnv,
@@ -38,20 +46,15 @@ export class LocalDeduplication {
     private readonly repositoryPath: string,
     private readonly signal?: AbortSignal,
     private readonly workbench: typeof runWorkbench = runWorkbench,
-    embedder?: FindingEmbedder,
+    embedding?: FindingEmbeddingBinding,
   ) {
     const endpoint =
       environment["CODEX_SECURITY_EMBEDDINGS_URL"] || EMBEDDINGS_URL;
-    // Includes the serialization/chunking version and vector space, never a raw URL/key.
-    this.space = workflowDigest({
-      version: 1,
+    this.embedding = embedding ?? {
       model: EMBEDDING_MODEL,
       dimensions: EMBEDDING_DIMENSIONS,
-      endpoint: createHash("sha256").update(endpoint).digest("hex"),
-    });
-    this.embedder =
-      embedder ??
-      new OpenAiFindingEmbedder(
+      cacheNamespace: endpoint,
+      embedder: new OpenAiFindingEmbedder(
         [
           environmentEntry(environment, "OPENAI_API_KEY"),
           environmentEntry(environment, "CODEX_API_KEY"),
@@ -59,7 +62,15 @@ export class LocalDeduplication {
         embeddingRequest,
         endpoint,
         signal,
-      );
+      ),
+    };
+    // The digest keeps endpoint/namespace details out of persisted cache keys.
+    this.space = workflowDigest({
+      version: 1,
+      model: this.embedding.model,
+      dimensions: this.embedding.dimensions,
+      namespace: this.embedding.cacheNamespace,
+    });
   }
 
   get inputDigest(): string {
@@ -88,7 +99,7 @@ export class LocalDeduplication {
         offset,
         offset + EMBEDDING_BATCH_SIZE,
       );
-      const embeddings = await this.embedder.embed(batch);
+      const embeddings = await this.embedding.embedder.embed(batch);
       this.signal?.throwIfAborted();
       if (embeddings.length !== batch.length)
         throw new CodexSecurityError(
@@ -139,8 +150,8 @@ export class LocalDeduplication {
       JSON.stringify({
         ...payload,
         space: this.space,
-        model: EMBEDDING_MODEL,
-        dimensions: EMBEDDING_DIMENSIONS,
+        model: this.embedding.model,
+        dimensions: this.embedding.dimensions,
         ...(this.scope.allRepositories
           ? {}
           : { repositoryId: this.scope.repositoryId }),
