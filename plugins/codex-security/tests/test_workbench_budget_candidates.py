@@ -905,7 +905,7 @@ def test_budget_completion_preserves_authored_partial_candidate_snapshot(
         assert pending["paths"] == ["app.py"]
 
 
-@pytest.mark.parametrize("receipt", ["valid", "missing", "unsafe"])
+@pytest.mark.parametrize("receipt", ["valid", "missing", "unsafe", "blank-label"])
 def test_budget_receipts_are_recovered_before_shared_surface_decisions(
     tmp_path: Path, receipt: str
 ) -> None:
@@ -932,6 +932,8 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
             "../outside.txt" if receipt == "unsafe" else "artifacts/review/receipt.txt"
         ],
     }
+    if receipt == "blank-label":
+        surface.update(label="", receiptRefs=[])
     pending = {
         "id": "authored-candidate-gap",
         "candidateId": candidate["candidate_id"],

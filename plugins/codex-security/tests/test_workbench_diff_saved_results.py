@@ -908,7 +908,8 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
 
 @pytest.mark.parametrize("ledger_state", ["missing", "malformed", "matching"])
 @pytest.mark.parametrize(
-    "evidence_location", ["finding", "candidate", "second-row", "surface", "other-owner"]
+    "evidence_location",
+    ["finding", "candidate", "second-row", "surface", "other-owner", "row-history"],
 )
 def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_admission(
     tmp_path: Path, workbench_api, ledger_state: str, evidence_location: str
@@ -943,6 +944,9 @@ def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_adm
         surface = workbench_api["saved_results"]._diff_candidate_decision(candidate)
         surface.update(id="closed-review", receiptRefs=[], finding=finding)
         coverage.update(surfaces=[surface], deferred=[])
+    elif evidence_location == "row-history":
+        pending["finding"] = {"title": "Compact saved finding annotation."}
+        pending["previousFindings"] = [finding]
     elif evidence_location == "candidate":
         # Custom validation stores the demoted finding in this supported field.
         pending["candidate"] = finding

@@ -27,6 +27,7 @@ def recover_candidate_receipts(
         and row.get("disposition") in ("rejected", "not_applicable")
         and (
             not isinstance(row.get("label"), str)
+            or not row["label"]
             or row.get("receiptRefs")
             or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
         )

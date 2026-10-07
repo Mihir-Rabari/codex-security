@@ -784,7 +784,15 @@ def _stopped_diff_candidate_decisions(
                 or key[0] is not None
             ):
                 continue
-            for payload in (item.get("finding"), item.get("candidate")):
+            for payload in (
+                item.get("finding"),
+                item.get("candidate"),
+                *(
+                    item.get("previousFindings")
+                    if isinstance(item.get("previousFindings"), list)
+                    else []
+                ),
+            ):
                 if isinstance(payload, dict):
                     for retained in _retained_findings(payload):
                         if finding_candidate_key(retained) == key:

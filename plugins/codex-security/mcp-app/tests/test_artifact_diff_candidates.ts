@@ -2903,66 +2903,85 @@ for (const provenance of [undefined, null, "Saved annotation", {}]) {
   }
 }
 
-for (const shared of [false, true]) {
-  test(`confirmation closes generated custom proof-gap followup, shared=${shared}`, async (t) => {
-    const current = candidate("authored-gap");
-    const context = await fixture(t, [current]);
-    const initial = draft([
-      {
-        candidateId: current.candidate_id,
-        candidate: current,
-        reason: "An authored runtime proof remains missing.",
-      },
-    ]);
-    initial.coverage.completeness = "partial";
-    await recordCodexSecurityScanDraft(context, { ...initial, complete: true });
-    const coverage = await readCoverage(context);
-    const followup = coverage.surfaces.find(
-      (row: FixtureObject) => row.candidateId === current.candidate_id,
-    );
-    assert.equal(followup.notes, "An authored runtime proof remains missing.");
-    if (shared)
-      coverage.deferred.push({
-        id: "independent-review",
-        reason: "Independent unfinished review.",
-        surfaceIds: [followup.id],
+for (const multiple of [false, true]) {
+  for (const shared of [false, true]) {
+    test(`confirmation closes generated custom proof-gap followup, shared=${shared}, multiple=${multiple}`, async (t) => {
+      const current = candidate("authored-gap");
+      const context = await fixture(t, [current]);
+      const initial = draft([
+        {
+          candidateId: current.candidate_id,
+          candidate: current,
+          reason: "An authored runtime proof remains missing.",
+        },
+      ]);
+      if (multiple)
+        initial.coverage.deferred.push({
+          candidateId: current.candidate_id,
+          candidate: current,
+          reason: "An independent second proof gap remains missing.",
+        });
+      initial.coverage.completeness = "partial";
+      await recordCodexSecurityScanDraft(context, {
+        ...initial,
+        complete: true,
       });
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      findings: [finding(current.candidate_id)],
-      coverage: {
-        completeness: coverage.completeness,
-        surfaces: coverage.surfaces,
-        explicitExclusions: coverage.explicitExclusions,
-        deferred: coverage.deferred,
-      },
-    });
-    const saved = await readCoverage(context);
-    assert.equal(
-      saved.deferred.some(
+      const coverage = await readCoverage(context);
+      const followup = coverage.surfaces.find(
         (row: FixtureObject) => row.candidateId === current.candidate_id,
-      ),
-      false,
-    );
-    assert.equal(
-      saved.surfaces.some(
-        (row: FixtureObject) =>
-          row.id === followup.id && row.disposition === "needs_follow_up",
-      ),
-      shared,
-    );
-    if (shared)
-      assert.ok(
-        saved.deferred.some(
-          (row: FixtureObject) => row.id === "independent-review",
-        ),
       );
-  });
+      assert.equal(
+        followup.notes,
+        "An authored runtime proof remains missing.",
+      );
+      if (shared)
+        coverage.deferred.push({
+          id: "independent-review",
+          reason: "Independent unfinished review.",
+          surfaceIds: [followup.id],
+        });
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+        findings: [finding(current.candidate_id)],
+        coverage: {
+          completeness: coverage.completeness,
+          surfaces: coverage.surfaces,
+          explicitExclusions: coverage.explicitExclusions,
+          deferred: coverage.deferred,
+        },
+      });
+      const saved = await readCoverage(context);
+      assert.equal(
+        saved.deferred.some(
+          (row: FixtureObject) => row.candidateId === current.candidate_id,
+        ),
+        false,
+      );
+      assert.equal(
+        saved.surfaces.some(
+          (row: FixtureObject) =>
+            row.id === followup.id && row.disposition === "needs_follow_up",
+        ),
+        shared,
+      );
+      if (shared)
+        assert.ok(
+          saved.deferred.some(
+            (row: FixtureObject) => row.id === "independent-review",
+          ),
+        );
+    });
+  }
 }
 
 for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
-  for (const payload of ["candidate", "finding", "previousFindings"] as const) {
+  for (const payload of [
+    "candidate",
+    "finding",
+    "previousFindings",
+    "originalCandidates",
+  ] as const) {
     test(`first Diff submission archives ${payload} evidence on ${outcome}`, async (t) => {
       const reviewed = candidate("first-submission", "reportable");
       const context = await fixture(t, [reviewed]);
@@ -2979,14 +2998,19 @@ for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
         id: "original-proof-gap",
         candidateId: reviewed.candidate_id,
         reason: "Original source review.",
-        [payload]: payload === "previousFindings" ? [evidence] : evidence,
+        [payload]:
+          payload === "previousFindings" || payload === "originalCandidates"
+            ? [evidence]
+            : evidence,
       };
       const otherPending = {
         ...pending,
         id: "independent-proof-gap",
         reason: "Independent source review.",
         [payload]:
-          payload === "previousFindings" ? [otherEvidence] : otherEvidence,
+          payload === "previousFindings" || payload === "originalCandidates"
+            ? [otherEvidence]
+            : otherEvidence,
       };
       const input = draft([pending, otherPending]);
       input.coverage.completeness = "partial";

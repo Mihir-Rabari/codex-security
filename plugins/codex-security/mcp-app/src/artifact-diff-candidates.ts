@@ -425,6 +425,13 @@ export function preserveUnresolvedDiffCandidates(
       }
       if (object(pending.finding))
         preserveFindingDetails(finding, pending.finding as JsonObject);
+      if (Array.isArray(pending.originalCandidates))
+        provenance.originalCandidates = exactUnion(
+          Array.isArray(provenance.originalCandidates)
+            ? provenance.originalCandidates
+            : [],
+          pending.originalCandidates,
+        );
       if (Array.isArray(pending.previousFindings))
         provenance.previousFindings = exactUnion(
           Array.isArray(provenance.previousFindings)
@@ -448,6 +455,13 @@ export function preserveUnresolvedDiffCandidates(
         decision[archive] = [...previous, structuredClone(pending[field])];
       decision[field] ??= structuredClone(pending[field]);
     }
+    if (Array.isArray(pending.originalCandidates))
+      decision.originalCandidates = exactUnion(
+        Array.isArray(decision.originalCandidates)
+          ? decision.originalCandidates
+          : [],
+        pending.originalCandidates,
+      );
     if (Array.isArray(pending.previousFindings))
       decision.previousFindings = exactUnion(
         Array.isArray(decision.previousFindings)
@@ -466,12 +480,13 @@ export function preserveUnresolvedDiffCandidates(
       )
       .map((candidate) => [candidateKey(candidate.candidate_id)!, candidate]),
   );
-  const previous = new Map(
-    (input.coverage.deferred as JsonObject[]).map((item) => [
-      coverageCandidateKey(item),
-      item,
-    ]),
-  );
+  const previous = new Map<string | undefined, JsonObject[]>();
+  for (const item of input.coverage.deferred as JsonObject[]) {
+    const key = coverageCandidateKey(item);
+    const rows = previous.get(key) ?? [];
+    rows.push(item);
+    previous.set(key, rows);
+  }
   const deferred = (input.coverage.deferred as JsonObject[])
     .filter((item) => {
       const candidateId = coverageCandidateKey(item);
@@ -529,12 +544,17 @@ export function preserveUnresolvedDiffCandidates(
   const surfaces = inputSurfaces
     .map((surface) => {
       const key = coverageCandidateKey(surface);
-      const item = previous.get(key);
+      const items = previous.get(key) ?? [];
+      const item = items.at(-1);
       const finding = confirmed.get(key ?? "");
       const decision = decisions.get(key);
       if (
         (finding || decision) &&
-        isGeneratedFollowUp(surface, item, deferred, inputSurfaces)
+        (items.length > 0
+          ? items.some((item) =>
+              isGeneratedFollowUp(surface, item, deferred, inputSurfaces),
+            )
+          : isGeneratedFollowUp(surface, undefined, deferred, inputSurfaces))
       ) {
         if (finding)
           return {
