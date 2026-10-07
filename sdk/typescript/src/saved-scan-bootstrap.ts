@@ -1,6 +1,9 @@
+import { environmentEntry } from "./auth.js";
+import { inspectTrustedExecutable } from "./trusted-executable.js";
+import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
-import { gitMarkerRoot } from "./targets.js";
+import { gitHistoryIdentity, gitMarkerRoot } from "./targets.js";
 import { CodexSecurityError } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
@@ -14,11 +17,12 @@ import {
 interface ScanTarget {
   id: string;
   target_path: string;
+  target_id?: string | null;
 }
 
 interface BootstrapDatabase {
   prepare(sql: string): {
-    all(...parameters: (string | number)[]): ScanTarget[];
+    all(...parameters: (string | number)[]): unknown[];
   };
   close(): void;
 }
@@ -39,13 +43,20 @@ export async function savedScanWorkbench(
   const environment: ProcessEnvironment = workbenchEnvironment(
     options.environment,
   );
-  const targets = readTargets(requestedId, environment);
+  const targets = await readTargets(
+    requestedId,
+    environment,
+    options.currentDirectory,
+    options.signal,
+  );
   const latest = requestedId === "latest" || typeof requestedId !== "string";
   if (targets.length === 0)
     throw new CodexSecurityError(
-      latest
-        ? "No completed saved scan was found for this repository."
-        : "Codex Security scan not found.",
+      typeof requestedId !== "string"
+        ? `Workflow ${requestedId.workflowId} has no saved scan. Start it with scan --workflow-id ${requestedId.workflowId}.`
+        : latest
+          ? "No completed saved scan was found for this repository."
+          : "Codex Security scan not found.",
     );
   if (!latest && targets.length > 1)
     throw new CodexSecurityError(
@@ -105,6 +116,18 @@ export async function savedScanWorkbench(
       target ? ["get-scan", "--scan-id", target.id] : args,
       input,
     );
+    if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
+      const workflow = result["workflow"];
+      if (
+        typeof workflow !== "object" ||
+        workflow === null ||
+        Array.isArray(workflow) ||
+        workflow["scanId"] !== targets[0]!.id
+      )
+        throw new CodexSecurityError(
+          "Saved workflow changed during lookup. Retry the command.",
+        );
+    }
     if (target) {
       const scan = result["scan"];
       if (
@@ -124,10 +147,12 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, { environment });
 }
 
-function readTargets(
+async function readTargets(
   requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
-): ScanTarget[] {
+  currentDirectory: string,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
   const Database = (
@@ -142,12 +167,27 @@ function readTargets(
       join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
       bun ? { readonly: true } : { readOnly: true },
     );
-    if (typeof requestedId !== "string")
-      return database.prepare("SELECT id, target_path FROM scans").all();
-    if (requestedId === "latest")
+    if (typeof requestedId !== "string") {
+      const columns = database
+        .prepare("PRAGMA table_info(finding_workflows)")
+        .all() as { name: string }[];
+      const scanId = columns.some((column) => column.name === "scan_id")
+        ? "workflow.scan_id"
+        : "json_extract(workflow.state_json, '$.scanId')";
       return database
-        .prepare("SELECT id, target_path FROM scans WHERE status = 'complete'")
-        .all();
+        .prepare(
+          `SELECT scans.id, scans.target_path FROM scans
+        JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
+        )
+        .all(requestedId.workflowId) as ScanTarget[];
+    }
+    if (requestedId === "latest")
+      return await latestTargets(
+        database,
+        currentDirectory,
+        environment,
+        signal,
+      );
     // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
     const compact = requestedId
       .replace(/^urn:uuid:/, "")
@@ -159,7 +199,7 @@ function readTargets(
         .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
       return database
         .prepare("SELECT id, target_path FROM scans WHERE id = ?")
-        .all(id);
+        .all(id) as ScanTarget[];
     }
     if (requestedId.length < 8)
       throw new CodexSecurityError(
@@ -169,8 +209,9 @@ function readTargets(
       .prepare(
         "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
       )
-      .all(requestedId.length, requestedId.toLowerCase());
+      .all(requestedId.length, requestedId.toLowerCase()) as ScanTarget[];
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;
     throw new CodexSecurityError(
       "Could not read saved scan targets before Python discovery.",
@@ -179,4 +220,138 @@ function readTargets(
   } finally {
     database?.close();
   }
+}
+
+async function latestTargets(
+  database: BootstrapDatabase,
+  directory: string,
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
+  const current = await pathKey(directory);
+  const registered = database
+    .prepare("SELECT id, current_path AS target_path FROM security_targets")
+    .all() as ScanTarget[];
+  const related = new Set<string>();
+  for (const target of registered)
+    if ((await pathKey(target.target_path)) === current) related.add(target.id);
+  const caller = await gitMarkerRoot(directory, signal, "outermost");
+  if (caller !== null) {
+    // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
+    const roots = await Promise.all(
+      registered.map(async (target) => {
+        try {
+          return await gitMarkerRoot(target.target_path, signal, "outermost");
+        } catch {
+          signal?.throwIfAborted();
+          return null;
+        }
+      }),
+    );
+    const protectedRoots = [
+      caller,
+      ...roots.filter((root): root is string => root !== null),
+    ];
+    const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");
+    const inspected =
+      configured === ""
+        ? { executable: null, environment }
+        : await inspectTrustedExecutable(
+            configured ?? "git",
+            environment,
+            protectedRoots,
+          );
+    // Keep workbench matching on this host Git without changing Python's PATH.
+    for (const key of Object.keys(environment))
+      if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];
+    environment["CODEX_SECURITY_GIT"] = inspected.executable ?? "";
+    const git =
+      inspected.executable === null
+        ? null
+        : {
+            executable: inspected.executable,
+            environment: inspected.environment,
+          };
+    const identity =
+      git === null
+        ? { commonDirectory: null, origin: null }
+        : await gitHistoryIdentity(directory, git, signal);
+    const common =
+      identity.commonDirectory === null
+        ? null
+        : await pathKey(identity.commonDirectory);
+    const origin = repositoryOrigin(identity.origin);
+    for (const [index, target] of registered.entries()) {
+      signal?.throwIfAborted();
+      if (related.has(target.id) || roots[index] === null || git === null)
+        continue;
+      const candidate = await gitHistoryIdentity(
+        target.target_path,
+        git,
+        signal,
+      );
+      if (
+        (common !== null &&
+          candidate.commonDirectory !== null &&
+          (await pathKey(candidate.commonDirectory)) === common) ||
+        (origin !== null && repositoryOrigin(candidate.origin) === origin)
+      )
+        related.add(target.id);
+    }
+  }
+  const scans = database
+    .prepare(
+      "SELECT id, target_path, target_id FROM scans WHERE status = 'complete' AND canceled_at IS NULL",
+    )
+    .all() as ScanTarget[];
+  const matches: ScanTarget[] = [];
+  for (const scan of scans) {
+    signal?.throwIfAborted();
+    if (
+      related.has(scan.target_id ?? "") ||
+      (await pathKey(scan.target_path)) === current
+    )
+      matches.push(scan);
+  }
+  return matches;
+}
+
+async function pathKey(path: string): Promise<string> {
+  const canonical = await realpath(path).catch(() => resolve(path));
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+// Match the workbench history's host/path identity across HTTPS and SSH origins.
+function repositoryOrigin(remote: string | null): string | null {
+  if (!remote) return null;
+  let host: string;
+  let path: string;
+  if (remote.includes("://")) {
+    let parsed: URL;
+    try {
+      parsed = new URL(remote);
+    } catch {
+      return null;
+    }
+    if (
+      !["https:", "ssh:"].includes(parsed.protocol) ||
+      parsed.search ||
+      parsed.hash
+    )
+      return null;
+    host = parsed.hostname.replace(/^\[|\]$/g, "");
+    if (
+      parsed.port &&
+      parsed.port !== (parsed.protocol === "https:" ? "443" : "22")
+    )
+      host += `:${parsed.port}`;
+    path = remote.match(/^[^:]+:\/\/[^/?#]*([^?#]*)/)?.[1] ?? "";
+  } else {
+    const colon = remote.indexOf(":");
+    if (colon < 0 || /[?#]/.test(remote)) return null;
+    host = remote.slice(0, colon).split("@").at(-1)!;
+    path = remote.slice(colon + 1);
+  }
+  path = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  return host && path ? JSON.stringify([host.toLowerCase(), path]) : null;
 }

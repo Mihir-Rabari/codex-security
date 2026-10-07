@@ -417,6 +417,11 @@ test.skipIf(process.platform === "win32")(
   "default CLI protects saved targets before Python lookup",
   async () => {
     const f = await fixture();
+    await deduplicateScanInternal(
+      f.first.scanId,
+      { workflowId: "synthetic-workflow", embedding: f.embedding },
+      { environment: f.environment, reviewer: f.reviewer },
+    );
     const python = join(f.repository, "python3");
     const marker = join(f.root, "cli-probed");
     await writeFile(
@@ -497,6 +502,204 @@ test.skipIf(process.platform === "win32")(
         },
         protectedRoot: target,
       }),
+    ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+    expect(existsSync(marker)).toBe(false);
+  },
+);
+
+for (const selector of ["latest", "workflow"] as const) {
+  test(`bootstrap ${selector} ignores unrelated history enclosing trusted Python`, async () => {
+    const f = await fixture();
+    const workflowId = "scoped-bootstrap";
+    await deduplicateScanInternal(
+      f.first.scanId,
+      { workflowId, embedding: f.embedding },
+      { environment: f.environment, reviewer: f.reviewer },
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.prepare(
+        "UPDATE scans SET target_path = ?, target_id = NULL WHERE id = ?",
+      ).run(dirname(f.python), f.second.scanId);
+    } finally {
+      db.close();
+    }
+    const workbench = await savedScanWorkbench(
+      selector === "latest" ? "latest" : { workflowId },
+      {
+        environment: { ...f.environment, PYTHON: f.python },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      },
+    );
+    if (selector === "latest") {
+      expect(
+        (
+          await resolveCompletedScan("latest", {
+            currentDirectory: () => f.repository,
+            runWorkbench: workbench,
+          })
+        ).scanId,
+      ).toBe(f.first.scanId);
+    } else {
+      const result = await workbench(
+        ["finding-workflow"],
+        JSON.stringify({ id: workflowId, action: "get" }),
+      );
+      expect((result["workflow"] as { scanId: string }).scanId).toBe(
+        f.first.scanId,
+      );
+    }
+  });
+}
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "workflow bootstrap ignores inaccessible unrelated history",
+  async () => {
+    const f = await fixture();
+    const workflowId = "scoped-bootstrap";
+    await deduplicateScanInternal(
+      f.first.scanId,
+      { workflowId, embedding: f.embedding },
+      { environment: f.environment, reviewer: f.reviewer },
+    );
+    const inaccessible = join(f.root, "inaccessible-history");
+    await mkdir(inaccessible);
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.prepare(
+        "UPDATE scans SET status = 'failed', target_path = ?, target_id = NULL WHERE id = ?",
+      ).run(join(inaccessible, "checkout"), f.second.scanId);
+    } finally {
+      db.close();
+    }
+    await chmod(inaccessible, 0);
+    try {
+      const workbench = await savedScanWorkbench(
+        { workflowId },
+        {
+          environment: { ...f.environment, PYTHON: f.python },
+          pluginRoot: PLUGIN_ROOT,
+          currentDirectory: f.repository,
+        },
+      );
+      const result = await workbench(
+        ["finding-workflow"],
+        JSON.stringify({ id: workflowId, action: "get" }),
+      );
+      expect((result["workflow"] as { scanId: string }).scanId).toBe(
+        f.first.scanId,
+      );
+    } finally {
+      await chmod(inaccessible, 0o700);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "latest preserves origin matching without executing another checkout's Git",
+  async () => {
+    const f = await fixture(true);
+    const clone = join(f.root, "other-clone");
+    execFileSync("git", ["clone", "--quiet", f.repository, clone]);
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "remote",
+      "add",
+      "origin",
+      "https://example.test/team/synthetic.git",
+    ]);
+    execFileSync("git", [
+      "-C",
+      clone,
+      "remote",
+      "set-url",
+      "origin",
+      "git@example.test:team/synthetic.git",
+    ]);
+    const executable = join(f.repository, "git");
+    const marker = join(f.root, "git-probed");
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nprintf "not-git\\n"\n',
+    );
+    await chmod(executable, 0o700);
+    const bootstrap = new URL("../src/saved-scan-bootstrap.ts", import.meta.url)
+      .href;
+    const saved = new URL("../src/saved-scan.ts", import.meta.url).href;
+    const script = `const { savedScanWorkbench } = await import(${JSON.stringify(bootstrap)});
+    const { resolveCompletedScan } = await import(${JSON.stringify(saved)});
+    const workbench = await savedScanWorkbench("latest", { environment: process.env, pluginRoot: ${JSON.stringify(PLUGIN_ROOT)}, currentDirectory: process.cwd() });
+    const scan = await resolveCompletedScan("latest", { currentDirectory: () => process.cwd(), runWorkbench: workbench });
+    console.log(scan.scanId);`;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: clone,
+      env: {
+        ...f.environment,
+        PATH: f.repository + delimiter + f.environment.PATH,
+        PYTHON: f.python,
+        TEST_GIT_PROBE: marker,
+      },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(f.second.scanId);
+    expect(existsSync(marker)).toBe(false);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "legacy workflow state resolves its bound target before Python discovery",
+  async () => {
+    const f = await fixture();
+    const state = join(f.root, "legacy-state");
+    await mkdir(state);
+    const db = new Database(join(state, "workbench.sqlite3"));
+    try {
+      db.exec(
+        "CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT NOT NULL); CREATE TABLE finding_workflows (id TEXT PRIMARY KEY, state_json TEXT NOT NULL)",
+      );
+      db.prepare("INSERT INTO scans VALUES (?, ?)").run(
+        f.first.scanId,
+        f.repository,
+      );
+      db.prepare("INSERT INTO finding_workflows VALUES (?, ?)").run(
+        "legacy-workflow",
+        JSON.stringify({ scanId: f.first.scanId }),
+      );
+    } finally {
+      db.close();
+    }
+    const executable = join(f.repository, "python3");
+    const marker = join(f.root, "legacy-probed");
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(executable, 0o700);
+    const workbench = await savedScanWorkbench(
+      { workflowId: "legacy-workflow" },
+      {
+        environment: {
+          ...f.environment,
+          CODEX_SECURITY_STATE_DIR: state,
+          PYTHON: executable,
+          TEST_PYTHON_PROBE: marker,
+        },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.root,
+      },
+    );
+    await expect(
+      workbench(
+        ["finding-workflow"],
+        JSON.stringify({ id: "legacy-workflow", action: "get" }),
+      ),
     ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
     expect(existsSync(marker)).toBe(false);
   },
