@@ -5593,9 +5593,13 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each(["root", "worker", "resumed worker"])(
-    "accounts for an authoritative archived %s rollout",
-    async (archived) => {
+  test.each(
+    ["root", "worker", "resumed worker"].flatMap((archived) =>
+      [false, true].map((polled) => ({ archived, polled })),
+    ),
+  )(
+    "accounts for an authoritative archived $archived rollout after polling=$polled",
+    async ({ archived, polled }) => {
       const home = await codexHome();
       const rootUsage = { input_tokens: 100, output_tokens: 10 };
       let root = await writeSession(
@@ -5616,12 +5620,6 @@ describe("live scan cost tracking", () => {
         "2026-07-26T12:01:00Z",
         true,
       );
-      const archive = join(home, "archived_sessions");
-      await mkdir(archive);
-      const moved = join(archive, "owned.jsonl");
-      await fsPromises.rename(archived === "root" ? root : worker, moved);
-      if (archived === "root") root = moved;
-      else worker = moved;
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
@@ -5629,13 +5627,70 @@ describe("live scan cost tracking", () => {
         maxCostUsd: 1,
         resolveOwnedSessionPaths: async () => new Set([root, worker]),
       });
-      tracker.start("scan-thread");
+      if (polled) {
+        tracker.start("scan-thread");
+        await tracker.refresh();
+      }
+      const archive = join(home, "archived_sessions");
+      await mkdir(archive);
+      const moved = join(archive, "owned.jsonl");
+      await fsPromises.rename(archived === "root" ? root : worker, moved);
+      if (archived === "root") root = moved;
+      else worker = moved;
+      if (!polled) tracker.start("scan-thread");
       const snapshot = await tracker.stop(rootUsage);
       expect(snapshot.cost).toMatchObject({
         inputTokens: 150,
         outputTokens: 15,
         estimatedUsd: 0.0009,
       });
+    },
+  );
+
+  test.each(["missing", "divergent", "unreadable"])(
+    "rejects a %s authoritative archive replacement after polling",
+    async (replacement) => {
+      const home = await codexHome();
+      const rootUsage = { input_tokens: 100, output_tokens: 10 };
+      const root = await writeSession(
+        home,
+        "scan-thread",
+        rootUsage,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 50, output_tokens: 5 },
+        "scan-thread",
+        undefined,
+        undefined,
+        true,
+      );
+      const archive = join(home, "archived-worker.jsonl");
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        resolveOwnedSessionPaths: async () => new Set([root, archive]),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      await fsPromises.rename(worker, archive);
+      if (replacement === "divergent") {
+        const contents = await fsPromises.readFile(archive, "utf8");
+        await writeFile(
+          archive,
+          contents.replace('"input_tokens":50', '"input_tokens":49'),
+        );
+      } else {
+        await rm(archive);
+        if (replacement === "unreadable") await mkdir(archive);
+      }
+      await expect(tracker.stop(rootUsage)).rejects.toThrow();
     },
   );
 

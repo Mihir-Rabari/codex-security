@@ -1,3 +1,4 @@
+import { createHash, type Hash } from "node:crypto";
 import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -46,6 +47,7 @@ interface SessionReasoning {
 
 interface SessionUsage {
   offset: number;
+  contentHash: Hash | null;
   pendingLine: Buffer[];
   unreadable: { error: unknown } | null;
   threadId: string | null;
@@ -109,6 +111,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    contentHash: null,
     pendingLine: [],
     unreadable: null,
     threadId: null,
@@ -390,7 +393,12 @@ export class ScanCostTracker {
         complete.accounting !== null &&
         complete.accountingError === null &&
         complete.offset >= partial.offset &&
-        (await sessionPrefixMatches(path, partial.offset, completePath))
+        (await sessionPrefixMatches(
+          path,
+          partial,
+          completePath,
+          present.has(path),
+        ))
       )
         return true;
     }
@@ -430,6 +438,23 @@ export class ScanCostTracker {
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
+      }
+    }
+
+    // Native archival can move a file after polling has already read it.
+    if (ownedPaths !== undefined) {
+      for (const [path, session] of this.#sessions) {
+        if (
+          !presentSessions.has(path) &&
+          (await this.#hasCompleteCopy(
+            path,
+            session,
+            presentSessions,
+            ownedPaths,
+          ))
+        ) {
+          this.#sessions.delete(path);
+        }
       }
     }
 
@@ -797,33 +822,43 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
 
 async function sessionPrefixMatches(
   path: string,
-  length: number,
+  session: SessionUsage,
   completePath: string,
+  present: boolean,
 ): Promise<boolean> {
-  const partial = await open(path, "r");
+  if (!present && session.contentHash === null) return false;
+  const partial = present ? await open(path, "r") : null;
   try {
     const complete = await open(completePath, "r");
     try {
       const left = Buffer.alloc(SESSION_READ_SIZE);
       const right = Buffer.alloc(SESSION_READ_SIZE);
-      for (let offset = 0; offset < length;) {
-        const size = Math.min(left.length, length - offset);
-        const a = await partial.read(left, 0, size, offset);
-        const b = await complete.read(right, 0, a.bytesRead, offset);
-        if (
-          a.bytesRead === 0 ||
-          a.bytesRead !== b.bytesRead ||
-          !left.subarray(0, a.bytesRead).equals(right.subarray(0, b.bytesRead))
-        )
-          return false;
-        offset += a.bytesRead;
+      const hash = partial === null ? createHash("sha256") : null;
+      for (let offset = 0; offset < session.offset;) {
+        const size = Math.min(right.length, session.offset - offset);
+        const { bytesRead } = await complete.read(right, 0, size, offset);
+        if (bytesRead === 0) return false;
+        if (partial === null) {
+          hash!.update(right.subarray(0, bytesRead));
+        } else {
+          const compared = await partial.read(left, 0, bytesRead, offset);
+          if (
+            compared.bytesRead !== bytesRead ||
+            !left.subarray(0, bytesRead).equals(right.subarray(0, bytesRead))
+          )
+            return false;
+        }
+        offset += bytesRead;
       }
-      return true;
+      return (
+        hash === null ||
+        hash.digest().equals(session.contentHash!.copy().digest())
+      );
     } finally {
       await complete.close();
     }
   } finally {
-    await partial.close();
+    await partial?.close();
   }
 }
 
@@ -859,6 +894,11 @@ async function readSessionUsage(
       if (length <= 0) return true;
       const { bytesRead } = await file.read(buffer, 0, length, session.offset);
       if (bytesRead === 0) return true;
+      if (requireReadableSessions) {
+        // Preserve prefix evidence if native ownership later names an archived path.
+        session.contentHash ??= createHash("sha256");
+        session.contentHash.update(buffer.subarray(0, bytesRead));
+      }
       session.offset += bytesRead;
       try {
         readSessionChunk(
