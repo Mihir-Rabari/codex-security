@@ -113,6 +113,18 @@ test("initializes the shared database concurrently without Python", async () => 
   });
 });
 
+test("missing explicit Python fails only when a Python operation runs", async () => {
+  const { environment } = await fixture();
+  const store = new SqliteFindingsStore({
+    ...environment,
+    PYTHON: join(environment.CODEX_SECURITY_STATE_DIR, "missing-python"),
+  });
+  await store.initialize();
+  await expect(store.list({ limit: 50, offset: 0 })).rejects.toThrow(
+    "The PYTHON interpreter is unavailable or unusable",
+  );
+});
+
 test.skipIf(process.platform === "win32")(
   "database initialization under Bun ignores repository-local Node shims",
   async () => {
@@ -228,7 +240,7 @@ test("initialized stores retain their environment across findings operations", a
   expect(await readdir(directory)).toEqual(["state with spaces"]);
 });
 
-test("findings stores retain their Python interpreter after changing directories", async () => {
+test("findings stores retain relative Python paths before and after first use", async () => {
   const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
   directories.push(directory);
   const first = join(directory, "first");
@@ -242,8 +254,9 @@ test("findings stores retain their Python interpreter after changing directories
       `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
 const store = new SqliteFindingsStore();
 await store.initialize();
-await store.insert(${JSON.stringify([embedded(1)])});
 process.chdir(${JSON.stringify(second)});
+await store.insert(${JSON.stringify([embedded(1)])});
+process.chdir(${JSON.stringify(first)});
 console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
     ],
     {
@@ -258,6 +271,45 @@ console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
   expect(result.exitCode, result.stderr.toString()).toBe(0);
   expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
 });
+
+test.skipIf(process.platform === "win32")(
+  "changing directories does not trust the original repository's Python shim",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "findings-python-shim-"));
+    directories.push(directory);
+    const repository = join(directory, "repository");
+    const other = join(directory, "other");
+    await Promise.all([mkdir(repository), mkdir(other)]);
+    await writeFile(
+      join(repository, "python"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_PYTHON_MARKER"\nprintf "codex-security-python-ok\\n"\n',
+      { mode: 0o755 },
+    );
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const assert = await import("node:assert/strict");
+const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(other)});
+await assert.rejects(store.list({ limit: 50, offset: 0 }), /The PYTHON interpreter is unavailable or unusable/);`,
+      ],
+      {
+        cwd: repository,
+        env: {
+          ...process.env,
+          PYTHON: "./python",
+          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+          SYNTHETIC_PYTHON_MARKER: join(repository, "invoked"),
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(await readdir(repository)).toEqual(["python"]);
+  },
+);
 
 test("escapes terminal controls in database helper diagnostics", async () => {
   const directory = await mkdtemp(join(tmpdir(), "database-info-"));
