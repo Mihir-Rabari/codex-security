@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.cross_platform
+
 
 class Python310DateTime(datetime):
     @classmethod
     def fromisoformat(cls, value: str) -> datetime:
-        if value.endswith(("Z", "z")):
+        if isinstance(value, str) and value.endswith(("Z", "z")):
             raise ValueError("Python 3.10 rejects Z-suffixed timestamps")
         return datetime.fromisoformat(value)
 

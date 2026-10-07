@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 from workbench_test_support import load_script
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
+pytestmark = pytest.mark.cross_platform
 
 PROJECTION = load_script("report_projection")
 
@@ -263,7 +264,8 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     assert "The runtime path inserts `local` without reusing the startup check." in markdown
 
 
-def test_projection_renders_nested_attack_path_code_evidence() -> None:
+@pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
+def test_projection_renders_nested_attack_path_code_evidence(reference_key: str) -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
     finding["codeEvidence"] = [
@@ -292,7 +294,7 @@ def test_projection_renders_nested_attack_path_code_evidence() -> None:
         },
         "reachability": {
             "summary": "An authenticated uploader can trigger extraction.",
-            "evidence_refs": ["archive-sink"],
+            reference_key: ["archive-sink"],
         },
     }
 

@@ -23,6 +23,8 @@ from workbench_test_support import (
     write_completed_contract,
 )
 
+pytestmark = pytest.mark.native_macos
+
 
 @dataclass(frozen=True)
 class ScanFixture:

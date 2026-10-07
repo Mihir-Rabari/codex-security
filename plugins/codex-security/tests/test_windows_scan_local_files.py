@@ -11,6 +11,8 @@ from unittest import mock
 import pytest
 from workbench_test_support import load_script
 
+pytestmark = pytest.mark.native_windows
+
 WINDOWS_FILES = load_script("windows_scan_local_files")
 
 
