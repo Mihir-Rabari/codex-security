@@ -1,6 +1,6 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
-import { existsSync, watch } from "node:fs";
-import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -744,9 +744,7 @@ test.skipIf(process.platform === "win32")(
     );
     await chmod(python, 0o700);
     const controller = new AbortController();
-    const watcher = watch(f.root);
     try {
-      const started = once(watcher, "change");
       const local = new LocalDeduplication(
         { ...f.environment, PYTHON: python, TEST_PYTHON_PROBE: marker },
         { repositoryId: f.targetId },
@@ -758,12 +756,15 @@ test.skipIf(process.platform === "win32")(
       const outcome = local
         .prepare(f.document.findings, f.targetId)
         .catch((error: unknown) => error);
-      await started;
+      const completion = outcome.then((error) => ({ error }));
+      while (!existsSync(marker)) {
+        const exited = await Promise.race([delay(10), completion]);
+        if (exited) throw exited.error;
+      }
       controller.abort();
       expect(await outcome).toMatchObject({ name: "AbortError" });
     } finally {
       controller.abort();
-      watcher.close();
     }
   },
 );
