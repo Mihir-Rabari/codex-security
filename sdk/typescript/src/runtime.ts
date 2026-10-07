@@ -1594,7 +1594,9 @@ export async function resolveScanSessionPaths(
   try {
     if (
       nativeConfig !== undefined &&
-      !options.environment?.["CODEX_STATE_DB"]
+      !(process.platform === "win32"
+        ? environmentValue(options.environment, "CODEX_STATE_DB")
+        : options.environment["CODEX_STATE_DB"]?.trim())
     ) {
       const sqliteHome = await (nativeConfig.sqliteHome ??=
         readNativeSqliteHome(nativeConfig, options));

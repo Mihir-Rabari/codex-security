@@ -157,17 +157,21 @@ test("resolves native SQLite ownership for concurrent fresh and resumed Deep wor
   for (const row of completed) if (row.status === "rejected") throw row.reason;
 });
 
-test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
+test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB", "Codex_State_Db"] as const)(
   "preserves explicit %s ownership",
   async (key) => {
+    const stateDatabase = key !== "CODEX_SQLITE_HOME";
+    const explicitDatabase =
+      key === "CODEX_STATE_DB" ||
+      (key === "Codex_State_Db" && process.platform === "win32");
     const f = await fixture(
       "explicit",
-      key === "CODEX_STATE_DB" ? "error" : "environment",
+      explicitDatabase ? "error" : stateDatabase ? "selected" : "environment",
     );
-    f.options.environment[key] =
-      key === "CODEX_STATE_DB"
-        ? join(f.sqliteHome, "state_7.sqlite")
-        : f.sqliteHome;
+    const value = stateDatabase
+      ? join(f.sqliteHome, "state_7.sqlite")
+      : f.sqliteHome;
+    f.options.environment[key] = value;
     expect(
       [
         ...(await resolveScanSessionPaths(
@@ -182,7 +186,8 @@ test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
         .map<[string, string]>((path, index) => [path, f.ids[index]!])
         .sort(),
     );
-    if (key === "CODEX_STATE_DB") {
+    expect(f.options.environment[key]).toBe(value);
+    if (explicitDatabase) {
       await expect(readFile(f.transcript, "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -346,9 +351,16 @@ test.each(["CODEX_SQLITE_HOME", "CODEX_STATE_DB"] as const)(
   },
 );
 
-test.each(["direct", "profile"])(
-  "preserves the caller's %s SQLite override during native ownership lookup",
-  async (selection) => {
+test.each(
+  ["direct", "profile"].flatMap((selection) =>
+    ["absolute", "relative", "tilde"].map((location) => ({
+      selection,
+      location,
+    })),
+  ),
+)(
+  "preserves the caller's $selection $location SQLite override during native ownership lookup",
+  async ({ selection, location }) => {
     const f = await fixture("caller-override-" + selection);
     const callerHome = join(f.root, "caller sqlite");
     await mkdir(callerHome);
@@ -372,13 +384,22 @@ test.each(["direct", "profile"])(
       f.ids[0]!,
     ]);
     f.options.environment["CODEX_SQLITE_HOME"] = callerHome;
+    f.options.environment["HOME"] = f.root;
+    f.options.environment["USERPROFILE"] = f.root;
+    const configuredHome =
+      location === "relative"
+        ? "../caller sqlite"
+        : location === "tilde"
+          ? "~/caller sqlite"
+          : callerHome;
     const config: JsonObject =
       selection === "direct"
-        ? { sqlite_home: callerHome }
+        ? { sqlite_home: configuredHome }
         : {
             profile: "chosen",
-            profiles: { chosen: { sqlite_home: callerHome } },
+            profiles: { chosen: { sqlite_home: configuredHome } },
           };
+    const originalConfig = structuredClone(config);
     expect([
       ...(await resolveScanSessionPaths(f.options, null, f.ids[0]!, {
         ...f.native,
@@ -393,5 +414,6 @@ test.each(["direct", "profile"])(
     expect(requests[0].argv).toContain(
       `sqlite_home=${JSON.stringify(callerHome)}`,
     );
+    expect(config).toEqual(originalConfig);
   },
 );

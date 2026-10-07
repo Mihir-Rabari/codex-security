@@ -1249,6 +1249,8 @@ async function testUnsupportedProviderSnapshotFailsBeforeLaunch() {
 }
 
 async function testWorkerRuntimeSettings() {
+  const stateDatabaseName =
+    process.platform === "win32" ? "Codex_State_Db" : "CODEX_STATE_DB";
   const cases: [string, string | undefined][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -1276,6 +1278,7 @@ async function testWorkerRuntimeSettings() {
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "CODEX_SQLITE_HOME",
+    stateDatabaseName,
     "SYNTHETIC_GATEWAY_KEY",
     "SYNTHETIC_HEADER_VALUE",
     "XDG_CACHE_HOME",
@@ -1588,6 +1591,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             executors.map((executor, index) => {
               // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_SQLITE_HOME = sqliteHomes[index];
+              delete process.env[stateDatabaseName];
+              process.env[stateDatabaseName] = path.join(
+                sqliteHomes[index],
+                "explicit.sqlite",
+              );
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.XDG_CACHE_HOME = path.join(
@@ -1649,6 +1657,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               sqliteHomes[index],
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            assert.equal(
+              workerLaunch.environment![stateDatabaseName],
+              path.join(sqliteHomes[index], "explicit.sqlite"),
+            );
+            assert.equal(
+              invocation.stateDatabase,
+              path.join(sqliteHomes[index], "explicit.sqlite"),
+            );
             assert.equal(
               invocation.argv.some((arg: string) =>
                 arg.startsWith("sqlite_home="),
@@ -2873,7 +2889,7 @@ const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHON
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, sqliteHome: process.env.CODEX_SQLITE_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...((stdin.includes('COMPLETE_THEN_HANG') || stdin.includes('COMPLETE_THEN_FLUSH')) ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, sqliteHome: process.env.CODEX_SQLITE_HOME, stateDatabase: process.env.CODEX_STATE_DB, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...((stdin.includes('COMPLETE_THEN_HANG') || stdin.includes('COMPLETE_THEN_FLUSH')) ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { writeFileSync(completionMarkerPath, 'aborted\\n'); if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

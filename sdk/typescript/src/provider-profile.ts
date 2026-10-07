@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { configuredCodexHome } from "./auth.js";
@@ -17,6 +17,7 @@ import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
   executablePathForSpawn,
+  expandHome,
   requirePrivateCredentialHome,
   resolveCodexCommand,
   type CodexCommand,
@@ -219,7 +220,9 @@ export async function readNativeSessionSqliteHome(
       context: "helper",
       configOverrides:
         typeof sqliteHome === "string"
-          ? [`sqlite_home=${inlineToml(sqliteHome)}`]
+          ? [
+              `sqlite_home=${inlineToml(resolve(cwd, expandHome(sqliteHome, environment)))}`,
+            ]
           : [],
     });
     return typeof config.sqlite_home === "string"

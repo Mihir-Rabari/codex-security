@@ -64,11 +64,7 @@ import {
   type ScanCost,
   ScanCostTracker,
 } from "../src/cost.js";
-import {
-  resolveCodexCommand,
-  runWorkbench,
-  type WorkbenchCommandOptions,
-} from "../src/runtime.js";
+import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
@@ -8253,12 +8249,55 @@ test.each([
         nativeConfig,
       ) => {
         ownershipChecks += 1;
-        return await runtime.resolveScanSessionPaths(
-          options,
-          scanId,
-          threadId,
-          nativeConfig,
-        );
+        try {
+          return await runtime.resolveScanSessionPaths(
+            options,
+            scanId,
+            threadId,
+            nativeConfig,
+          );
+        } catch (error) {
+          let diagnostics: string;
+          try {
+            const nativeSqliteHome = await nativeConfig?.sqliteHome;
+            diagnostics = execFileSync(
+              python,
+              [
+                "-I",
+                "-B",
+                "-c",
+                [
+                  "import json,os,sqlite3,sys",
+                  "from pathlib import Path",
+                  "sys.path.insert(0,sys.argv[1])",
+                  "import workbench_scan_usage as usage",
+                  "database=usage._codex_state_database(); warnings=set()",
+                  "sessions,missing=usage._discover_rollout_sessions(database,[sys.argv[2]],warnings)",
+                  "c=sqlite3.connect(database.as_uri()+'?mode=ro',uri=True)",
+                  "rows=[{'id':id,'stored':path,'resolved':str(Path(path).resolve()),'exists':Path(path).is_file()} for id,path in c.execute('SELECT id,rollout_path FROM threads')]; c.close()",
+                  "print(json.dumps({'selected_database':str(database),'sqlite_home':os.environ.get('CODEX_SQLITE_HOME'),'expected_sqlite_home':sys.argv[3],'roots':[sys.argv[2]],'missing':sorted(missing),'warnings':sorted(warnings),'rollouts':rows}))",
+                ].join("\n"),
+                join(options.pluginRoot, "scripts"),
+                threadId,
+                sqliteHome,
+              ],
+              {
+                env: {
+                  ...options.environment,
+                  ...(nativeSqliteHome === undefined
+                    ? {}
+                    : { CODEX_SQLITE_HOME: nativeSqliteHome }),
+                },
+                encoding: "utf8",
+              },
+            );
+          } catch (diagnosticError) {
+            diagnostics = String(diagnosticError);
+          }
+          throw new Error(`SQLite fixture ${location}: ${diagnostics}`, {
+            cause: error,
+          });
+        }
       },
       createCodex: (configuration) => {
         selectedEnvironment = configuration?.env;
