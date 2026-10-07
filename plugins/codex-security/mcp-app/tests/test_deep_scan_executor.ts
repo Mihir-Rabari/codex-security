@@ -1557,18 +1557,38 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         );
       }) as unknown as typeof childProcess.spawn;
       syncBuiltinESMExports();
-      const executors = settings.map(
-        (modelSettings, index) =>
-          new CodexSdkWorkerExecutor({
-            ...modelSettings,
-            parentSandbox: workerConfigurations[index].parentSandbox,
+      const executors = await Promise.all(
+        settings.map(async (modelSettings, index) => {
+          const entry = workerConfigurations[index];
+          const environment = {
+            ...process.env,
+            CODEX_SECURITY_CONFIG_PATH: entry.path,
+            CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: entry.deepPath,
+            XDG_CACHE_HOME: path.join(fixture.root, `cache-${index} `),
+          };
+          const restored =
+            index === 1
+              ? restoredDeepScanWorkerSettings(
+                  await captureDeepScanExecutionSettings(
+                    modelSettings,
+                    entry.parentSandbox,
+                    environment,
+                  ),
+                  entry.parentSandbox,
+                  () => environment,
+                )
+              : modelSettings;
+          return new CodexSdkWorkerExecutor({
+            ...restored,
+            parentSandbox: entry.parentSandbox,
             artifactContext: {
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
               pythonCommand: helperPython,
             },
-          }),
+          });
+        }),
       );
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"] as const) {

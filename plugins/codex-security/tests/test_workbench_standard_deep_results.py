@@ -3468,3 +3468,146 @@ def test_interrupted_worker_reopening_preserves_candidate_identity(
     )
     assert replay is not None
     assert all(row in replay[2]["deferred"] for row in pending["coverage"]["deferred"])
+
+
+@pytest.mark.parametrize(
+    "explicit_complete,terminal", [(False, True), (True, True), (False, False)]
+)
+def test_legacy_reducer_replay_fences_partial_drafts_after_output_failure(
+    tmp_path: Path,
+    workbench_api,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_complete: bool,
+    terminal: bool,
+) -> None:
+    state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    environment = {"CODEX_HOME": str(home)}
+    worker = str(uuid.uuid4())
+    prompt, artifacts, result = worker_paths(scan_dir, "accepted-worker")
+    upsert_deep_worker(
+        state,
+        scan_id,
+        worker,
+        "discovery",
+        "running",
+        str(prompt),
+        str(artifacts),
+        "--attempt",
+        "1",
+        environment=environment,
+    )
+    payload = {
+        "scanId": scan_id,
+        "findings": [],
+        "coverage": saved_coverage(
+            deferred=[{"id": "review", "reason": "Another surface remains."}]
+        ),
+        "threatModel": {"format": "markdown", "content": "# Synthetic model\n"},
+    }
+    if explicit_complete:
+        payload["complete"] = True
+    result.write_text(json.dumps(payload))
+    upsert_deep_worker(
+        state,
+        scan_id,
+        worker,
+        "discovery",
+        "succeeded",
+        str(prompt),
+        str(artifacts),
+        "--attempt",
+        "1",
+        "--result-manifest-path",
+        str(result),
+        environment=environment,
+    )
+    committed_standard_reducer(state, home, scan_dir, scan_id, worker, result)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(
+        contract, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    documents = {
+        key: json.loads((contract / name).read_text())
+        for key, name in [
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        ]
+    }
+    documents["manifest"]["scan"].update(complete=True, threatModel=payload["threatModel"])
+    documents["findings"]["findings"] = []
+    documents["coverage"].update(payload["coverage"])
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    run_workbench(
+        state,
+        "write-scan-draft",
+        "--scan-id",
+        scan_id,
+        "--draft-path",
+        str(staged),
+        environment=environment,
+    )
+    if terminal:
+        finish_deep_scan(
+            state, scan_id, "capped", str(scan_dir / "scan-manifest.json"), environment=environment
+        )
+        complete = workbench_api["complete_scan_locked"]
+        original = complete.__globals__["_write_prepared_scan_finalization"]
+        report = scan_dir / "report.md"
+        original_report = report.read_bytes() if report.exists() else None
+
+        def replace_output_with_directory(prepared, **kwargs):
+            if report.exists():
+                report.unlink()
+            report.mkdir()
+            return original(prepared, **kwargs)
+
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        with monkeypatch.context() as patch:
+            patch.setitem(
+                complete.__globals__,
+                "_write_prepared_scan_finalization",
+                replace_output_with_directory,
+            )
+            with sqlite3.connect(state / "workbench.sqlite3") as connection:
+                connection.row_factory = sqlite3.Row
+                with pytest.raises(SystemExit, match="report.md: expected a regular"):
+                    complete(connection, scan_id, None, None)
+                assert (
+                    connection.execute(
+                        "SELECT status FROM scans WHERE id = ?", (scan_id,)
+                    ).fetchone()[0]
+                    == "running"
+                )
+        report.rmdir()
+        if original_report is not None:
+            report.write_bytes(original_report)
+    before = {
+        name: (scan_dir / name).read_bytes()
+        for name in ["scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json"]
+    }
+    partial = copy.deepcopy(documents)
+    partial["manifest"]["scan"]["complete"] = False
+    late = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    late.write_text(json.dumps(partial))
+    outcome = run_workbench(
+        state,
+        "write-scan-draft",
+        "--scan-id",
+        scan_id,
+        "--draft-path",
+        str(late),
+        environment=environment,
+        check=False,
+    )
+    assert (outcome["returncode"] != 0) is terminal
+    if terminal:
+        assert "retry their publication" in outcome["stderr"]
+        assert all((scan_dir / name).read_bytes() == contents for name, contents in before.items())
+        completed = run_workbench(
+            state, "complete-scan", "--scan-id", scan_id, environment=environment
+        )["scan"]
+        assert completed["progress"]["status"] == "complete"

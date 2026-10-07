@@ -494,9 +494,15 @@ test("delayed response receipts resolve cumulative gaps without treating smaller
     codexHome: home,
     model: "gpt-5.6-sol",
   });
-  const record = (id: string, tokens: number, cumulative: number) =>
+  const record = (
+    id: string,
+    tokens: number,
+    cumulative: number,
+    second: string,
+  ) =>
     JSON.stringify({
       type: "token_usage_record",
+      timestamp: `2026-09-01T00:00:${second}Z`,
       payload: {
         response_id: id,
         thread_id: "worker",
@@ -512,15 +518,15 @@ test("delayed response receipts resolve cumulative gaps without treating smaller
       file,
       JSON.stringify({ type: "session_meta", payload: { id: "worker" } }) +
         "\n" +
-        record("first", 100, 100) +
-        record("third", 50, 180),
+        record("first", 100, 100, "01") +
+        record("third", 50, 180, "03"),
     );
     tracker.start("worker");
     expect((await tracker.refresh()).cost).toMatchObject({
       inputTokens: 150,
       coverage: "partial",
     });
-    await appendFile(file, record("second", 30, 130));
+    await appendFile(file, record("second", 30, 130, "02"));
     const result = await tracker.stop();
     expect(result.cost?.inputTokens).toBe(180);
     expect(result.cost?.coverage).toBeUndefined();
@@ -554,8 +560,14 @@ test("late exact receipts replace an overlapping legacy counter without adding i
     model: "gpt-5.6-sol",
   });
   const usage = (count: number) => ({ input_tokens: count, output_tokens: 0 });
-  const receipt = (id: string, count: number, cumulative: number) => ({
+  const receipt = (
+    id: string,
+    count: number,
+    cumulative: number,
+    second: string,
+  ) => ({
     type: "token_usage_record",
+    timestamp: `2026-09-01T00:00:${second}Z`,
     payload: {
       thread_id: "worker",
       response_id: id,
@@ -577,8 +589,8 @@ test("late exact receipts replace an overlapping legacy counter without adding i
             info: { total_token_usage: usage(100) },
           },
         },
-        receipt("new", 10, 110),
-        receipt("old", 100, 100),
+        receipt("new", 10, 110, "02"),
+        receipt("old", 100, 100, "01"),
         {
           type: "event_msg",
           payload: {

@@ -689,6 +689,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "recorded",
         "recorded-committed",
         "recorded-tampered",
+        "recorded-owner",
+        "external-owner",
         "current",
         "inherited-sqlite",
         "current-prefix",
@@ -801,6 +803,17 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             stream.write(json.dumps(_event(counted, "turn_context", {"turn_id": "later"})) + "\n")
             stream.write(json.dumps(_token_event(counted, 9000, 900)) + "\n")
         worker_threads = {}
+        if worker_home in {"recorded-owner", "external-owner"}:
+            owner_id = f"owner-{index}"
+            worker_threads[owner_id] = owners[owner_id]
+            worker_threads[f"unrelated-owner-child-{index}"] = _rollout(
+                root,
+                f"unrelated-owner-child-{index}",
+                [_token_event(counted, 7000, 700)],
+                parent_thread_id=owner_id,
+            )
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.execute("DELETE FROM threads WHERE id = ?", (owner_id,))
         for kind in ("discovery", "second-discovery"):
             thread_id = f"{kind}-{index}"
             artifact = scan_dir / "artifacts" / thread_id
@@ -889,6 +902,7 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             "recorded",
             "recorded-committed",
             "recorded-tampered",
+            "recorded-owner",
             "current-prefix",
             "recorded-prefix",
             "current-unreadable",
@@ -915,10 +929,18 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             _state_graph(
                 {"CODEX_SQLITE_HOME": str(selected_home)},
                 recorded_threads,
-                [(f"discovery-{index}", child_id)],
+                [
+                    (f"discovery-{index}", child_id),
+                    *(
+                        [(f"owner-{index}", f"unrelated-owner-child-{index}")]
+                        if worker_home == "recorded-owner"
+                        else []
+                    ),
+                ],
             )
         elif worker_home in {
             "external-sqlite",
+            "external-owner",
             "external-late-parent",
             "external-shared-home",
             "external-missing-copy",
@@ -938,7 +960,14 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 (
                     [(f"discovery-{index}", middle_id), (middle_id, child_id)]
                     if worker_home == "external-late-parent"
-                    else [(f"discovery-{index}", child_id)]
+                    else [
+                        (f"discovery-{index}", child_id),
+                        *(
+                            [(f"owner-{index}", f"unrelated-owner-child-{index}")]
+                            if worker_home == "external-owner"
+                            else []
+                        ),
+                    ]
                 ),
             )
         if worker_home == "external-late-parent":

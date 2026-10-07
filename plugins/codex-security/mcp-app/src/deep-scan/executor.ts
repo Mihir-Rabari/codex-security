@@ -53,7 +53,7 @@ export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
   cyberAccessProgram?: CyberAccessProgram;
-  /** Owner-supplied fallback; an empty snapshot preserves recorded omissions. */
+  /** Recorded selections override defaults while preserving private SDK transport. */
   runtimeSettings?: CodexSdkWorkerRuntimeSettings;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
@@ -98,9 +98,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
+      const inheritedRuntime = await (this.runtimeSettings ??=
+        workerRuntimeSettings(childEnv));
       const runtimeSettings =
-        this.modelSettings.runtimeSettings ??
-        (await (this.runtimeSettings ??= workerRuntimeSettings(childEnv)));
+        this.modelSettings.runtimeSettings === undefined
+          ? inheritedRuntime
+          : restoredWorkerRuntime(
+              inheritedRuntime,
+              this.modelSettings.runtimeSettings,
+            );
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -113,11 +119,18 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (resolved?.apiKey !== undefined)
         childEnv.CODEX_API_KEY = resolved.apiKey;
+      const selectedConfig = await (this.runtimeModelConfig ??= resolved?.config
+        ? Promise.resolve(resolved.config)
+        : workerModelConfig(childEnv));
       const modelConfig: NonNullable<CodexOptions["config"]> = {
         ...runtimeSettings.config,
-        ...(await (this.runtimeModelConfig ??= resolved?.config
-          ? Promise.resolve(resolved.config)
-          : workerModelConfig(childEnv))),
+        ...selectedConfig,
+        features: {
+          ...(isRecord(runtimeSettings.config.features)
+            ? runtimeSettings.config.features
+            : {}),
+          ...(isRecord(selectedConfig.features) ? selectedConfig.features : {}),
+        } as NonNullable<CodexOptions["config"]>,
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
           : {}),
@@ -599,6 +612,39 @@ async function workerModelConfig(
     ...config,
     ...(isRecord(profile) ? profile : {}),
   } as NonNullable<CodexOptions["config"]>);
+}
+
+/** Keep private SDK transport while recorded selections replace current defaults. */
+function restoredWorkerRuntime(
+  inherited: CodexSdkWorkerRuntimeSettings,
+  recorded: CodexSdkWorkerRuntimeSettings,
+): CodexSdkWorkerRuntimeSettings {
+  const config = { ...inherited.config };
+  for (const key of [
+    "model",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "service_tier",
+  ]) {
+    delete config[key];
+  }
+  const features = isRecord(config.features) ? { ...config.features } : {};
+  delete features.api_key_cyber_access_programs;
+  delete features.api_key_model_discovery;
+  return {
+    ...inherited,
+    ...recorded,
+    cyberAccessProgram: recorded.cyberAccessProgram,
+    config: {
+      ...config,
+      ...recorded.config,
+      features: {
+        ...features,
+        ...(isRecord(recorded.config.features) ? recorded.config.features : {}),
+      },
+    },
+  };
 }
 
 async function workerRuntimeSettings(

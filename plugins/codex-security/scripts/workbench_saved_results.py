@@ -2964,7 +2964,7 @@ def _require_current_deep_publication(
                         kind="dedup",
                         accepted_source_digests=_accepted_source_digests(connection, scan_id),
                     )
-                    if accepted.get("complete") is True:
+                    if accepted.get("complete") is not False:
                         raise SystemExit(
                             "Deep Scan already accepted complete results; retry their publication "
                             "without replacing them with a partial draft."

@@ -1443,6 +1443,7 @@ export class CodexSecurity {
       if (mode === "deep" && options.resumeScanId === undefined) {
         const summary = await captureOriginalReasoningSummary({
           config: session.sessionConfig,
+          nativeProfile: runtime.providerProfile,
           command: this.#codexCommand(),
           cwd: scanDir,
           environment: {

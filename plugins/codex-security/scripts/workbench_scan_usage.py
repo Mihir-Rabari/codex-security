@@ -132,16 +132,22 @@ def collect_scan_usage(
             worker_codex_home = Path(home)
     groups = [(current_database, roots)]
     worker_roots: set[str] = set()
+    recorded_roots: set[str] = set()
     if worker_codex_home is not None:
         worker_roots = set(
             _scan_root_thread_ids(connection, scan, None, include_owner_threads=False)
+        )
+        recorded_roots = worker_roots | (
+            {attribution["owner"]["threadId"]}
+            if attribution and attribution["owner"].get("threadId")
+            else set()
         )
         # Workers retain their Codex home, but inherit an explicit current
         # SQLite home. Their earlier and resumed sessions can be in either index.
         worker_database = _codex_state_database(worker_codex_home)
         if worker_database != current_database:
-            groups.append((worker_database, [root for root in roots if root in worker_roots]))
-    if not any(database is not None for database, _ in groups) and not worker_roots:
+            groups.append((worker_database, [root for root in roots if root in recorded_roots]))
+    if not any(database is not None for database, _ in groups) and not recorded_roots:
         return _unavailable_usage("codex_state_unavailable")
 
     started_at = _timestamp(scan["started_at"])
@@ -175,10 +181,14 @@ def collect_scan_usage(
                 copies.append(session)
             seen_thread_ids.add(session.thread_id)
 
-    if worker_codex_home is not None and worker_roots:
+    if worker_codex_home is not None and recorded_roots:
         # An external SQLite location can change on recovery. Native rollouts
         # still live in the recorded worker home; they retain their lineage.
-        for session in _discover_recorded_worker_sessions(worker_codex_home, worker_roots):
+        for session in _discover_recorded_worker_sessions(
+            worker_codex_home,
+            recorded_roots,
+            descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
+        ):
             copies = sessions.setdefault(session.thread_id, [])
             if session not in copies:
                 copies.append(session)
@@ -629,7 +639,9 @@ def _discover_rollout_sessions(
         database.close()
 
 
-def _discover_recorded_worker_sessions(codex_home: Path, roots: set[str]) -> list[RolloutSession]:
+def _discover_recorded_worker_sessions(
+    codex_home: Path, roots: set[str], *, descendant_roots: set[str] | None = None
+) -> list[RolloutSession]:
     recorded: dict[str, list[RolloutSession]] = {}
     children: dict[str, set[str]] = {}
     for candidate in sorted((codex_home / "sessions").rglob("*.jsonl")):
@@ -667,6 +679,12 @@ def _discover_recorded_worker_sessions(codex_home: Path, roots: set[str]) -> lis
                     session.path,
                 )
             )
+        if (
+            descendant_roots is not None
+            and thread_id in roots
+            and thread_id not in descendant_roots
+        ):
+            continue
         for child_id in sorted(children.get(thread_id, set()) - included):
             included.add(child_id)
             pending.append(child_id)

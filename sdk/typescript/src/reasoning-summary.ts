@@ -2,8 +2,10 @@ import {
   inlineToml,
   resolveCodexProfile,
   scanModelConfiguration,
+  structuredCodexConfig,
   type JsonObject,
 } from "./config.js";
+import type { ProviderProfile } from "./provider-profile.js";
 import { scanPreflightCodexConfig } from "./preflight-config.js";
 import {
   runCodexCommand,
@@ -14,6 +16,7 @@ import {
 /** Capture a future owner's selected model default; never infer historical settings. */
 export async function captureOriginalReasoningSummary(options: {
   config: JsonObject;
+  nativeProfile?: ProviderProfile;
   command: CodexCommand;
   cwd: string;
   environment: ProcessEnvironment;
@@ -28,8 +31,11 @@ export async function captureOriginalReasoningSummary(options: {
     return undefined;
   const { model } = scanModelConfiguration(options.config);
   // The same per-session overrides protect the lookup from concurrent home edits.
-  const config = JSON.parse(JSON.stringify(options.config)) as JsonObject;
+  const config = structuredCodexConfig(options.config);
   const args = [
+    ...(options.nativeProfile === undefined
+      ? []
+      : ["--profile", options.nativeProfile.name]),
     "debug",
     "models",
     ...Object.entries(config).flatMap(([key, value]) => [
