@@ -391,6 +391,7 @@ async function runCampaign(
         options.scanOptionsByMode?.[task.mode]?.target,
         options.signal,
         options.githubHost,
+        restoreReport,
       );
       if (resumed !== undefined) {
         if (receipt.status !== "failed" && receipt.warnings?.length) {
@@ -403,13 +404,6 @@ async function runCampaign(
               warning,
             });
           }
-        }
-        if (!resumed.reportSealed) {
-          await restoreReport(
-            canonicalArtifactOutput,
-            schemaPluginRoot,
-            resumed.checkout,
-          );
         }
         if (resumed.checkout === checkout) {
           await rm(checkout, { recursive: true, force: true }).catch(
@@ -1153,12 +1147,16 @@ async function loadResumableScan(
   receipt: MultiscanReceipt,
   checkout: string,
   configuredTarget: ScanTarget | undefined,
-  signal?: AbortSignal,
-  githubHost?: string,
+  signal: AbortSignal | undefined,
+  githubHost: string | undefined,
+  restoreReport: (
+    scanDir: string,
+    schemaRoot: string,
+    protectedRoot: string,
+  ) => Promise<void>,
 ): Promise<
   | {
       completeness: CoverageDocument["completeness"];
-      reportSealed: boolean;
       checkout: string;
     }
   | undefined
@@ -1237,14 +1235,14 @@ async function loadResumableScan(
           receipt.error === "Multiscan repository coverage is incomplete.");
   if (!matchesOutcome) return undefined;
   let expectedPaths = ["."];
-  if (requestedPaths !== undefined) {
-    // Scope spellings and tracked links are relative to the recorded checkout.
-    if (matchedRoot !== checkout) {
-      await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
-      await ensureOutputDirectory(dirname(matchedRoot));
-    }
-    let createdCheckout = false;
-    try {
+  let createdCheckout = false;
+  try {
+    if (requestedPaths !== undefined) {
+      // Scope spellings and tracked links are relative to the recorded checkout.
+      if (matchedRoot !== checkout) {
+        await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
+        await ensureOutputDirectory(dirname(matchedRoot));
+      }
       try {
         await mkdir(matchedRoot, { mode: 0o700 });
         createdCheckout = true;
@@ -1267,108 +1265,113 @@ async function loadResumableScan(
           throw error;
         }
         // Interrupted preparation or cleanup may leave a pinned checkout incomplete.
-        await checkoutRevision(receipt, matchedRoot, signal, githubHost, true);
+        await checkoutRevision(
+          receipt,
+          matchedRoot,
+          signal,
+          githubHost,
+          true,
+          scope.includePaths,
+        );
         normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
       }
       expectedPaths = [...normalized.paths];
-    } finally {
-      if (createdCheckout) {
-        await rm(matchedRoot, { recursive: true, force: true });
-      }
+      if (
+        receipt.scope !== undefined &&
+        expectedPaths[0] !==
+          posix.normalize(receipt.scope).replace(/\/+$/, "") &&
+        receipt.resolvedScope === undefined
+      )
+        return undefined;
     }
     if (
-      receipt.scope !== undefined &&
-      expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/, "") &&
-      receipt.resolvedScope === undefined
+      scope.includePaths.length !== expectedPaths.length ||
+      scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
+      (receipt.resolvedScope !== undefined &&
+        (expectedPaths.length !== 1 ||
+          receipt.resolvedScope !== expectedPaths[0]))
     )
       return undefined;
-  }
-  if (
-    scope.includePaths.length !== expectedPaths.length ||
-    scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
-    (receipt.resolvedScope !== undefined &&
-      (expectedPaths.length !== 1 ||
-        receipt.resolvedScope !== expectedPaths[0]))
-  )
-    return undefined;
-  const sealedArtifacts = new Set(
-    manifest.scan.artifacts.map((artifact) => artifact.path),
-  );
-  if (
-    !sealedArtifacts.has("findings.json") ||
-    !sealedArtifacts.has("coverage.json")
-  ) {
-    return undefined;
-  }
-  if (
-    completeness === "complete" &&
-    (coverage.deferred.length !== 0 ||
-      coverage.surfaces.some(
-        (surface) => surface.disposition === "needs_follow_up",
-      ))
-  ) {
-    return undefined;
-  }
-  const surfaceIds = new Set<string>();
-  for (const surface of coverage.surfaces) {
-    if (surfaceIds.has(surface.id)) return undefined;
-    surfaceIds.add(surface.id);
-  }
-  const findingIds = new Set<string>();
-  const occurrenceIds = new Set<string>();
-  for (const finding of findings.findings) {
+    const sealedArtifacts = new Set(
+      manifest.scan.artifacts.map((artifact) => artifact.path),
+    );
     if (
-      findingIds.has(finding.findingId) ||
-      occurrenceIds.has(finding.occurrenceId)
+      !sealedArtifacts.has("findings.json") ||
+      !sealedArtifacts.has("coverage.json")
     ) {
       return undefined;
     }
-    findingIds.add(finding.findingId);
-    occurrenceIds.add(finding.occurrenceId);
     if (
-      finding.locations.some(
-        (location) =>
-          location.endLine !== undefined &&
-          location.endLine < location.startLine,
-      )
+      completeness === "complete" &&
+      (coverage.deferred.length !== 0 ||
+        coverage.surfaces.some(
+          (surface) => surface.disposition === "needs_follow_up",
+        ))
     ) {
       return undefined;
     }
-    const evidenceIds = new Set<string>();
-    for (const evidence of finding.codeEvidence ?? []) {
-      if (evidenceIds.has(evidence.id)) return undefined;
-      evidenceIds.add(evidence.id);
+    const surfaceIds = new Set<string>();
+    for (const surface of coverage.surfaces) {
+      if (surfaceIds.has(surface.id)) return undefined;
+      surfaceIds.add(surface.id);
     }
-    for (const evidence of finding.code_evidence ?? []) {
-      evidenceIds.add(evidence.id);
-    }
-    // Sealed legacy details retain their original references through loadContract.
-    if (finding.code_evidence !== undefined) continue;
-    for (const section of [
-      finding.rootCause,
-      finding.validation,
-      finding.attackPath,
-    ]) {
-      if (!isReceiptRecord(section)) continue;
-      const references = section["evidenceRefs"];
+    const findingIds = new Set<string>();
+    const occurrenceIds = new Set<string>();
+    for (const finding of findings.findings) {
       if (
-        references !== undefined &&
-        (!Array.isArray(references) ||
-          references.some(
-            (reference) =>
-              typeof reference !== "string" || !evidenceIds.has(reference),
-          ))
+        findingIds.has(finding.findingId) ||
+        occurrenceIds.has(finding.occurrenceId)
       ) {
         return undefined;
       }
+      findingIds.add(finding.findingId);
+      occurrenceIds.add(finding.occurrenceId);
+      if (
+        finding.locations.some(
+          (location) =>
+            location.endLine !== undefined &&
+            location.endLine < location.startLine,
+        )
+      ) {
+        return undefined;
+      }
+      const evidenceIds = new Set<string>();
+      for (const evidence of finding.codeEvidence ?? []) {
+        if (evidenceIds.has(evidence.id)) return undefined;
+        evidenceIds.add(evidence.id);
+      }
+      for (const evidence of finding.code_evidence ?? []) {
+        evidenceIds.add(evidence.id);
+      }
+      // Sealed legacy details retain their original references through loadContract.
+      if (finding.code_evidence !== undefined) continue;
+      for (const section of [
+        finding.rootCause,
+        finding.validation,
+        finding.attackPath,
+      ]) {
+        if (!isReceiptRecord(section)) continue;
+        const references = section["evidenceRefs"];
+        if (
+          references !== undefined &&
+          (!Array.isArray(references) ||
+            references.some(
+              (reference) =>
+                typeof reference !== "string" || !evidenceIds.has(reference),
+            ))
+        ) {
+          return undefined;
+        }
+      }
     }
-  }
 
-  return {
-    completeness,
-    checkout: matchedRoot,
-    reportSealed: await hasSealedReport(path, manifest, signal),
-  };
+    const reportSealed = await hasSealedReport(path, manifest, signal);
+    if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
+    return { completeness, checkout: matchedRoot };
+  } finally {
+    if (createdCheckout)
+      await rm(matchedRoot, { recursive: true, force: true });
+  }
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {
@@ -1500,6 +1503,7 @@ async function checkoutRevision(
   signal?: AbortSignal,
   githubHost?: string,
   restoreIncomplete = false,
+  restorePaths: readonly string[] = ["."],
 ): Promise<void> {
   const environment = { ...process.env };
   const repositoryVariables = new Set([
@@ -1522,7 +1526,10 @@ async function checkoutRevision(
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
-  const gitOutput = async (args: string[], input?: string): Promise<string> => {
+  const gitOutput = async (
+    args: string[],
+    input?: string | Buffer,
+  ): Promise<Buffer> => {
     // Use the resolved absolute path so Windows PATHEXT cannot prefer a
     // .bat/.cmd shim over the trusted executable selected above.
     const pending = execFile(
@@ -1535,13 +1542,18 @@ async function checkoutRevision(
         path,
         ...args,
       ],
-      { env: command.environment, signal, maxBuffer: Infinity },
+      {
+        env: command.environment,
+        signal,
+        maxBuffer: Infinity,
+        encoding: "buffer",
+      },
     );
     if (input !== undefined) pending.child.stdin!.end(input);
     return (await pending).stdout;
   };
   const git = async (...args: string[]): Promise<string> =>
-    (await gitOutput(args)).trim();
+    (await gitOutput(args)).toString("utf8").trim();
   if (restoreIncomplete) {
     const gitDirectory = join(path, ".git");
     const metadata = await lstat(gitDirectory).catch((error: unknown) => {
@@ -1553,9 +1565,16 @@ async function checkoutRevision(
       const canonicalObjects = await ensureOutputDirectory(
         join(gitDirectory, "objects"),
       );
+      if (
+        await lstat(join(canonicalObjects, "pack")).catch(
+          undefinedIfMissingFile,
+        )
+      )
+        await ensureOutputDirectory(join(canonicalObjects, "pack"));
       for (const entry of [
         "config",
         "FETCH_HEAD",
+        "shallow",
         "index",
         "logs",
         "logs/HEAD",
@@ -1563,7 +1582,10 @@ async function checkoutRevision(
         const saved = await lstat(join(gitDirectory, entry)).catch(
           undefinedIfMissingFile,
         );
-        if (saved?.isSymbolicLink()) {
+        if (
+          saved?.isSymbolicLink() ||
+          (entry === "FETCH_HEAD" && saved !== undefined && saved.nlink > 1)
+        ) {
           throw new Error(
             "The retained campaign checkout has linked Git metadata write destinations.",
           );
@@ -1605,24 +1627,47 @@ async function checkoutRevision(
     }
   }
   await git("init", "--quiet");
-  await git(
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--depth=1",
-    "--",
-    task.repository,
-    task.revision,
-  );
-  await git("checkout", "--quiet", "--detach", "FETCH_HEAD");
+  let locallyPinned = false;
   if (restoreIncomplete) {
-    const deleted = await gitOutput(["ls-files", "--deleted", "-z"]);
-    if (deleted !== "") {
+    try {
+      await git(
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${task.revision}^{commit}`,
+      );
+      locallyPinned = true;
+    } catch (error) {
+      if ((error as { code?: number }).code !== 1) throw error;
+    }
+  }
+  if (!locallyPinned) {
+    await git(
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--depth=1",
+      "--",
+      task.repository,
+      task.revision,
+    );
+  }
+  await git("checkout", "--quiet", "--detach", task.revision);
+  if (restoreIncomplete) {
+    const deleted = await gitOutput([
+      "--literal-pathspecs",
+      "ls-files",
+      "--deleted",
+      "-z",
+      "--",
+      ...restorePaths,
+    ]);
+    if (deleted.length !== 0) {
       await gitOutput(
         [
           "--literal-pathspecs",
           "restore",
-          "--source=FETCH_HEAD",
+          `--source=${task.revision}`,
           "--worktree",
           "--pathspec-from-file=-",
           "--pathspec-file-nul",

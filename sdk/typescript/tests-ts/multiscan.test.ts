@@ -10,6 +10,7 @@ import {
   chmod,
   cp,
   lstat,
+  link,
   mkdir,
   readFile,
   readdir,
@@ -4516,7 +4517,7 @@ testPosix(
   },
 );
 
-for (const modified of [false, true]) {
+for (const modified of [false, true, "deleted"] as const) {
   test(`preserved recovery data retains unrelated tracked modifications=${modified}`, async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "preserved-tracked-source");
@@ -4567,7 +4568,8 @@ for (const modified of [false, true]) {
     const notes = modified
       ? "Preserve interrupted tracked notes.\n"
       : "Original tracked notes.\n";
-    if (modified) await writeFile(join(checkout, "README.md"), notes);
+    if (modified === "deleted") await rm(join(checkout, "README.md"));
+    else if (modified) await writeFile(join(checkout, "README.md"), notes);
     await writeFile(
       join(checkout, "retained.txt"),
       "Preserve untracked recovery data.\n",
@@ -4576,7 +4578,15 @@ for (const modified of [false, true]) {
       completed: 1,
       skipped: 1,
     });
-    expect(await readFile(join(checkout, "README.md"), "utf8")).toBe(notes);
+    if (modified === "deleted")
+      expect(
+        await lstat(join(checkout, "README.md")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+    else
+      expect(await readFile(join(checkout, "README.md"), "utf8")).toBe(notes);
     expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
       "Preserve untracked recovery data.\n",
     );
@@ -4633,16 +4643,15 @@ for (const entry of ["logs/HEAD", "logs"] as const) {
 test("followup recovery restores deleted paths above the default subprocess buffer", async () => {
   const paths = await fixture();
   const source = await repository(paths.root, "large-path-list-source");
-  const directory = `src/long_${"a".repeat(165)}`;
-  await mkdir(join(source.path, directory));
   const names = Array.from(
-    { length: 4000 },
-    (_, i) => `${directory}/file_${i}_${"b".repeat(120)}.txt`,
+    { length: 14000 },
+    (_, i) => `src/file_${i}_${"b".repeat(70)}.ts`,
   );
-  for (const name of names)
-    await writeFile(join(source.path, name), "Synthetic source.\n");
   expect(names.join("\0").length).toBeGreaterThan(1024 * 1024);
-  git(source.path, "add", ".");
+  const blob = git(source.path, "hash-object", "-w", "src/app.ts");
+  gitText(["-C", source.path, "update-index", "--index-info"], {
+    input: names.map((name) => `100644 ${blob}\t${name}\n`).join(""),
+  });
   git(
     source.path,
     "-c",
@@ -4680,59 +4689,260 @@ test("followup recovery restores deleted paths above the default subprocess buff
   expect(runs).toHaveBeenCalledTimes(1);
 });
 
-test("followup recovery refuses a linked index write destination", async () => {
+for (const entry of ["index", "shallow"] as const) {
+  test(`followup recovery refuses a linked ${entry} write destination`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "index-binding-source");
+    const interruptedRevision = source.revision;
+    await appendFile(
+      join(source.path, "src", "app.ts"),
+      "export const pinned = true;\n",
+    );
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Multiscan Test",
+      "-c",
+      "user.email=multiscan@example.test",
+      "commit",
+      "-qm",
+      "Advance pinned state",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(paths.output, "checkouts", "repo");
+    const outside = join(paths.root, "other-index-checkout");
+    git(paths.root, "clone", "--quiet", source.path, outside);
+    git(outside, "checkout", "--quiet", "--detach", interruptedRevision);
+    const destination = join(outside, ".git", entry);
+    if (entry === "shallow")
+      await writeFile(destination, interruptedRevision + "\n");
+    const bytes = await readFile(destination);
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    git(checkout, "checkout", "--quiet", "--detach", interruptedRevision);
+    await rm(join(checkout, "src"), { recursive: true });
+    await rm(join(checkout, ".git", entry), { force: true });
+    await symlink(destination, join(checkout, ".git", entry));
+    let failed = false;
+    try {
+      await runMultiscan(campaign);
+    } catch {
+      failed = true;
+    }
+    expect(await readFile(destination)).toEqual(bytes);
+    expect(failed).toBe(true);
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
+
+test("final native recovery restores a locally pinned commit with an unavailable source", async () => {
   const paths = await fixture();
-  const source = await repository(paths.root, "index-binding-source");
-  const interruptedRevision = source.revision;
-  await appendFile(
-    join(source.path, "src", "app.ts"),
-    "export const pinned = true;\n",
-  );
-  git(source.path, "add", ".");
-  git(
-    source.path,
-    "-c",
-    "user.name=Multiscan Test",
-    "-c",
-    "user.email=multiscan@example.test",
-    "commit",
-    "-qm",
-    "Advance pinned state",
-  );
-  const revision = git(source.path, "rev-parse", "HEAD");
+  const source = await repository(paths.root, "local-pinned-source");
   await writeFile(
     paths.input,
-    `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
   );
-  const runs = mock(
-    async (
-      checkout: string,
-      settings: Parameters<SecurityClient["run"]>[1] = {},
-    ) => completedScan(settings.outputDir!, "complete", checkout),
-  );
+  const runs = mock(completeRun);
   const campaign = options(paths, client(runs));
+  const initial = await runMultiscan(campaign);
+  const before = await readFile(initial.resultsPath);
+  const checkout = join(paths.output, "checkouts", "repo");
+  git(paths.root, "clone", "--quiet", source.path, checkout);
+  await rm(join(checkout, "src"), { recursive: true });
+  await rename(source.path, join(paths.root, "moved-pinned-source"));
   expect(await runMultiscan(campaign)).toMatchObject({
     completed: 1,
-    skipped: 0,
+    skipped: 1,
   });
+  expect(runs).toHaveBeenCalledTimes(1);
+  expect(await readFile(initial.resultsPath)).toEqual(before);
+});
+
+testPosix(
+  "final native recovery forwards non-UTF-8 deleted filenames as raw bytes",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "byte-path-source");
+    const suffix = Buffer.from([
+      0x62, 0x79, 0x74, 0x65, 0x2d, 0xff, 0x2e, 0x74, 0x78, 0x74,
+    ]);
+    const bytePath = (root: string) =>
+      Buffer.concat([Buffer.from(join(root, "src") + sep), suffix]);
+    await writeFile(bytePath(source.path), "Synthetic bytes.\n");
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Byte-valued tracked path",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    await runMultiscan(campaign);
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+testPosix(
+  "final native recovery retains a tracked interpreter alias through report recovery",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "tracked-python-source");
+    const python = await realpath(PYTHON);
+    await symlink(python, join(source.path, "python-alias"));
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Tracked interpreter alias",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const alias = join(paths.output, "checkouts", "repo", "python-alias");
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: alias,
+          protectedRoot: checkout,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(python);
+        return completedScan(settings.outputDir!, "complete", checkout);
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      config: { pythonPath: alias },
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("final native recovery refuses hardlinked FETCH_HEAD before external bytes change", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "hardlinked-fetch-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs));
+  await runMultiscan(campaign);
+  const outside = join(paths.root, "external-fetch-head");
+  await writeFile(outside, "Preserve synthetic metadata.\n");
+  const before = await readFile(outside);
   const checkout = join(paths.output, "checkouts", "repo");
-  const outside = join(paths.root, "other-index-checkout");
-  git(paths.root, "clone", "--quiet", source.path, outside);
-  git(outside, "checkout", "--quiet", "--detach", interruptedRevision);
-  const destination = join(outside, ".git", "index");
-  const bytes = await readFile(destination);
   git(paths.root, "clone", "--quiet", source.path, checkout);
-  git(checkout, "checkout", "--quiet", "--detach", interruptedRevision);
   await rm(join(checkout, "src"), { recursive: true });
-  await rm(join(checkout, ".git", "index"));
-  await symlink(destination, join(checkout, ".git", "index"));
+  await rm(join(checkout, ".git", "FETCH_HEAD"), { force: true });
+  await link(outside, join(checkout, ".git", "FETCH_HEAD"));
   let failed = false;
   try {
     await runMultiscan(campaign);
   } catch {
     failed = true;
   }
-  expect(await readFile(destination)).toEqual(bytes);
+  expect(await readFile(outside)).toEqual(before);
+  expect(failed).toBe(true);
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+test("final native recovery refuses a linked pack directory before fetching missing objects", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "linked-pack-source");
+  const interrupted = join(paths.root, "interrupted-checkout");
+  git(paths.root, "clone", "--quiet", source.path, interrupted);
+  for (let i = 0; i < 120; i++)
+    await writeFile(
+      join(source.path, "src", `object-${i}.ts`),
+      `export const object${i} = ${i};\n`,
+    );
+  git(source.path, "add", ".");
+  git(
+    source.path,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    "Pinned packed objects",
+  );
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs));
+  await runMultiscan(campaign);
+  const outside = join(paths.root, "external-packs");
+  await mkdir(outside);
+  const checkout = join(paths.output, "checkouts", "repo");
+  await rename(interrupted, checkout);
+  await rm(join(checkout, "src"), { recursive: true });
+  await rm(join(checkout, ".git", "objects", "pack"), {
+    recursive: true,
+    force: true,
+  });
+  await symlink(outside, join(checkout, ".git", "objects", "pack"), "junction");
+  let failed = false;
+  try {
+    await runMultiscan(campaign);
+  } catch {
+    failed = true;
+  }
+  expect(await readdir(outside)).toEqual([]);
   expect(failed).toBe(true);
   expect(runs).toHaveBeenCalledTimes(1);
 });
