@@ -163,7 +163,19 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
                         for key in descriptions:
                             item["provenance"].pop(key, None)
 
-        def interrupt_before_seal(*args):
+        def interrupt_before_seal(connection, *_args):
+            selection = json.loads(
+                connection.execute(
+                    "SELECT finalization_input_json FROM deep_scan_runs WHERE scan_id = ?",
+                    (scan.scan_id,),
+                ).fetchone()[0]
+            )
+            selection.pop("publicationSha256", None)
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
+                    (json.dumps(selection), scan.scan_id),
+                )
             raise RuntimeError("Publication interrupted after the budget draft committed.")
 
         database = tmp_path / "interrupted-budget.sqlite3"
@@ -175,6 +187,11 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
                 patch.setattr(saved, "retain_unmerged_budget_coverage", legacy_projection)
                 # The legacy writer predates the selected-publication digest.
                 patch.setattr(saved, "record_selected_publication", lambda *args: None)
+                patch.setattr(
+                    budget.__globals__["deep_scan"],
+                    "_selected_publication_digest_for_documents",
+                    lambda *args: None,
+                )
                 patch.setitem(budget.__globals__, "complete_scan_locked", interrupt_before_seal)
                 with pytest.raises(RuntimeError, match="budget draft committed"):
                     budget(connection, args)

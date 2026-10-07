@@ -1194,21 +1194,24 @@ def complete_budget_exhausted_scan(
             except ContractError as exc:
                 raise SystemExit(str(exc)) from exc
         if before_selection:
-            deep_scan.prepare_budget_exhausted_deep_scan(
-                connection,
-                scan,
-                scan_dir,
-                warning,
-                lambda accepted, unmerged: budget_exhausted_draft(
+            try:
+                deep_scan.prepare_budget_exhausted_deep_scan(
+                    connection,
                     scan,
                     scan_dir,
-                    [],
                     warning,
-                    before_selection=True,
-                    accepted_result=accepted,
-                    unmerged_workers=unmerged,
-                ),
-            )
+                    lambda accepted, unmerged: budget_exhausted_draft(
+                        scan,
+                        scan_dir,
+                        [],
+                        warning,
+                        before_selection=True,
+                        accepted_result=accepted,
+                        unmerged_workers=unmerged,
+                    ),
+                )
+            except ContractError as exc:
+                raise SystemExit(str(exc)) from exc
         else:
             budget_exhausted_draft(
                 scan,
