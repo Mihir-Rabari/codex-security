@@ -417,11 +417,17 @@ def git_worktree_context(target: Path) -> tuple[Path, str]:
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
+    prefix = git_bytes(target, "rev-parse", "--show-prefix")
+    if prefix is None:
+        raise SystemExit("Could not inspect the selected Git working tree.")
+    pathspec = os.fsdecode(prefix.removesuffix(b"\n")).removesuffix("/") or "."
+    scoped = (repository / pathspec).resolve()
     try:
-        relative = target.resolve().relative_to(repository)
-    except ValueError as exc:
+        if not scoped.is_relative_to(repository) or not scoped.samefile(target):
+            raise ValueError("Git working tree does not contain the selected target")
+    except (OSError, ValueError) as exc:
         raise SystemExit("Scan target must stay inside its Git working tree.") from exc
-    return repository, relative.as_posix() or "."
+    return repository, pathspec
 
 
 def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
@@ -440,7 +446,8 @@ def git_submodule_entries(target: Path) -> tuple[tuple[Path, str], ...]:
             ) from exc
         if mode != b"160000":
             continue
-        entries.append((repository / os.fsdecode(raw_path), object_id.decode("ascii")))
+        relative_path = Path(os.fsdecode(raw_path)).relative_to(pathspec)
+        entries.append((target / relative_path, object_id.decode("ascii")))
     return tuple(entries)
 
 
@@ -455,7 +462,7 @@ def require_clean_submodule_worktrees(target: Path) -> None:
             continue
         root = git_output(submodule, "rev-parse", "--show-toplevel")
         try:
-            is_initialized = root is not None and Path(root).resolve() == submodule.resolve()
+            is_initialized = root is not None and Path(root).samefile(submodule)
         except OSError:
             is_initialized = False
         if not is_initialized:
@@ -528,7 +535,6 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         relative = Path(os.fsdecode(raw_path))
-        path = repository / relative
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -545,11 +551,11 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
                 continue
-            path = scope.joinpath(*relative.parts[scope_depth:])
+        path = target.joinpath(*relative.parts[scope_depth:])
         try:
             # Git can list descendants of a junction; snapshots retain the link.
-            prefix = scope
-            for component in path.relative_to(scope).parts[:-1]:
+            prefix = target
+            for component in path.relative_to(target).parts[:-1]:
                 prefix /= component
                 key = str(prefix)
                 if key not in junction_prefixes:
@@ -570,10 +576,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         ):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
-        if (
-            nested_repository_root is not None
-            and Path(nested_repository_root).resolve() == path.resolve()
-        ):
+        if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
                 paths.extend(nested_paths)
@@ -730,9 +733,16 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
     )
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
-    excluded_relative = [
-        path.relative_to(repository) for path in excluded if path.is_relative_to(repository)
-    ]
+    excluded_relative = []
+    for path in excluded:
+        try:
+            relative_path = path.relative_to(repository)
+        except ValueError:
+            try:
+                relative_path = Path(pathspec) / path.relative_to(source)
+            except ValueError:
+                continue
+        excluded_relative.append(relative_path)
     destination.mkdir()
     for raw_path in sorted(path for path in listed.split(b"\0") if path):
         relative = Path(os.fsdecode(raw_path))
@@ -776,7 +786,7 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
         and is_worktree
         and revision is not None
         and repository_root is not None
-        and Path(repository_root).resolve() == target
+        and Path(repository_root).samefile(target)
     )
     metadata: dict[str, Any] = {
         "hasHead": revision is not None,
