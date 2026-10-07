@@ -6305,6 +6305,8 @@ for (const { parentThroughLink, missing } of [
   { parentThroughLink: true, missing: "alias" },
   { parentThroughLink: true, missing: "jump" },
   { parentThroughLink: true, missing: "both" },
+  { parentThroughLink: false, missing: "nested" },
+  { parentThroughLink: true, missing: "nested" },
 ]) {
   testPosix(
     `retained requested-file recovery follows physical alias parent=${parentThroughLink} missing=${missing}`,
@@ -6370,7 +6372,9 @@ for (const { parentThroughLink, missing } of [
       git(paths.root, "clone", "--quiet", source.path, checkout);
       if (missing !== "jump") await rm(join(checkout, "alias"));
       if (missing !== "alias") await rm(join(checkout, "jump"));
-      await rm(join(checkout, "nested", "src", "app.ts"));
+      if (missing === "nested")
+        await rm(join(checkout, "nested"), { recursive: true });
+      else await rm(join(checkout, "nested", "src", "app.ts"));
       await writeFile(
         join(checkout, "retained.txt"),
         "Preserve retained recovery data.\n",
@@ -6407,6 +6411,12 @@ for (const { parentThroughLink, missing } of [
         "Preserve retained recovery data.\n",
       );
       expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      if (missing === "nested")
+        expect(
+          await lstat(join(checkout, "nested", "deep", "keep.ts")).catch(
+            () => undefined,
+          ),
+        ).toBeUndefined();
       expect(runs).toHaveBeenCalledTimes(1);
     },
   );
@@ -6503,6 +6513,89 @@ for (const linked of [false, true]) {
       }
       expect(await readFile(initial.resultsPath)).toEqual(ledger);
       expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+for (const automatic of [false, true]) {
+  testPosix(
+    `whole recovery preserves automatically selected tracked Python automatic=${automatic}`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "automatic-python-source");
+      const python = await realpath(PYTHON);
+      await symlink(python, join(source.path, "python-alias"));
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Tracked automatic interpreter alias",
+      );
+      source.revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+      );
+      const alias = join(paths.output, "checkouts", "repo", "python-alias");
+      const bin = join(paths.root, "tools");
+      await mkdir(bin);
+      await symlink(alias, join(bin, "python3"));
+      const selectedGit = await resolveTrustedExecutable(
+        "git",
+        process.env,
+        paths.root,
+      );
+      expect(selectedGit).not.toBeNull();
+      await symlink(selectedGit!.executable, join(bin, "git"));
+      const runs = mock(
+        async (
+          checkout: string,
+          settings: Parameters<SecurityClient["run"]>[1] = {},
+        ) => {
+          const selected = await runtime.resolvePluginPythonCommand({
+            environment: { ...process.env, PATH: bin, PYTHON: undefined },
+            protectedRoot: checkout,
+            homeDirectory: paths.root,
+            managedRuntimeRoots: [],
+          });
+          expect(await realpath(selected.executable)).toBe(python);
+          return completedScan(settings.outputDir!, "complete", checkout);
+        },
+      );
+      const initial = await runMultiscan(options(paths, client(runs)));
+      const rows = await results(initial.resultsPath);
+      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+      const receipt = rows.find((row) => row["status"] === "completed")!;
+      await appendFile(
+        join(receipt["outputDir"] as string, "report.md"),
+        "Refresh this synthetic report.\n",
+      );
+      const ledger = await readFile(initial.resultsPath);
+      const code = `import {runMultiscan} from ${JSON.stringify(join(dirname(import.meta.path), "..", "src", "multiscan.ts"))};
+        const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: automatic ? {} : { pythonPath: "python3" } })};
+        options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
+        options.recoverScan=async()=>undefined;
+        console.log(JSON.stringify(await runMultiscan(options)));`;
+      const summary = JSON.parse(
+        execFileSync(process.execPath, ["-e", code], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: bin,
+            PYTHON: undefined,
+            HOME: paths.root,
+            USERPROFILE: paths.root,
+          },
+        }),
+      );
+      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
+      expect(runs).toHaveBeenCalledTimes(1);
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
     },
   );
 }
