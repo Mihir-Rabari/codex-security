@@ -576,7 +576,7 @@ describe("npm package tar listings", () => {
           representation === "pax-then-long-name" ? wrongPath : path;
       const longName = tarRecord(
         Buffer.from(
-          `${representation === "pax-then-long-name" || representation === "ordinary-pax-then-correct-long-name" ? path : wrongPath}\0`,
+          `${representation === "pax-then-long-name" || representation === "ordinary-pax-then-correct-long-name" || pathOrder === "long-name-then-pax" ? path : wrongPath}\0`,
         ),
         { name: "././@LongLink", type: 0x4c },
       );
