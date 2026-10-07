@@ -187,11 +187,20 @@ export function estimateScanCost(
     if (total === null || usage["modelUsage"].length === 0) return null;
     const costs: ScanCost[] = [];
     for (const part of usage["modelUsage"]) {
-      if (!isRecord(part) || typeof part["model"] !== "string") return null;
-      const cost = estimateModelCost(part["model"], part);
-      if (cost === null) return null;
+      if (!isRecord(part)) return null;
+      const tokens = tokenUsage(part);
+      if (tokens === null) return null;
+      const cost =
+        typeof part["model"] === "string"
+          ? estimateModelCost(part["model"], part)
+          : null;
+      if (cost === null) {
+        if (tokens.total_tokens === 0) continue;
+        return null;
+      }
       costs.push(cost);
     }
+    if (costs.length === 0) return null;
     const sum = (
       key:
         | "inputTokens"

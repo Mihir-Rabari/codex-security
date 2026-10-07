@@ -653,6 +653,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "inherited-sqlite",
         "current-prefix",
         "recorded-prefix",
+        "current-equal-incomplete",
+        "recorded-equal-incomplete",
         "current-unreadable",
         "current-mismatched",
         "external-sqlite",
@@ -669,6 +671,8 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
     copied_rollout = worker_home in {
         "current-prefix",
         "recorded-prefix",
+        "current-equal-incomplete",
+        "recorded-equal-incomplete",
         "current-unreadable",
         "current-mismatched",
     }
@@ -822,6 +826,8 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             "recorded",
             "current-prefix",
             "recorded-prefix",
+            "current-equal-incomplete",
+            "recorded-equal-incomplete",
             "current-unreadable",
             "current-mismatched",
         }:
@@ -831,12 +837,14 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                 full = worker_threads[thread_id]
                 copied = full.with_name(f"copied-{thread_id}.jsonl")
                 copied.write_bytes(b"\n".join(full.read_bytes().splitlines()[:3]) + b"\n")
+                if worker_home in {"current-equal-incomplete", "recorded-equal-incomplete"}:
+                    copied.write_bytes(full.read_bytes() + b'{"type":"event_msg"')
                 if worker_home == "current-unreadable":
                     copied.write_text("invalid session metadata\n")
                 elif worker_home == "current-mismatched":
                     copied.write_text(full.read_text().replace(thread_id, "unrelated-thread"))
                 current_copy = copied
-                if worker_home == "recorded-prefix":
+                if worker_home in {"recorded-prefix", "recorded-equal-incomplete"}:
                     recorded_threads[thread_id] = copied
                     current_copy = full
                 with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
@@ -1362,3 +1370,45 @@ def test_completion_keeps_cached_subsets_valid_when_categories_diverge(
         assert row["cachedInputTokens"] + row["cacheWriteInputTokens"] <= row["inputTokens"]
     for key in ("inputTokens", "cachedInputTokens", "outputTokens", "totalTokens"):
         assert sum(row[key] for row in usage["modelUsage"]) == usage[key]
+
+
+@pytest.mark.parametrize("receipt_owner", ["other-turn", "outside-window"])
+def test_owned_legacy_model_survives_unrelated_first_receipt(
+    tmp_path: Path, workbench_api, receipt_owner: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    end = start + timedelta(seconds=5)
+    events = [
+        _event(start, "turn_context", {"turn_id": "scan-turn", "model": "gpt-5.6-sol"}),
+        _token_event(start, 1000, 10),
+        _event(
+            end + timedelta(seconds=1) if receipt_owner == "outside-window" else start,
+            "token_usage_record",
+            {
+                "thread_id": "parent",
+                "turn_id": "other-turn" if receipt_owner == "other-turn" else "scan-turn",
+                "response_id": "unrelated-response",
+                "model": "gpt-6-astra",
+                "usage": {
+                    "input_tokens": 50,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 50,
+                },
+            },
+        ),
+    ]
+    models = {}
+    counts, warnings = reader._read_rollout_usage(
+        reader.RolloutSession("parent", None, _rollout(tmp_path, "parent", events)),
+        started_at=start,
+        completed_at=end,
+        owner_turn_id="scan-turn",
+        model_usage=models,
+    )
+    assert counts == _counts(1000, 0, 10)
+    assert warnings == set()
+    assert models == {"gpt-5.6-sol": _counts(1000, 0, 10)}

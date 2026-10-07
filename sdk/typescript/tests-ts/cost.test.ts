@@ -3030,3 +3030,113 @@ test.each(["single", "identical", "prefix-first", "prefix-last"] as const)(
     }
   },
 );
+
+test.each([0, 100])(
+  "ignores only zero unpriced counter buckets: %i",
+  async (unpricedTokens) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "owner", {
+      input_tokens: unpricedTokens,
+      output_tokens: 0,
+    });
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: { turn_id: "turn", model: "gpt-5.6-sol" },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: unpricedTokens + 1000,
+                output_tokens: 0,
+              },
+            },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.start("owner");
+    try {
+      const snapshot = await tracker.refresh();
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(
+        unpricedTokens + 1000,
+      );
+      if (unpricedTokens === 0)
+        expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+      else expect(snapshot.cost).toBeNull();
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["other turn", "outside window"])(
+  "keeps owned legacy model before an unrelated first receipt: %s",
+  async (kind) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "owner", {});
+    const at = "2026-09-01T00:00:02Z";
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: at,
+          payload: { turn_id: "turn", model: "gpt-5.6-sol" },
+        },
+        {
+          type: "event_msg",
+          timestamp: at,
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { input_tokens: 1000, output_tokens: 0 },
+            },
+          },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: kind === "outside window" ? "2026-09-01T00:00:04Z" : at,
+          payload: {
+            thread_id: "owner",
+            turn_id: kind === "other turn" ? "other" : "turn",
+            response_id: "unrelated-response",
+            model: "gpt-6-astra",
+            usage: { input_tokens: 50, output_tokens: 0 },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      owner: { threadId: "owner", turnId: "turn", startedAt: at },
+      startedAt: at,
+      completedAt: "2026-09-01T00:00:03Z",
+    }));
+    tracker.start("owner");
+    try {
+      const snapshot = await tracker.refresh();
+      expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1000);
+      expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.004, 10);
+      expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
+    } finally {
+      await tracker.stop();
+    }
+  },
+);

@@ -853,13 +853,6 @@ function readSessionEvent(
         session.expectedResponseTokens,
         cumulative.total_tokens,
       );
-    if (!session.responseUsageObserved) {
-      // Exact receipts include compaction and survive counter resets. Keep the
-      // legacy counter as an independent lower bound, never add it to receipts.
-      session.responseUsageObserved = true;
-      session.usage = null;
-      session.modelUsage.clear();
-    }
     session.responseTokens += usage.total_tokens;
     const turnId =
       typeof payload["turn_id"] === "string"
@@ -875,6 +868,13 @@ function readSessionEvent(
       )
     )
       return;
+    if (!session.responseUsageObserved) {
+      // Exact receipts include compaction and survive counter resets. Keep the
+      // legacy counter as an independent lower bound, never add it to receipts.
+      session.responseUsageObserved = true;
+      session.usage = null;
+      session.modelUsage.clear();
+    }
     const model =
       typeof payload["model"] === "string" ? payload["model"] : session.model;
     session.usage = addTokenUsage(session.usage, usage);

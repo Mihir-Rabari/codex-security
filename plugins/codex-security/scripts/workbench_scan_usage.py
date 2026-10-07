@@ -313,7 +313,11 @@ def _read_rollout_copies_usage(
     # Restored indexes can reference a prefix and its complete continuation.
     # Keep totals and model attribution from the same copy, counting it once.
     usage, warnings, selected_models = max(
-        attributable or readings, key=lambda reading: reading[0]["totalTokens"]
+        attributable or readings,
+        key=lambda reading: (
+            reading[0]["totalTokens"],
+            "rollout_record_incomplete" not in reading[1],
+        ),
     )
     for model, tokens in selected_models.items():
         _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), tokens)
@@ -801,10 +805,6 @@ def _read_rollout_usage(
                     expected_response_tokens = max(
                         expected_response_tokens, cumulative["totalTokens"]
                     )
-                if not response_usage_observed:
-                    response_usage_observed = True
-                    total = _empty_token_usage()
-                    local_models = {}
                 response_tokens += usage["totalTokens"]
                 timestamp = _timestamp(event.get("timestamp"))
                 if timestamp is None:
@@ -819,6 +819,10 @@ def _read_rollout_usage(
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
+                if not response_usage_observed:
+                    response_usage_observed = True
+                    total = _empty_token_usage()
+                    local_models = {}
                 usage_observed = True
                 model = payload.get("model", current_model)
                 if not isinstance(model, str):
