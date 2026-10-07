@@ -3957,9 +3957,7 @@ export async function main(
           .string()
           .url()
           .optional()
-          .describe(
-            "Optional Findings API base URL; omit to prepare embeddings and deduplicate in local SQLite.",
-          ),
+          .describe("Findings API base URL for service-backed deduplication."),
       }),
       output: z
         .object({
