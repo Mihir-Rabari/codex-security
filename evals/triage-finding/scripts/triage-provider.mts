@@ -41,7 +41,7 @@ function resolveCommand(
   for (const directory of (environment.PATH ?? "/usr/bin:/bin").split(
     path.delimiter,
   )) {
-    const candidate = path.resolve(cwd, directory, command);
+    const candidate = `${path.isAbsolute(directory) ? directory : `${cwd}/${directory}`}/${command}`;
     try {
       accessSync(candidate, constants.X_OK);
       if (statSync(candidate).isFile()) return candidate;
@@ -84,7 +84,7 @@ export default class TriageProvider implements ApiProvider {
         // thread options. Extend this call's config without changing selection
         // or the SDK's bundled-tool PATH handling.
         const { executablePath, pathDirs } = instance.activeInstance.exec;
-        const executable = realpathSync(
+        const executable = realpathSync.native(
           resolveCommand(executablePath, process.cwd(), environment),
         );
         config.additional_directories = [

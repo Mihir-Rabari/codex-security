@@ -379,7 +379,7 @@ test(
     fs.writeFileSync(
       fakeCodex,
       `#!${process.execPath}
-const details = {executable:require('node:fs').realpathSync(process.argv[1]), path:process.env.PATH, node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
+const details = {executable:process.env.CODEX_TEST_EXECUTABLE || require('node:fs').realpathSync(process.argv[1]), path:process.env.PATH, node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
 console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-thread'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify(details)}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
@@ -497,6 +497,18 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     fs.copyFileSync(fakeCodex, builtinCodex);
     const literalCodex = path.join(root, String.raw`codex\probe`);
     fs.copyFileSync(fakeCodex, literalCodex);
+    const targetRoot = path.join(root, "path-target");
+    fs.mkdirSync(path.join(targetRoot, "child"), { recursive: true });
+    const directoryAlias = path.join(root, "path-alias");
+    fs.symlinkSync(path.join(targetRoot, "child"), directoryAlias);
+    const targetCodex = path.join(targetRoot, "codex");
+    const shellQuote = (value: string) =>
+      "'" + value.replaceAll("'", "'\\''") + "'";
+    fs.writeFileSync(
+      targetCodex,
+      `#!/bin/sh\nCODEX_TEST_EXECUTABLE=${shellQuote(targetCodex)} exec ${shellQuote(process.execPath)} ${shellQuote(fakeCodex)} "$@"\n`,
+      { mode: 0o755 },
+    );
     const relativePath = path.relative(process.cwd(), root);
     for (const [command, executable, searchPath] of [
       [fakeCodex, fakeCodex, selectedPath],
@@ -505,6 +517,13 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       [alias, fakeCodex, selectedPath],
       ["test", builtinCodex, selectedPath],
       [path.basename(literalCodex), literalCodex, selectedPath],
+      ["codex", targetCodex, `${directoryAlias}/..`],
+      [
+        "codex",
+        targetCodex,
+        `${path.relative(process.cwd(), directoryAlias)}/..`,
+      ],
+      [`${directoryAlias}/../codex`, targetCodex, selectedPath],
       ["test", builtinCodex, relativePath],
       ["test", builtinCodex, `${path.delimiter}${relativePath}`],
     ] as const) {
@@ -515,7 +534,10 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         const captured = JSON.parse(String(result.output));
         assert.equal(captured.executable, executable);
         assert.equal(captured.path, searchPath);
-        assert.deepEqual(captured.directories, [path.dirname(nodes[0]), root]);
+        assert.deepEqual(captured.directories, [
+          path.dirname(nodes[0]),
+          path.dirname(executable),
+        ]);
       } finally {
         await provider.cleanup?.();
       }
