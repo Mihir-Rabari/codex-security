@@ -307,8 +307,12 @@ assertExpectedGitHead(
 
 assertPublicPackageContents(archiveFiles);
 assertStoredSparseContents(storedArchive, archiveFiles);
-for (const [path, { npmPath }] of storedArchive.sparseFiles) {
-  if (npmPath !== path) invalidTarEntry();
+for (const path of archiveFiles.keys()) {
+  if (
+    /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path) &&
+    !storedArchive.npmFiles.has(path)
+  )
+    invalidTarEntry();
 }
 assertPublicPackageContents(storedArchive.npmFiles);
 

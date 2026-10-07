@@ -220,6 +220,9 @@ function installPackage(
     [
       ...npm.args,
       "install",
+      "--global=false",
+      "--prefix",
+      consumer,
       "--offline",
       "--ignore-scripts",
       "--package-lock=false",
@@ -441,6 +444,59 @@ describe("npm package tar listings", () => {
     }
   });
 
+  test.each(["environment", "user-config"])(
+    "keeps npm fixture installs local with global %s settings",
+    (configuration) => {
+      const root = mkdtempSync(join(tmpdir(), "codex-package-npm-local-"));
+      try {
+        const archivePath = join(root, "package.tgz");
+        writeFileSync(archivePath, gzipSync(packageTar()));
+        const userConfig = join(root, "npmrc");
+        writeFileSync(
+          userConfig,
+          configuration === "user-config" ? "global=true\n" : "",
+        );
+        const environment: NodeJS.ProcessEnv = { ...process.env };
+        for (const key of Object.keys(environment)) {
+          if (/^npm_config_(?:global|prefix|userconfig|cache)$/iu.test(key))
+            delete environment[key];
+        }
+        const globalPrefix = join(root, "global-prefix");
+        Object.assign(environment, {
+          npm_config_cache: join(root, "npm-cache"),
+          npm_config_prefix: globalPrefix,
+          npm_config_userconfig: userConfig,
+          ...(configuration === "environment"
+            ? { npm_config_global: "true" }
+            : {}),
+        });
+        const installed = installPackage(root, archivePath, environment);
+        expect({
+          status: installed.status,
+          stderr: installed.status === 0 ? "" : installed.stderr,
+        }).toEqual({
+          status: 0,
+          stderr: "",
+        });
+        expect(
+          existsSync(
+            join(
+              root,
+              "consumer",
+              "node_modules",
+              "@openai",
+              "codex-security",
+              "package.json",
+            ),
+          ),
+        ).toBe(true);
+        expect(existsSync(globalPrefix)).toBe(false);
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
+
   test.each([
     "pax-full",
     "pax-map-prefix",
@@ -454,7 +510,10 @@ describe("npm package tar listings", () => {
     "pax-then-wrong-long-name",
     "overwrite-text",
     "overwrite-logo",
-  ])("validates sparse assets as npm installs them: %s", (representation) => {
+    "ordinary-pax-then-wrong-long-name",
+    "ordinary-pax-then-correct-long-name",
+    "ordinary-long-name-then-pax",
+  ])("validates archive assets as npm installs them: %s", (representation) => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
     try {
       const logo = readFileSync(
@@ -467,15 +526,21 @@ describe("npm package tar listings", () => {
       const renamed =
         representation === "sparse-name" || representation === "pax-path";
       const wrongPath = "package/synthetic-storage.png";
+      const ordinary = representation.startsWith("ordinary-");
+      const pathOrder = ordinary
+        ? representation.slice("ordinary-".length)
+        : representation;
       const orderedPath = representation.includes("then");
       const overwrite = representation.startsWith("overwrite");
       let stored =
         representation === "overwrite-text" ? Buffer.from("fixture\n") : logo;
-      const attributes: Record<string, string> = {
-        "GNU.sparse.size": String(stored.length),
-        "GNU.sparse.numblocks": "1",
-        "GNU.sparse.map": `0,${stored.length}`,
-      };
+      const attributes: Record<string, string> = ordinary
+        ? {}
+        : {
+            "GNU.sparse.size": String(stored.length),
+            "GNU.sparse.numblocks": "1",
+            "GNU.sparse.map": `0,${stored.length}`,
+          };
       if (representation === "pax-map-prefix") {
         const map = Buffer.alloc(512);
         map.write(`1\n0\n${logo.length}\n`);
@@ -500,7 +565,10 @@ describe("npm package tar listings", () => {
         attributes["GNU.sparse.map"] =
           `0,${hole},${hole + 1},${logo.length - hole - 1}`;
       }
-      if (renamed || orderedPath || representation === "global-path")
+      if (
+        !ordinary &&
+        (renamed || orderedPath || representation === "global-path")
+      )
         attributes["GNU.sparse.name"] = path;
       if (overwrite) attributes["GNU.sparse.name"] = "package/README.md";
       if (representation === "pax-path" || orderedPath)
@@ -508,7 +576,7 @@ describe("npm package tar listings", () => {
           representation === "pax-then-long-name" ? wrongPath : path;
       const longName = tarRecord(
         Buffer.from(
-          `${representation === "pax-then-long-name" ? path : wrongPath}\0`,
+          `${representation === "pax-then-long-name" || representation === "ordinary-pax-then-correct-long-name" ? path : wrongPath}\0`,
         ),
         { name: "././@LongLink", type: 0x4c },
       );
@@ -524,13 +592,15 @@ describe("npm package tar listings", () => {
                     }),
                   ]
                 : []),
-              ...(representation === "long-name-then-pax" ? [longName] : []),
+              ...(pathOrder === "long-name-then-pax" ? [longName] : []),
               tarRecord(paxRecords(attributes), {
                 name: "PaxHeaders/asset",
                 type: 0x78,
               }),
-              ...(representation.startsWith("pax-then") ? [longName] : []),
-              tarRecord(stored, { name: renamed ? wrongPath : path }),
+              ...(pathOrder.startsWith("pax-then") ? [longName] : []),
+              tarRecord(stored, {
+                name: renamed || ordinary ? wrongPath : path,
+              }),
             ]);
       const archivePath = join(root, "package.tgz");
       writeFileSync(
@@ -590,6 +660,8 @@ describe("npm package tar listings", () => {
         "pax-then-long-name",
         "long-name-then-pax",
         "overwrite-logo",
+        "ordinary-pax-then-correct-long-name",
+        "ordinary-long-name-then-pax",
       ].includes(representation);
       expect(
         existsSync(installedLogo) && readFileSync(installedLogo).equals(logo),

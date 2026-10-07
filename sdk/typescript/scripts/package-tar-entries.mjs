@@ -260,12 +260,12 @@ export function readTarArchive(archiveBytes) {
               1) &&
           /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
         ) {
-          sparseFiles.set(path, {
-            ...(oldSparse
+          sparseFiles.set(
+            path,
+            oldSparse
               ? { contents, extents: oldSparseExtents, dataOffset: 0 }
-              : sparseMap(contents, paxSparseMap)),
-            npmPath,
-          });
+              : sparseMap(contents, paxSparseMap),
+          );
           // Retain sparse framing in order with the surrounding headers and padding.
           archiveMetadata.push(path);
         } else {
