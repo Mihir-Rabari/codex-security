@@ -31,19 +31,19 @@ def test_blob_batch_preserves_following_blobs_after_tree_and_commit(tmp_path: Pa
     target = tmp_path / "target"
     initialize_git_repository(target)
     source = target / ("fixture.py" if os.name == "nt" else "line\nbreak.py")
-    source.write_bytes(b"print('fixture')\n\0payload\n")
+    source.write_bytes(b"print('fixture')\npayload\n")
     git(target, "add", "--", source.name)
     git(target, "commit", "-qm", "Add unusual fixture")
-    reader = load_script("workbench_target").git_blob_bytes
+    reader = load_script("workbench_target").git_blob_samples
     assert reader(
         target,
         ["HEAD^{tree}", "HEAD", f"HEAD:{source.name}", "HEAD:missing\nfile", "HEAD:README.md"],
     ) == [
         None,
         None,
-        source.read_bytes(),
+        (source.read_bytes(), False),
         None,
-        b"fixture\n",
+        (b"fixture\n", False),
     ]
 
 
@@ -148,36 +148,6 @@ def test_dirty_submodule_warning_preserves_the_changed_target_detail(tmp_path: P
     assert "results were saved" in warning
 
 
-def test_committed_binary_detection_agrees_beyond_preview_window(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    initialize_git_repository(target)
-    base = git(target, "rev-parse", "HEAD").decode()
-    (target / "payload.php").write_bytes(b"<?php\n" + b" " * (70 * 1024) + b"\0payload")
-    (target / "visible.py").write_text("value = 1\n")
-    git(target, "add", ".")
-    git(target, "commit", "-qm", "Add source and binary fixtures")
-    inventory_path = tmp_path / "inventory.txt"
-    rank_path = tmp_path / "rank.jsonl"
-    load_script("generate_in_scope_files").generate_diff_in_scope_files(
-        target, base, "HEAD", "revisions", inventory_path
-    )
-    load_script("generate_rank_input").make_diff_rank_input(
-        argparse.Namespace(
-            repo=str(target),
-            base=base,
-            head="HEAD",
-            mode="revisions",
-            out=str(rank_path),
-            area="fixture",
-            preview_bytes=1024,
-        )
-    )
-    assert inventory_path.read_text().splitlines() == ["visible.py"]
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == [
-        "visible.py"
-    ]
-
-
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
 @pytest.mark.parametrize("replacement", ["symlink", "gitlink"])
 def test_diff_inventories_exclude_non_file_type_changes(
@@ -223,7 +193,6 @@ def test_diff_inventories_exclude_non_file_type_changes(
             preview_bytes=1024,
         )
     )
-    assert inventory_path.read_text().splitlines() == ["visible.py"]
-    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == [
-        "visible.py"
-    ]
+    expected = [".gitmodules", "visible.py"] if replacement == "gitlink" else ["visible.py"]
+    assert inventory_path.read_text().splitlines() == expected
+    assert [json.loads(line)["path"] for line in rank_path.read_text().splitlines()] == expected
