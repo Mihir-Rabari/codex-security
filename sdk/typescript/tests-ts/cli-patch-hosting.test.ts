@@ -493,6 +493,8 @@ describe("patch change tracking", () => {
       "ssh-uri-git+ssh-api-port",
       "ssh-uri-ssh+git-api-port",
       "ssh-enterprise",
+      "ssh-enterprise-www",
+      "https-enterprise-www",
       "scp",
       "scp-userless",
       "scp-ipv6",
@@ -577,9 +579,11 @@ describe("patch change tracking", () => {
       const apiPort = transport.endsWith("-api-port") ? ":8443" : "";
       const hostingHost = transport.endsWith("ipv6-api")
         ? "[::1]"
-        : transport === "ssh-enterprise" || apiPort
-          ? "enterprise.example.test"
-          : "github.com";
+        : transport.endsWith("-www")
+          ? "www.enterprise.example.test"
+          : transport === "ssh-enterprise" || apiPort
+            ? "enterprise.example.test"
+            : "github.com";
       const hostingUrl = `https://${hostingHost}${apiPort}`;
       if (apiPort)
         environment["GH_REPO"] = `${hostingHost}${apiPort}/upstream/repository`;
@@ -597,7 +601,7 @@ describe("patch change tracking", () => {
         ? "example/repository%2Dname.git"
         : "example/repository.git";
       const pushRemote =
-        transport === "https-api-port"
+        transport === "https-api-port" || transport === "https-enterprise-www"
           ? `${hostingUrl}/push-owner/repository.git`
           : transport === "www-scp"
             ? "git@www.github.com:push-owner/repository.git"
@@ -624,8 +628,8 @@ describe("patch change tracking", () => {
                           : transport === "ssh-api" ||
                               transport === "ssh-api-port"
                             ? `git@${hostingHost}:push-owner/repository.git`
-                            : transport === "ssh-enterprise"
-                              ? "git@enterprise.example.test:push-owner/other-repository.git"
+                            : transport.startsWith("ssh-enterprise")
+                              ? `git@${hostingHost}:push-owner/other-repository.git`
                               : transport.startsWith("scp")
                                 ? `${remoteUser}@${alias}:${transport.includes("absolute") ? "/" : ""}${repositoryPath}`
                                 : transport.startsWith("ssh-uri")
@@ -648,7 +652,7 @@ describe("patch change tracking", () => {
               ? `${hostingHost}/push-owner/old-name`
               : transport === "transferred"
                 ? `${hostingHost}/old-owner/repository`
-                : transport === "ssh-enterprise"
+                : transport.startsWith("ssh-enterprise")
                   ? `${hostingHost}/push-owner/other-repository`
                   : localFirst ||
                       mirror ||
@@ -662,6 +666,7 @@ describe("patch change tracking", () => {
                         "ssh-api",
                         "ssh-api-port",
                         "https-api-port",
+                        "https-enterprise-www",
                       ].includes(transport)
                     ? `${hostingHost}${apiPort}/push-owner/repository`
                     : `${hostingHost}${apiPort}/example/${transport === "scp-percent" ? "repository%2Dname" : transport === "ssh-uri-percent" ? "repository-name" : "repository"}`;

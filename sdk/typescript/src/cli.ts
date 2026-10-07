@@ -7246,7 +7246,7 @@ async function publishPatchBranch(
 }
 
 function patchApiHostname(hostname: string): string {
-  const host = hostname.toLowerCase().replace(/^www\./u, "");
+  const host = hostname.toLowerCase().replace(/^www\.(github\.com)$/u, "$1");
   const address = host.replace(/^\[|\]$/gu, "");
   return isIP(address) === 6 && !address.includes("%")
     ? new URL(`ssh://[${address}]`).hostname
