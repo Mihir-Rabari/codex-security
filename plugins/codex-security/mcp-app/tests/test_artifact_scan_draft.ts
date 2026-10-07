@@ -9,7 +9,20 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import type { ArtifactContext } from "../src/artifact-context.js";
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type { PreparedScanDraft } from "../../../../sdk/typescript/src/scan-semantics.js";
+import type {
+  SemanticFinding,
+  SemanticCoverage,
+} from "../../../../sdk/typescript/src/semantic-models.js";
+type FixtureDocuments = PreparedScanDraft & {
+  reconciledCheckpointIds: string[];
+  manifest: { scan: PreparedScanDraft["manifest"]["scan"] & { id: string } };
+  findings: { scanId: string };
+  coverage: { scanId: string };
+};
 import { loadSourceModule, privateDirectory } from "./helpers/source.mjs";
 
 const {
@@ -17,10 +30,12 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
   getCodexSecurityCompletedScan,
   parseScanDraft,
-} = await loadSourceModule(
+} = await loadSourceModule<typeof import("../src/artifact-scan-draft.js")>(
   new URL("../src/artifact-scan-draft.ts", import.meta.url),
 );
-const { semanticFinding, semanticCoverage } = await loadSourceModule(
+const { semanticFinding, semanticCoverage } = await loadSourceModule<
+  typeof import("../../../../sdk/typescript/tests-ts/helpers/semantic-scan.js")
+>(
   new URL(
     "../../../../sdk/typescript/tests-ts/helpers/semantic-scan.ts",
     import.meta.url,
@@ -29,25 +44,31 @@ const { semanticFinding, semanticCoverage } = await loadSourceModule(
 
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
 const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
-const draft = (overrides = {}) => ({
+const draft = (overrides: Record<string, unknown> = {}): ScanDraftInput => ({
   scanId,
   handoffClaimToken: claimToken,
   findings: [],
   coverage: semanticCoverage(),
   ...overrides,
 });
-const finding = (id, overrides = {}) =>
+const finding = (
+  id: string,
+  overrides: Record<string, unknown> = {},
+): SemanticFinding =>
   semanticFinding({
     identity: { anchor: id },
     provenance: { source: "local_plugin", candidateId: id },
     ...overrides,
   });
 
-async function fixture(t, mode = "standard") {
+async function fixture(
+  t: TestContext,
+  mode: ArtifactContext["mode"] = "standard",
+) {
   const root = await privateDirectory("codex-security-draft-");
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "artifacts"), { mode: 0o700 });
-  const context = {
+  const context: ArtifactContext = {
     root,
     repoRoot: root,
     scanId,
@@ -72,12 +93,12 @@ async function fixture(t, mode = "standard") {
     },
   };
   const snapshotPath = join(root, "artifacts", "scan-draft.json");
-  let last;
+  let last: FixtureDocuments;
   const publish = async (
-    documents,
-    expected,
-    _checkpoint,
-    reconciledCheckpointIds = [],
+    documents: PreparedScanDraft,
+    expected?: string,
+    _checkpoint?: ScanDraftInput,
+    reconciledCheckpointIds: readonly string[] = [],
   ) => {
     const before = await readFile(snapshotPath, "utf8").catch(() => undefined);
     if (expected !== undefined) {
@@ -97,11 +118,11 @@ async function fixture(t, mode = "standard") {
       }
       assert.equal(expected, digest.digest("hex"));
     }
-    last = documents;
-    documents.reconciledCheckpointIds = [...reconciledCheckpointIds];
-    documents.manifest.scan.id = scanId;
-    documents.findings.scanId = scanId;
-    documents.coverage.scanId = scanId;
+    last = documents as FixtureDocuments;
+    last.reconciledCheckpointIds = [...reconciledCheckpointIds];
+    last.manifest.scan.id = scanId;
+    last.findings.scanId = scanId;
+    last.coverage.scanId = scanId;
     await writeFile(snapshotPath, JSON.stringify(documents));
   };
   return {
@@ -109,7 +130,8 @@ async function fixture(t, mode = "standard") {
     context,
     snapshotPath,
     publish,
-    save: (input) => recordCodexSecurityScanDraft(context, input, publish),
+    save: (input: ScanDraftInput) =>
+      recordCodexSecurityScanDraft(context, input, publish),
     get documents() {
       return last;
     },
@@ -127,7 +149,7 @@ test("draft saves read one committed snapshot and preserve accepted findings by 
   await writeFile(join(f.root, "checkpoints", "invalid.json"), "not JSON");
   await f.save(draft({ findings: [finding("second")] }));
   assert.deepEqual(
-    f.documents.findings.findings.map((row) => row.identity.anchor),
+    f.documents.findings.findings.map((row) => row.identity!.anchor),
     ["second", "first"],
   );
   assert.equal(
@@ -138,11 +160,11 @@ test("draft saves read one committed snapshot and preserve accepted findings by 
     draft({ findings: [finding("first", { remediation: "Updated repair." })] }),
   );
   const updated = f.documents.findings.findings.find(
-    (row) => row.identity.anchor === "first",
+    (row) => row.identity!.anchor === "first",
   );
-  assert.equal(updated.remediation, "Updated repair.");
+  assert.equal(updated!.remediation, "Updated repair.");
   assert.equal(
-    updated.provenance.previousFindings[0].remediation,
+    (updated!.provenance.previousFindings as SemanticFinding[])[0].remediation,
     original.remediation,
   );
   assert.equal(f.documents.findings.findings.length, 2);
@@ -174,7 +196,7 @@ test("normalization assigns canonical IDs and explicit updates are idempotent", 
 
 test("new same-label surfaces retain pending coverage until its explicit ID is resolved", async (t) => {
   const f = await fixture(t);
-  const pending = {
+  const pending: SemanticCoverage["surfaces"][number] = {
     label: "Request handler",
     riskArea: "authentication",
     paths: ["src/login.ts"],
@@ -190,7 +212,7 @@ test("new same-label surfaces retain pending coverage until its explicit ID is r
     }),
   );
   const pendingId = f.documents.coverage.surfaces[0].id;
-  const reviewed = {
+  const reviewed: SemanticCoverage["surfaces"][number] = {
     label: pending.label,
     riskArea: "file-handling",
     paths: ["src/download.ts"],
@@ -247,7 +269,7 @@ test("missing deferred IDs preserve distinct candidates and stable IDs revise sa
       paths: ["src/handler.ts"],
       candidate: { explanation: "Review authentication flow" },
     };
-    const saveDeferred = (row) =>
+    const saveDeferred = (row: SemanticCoverage["deferred"][number]) =>
       f.save(
         draft({
           complete: false,
@@ -302,7 +324,7 @@ test("candidate-only deferred updates preserve the unique saved ID and evidence"
     candidate: { explanation: "Saved candidate evidence" },
     finding: finding("candidate"),
   };
-  const save = (deferred) =>
+  const save = (deferred: SemanticCoverage["deferred"]) =>
     f.save(
       draft({
         complete: false,
@@ -327,9 +349,9 @@ test("deferred ID inference preserves distinct work sharing a candidate", async 
   for (const input of [
     [{ id: "work-1", candidateId: "candidate", reason: "Updated work" }],
     [{ candidateId: "candidate", reason: "Ambiguous update" }],
-  ]) {
+  ] as SemanticCoverage["deferred"][]) {
     const f = await fixture(t);
-    const save = (deferred) =>
+    const save = (deferred: SemanticCoverage["deferred"]) =>
       f.save(
         draft({
           complete: false,
@@ -342,9 +364,9 @@ test("deferred ID inference preserves distinct work sharing a candidate", async 
     assert.equal(saved.length, input[0].id ? 2 : 3);
     for (const row of original) {
       const updated = saved.find(({ id }) => id === row.id);
-      assert.deepEqual(updated.candidate, row.candidate);
+      assert.deepEqual(updated!.candidate, row.candidate);
       assert.equal(
-        updated.reason,
+        updated!.reason,
         row.id === input[0].id ? input[0].reason : row.reason,
       );
     }
@@ -355,7 +377,7 @@ test("deferred ID inference preserves distinct work sharing a candidate", async 
 test("candidate-only inference does not reuse an explicitly claimed row ID", async (t) => {
   for (const candidateId of ["candidate", "other-candidate"]) {
     const f = await fixture(t);
-    const save = (deferred) =>
+    const save = (deferred: SemanticCoverage["deferred"]) =>
       f.save(
         draft({
           complete: false,
@@ -414,7 +436,10 @@ test("missing finding IDs preserve distinct candidates across draft updates", as
     saved[0].identity,
   );
   assert.equal(
-    f.documents.findings.findings[0].provenance.previousFindings[0].remediation,
+    (
+      f.documents.findings.findings[0].provenance
+        .previousFindings as SemanticFinding[]
+    )[0].remediation,
     second.remediation,
   );
 });
@@ -447,7 +472,7 @@ test("missing finding IDs are unique within a batch and preserve explicit IDs", 
 });
 
 test("pending candidate evidence is preserved until its explicit finding or rejection", async (t) => {
-  for (const disposition of ["reported", "rejected"]) {
+  for (const disposition of ["reported", "rejected"] as const) {
     const f = await fixture(t);
     const candidate = { explanation: "Original supporting evidence" };
     const pending = draft({
@@ -525,7 +550,7 @@ for (const next of ["rejected", "reported", "deferred"]) {
         }),
       }),
     );
-    const surface = {
+    const surface: SemanticCoverage["surfaces"][number] = {
       id: "surface",
       candidateId: "candidate",
       label: "Handler",
@@ -594,7 +619,7 @@ for (const next of ["rejected", "reported", "deferred"]) {
 
 for (const field of ["candidateId", "reportId", "ledgerRowId"]) {
   test(`extension ${field} resolves pending work and honors rejection`, async (t) => {
-    for (const disposition of ["rejected", "not_applicable"]) {
+    for (const disposition of ["rejected", "not_applicable"] as const) {
       const f = await fixture(t);
       const candidate = { explanation: "Saved candidate evidence" };
       await f.save(
@@ -735,7 +760,7 @@ test("a late partial writer preserves final presentation and retains new evidenc
   await f.save(draft({ complete: false }));
   assert.equal(await readFile(f.snapshotPath, "utf8"), accepted);
 
-  let checkpoint;
+  let checkpoint!: ScanDraftInput;
   const result = await recordCodexSecurityScanDraftViaWorkbench(
     f.context,
     draft({
@@ -782,7 +807,7 @@ test("a late partial writer preserves final presentation and retains new evidenc
   assert.equal(result.findingCount, 2);
   assert.equal(checkpoint.complete, false);
   assert.deepEqual(
-    checkpoint.findings.map((row) => row.identity.anchor),
+    checkpoint.findings.map((row) => row.identity!.anchor),
     ["accepted", "late"],
   );
   assert.equal(checkpoint.findings[0].remediation, "Earlier repair evidence.");
@@ -795,7 +820,9 @@ test("a late partial writer preserves final presentation and retains new evidenc
   assert.deepEqual(committed.coverage.deferred, []);
   assert.equal(committed.findings.findings[0].remediation, final.remediation);
   assert.deepEqual(
-    committed.findings.findings.map((row) => row.identity.anchor),
+    committed.findings.findings.map(
+      (row: SemanticFinding) => row.identity!.anchor,
+    ),
     ["accepted", "late"],
   );
   await f.save(draft());
@@ -807,7 +834,7 @@ test("Deep completion uses the accepted aggregate without reintroducing older fi
   await f.save(draft({ complete: false, findings: [finding("obsolete")] }));
   await f.save(draft({ findings: [finding("accepted")] }));
   assert.deepEqual(
-    f.documents.findings.findings.map((row) => row.identity.anchor),
+    f.documents.findings.findings.map((row) => row.identity!.anchor),
     ["accepted"],
   );
 });
@@ -864,7 +891,7 @@ test("CAS conflicts reread the committed head and cancellation stops retries", a
   );
   assert.equal(calls, 2);
   assert.deepEqual(
-    f.documents.findings.findings.map((row) => row.identity.anchor),
+    f.documents.findings.findings.map((row) => row.identity!.anchor),
     ["mine", "concurrent"],
   );
   const controller = new AbortController();
@@ -959,7 +986,7 @@ test("semantic drafts retain nested finding report references", () => {
   const parsed = parseScanDraft(
     draft({ findings: [finding("nested", { writeup: { reportPath } })] }),
   );
-  assert.equal(parsed.findings[0].writeup.reportPath, reportPath);
+  assert.equal(parsed.findings[0].writeup!.reportPath, reportPath);
 });
 
 test("scan claims, status, and semantic validation precede publication", async (t) => {
@@ -1078,7 +1105,7 @@ test("completed results require a sealed, matching workbench result", async (t) 
   );
 });
 
-for (const mode of ["standard", "deep"]) {
+for (const mode of ["standard", "deep"] as const) {
   test(`${mode} draft reconciles pending evidence without rereading accepted history`, async (t) => {
     const f = await fixture(t, mode);
     await f.save(draft({ complete: false }));
@@ -1098,7 +1125,7 @@ for (const mode of ["standard", "deep"]) {
     );
     await f.save(draft({ findings: [finding("later-evidence")] }));
     assert.deepEqual(
-      f.documents.findings.findings.map((row) => row.identity.anchor),
+      f.documents.findings.findings.map((row) => row.identity!.anchor),
       ["later-evidence", "pending-evidence"],
     );
     assert.deepEqual(f.documents.reconciledCheckpointIds, [name]);
@@ -1119,7 +1146,7 @@ for (const mode of ["standard", "deep"]) {
     rejected.findings = [finding("later-evidence")];
     await f.save(rejected);
     assert.deepEqual(
-      f.documents.findings.findings.map((row) => row.identity.anchor),
+      f.documents.findings.findings.map((row) => row.identity!.anchor),
       ["later-evidence"],
     );
     assert.equal(
@@ -1146,7 +1173,7 @@ for (const scenario of [
 ]) {
   test(`candidate-only deferred inference considers ${scenario} across pending drafts`, async (t) => {
     const f = await fixture(t);
-    const row = (id) => ({
+    const row = (id: string) => ({
       id,
       candidateId: "candidate",
       reason: "Review",
@@ -1196,7 +1223,7 @@ for (const scenario of [
       assert.deepEqual(
         saved
           .slice(1)
-          .map((row) => row.candidate.summary)
+          .map((row) => (row.candidate as { summary: string }).summary)
           .sort(),
         ["candidate", "work-2"],
       );
@@ -1208,7 +1235,7 @@ for (const scenario of [
   });
 }
 
-for (const disposition of ["no_issue_found", "reported"]) {
+for (const disposition of ["no_issue_found", "reported"] as const) {
   test(`unchanged ${disposition} surface retains independent deferred work`, async (t) => {
     const f = await fixture(t);
     const surfaces = [
@@ -1332,8 +1359,11 @@ for (const storage of ["legacy", "indexed", "pending payload"]) {
     const surface = f.documents.coverage.surfaces.find(
       (row) => row.candidateId === "removed-candidate",
     );
-    assert.equal(surface.disposition, "rejected");
-    assert.equal(surface.finding.identity.anchor, "removed-candidate");
+    assert.equal(surface!.disposition, "rejected");
+    assert.equal(
+      (surface!.finding as SemanticFinding).identity!.anchor,
+      "removed-candidate",
+    );
     assert.deepEqual(
       f.documents.reconciledCheckpointIds,
       checkpoints.map(({ name }) => name).reverse(),
@@ -1394,7 +1424,7 @@ for (const mode of ["standard", "diff"]) {
 }
 
 for (const mode of ["standard", "diff"]) {
-  for (const outcome of ["reported", "rejected", "not_applicable"]) {
+  for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
     test(`${mode} final ${outcome} candidate accepts a redundant deferred closure and retains evidence`, async (t) => {
       const f = await fixture(t, mode);
       const candidate = { explanation: "Saved candidate evidence." };
@@ -1470,7 +1500,7 @@ test("generic closure cannot discard candidate work, unknown work, or still-acti
   for (const [id, expected] of [
     ["candidate-task", /cannot close candidate/],
     ["unknown", /no saved generic deferral/],
-  ]) {
+  ] as const) {
     await assert.rejects(
       f.save(
         draft({

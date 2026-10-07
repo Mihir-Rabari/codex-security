@@ -190,7 +190,7 @@ import { pathToFileURL } from "node:url";
           CODEX_HOME: home,
         },
         home,
-        native.args ?? [],
+        [...(native.args ?? [])],
         "config/read",
         { cwd: home, includeLayers: false },
         native,

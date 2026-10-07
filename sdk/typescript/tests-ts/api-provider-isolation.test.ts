@@ -4,14 +4,11 @@ import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import * as childProcess from "node:child_process";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
@@ -317,7 +314,7 @@ test.each(["root", "profile override", "profile only"] as const)(
                       );
                       expect(observedProviders[index]).toMatchObject(provider);
                       expect(
-                        observedProviders[index]!.http_headers ?? {},
+                        observedProviders[index]!["http_headers"] ?? {},
                       ).toEqual(provider.http_headers ?? {});
                     }
                     checkedLaunches[index]!++;
@@ -594,8 +591,7 @@ test.each(legacyScanCases)(
       `
       import { appendFileSync, existsSync } from "node:fs";
       import { join } from "node:path";
-      import { createInterface } from "node:readline";
-      const args = process.argv.slice(2);
+            const args = process.argv.slice(2);
       const selected = args.some((arg) => arg === 'model_provider="openai"') ? "openai" : ${JSON.stringify(native.inherited ?? "openai")};
       for await (const line of createInterface({ input: process.stdin })) {
         const request = JSON.parse(line);
@@ -720,7 +716,6 @@ async function createPluginProbe(root: string, report: string) {
   await writeFile(
     probe,
     `import { writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { workerRuntimeSettings } from "./worker-settings.mjs";
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);

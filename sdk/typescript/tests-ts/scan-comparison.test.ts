@@ -3105,7 +3105,10 @@ describe("incoming native runtime integration", () => {
       let codexPath: string | undefined;
       let codexEnvironment: CodexOptions["env"];
       const startThread = observeCodexOptions(codex, (options) => {
-        config = deepMerge(options.config ?? {}, launchConfig(options.configOverrides ?? []));
+        config = deepMerge(
+          options.config ?? {},
+          launchConfig(options.configOverrides ?? []),
+        ) as CodexOptions["config"];
         codexPath = options.codexPathOverride;
         codexEnvironment = options.env;
       });

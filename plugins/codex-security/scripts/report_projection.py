@@ -268,8 +268,8 @@ def _hardening_portfolio_path(scan: dict[str, Any]) -> str | None:
     return portfolio_path
 
 
-def _bullets(items: list[str], fallback: str) -> list[str]:
-    return [f"- {item}" for item in (items or [fallback])]
+def _bullet_section(heading: str, items: list[str]) -> list[str]:
+    return ["", heading, *(f"- {item}" for item in items)] if items else []
 
 
 def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -484,22 +484,9 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _severity_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["severity"]["level"] for finding in findings)
-    return (
-        ", ".join(f"{level}: {counts[level]}" for level in SEVERITY_ORDER if counts[level])
-        or "none"
-    )
-
-
-def _confidence_mix(findings: list[dict[str, Any]]) -> str:
-    counts = Counter(finding["confidence"]["level"] for finding in findings)
-    return (
-        ", ".join(
-            f"{level}: {counts[level]}" for level in ("high", "medium", "low") if counts[level]
-        )
-        or "none"
-    )
+def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]) -> str:
+    counts = Counter(finding[field]["level"] for finding in findings)
+    return ", ".join(f"{level}: {counts[level]}" for level in order if counts[level]) or "none"
 
 
 def _locations(finding: dict[str, Any]) -> str:
@@ -601,7 +588,7 @@ def _remediation_section(finding: dict[str, Any]) -> list[str]:
             )
         )
         if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+            lines.extend(_bullet_section(f"{label}:", values))
     return lines
 
 
@@ -721,16 +708,16 @@ def _finding_detail_sections(finding: dict[str, Any]) -> dict[str, list[str]]:
     ):
         values = _strings(validation.get(key))
         if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+            lines.extend(_bullet_section(f"{label}:", values))
     lines = sections["Dataflow"] = [dataflow_summary]
     if attack_steps:
-        lines.extend(["", "Attack steps:", *_bullets(attack_steps, "None recorded.")])
+        lines.extend(_bullet_section("Attack steps:", attack_steps))
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
             lines.extend(["", f"- **{label}:** {_text(dataflow[key], 'not recorded')}"])
     transformations = _strings(dataflow.get("transformations"))
     if transformations:
-        lines.extend(["", "Transformations:", *_bullets(transformations, "None recorded.")])
+        lines.extend(_bullet_section("Transformations:", transformations))
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
     lines = sections["Reachability"] = [reachability_summary]
     for label, key in (
@@ -751,7 +738,7 @@ def _finding_detail_sections(finding: dict[str, Any]) -> dict[str, list[str]]:
         )
     )
     if preconditions:
-        lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
+        lines.extend(_bullet_section("Preconditions:", preconditions))
     for label, key in (
         ("Assumptions", "assumptions"),
         ("Existing controls", "controls"),
@@ -760,7 +747,7 @@ def _finding_detail_sections(finding: dict[str, Any]) -> dict[str, list[str]]:
     ):
         values = _strings(attack_path.get(key))
         if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+            lines.extend(_bullet_section(f"{label}:", values))
     lines.extend(_code_evidence_lines(reachability_code_evidence))
     lines = sections["Severity"] = [
         f"**{severity_level.capitalize()}** — {severity_rationale}",
@@ -921,19 +908,19 @@ def build_report_markdown(
                 f"{_text(exclusion.get('reason'), 'reason not recorded')}"
             )
     if limitations:
-        lines.extend(["", "Limitations and exclusions:", *_bullets(limitations, "None recorded.")])
+        lines.extend(_bullet_section("Limitations and exclusions:", limitations))
     summary_count_lines = (
         [
             f"| Reportable DSS findings | {len(deep_finding_groups)} |",
             f"| Report instances | {len(findings)} |",
-            f"| Report severity mix | {_severity_mix(findings)} |",
-            f"| Report confidence mix | {_confidence_mix(findings)} |",
+            f"| Report severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Report confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
         if deep_presentation
         else [
             f"| Reportable findings | {len(findings)} |",
-            f"| Severity mix | {_severity_mix(findings)} |",
-            f"| Confidence mix | {_confidence_mix(findings)} |",
+            f"| Severity mix | {_level_mix(findings, 'severity', SEVERITY_ORDER)} |",
+            f"| Confidence mix | {_level_mix(findings, 'confidence', CONFIDENCE_ORDER)} |",
         ]
     )
     lines.extend(
@@ -964,7 +951,7 @@ def build_report_markdown(
                 "No explicit canonical threat-model summary was recorded.",
             )
         )
-        for heading, key, fallback in (
+        for heading, key, _fallback in (
             ("Assets", "assets", "No assets were recorded."),
             ("Trust Boundaries", "trustBoundaries", "No trust boundaries were recorded."),
             (
@@ -977,7 +964,7 @@ def build_report_markdown(
         ):
             values = _strings(threat_model.get(key))
             if values:
-                lines.extend(["", f"### {heading}", "", *_bullets(values, fallback)])
+                lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:

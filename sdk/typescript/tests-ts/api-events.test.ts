@@ -482,21 +482,55 @@ describe("one-shot scan events", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("isolates trusted cyber access warning observer failures", async () => {
+  test("captures warning observers before payload evaluation and isolates failures", async () => {
     const scanDir = await temporaryDirectory();
     const observerErrors: Array<[ScanObserverName, string]> = [];
-
-    const result = await runTacEvents(
+    const replacement = mock();
+    let warningPending = false;
+    let onWarning: () => void = function (this: void) {
+      expect(this).toBeUndefined();
+      throw new Error("TAC warning observer failed");
+    };
+    let onObserverError = function (
+      this: void,
+      observer: ScanObserverName,
+      error: unknown,
+    ) {
+      expect(this).toBeUndefined();
+      observerErrors.push([observer, (error as Error).message]);
+    };
+    const result = await runScanTurn({
+      thread: { id: null },
+      events: completedEvents(
+        "thread-1",
+        tacEvents([tacToolCall("not_granted")]),
+      ),
+      signal: new AbortController().signal,
       scanDir,
-      [tacToolCall("not_granted")],
-      throwing("TAC warning observer failed"),
-      collectObserverErrors(observerErrors),
-    );
-
+      repository: "/repository",
+      get onTrustedAccessStatus() {
+        warningPending = true;
+        return undefined;
+      },
+      get authentication() {
+        if (warningPending) {
+          onWarning = replacement;
+          onObserverError = replacement;
+        }
+        return undefined;
+      },
+      get onWarning() {
+        return onWarning;
+      },
+      get onObserverError() {
+        return onObserverError;
+      },
+    });
     expect(result.turnResult.status).toBe("completed");
     expect(observerErrors).toEqual([
       ["onWarning", "TAC warning observer failed"],
     ]);
+    expect(replacement).not.toHaveBeenCalled();
   });
 
   test("isolates trusted cyber access status observer failures", async () => {

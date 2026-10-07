@@ -5,6 +5,7 @@ import type {
   ScanOptions,
   ScanTrustedAccessStatus,
 } from "./api.js";
+import type { SecurityPolicyOptions } from "./security-policy.js";
 import type { CodexThreadLike, ScanEvent } from "./execution-preparation.js";
 import {
   CodexSecurityError,
@@ -57,12 +58,7 @@ export function reportScanActivities(
   options: Pick<ScanEventRunOptions, "onActivity" | "onObserverError">,
 ): void {
   for (const activity of scanActivitiesFromEvent(event, repository)) {
-    notifyObserver(
-      "onActivity",
-      options.onActivity,
-      options.onObserverError,
-      activity,
-    );
+    notifyObserver(options, "onActivity")(activity);
   }
 }
 
@@ -71,10 +67,7 @@ export function scanReconnectObserver(
   options: Pick<ScanEventRunOptions, "onReconnect" | "onObserverError">,
 ) {
   return (message: string, attempts: [number, number]): void =>
-    notifyObserver(
-      "onReconnect",
-      options.onReconnect,
-      options.onObserverError,
+    notifyObserver(options, "onReconnect")(
       ...attempts,
       reconnectDetails(message),
     );
@@ -99,19 +92,12 @@ export async function runScanTurn(
           const tacStatus = trustedAccessStatusFromEvent(event);
           if (tacStatus !== null) {
             tacStatusReported = true;
-            notifyObserver(
-              "onTrustedAccessStatus",
-              options.onTrustedAccessStatus,
-              options.onObserverError,
-              tacStatus,
-            );
+            notifyObserver(options, "onTrustedAccessStatus")(tacStatus);
             if (tacStatus !== "granted") {
               notifyObserver(
+                options,
                 "onWarning",
-                options.onWarning,
-                options.onObserverError,
-                trustedAccessWarning(tacStatus, options.authentication),
-              );
+              )(trustedAccessWarning(tacStatus, options.authentication));
             }
           }
         }
@@ -123,21 +109,11 @@ export async function runScanTurn(
           ) {
             continue;
           }
-          notifyObserver(
-            "onProgress",
-            options.onProgress,
-            options.onObserverError,
-            progress,
-          );
+          notifyObserver(options, "onProgress")(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
-          notifyObserver(
-            "onWorkerStatus",
-            options.onWorkerStatus,
-            options.onObserverError,
-            workerStatus,
-          );
+          notifyObserver(options, "onWorkerStatus")(workerStatus);
         }
         if (event.type === "thread.started") {
           const startedThreadId = event["thread_id"];
@@ -146,11 +122,7 @@ export async function runScanTurn(
           }
           if (!scanStarted) {
             scanStarted = true;
-            notifyObserver(
-              "onScanStarted",
-              options.onScanStarted,
-              options.onObserverError,
-            );
+            notifyObserver(options, "onScanStarted")();
           }
         }
       },
@@ -446,17 +418,20 @@ export function classifyConnectionFailure(
   return "unknown";
 }
 
-export function notifyObserver<Arguments extends unknown[]>(
-  observerName: ScanObserverName,
-  observer: ((...args: Arguments) => void) | undefined,
-  onObserverError:
-    ((observer: ScanObserverName, error: unknown) => void) | undefined,
-  ...args: Arguments
-): void {
-  void Promise.resolve()
-    .then(() => observer?.(...args))
-    .catch((error: unknown) => onObserverError?.(observerName, error))
-    .catch(() => {});
+export function notifyObserver<Name extends ScanObserverName>(
+  options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
+  observerName: Name,
+) {
+  type Arguments = Parameters<NonNullable<(typeof options)[Name]>>;
+  const observer = options[observerName] as
+    ((...args: Arguments) => void) | undefined;
+  const onObserverError = options.onObserverError;
+  return (...args: Arguments): void => {
+    void Promise.resolve()
+      .then(() => observer?.(...args))
+      .catch((error: unknown) => onObserverError?.(observerName, error))
+      .catch(() => {});
+  };
 }
 
 export function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {

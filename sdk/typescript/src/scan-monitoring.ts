@@ -38,13 +38,7 @@ export function createScanCostReporter({
   let notifiedLimit: number | undefined;
   return (cost: Readonly<ScanCost>): void => {
     latestCost = cost;
-    notifyObserver(
-      "onCost",
-      options.onCost,
-      options.onObserverError,
-      cost,
-      maxCostUsd,
-    );
+    notifyObserver(options, "onCost")(cost, maxCostUsd);
     if (maxCostUsd !== undefined && cost.estimatedUsd > maxCostUsd) {
       costAbortController.abort(
         new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
@@ -90,22 +84,14 @@ export function createScanCostReporter({
         ]);
         if (budgetSignal.aborted) return;
         maxCostUsd = next;
-        notifyObserver(
-          "onCost",
-          options.onCost,
-          options.onObserverError,
-          latestCost!,
-          maxCostUsd,
-        );
+        notifyObserver(options, "onCost")(latestCost!, maxCostUsd);
       })
       .catch((error: unknown) => {
         if (!budgetSignal.aborted) {
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            `Could not increase scan cost limit: ${errorMessage(error)}`,
-          );
+          )(`Could not increase scan cost limit: ${errorMessage(error)}`);
         }
       });
   };
@@ -132,11 +118,9 @@ export class ScanProgressReporter {
       return;
     this.reviewedFileCount = progress.filesCompleted;
     notifyObserver(
+      this.options,
       "onProgress",
-      this.options.onProgress,
-      this.options.onObserverError,
-      { ...progress, filesTotal: this.scopeFileCount },
-    );
+    )({ ...progress, filesTotal: this.scopeFileCount });
   };
 
   preflight(fileCount: number | null, tracker: ScanCostTracker): void {
@@ -144,11 +128,9 @@ export class ScanProgressReporter {
     if (fileCount === null) return;
     tracker.setExpectedFilesTotal(fileCount);
     notifyObserver(
+      this.options,
       "onProgress",
-      this.options.onProgress,
-      this.options.onObserverError,
-      { phase: "preflight", filesCompleted: 0, filesTotal: fileCount },
-    );
+    )({ phase: "preflight", filesCompleted: 0, filesTotal: fileCount });
   }
 
   fromScan(progress: ScanProgress, tracker: ScanCostTracker): void {

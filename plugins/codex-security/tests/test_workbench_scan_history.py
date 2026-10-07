@@ -15,11 +15,11 @@ from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
     begin_legacy_scan,
+    fail_scan,
+    get_scan,
     initialize_git_repository,
     mark_deep_aggregate_ready,
     private_directory,
-    fail_scan,
-    get_scan,
     run_workbench,
     scan_command,
     set_triage,

@@ -646,11 +646,16 @@ async function startReadOnlyCodexThread(
   );
   const sdkConfig = prepared.config;
   if (preparedFactory === undefined) {
-    const suppliedConfig = resolveCodexProfile(options.config?.codexOverrides ?? {});
+    const suppliedConfig = resolveCodexProfile(
+      options.config?.codexOverrides ?? {},
+    );
     normalizeLegacyWindowsSandboxOverride(suppliedConfig);
-    sdkConfig["windows"] = suppliedConfig["windows"] === undefined
-      ? homeExecutionConfig["windows"] ?? sdkConfig["windows"]
-      : resolveCodexProfile(config ?? {})["windows"];
+    const windows =
+      suppliedConfig["windows"] === undefined
+        ? (homeExecutionConfig["windows"] ?? sdkConfig["windows"])
+        : resolveCodexProfile(config ?? {})["windows"];
+    if (windows === undefined) delete sdkConfig["windows"];
+    else sdkConfig["windows"] = windows;
   }
   if (commandAuth)
     sdkConfig["model_providers"] = providerConfig["model_providers"]!;
@@ -1093,9 +1098,7 @@ function comparisonPrompt(
 }
 
 function characterCount(value: string): number {
-  let count = 0;
-  for (const _character of value) count += 1;
-  return count;
+  return value[Symbol.iterator]().reduce((count) => count + 1, 0);
 }
 
 function cataloguePages(input: CataloguePage): CataloguePage[] {

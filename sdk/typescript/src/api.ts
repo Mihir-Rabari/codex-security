@@ -938,12 +938,7 @@ export class CodexSecurity {
     let accumulatedCost: ScanCost | null = null;
     let completeCost = true;
     const warn = (message: string): void =>
-      notifyObserver(
-        "onWarning",
-        options.onWarning,
-        options.onObserverError,
-        message,
-      );
+      notifyObserver(options, "onWarning")(message);
     try {
       const target = await resolveSecurityPolicyTarget(
         repository,
@@ -1016,12 +1011,7 @@ export class CodexSecurity {
           outputDir,
         );
       }
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        outputDir,
-      );
+      notifyObserver(options, "onOutputDirReady")(outputDir);
       const guidance = await resolveSecurityPolicyGuidance(
         target,
         runtime.plugin.pluginRoot,
@@ -1063,13 +1053,7 @@ export class CodexSecurity {
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
-        if (completeCost)
-          notifyObserver(
-            "onCost",
-            options.onCost,
-            options.onObserverError,
-            total,
-          );
+        if (completeCost) notifyObserver(options, "onCost")(total);
         if (
           options.maxCostUsd !== undefined &&
           total.estimatedUsd > options.maxCostUsd
@@ -1199,13 +1183,7 @@ export class CodexSecurity {
         protectedRoot: inputs.protectedRoot,
         signal,
         onWarning: warn,
-        onStage: (stage) =>
-          notifyObserver(
-            "onStage",
-            options.onStage,
-            options.onObserverError,
-            stage,
-          ),
+        onStage: (stage) => notifyObserver(options, "onStage")(stage),
         answerQuestions: options.answerQuestions,
         run,
         cost: () => (completeCost ? accumulatedCost : null),
@@ -1345,29 +1323,18 @@ export class CodexSecurity {
         return;
       }
       notifyObserver(
+        options,
         "onWarning",
-        options.onWarning,
-        options.onObserverError,
-        `Could not track scan activity: ${errorMessage(error)}`,
-      );
+      )(`Could not track scan activity: ${errorMessage(error)}`);
     };
     // Saved totals describe already completed work and cannot spend the execution budget.
     const reportSavedCost = (cost: Readonly<ScanCost>): void =>
-      notifyObserver(
-        "onCost",
-        options.onCost,
-        options.onObserverError,
-        cost,
-        options.maxCostUsd,
-      );
+      notifyObserver(options, "onCost")(cost, options.maxCostUsd);
     const reportWarnings = (
       warnings: Awaited<ReturnType<typeof publishScan>>["warnings"],
     ): void => {
       for (const warning of warnings) {
-        notifyObserver(
-          "onWarning",
-          options.onWarning,
-          options.onObserverError,
+        notifyObserver(options, "onWarning")(
           warning.message,
           warning.targetChanged ? { kind: "target_changed" } : undefined,
         );
@@ -1544,12 +1511,7 @@ export class CodexSecurity {
             workbench: (args, input) => workbench(readOptions, args, input),
           });
           if (registered.sealed) {
-            notifyObserver(
-              "onOutputDirReady",
-              options.onOutputDirReady,
-              options.onObserverError,
-              scanDir,
-            );
+            notifyObserver(options, "onOutputDirReady")(scanDir);
             const model = scanModel({
               ...DEFAULT_CODEX_CONFIG,
               ...((registered.registration["recipe"] as JsonObject)[
@@ -1604,9 +1566,9 @@ export class CodexSecurity {
               } catch (error) {
                 if (error instanceof ScanPermissionError) throw error;
                 notifyObserver(
+                  options,
                   "onWarning",
-                  options.onWarning,
-                  options.onObserverError,
+                )(
                   `Could not update repository findings: ${errorMessage(error)}`,
                 );
               }
@@ -1717,12 +1679,7 @@ export class CodexSecurity {
       releaseExecution ??= await (
         this.#dependencies.acquireScanExecution ?? acquireScanExecution
       )(stateDirectory, scanDir, await bundledPluginRoot());
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        scanDir,
-      );
+      notifyObserver(options, "onOutputDirReady")(scanDir);
       checkOpen();
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
@@ -1807,11 +1764,9 @@ export class CodexSecurity {
           ]);
         } catch (error) {
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            `Could not save scan session: ${errorMessage(error)}`,
-          );
+          )(`Could not save scan session: ${errorMessage(error)}`);
         }
       };
       if (
@@ -1905,11 +1860,9 @@ export class CodexSecurity {
             targetId,
           ).catch((error) => {
             notifyObserver(
+              options,
               "onWarning",
-              options.onWarning,
-              options.onObserverError,
-              `Could not load repository findings: ${errorMessage(error)}`,
-            );
+            )(`Could not load repository findings: ${errorMessage(error)}`);
             return undefined;
           })) as RepositoryFinding[] | undefined;
         return published.result;
@@ -1939,33 +1892,15 @@ export class CodexSecurity {
         onActivity:
           options.onActivity === undefined
             ? undefined
-            : (activity) =>
-                notifyObserver(
-                  "onActivity",
-                  options.onActivity,
-                  options.onObserverError,
-                  activity,
-                ),
+            : (activity) => notifyObserver(options, "onActivity")(activity),
         onWorkerEvent:
           options.onWorkerEvent === undefined
             ? undefined
-            : (event) =>
-                notifyObserver(
-                  "onWorkerEvent",
-                  options.onWorkerEvent,
-                  options.onObserverError,
-                  event,
-                ),
+            : (event) => notifyObserver(options, "onWorkerEvent")(event),
         onSessionEvent:
           options.onSessionEvent === undefined
             ? undefined
-            : (event) =>
-                notifyObserver(
-                  "onSessionEvent",
-                  options.onSessionEvent,
-                  options.onObserverError,
-                  event,
-                ),
+            : (event) => notifyObserver(options, "onSessionEvent")(event),
         onProgress:
           options.onProgress === undefined ? undefined : reportProgress,
         onCost:
@@ -2036,21 +1971,14 @@ export class CodexSecurity {
               ["get-scan", "--scan-id", scanId],
             ),
           onProgress: (progress) =>
-            notifyObserver(
-              "onDeepProgress",
-              options.onDeepProgress,
-              options.onObserverError,
-              progress,
-            ),
+            notifyObserver(options, "onDeepProgress")(progress),
           onError: (error) => {
             if (progressWarningReported) return;
             progressWarningReported = true;
             notifyObserver(
+              options,
               "onWarning",
-              options.onWarning,
-              options.onObserverError,
-              `Could not track Deep Scan progress: ${errorMessage(error)}`,
-            );
+            )(`Could not track Deep Scan progress: ${errorMessage(error)}`);
           },
         });
         deepProgressTracker.start();
@@ -2364,9 +2292,9 @@ export class CodexSecurity {
             : (snapshot.cost ?? savedCost);
         if (options.maxCostUsd !== undefined && completionCost === null) {
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
+          )(
             "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
           );
         }
@@ -2406,11 +2334,7 @@ export class CodexSecurity {
                   args,
                   input,
                 );
-              notifyObserver(
-                "onScanStarted",
-                options.onScanStarted,
-                options.onObserverError,
-              );
+              notifyObserver(options, "onScanStarted")();
               const composition = await runDeepScans({
                 scanId,
                 scanDir,
@@ -2645,11 +2569,9 @@ export class CodexSecurity {
           if (signal.aborted || error instanceof ScanPermissionError)
             throw error;
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            `Could not run post-scan instructions: ${errorMessage(error)}`,
-          );
+          )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
 
@@ -2763,11 +2685,9 @@ export class CodexSecurity {
         } catch (error) {
           if (error instanceof ScanPermissionError) throw error;
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            `Could not update repository findings: ${errorMessage(error)}`,
-          );
+          )(`Could not update repository findings: ${errorMessage(error)}`);
         }
       return result;
     } catch (error) {
@@ -2902,10 +2822,7 @@ export class CodexSecurity {
           for (const warning of warnings.length > 0
             ? warnings
             : [failure.message]) {
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
+            notifyObserver(options, "onWarning")(
               warning,
               targetWarnings.has(warning)
                 ? { kind: "target_changed" }
@@ -3015,9 +2932,9 @@ export class CodexSecurity {
         } catch (postScanError) {
           if (postScanError instanceof ScanPermissionError) throw postScanError;
           notifyObserver(
+            options,
             "onWarning",
-            options.onWarning,
-            options.onObserverError,
+          )(
             `Could not run post-scan instructions: ${errorMessage(postScanError)}`,
           );
         }
@@ -3471,12 +3388,7 @@ export class CodexSecurity {
           "safetyIdentifier requires API-key authentication.",
         );
       }
-      notifyObserver(
-        "onAuthentication",
-        options.onAuthentication,
-        options.onObserverError,
-        authentication,
-      );
+      notifyObserver(options, "onAuthentication")(authentication);
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
@@ -3683,12 +3595,7 @@ export class CodexSecurity {
         archiveObserver(options, (path) => (archivedScanDir = path)),
       );
       requireModelSafeOutputDir(scanDir);
-      notifyObserver(
-        "onOutputDirReady",
-        options.onOutputDirReady,
-        options.onObserverError,
-        scanDir,
-      );
+      notifyObserver(options, "onOutputDirReady")(scanDir);
       const revision = await repositoryRevision(local.repository, signal);
       const { model } = scanModelConfiguration({
         ...DEFAULT_CODEX_CONFIG,
@@ -3746,11 +3653,7 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
-      notifyObserver(
-        "onScanStarted",
-        options.onScanStarted,
-        options.onObserverError,
-      );
+      notifyObserver(options, "onScanStarted")();
       await writeMockScanDraft(
         scanDir,
         scanId,
@@ -3780,10 +3683,7 @@ export class CodexSecurity {
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string")
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
+            notifyObserver(options, "onWarning")(
               warning,
               Array.isArray(completion["targetWarnings"]) &&
                 completion["targetWarnings"].includes(warning)
@@ -4152,11 +4052,9 @@ function warnCleanupFailed(
   try {
     const message = String(reason instanceof Error ? reason.message : reason);
     notifyObserver(
+      options,
       "onWarning",
-      options.onWarning,
-      options.onObserverError,
-      `Could not clean up after the Codex Security ${operation}: ${message}`,
-    );
+    )(`Could not clean up after the Codex Security ${operation}: ${message}`);
   } catch {}
 }
 
@@ -4356,12 +4254,7 @@ export function formatEnvironmentVariableRemovalGuidance(
 const archiveObserver =
   (options: ScanOptions, save: (path: string) => void) => (path: string) => {
     save(path);
-    notifyObserver(
-      "onOutputArchived",
-      options.onOutputArchived,
-      options.onObserverError,
-      path,
-    );
+    notifyObserver(options, "onOutputArchived")(path);
   };
 
 export function scanRuntimeCodexConfig(
@@ -4484,28 +4377,14 @@ function sharedCredentialCodexConfig(
   config: JsonObject,
   credentialHome: string,
 ): JsonObject {
+  // Providers stay in private session profiles. Codex merges provider tables, so
+  // persisting them here would mix credentials from concurrent scans.
   const shared: JsonObject = {
     approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
   for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
-  }
-  const modelProvider = scanModelProvider(config);
-  if (hasCommandAuth(config)) {
-    for (const key of ["profile", "profiles"]) {
-      if (Object.hasOwn(config, key))
-        shared[key] = structuredClone(config[key]!);
-    }
-  }
-  if (typeof modelProvider === "string" && modelProvider.length > 0) {
-    shared["model_provider"] = modelProvider;
-    const providers = config["model_providers"];
-    if (isRecord(providers) && Object.hasOwn(providers, modelProvider)) {
-      shared["model_providers"] = {
-        [modelProvider]: structuredClone(providers[modelProvider]!),
-      };
-    }
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
 }

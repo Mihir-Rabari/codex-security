@@ -1,3 +1,4 @@
+import { asRecord } from "./record.js";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import attackPathSchema from "../../schemas/tools/candidate-attack-paths.schema.json";
@@ -154,14 +155,6 @@ export async function recordCodexSecurityCandidateAttackPaths(
 }
 
 function isAttackPathEligible(candidate: Record<string, unknown>): boolean {
-  const validation = candidate.validation;
-  if (
-    !validation ||
-    typeof validation !== "object" ||
-    Array.isArray(validation)
-  ) {
-    return false;
-  }
-  const disposition = (validation as Record<string, unknown>).disposition;
+  const disposition = asRecord(candidate.validation)?.disposition;
   return disposition === "reportable" || disposition === "deferred";
 }
