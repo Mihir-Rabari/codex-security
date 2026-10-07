@@ -5109,6 +5109,7 @@ for (const selection of [
   "inherited",
   "parent",
   "chain",
+  "external",
 ] as const) {
   const inherited = selection === "inherited";
   testPosix(
@@ -5142,12 +5143,26 @@ for (const selection of [
       const parentAlias = join(paths.root, "output-parent-link");
       if (selection === "parent")
         await symlink(paths.output, parentAlias, "junction");
-      const alias = join(
+      const checkoutAlias = join(
         selection === "parent" ? parentAlias : paths.output,
         "checkouts",
         "repo",
         "python-alias",
       );
+      const alias =
+        selection === "external"
+          ? join(paths.root, "external-python")
+          : checkoutAlias;
+      if (selection === "external") {
+        git(
+          paths.root,
+          "clone",
+          "--quiet",
+          source.path,
+          dirname(checkoutAlias),
+        );
+        await symlink(checkoutAlias, alias);
+      }
       const runs = mock(
         async (
           checkout: string,
@@ -5158,7 +5173,9 @@ for (const selection of [
             protectedRoot: checkout,
             environment: runtime.pluginHelperEnvironment(process.env),
           });
-          expect(selected.executable).toBe(python);
+          expect(selected.executable).toBe(
+            selection === "external" ? alias : python,
+          );
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
@@ -5168,7 +5185,8 @@ for (const selection of [
       const previousPython = process.env["PYTHON"];
       if (inherited) process.env["PYTHON"] = alias;
       try {
-        expect(await runMultiscan(campaign)).toMatchObject({
+        const initialSummary = await runMultiscan(campaign);
+        expect(initialSummary).toMatchObject({
           completed: 1,
           skipped: 0,
         });

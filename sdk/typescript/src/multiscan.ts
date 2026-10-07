@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -802,6 +803,25 @@ async function canonicalCreationPath(path: string): Promise<string> {
   }
 }
 
+async function canonicalPythonPath(path: string): Promise<string> {
+  try {
+    await realpath(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      if ((await lstat(path)).isSymbolicLink()) {
+        return canonicalPythonPath(
+          resolve(dirname(path), await readlink(path)),
+        );
+      }
+    } catch (linkError) {
+      if ((linkError as NodeJS.ErrnoException).code !== "ENOENT")
+        throw linkError;
+    }
+  }
+  return canonicalCreationPath(path);
+}
+
 async function appendReceipt(path: string, receipt: string): Promise<void> {
   const file = await open(path, "a", 0o600);
   try {
@@ -1254,7 +1274,7 @@ async function loadResumableScan(
       ? undefined
       : relative(
           matchedRoot,
-          await canonicalCreationPath(
+          await canonicalPythonPath(
             resolve(
               expandHome(configuredPythonPath) +
                 (process.platform === "win32" &&
