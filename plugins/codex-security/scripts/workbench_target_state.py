@@ -22,7 +22,7 @@ from filesystem_identity import (
     serialize_filesystem_identity,
     stored_filesystem_identity_matches,
 )
-from workbench_target import git_bytes, git_output
+from workbench_target import git_bytes, git_output, git_worktree_context
 
 
 def stable_target_id(target: Path) -> str:
@@ -37,15 +37,10 @@ def repository_relative_path(target: Path) -> str | None:
 
 
 def _repository_worktree(target: Path) -> tuple[Path, str] | None:
-    worktree_root = _git_path(target, "rev-parse", "--show-toplevel")
-    if worktree_root is None:
-        return None
     try:
-        canonical_root = Path(os.path.realpath(worktree_root))
-        relative = Path(os.path.realpath(target)).relative_to(canonical_root)
-    except (OSError, ValueError):
+        return git_worktree_context(target)
+    except SystemExit:
         return None
-    return canonical_root, relative.as_posix()
 
 
 def _path_from_git_bytes(
@@ -629,6 +624,15 @@ class RepositoryIdentityCache:
 
     def for_path(self, target_path: str) -> RepositoryTargetState:
         row = self.targets_by_path.get(target_path)
+        if row is None:
+            row = next(
+                (
+                    target
+                    for target in self.targets.values()
+                    if _same_existing_path(Path(target["target_path"]), Path(target_path))
+                ),
+                None,
+            )
         return self.for_row(
             row
             if row is not None

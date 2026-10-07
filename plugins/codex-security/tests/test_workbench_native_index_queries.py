@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ntpath
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -261,3 +262,39 @@ def test_scan_list_probes_requested_repository_once(
         ("rev-parse", "--show-toplevel"),
     ]
     assert all(target == targets[0] for target, _ in probes)
+
+
+@pytest.mark.parametrize("exact_saved", [False, True])
+@pytest.mark.parametrize("stale_exact", [False, True])
+def test_repository_findings_match_directory_aliases_after_exact_paths(
+    workbench_api, indexed_collections, tmp_path, monkeypatch, exact_saved, stale_exact
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    resolve = Path.resolve
+
+    def preserve_alias(self, *args, **kwargs):
+        return self if self == alias else resolve(self, *args, **kwargs)
+
+    # Exercise preserved case-alias spelling with an actual directory link.
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+    if exact_saved:
+        connection.execute(
+            "UPDATE security_targets SET current_path = ? WHERE id = ?",
+            (str(alias), stable_target_id(targets[1])),
+        )
+    selected = 1 if exact_saved else 0
+    if stale_exact:
+        metadata = targets[0].stat()
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (str(metadata.st_dev + 1), str(metadata.st_ino), SCAN_IDS[selected]),
+        )
+    result = workbench_api["native_indexes"].list_global_findings(
+        connection, query_args(repository=str(alias))
+    )
+    assert result["projectionAvailable"] is (not stale_exact)
+    assert [item["scanId"] for item in result["findings"]] == (
+        [] if stale_exact else [SCAN_IDS[selected]]
+    )

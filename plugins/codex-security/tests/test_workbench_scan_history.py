@@ -2099,3 +2099,33 @@ def test_originless_linked_comparison_without_birth_timestamps(
             read_coverage=read_coverage,
         )
         assert saved["afterScanId"] == after["scanId"]
+
+
+@pytest.mark.parametrize("scope", [".", "component"])
+def test_repository_identity_preserves_directory_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    import os
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / "component").mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(repository, target_is_directory=True)
+    selected = alias / scope
+    actual_realpath = os.path.realpath
+
+    def preserve_alias(path, *args, **kwargs):
+        result = actual_realpath(path, *args, **kwargs)
+        return str(selected) if str(path) == str(selected) else result
+
+    # Case-insensitive filesystems can retain an alias's spelling. Keep real
+    # directory identity and Git operations while controlling that spelling.
+    monkeypatch.setattr(os.path, "realpath", preserve_alias)
+    expected = target_state.repository_identity(repository / scope)
+    assert expected is not None
+    assert target_state.repository_identity(selected) == expected
+    assert target_state.repository_relative_path(selected) == scope
