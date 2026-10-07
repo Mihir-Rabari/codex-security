@@ -62,6 +62,27 @@ def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -
     assert api.directory_content_digest(target) != before
 
 
+def test_git_directory_inventory_keeps_nested_bare_repository_contents(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    initialize_git_repository(target)
+    nested = target / "nested.git"
+    git(target, "init", "--bare", "--quiet", str(nested))
+    (target / ".gitignore").write_text("nested.git/ignored-cache/\n")
+    ignored = nested / "ignored-cache"
+    ignored.mkdir()
+    (ignored / "output.txt").write_text("ignored fixture\n")
+    api = load_script("workbench_target")
+
+    paths = api.git_directory_snapshot_paths(target)
+
+    assert nested / "HEAD" in paths
+    assert nested / "config" in paths
+    assert all(ignored not in path.parents for path in paths)
+    before = api.directory_content_digest(target)
+    (nested / "description").write_text("changed bare repository fixture\n")
+    assert api.directory_content_digest(target) != before
+
+
 def test_excerpt_uses_target_relative_committed_path(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)

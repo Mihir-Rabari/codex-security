@@ -626,6 +626,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
 
     # Git omits empty untracked directories from its file listing. Inventory
     # junction identities independently of whether their targets contain files.
+    git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
+    if git_directory is None:
+        raise SystemExit("Could not inspect the selected Git working tree.")
     pending = [target]
     while pending:
         directory = pending.pop()
@@ -640,6 +643,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             "--",
             # Match directory descendants, never the selected directory itself.
             ":(glob)**/*/",
+            # Changing cwd must not select a nested repository's Git context.
+            git_dir=Path(git_directory),
+            work_tree=repository,
         )
         if directories is None:
             raise SystemExit("Could not inspect directories in the selected Git working tree.")
