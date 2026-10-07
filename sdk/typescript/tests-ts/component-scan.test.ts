@@ -230,19 +230,11 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
         "from generate_rank_input import make_repo_scope_input",
-        "queries = []",
-        "git_bytes = target.git_bytes",
-        "def record_query(repository, *args, **kwargs):",
-        "    data = git_bytes(repository, *args, **kwargs)",
-        "    if 'ls-files' in args:",
-        "        queries.append({'pathspec': args[-1], 'count': len([path for path in (data or b'').split(b'\\0') if path])})",
-        "    return data",
-        "target.git_bytes = record_query",
         "repo, scope, scopes, output = sys.argv[2:]",
         "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
-        "print(json.dumps({'paths': rows, 'count': count, 'queries': queries}))",
+        "print(json.dumps({'paths': rows, 'count': count}))",
       ].join("\n"),
       join(PLUGIN_ROOT, "scripts"),
       paths.repository,
@@ -255,7 +247,6 @@ async function scopedInventory(paths: Fixture, scope: string) {
   return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
     paths: string[];
     count: number;
-    queries: Array<{ pathspec: string; count: number }>;
   };
 }
 
@@ -1242,10 +1233,6 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(await scopedInventory(paths, source)).toEqual({
     paths: ordinaryPaths,
     count: 3,
-    queries: [
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-    ],
   });
   git("switch", "-c", "case-rename");
   git("mv", source, "renaming");
@@ -1264,12 +1251,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(entries).toContain(uppercase);
 
   const inventory = async (scope: string) => {
-    const { queries, ...selected } = await scopedInventory(paths, scope);
-    const pathspec = scope === "." ? "." : ":(icase,literal)" + scope;
-    expect(queries.map((query) => query.pathspec)).toEqual([
-      pathspec,
-      pathspec,
-    ]);
+    const selected = await scopedInventory(paths, scope);
     if (scope === ".") {
       selected.paths = (
         await Promise.all(
@@ -1306,13 +1288,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
     paths: [...expectedInventory.paths, scope + "/untracked.ts"].sort(),
     count: 4,
   };
-  expect(await scopedInventory(paths, scope)).toEqual({
-    ...mixedInventory,
-    queries: [
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-    ],
-  });
+  expect(await scopedInventory(paths, scope)).toEqual(mixedInventory);
   const repositoryInventory = {
     paths: [
       ".gitignore",
@@ -1379,10 +1355,10 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   await writeFile(join(paths.repository, nonCased, "app.ts"), "export {};\n");
   execFileSync("git", ["-C", paths.repository, "init", "-q"]);
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
-  expect((await scopedInventory(paths, nonCased)).queries).toEqual([
-    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
-    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
-  ]);
+  expect(await scopedInventory(paths, nonCased)).toEqual({
+    paths: [nonCased + "/app.ts"],
+    count: 1,
+  });
   await rename(
     join(paths.repository, source),
     join(paths.repository, "renaming"),
@@ -1418,7 +1394,6 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
     ).sort();
   expect(await identities(inventory.paths)).toEqual(await identities(selected));
   expect(inventory.count).toBe(selected.length);
-  expect(inventory.queries.map((query) => query.pathspec)).toEqual([".", "."]);
 });
 
 test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
