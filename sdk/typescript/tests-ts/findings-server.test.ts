@@ -5,11 +5,12 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, relative } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
@@ -131,8 +132,8 @@ test.skipIf(process.platform === "win32")(
     const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
     directories.push(directory);
     const repository = join(directory, "repository");
-    const other = join(directory, "other");
-    await mkdir(other);
+    const other = join(directory, "other", "nested");
+    await mkdir(other, { recursive: true });
     const bin = join(repository, "node_modules", ".bin");
     await mkdir(bin, { recursive: true });
     await writeFile(
@@ -145,6 +146,15 @@ printf '%s\n' '{"databasePath":"shim"}'
     );
     const node = Bun.which("node");
     expect(node).not.toBeNull();
+    const tools = join(directory, "tools");
+    const replacementTools = join(directory, "other", "tools");
+    await Promise.all([mkdir(tools), mkdir(replacementTools)]);
+    await symlink(node!, join(tools, "node"));
+    await writeFile(
+      join(replacementTools, "node"),
+      '#!/bin/sh\nprintf invoked > "$SYNTHETIC_NODE_SHIM_MARKER"\nexit 1\n',
+      { mode: 0o755 },
+    );
     const state = join(directory, "state");
     const result = Bun.spawnSync(
       [
@@ -160,7 +170,7 @@ await store.initialize();`,
         cwd: repository,
         env: {
           ...process.env,
-          PATH: [bin, dirname(node!)].join(delimiter),
+          PATH: [bin, "../tools"].join(delimiter),
           CODEX_SECURITY_STATE_DIR: state,
           SYNTHETIC_NODE_SHIM_MARKER: join(bin, "invoked"),
         },
@@ -245,37 +255,60 @@ test("initialized stores retain their environment across findings operations", a
   expect(await readdir(directory)).toEqual(["state with spaces"]);
 });
 
-test("findings stores retain relative Python paths before and after first use", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
-  directories.push(directory);
-  const first = join(directory, "first");
-  const second = join(directory, "second", "nested");
-  await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
-  const python = await resolvePluginPython();
-  const result = Bun.spawnSync(
-    [
-      process.execPath,
-      "--eval",
-      `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
-const store = new SqliteFindingsStore();
+test.each(["explicit", "PATH", "Path"])(
+  "findings stores retain relative Python paths before and after first use (%s)",
+  async (configuration) => {
+    const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
+    directories.push(directory);
+    const first = join(directory, "first");
+    const second = join(directory, "second", "nested");
+    await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
+    const python = await resolvePluginPython();
+    const pythonDirectory = relative(first, dirname(python));
+    const searchPath = [
+      process.platform === "win32" ? `"${pythonDirectory}"` : pythonDirectory,
+      "",
+      dirname(Bun.which("node")!),
+    ].join(delimiter);
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        `const assert = await import("node:assert/strict");
+const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const environment = { ...process.env };
+if (${JSON.stringify(configuration)} !== "explicit") {
+  for (const key of Object.keys(environment)) if (key.toUpperCase() === "PATH") delete environment[key];
+  environment[${JSON.stringify(configuration)}] = ${JSON.stringify(searchPath)};
+}
+const original = ["PATH", "Path", "PYTHON", "CODEX_SECURITY_STATE_DIR"].map((key) => [key, environment[key], process.env[key]]);
+const store = new SqliteFindingsStore(environment);
 await store.initialize();
 process.chdir(${JSON.stringify(second)});
 await store.insert(${JSON.stringify([embedded(1)])});
 process.chdir(${JSON.stringify(first)});
-console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
-    ],
-    {
-      cwd: first,
-      env: {
-        ...process.env,
-        PYTHON: relative(first, python),
-        CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));
+for (const [key, supplied, inherited] of original) {
+  assert.equal(environment[key], supplied);
+  assert.equal(process.env[key], inherited);
+}`,
+      ],
+      {
+        cwd: first,
+        env: {
+          ...process.env,
+          PYTHON:
+            configuration === "explicit"
+              ? relative(first, python)
+              : basename(python),
+          CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+        },
       },
-    },
-  );
-  expect(result.exitCode, result.stderr.toString()).toBe(0);
-  expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
-});
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
+  },
+);
 
 test.skipIf(process.platform === "win32")(
   "changing directories does not trust the original repository's Python shim",
