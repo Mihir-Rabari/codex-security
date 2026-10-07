@@ -490,6 +490,44 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         await provider.cleanup?.();
       }
     }
+    for (const sibling of [false, true]) {
+      const nodeRoot = path.join(
+        root,
+        sibling ? "node-sibling" : "node-missing",
+      );
+      const target = path.join(nodeRoot, "target", "node");
+      const alias = path.join(nodeRoot, "alias");
+      fs.mkdirSync(path.join(nodeRoot, "target", "child"), { recursive: true });
+      fs.copyFileSync(nodes[0], target);
+      fs.symlinkSync(path.join(nodeRoot, "target", "child"), alias);
+      if (sibling) fs.copyFileSync(nodes[1], path.join(nodeRoot, "node"));
+      for (const [command, expected, searchPath] of [
+        [`${alias}/../node`, target, process.env.PATH],
+        [`${path.relative(root, alias)}/../node`, target, process.env.PATH],
+        ["node", target, `${alias}/..`],
+        ["node", target, `${path.relative(root, alias)}/..`],
+        [
+          path.join(nodeRoot, "target") + "/child/../node",
+          target,
+          process.env.PATH,
+        ],
+        [path.join(nodeRoot, "missing"), nodes[0], path.dirname(nodes[0])],
+      ] as const) {
+        const provider = await load(command, fakeCodex, { PATH: searchPath! });
+        try {
+          const result = await provider.callApi("synthetic");
+          assert.equal(result.error, undefined);
+          const captured = JSON.parse(String(result.output));
+          assert.equal(captured.node, expected, command);
+          assert.deepEqual(captured.directories, [
+            path.dirname(expected),
+            path.dirname(fakeCodex),
+          ]);
+        } finally {
+          await provider.cleanup?.();
+        }
+      }
+    }
     const alias = path.join(root, "codex-alias");
     fs.symlinkSync(fakeCodex, alias);
     const selectedPath = `${root}${path.delimiter}${process.env.PATH}`;

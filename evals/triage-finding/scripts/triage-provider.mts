@@ -28,7 +28,11 @@ function resolveCommand(
     command.includes("/") ||
     (process.platform === "win32" && command.includes("\\"))
   )
-    return command;
+    return process.platform === "win32"
+      ? path.resolve(cwd, command)
+      : path.isAbsolute(command)
+        ? command
+        : `${cwd}/${command}`;
   if (process.platform === "win32") {
     return execFileSync(
       path.join(process.env.SystemRoot!, "System32", "where.exe"),
@@ -114,13 +118,16 @@ export default class TriageProvider implements ApiProvider {
         try {
           nodeCommand = resolveCommand(requestedNode, runtimeRoot, environment);
           accessSync(
-            path.resolve(runtimeRoot, nodeCommand),
+            nodeCommand,
             process.platform === "win32" ? constants.F_OK : constants.X_OK,
           );
         } catch {
           nodeCommand = resolveCommand("node", runtimeRoot, environment);
         }
-        const nodePath = realpathSync(path.resolve(runtimeRoot, nodeCommand));
+        const nodePath =
+          process.platform === "win32"
+            ? realpathSync(nodeCommand)
+            : realpathSync.native(nodeCommand);
         return callApiInternal(prompt, context, options, {
           ...config,
           working_dir: runtimeRoot,
