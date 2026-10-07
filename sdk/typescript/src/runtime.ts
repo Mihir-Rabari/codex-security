@@ -190,7 +190,7 @@ export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
-function environmentValue(
+export function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
 ): string | undefined {

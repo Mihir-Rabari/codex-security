@@ -2,6 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
+  chmod,
   lstat,
   mkdir,
   open,
@@ -43,6 +44,7 @@ import type { CoverageDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
   bundledPluginRoot,
+  environmentValue,
   expandHome,
   executablePathForSpawn,
   pluginHelperEnvironment,
@@ -394,7 +396,8 @@ async function runCampaign(
         options.signal,
         options.githubHost,
         restoreReport,
-        options.config.pythonPath,
+        options.config.pythonPath ??
+          environmentValue(pluginHelperEnvironment(process.env), "PYTHON"),
       );
       if (resumed !== undefined) {
         if (receipt.status !== "failed" && receipt.warnings?.length) {
@@ -739,7 +742,10 @@ function notifyProgress(
   } catch {}
 }
 
-async function ensureOutputDirectory(path: string): Promise<string> {
+async function ensureOutputDirectory(
+  path: string,
+  privateGitMetadata = false,
+): Promise<string> {
   const metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -752,9 +758,7 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   let prepared = path;
   if (metadata === undefined) {
     prepared =
-      process.platform === "win32"
-        ? await canonicalWindowsCreationPath(path)
-        : path;
+      process.platform === "win32" ? await canonicalCreationPath(path) : path;
     await mkdir(prepared, { recursive: true, mode: 0o700 });
   }
   const canonical = await realpath(prepared);
@@ -766,21 +770,23 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") return canonical;
-  if ((directory.mode & 0o022n) !== 0n) {
-    throw new Error(
-      "Multiscan output directories must not be group- or world-writable.",
-    );
-  }
   const owner = process.geteuid?.();
   if (owner !== undefined && directory.uid !== BigInt(owner)) {
     throw new Error(
       "Multiscan output directories must be owned by the current user.",
     );
   }
+  if ((directory.mode & 0o022n) !== 0n) {
+    if (privateGitMetadata) await chmod(canonical, 0o700);
+    else
+      throw new Error(
+        "Multiscan output directories must not be group- or world-writable.",
+      );
+  }
   return canonical;
 }
 
-async function canonicalWindowsCreationPath(path: string): Promise<string> {
+async function canonicalCreationPath(path: string): Promise<string> {
   let ancestor = dirname(path);
   for (;;) {
     try {
@@ -1194,7 +1200,7 @@ async function loadResumableScan(
   const targetRoots = [
     checkout,
     process.platform === "win32"
-      ? await canonicalWindowsCreationPath(recoveryCheckout)
+      ? await canonicalCreationPath(recoveryCheckout)
       : recoveryCheckout,
   ];
   const matchedRoot = targetRoots.find(
@@ -1242,7 +1248,12 @@ async function loadResumableScan(
   const pythonPath =
     configuredPythonPath === undefined
       ? undefined
-      : relative(matchedRoot, resolve(expandHome(configuredPythonPath)));
+      : relative(
+          matchedRoot,
+          await canonicalCreationPath(
+            resolve(expandHome(configuredPythonPath)),
+          ),
+        );
   const checkoutPython =
     !reportSealed &&
     pythonPath !== undefined &&
@@ -1268,7 +1279,7 @@ async function loadResumableScan(
       } else if (
         checkoutPython &&
         pythonPath !== undefined &&
-        !(await lstat(join(matchedRoot, pythonPath)).catch(
+        !(await realpath(join(matchedRoot, pythonPath)).catch(
           undefinedIfMissingFile,
         ))
       ) {
@@ -1296,7 +1307,6 @@ async function loadResumableScan(
           signal,
           githubHost,
           true,
-          scope.includePaths,
           requestedPaths,
         );
         normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
@@ -1529,7 +1539,6 @@ async function checkoutRevision(
   githubHost?: string,
   restoreIncomplete = false,
   restorePaths: readonly string[] = ["."],
-  requestedPaths: readonly string[] = [],
 ): Promise<void> {
   const environment = { ...process.env };
   const repositoryVariables = new Set([
@@ -1589,20 +1598,21 @@ async function checkoutRevision(
     });
     if (metadata !== undefined) {
       retainedGit = true;
-      const canonicalGit = await ensureOutputDirectory(gitDirectory);
+      const canonicalGit = await ensureOutputDirectory(gitDirectory, true);
       const canonicalObjects = await ensureOutputDirectory(
         join(gitDirectory, "objects"),
+        true,
       );
       for (const entry of await readdir(canonicalObjects)) {
         if (/^[0-9a-f]{2}$/.test(entry))
-          await ensureOutputDirectory(join(canonicalObjects, entry));
+          await ensureOutputDirectory(join(canonicalObjects, entry), true);
       }
       if (
         await lstat(join(canonicalObjects, "pack")).catch(
           undefinedIfMissingFile,
         )
       )
-        await ensureOutputDirectory(join(canonicalObjects, "pack"));
+        await ensureOutputDirectory(join(canonicalObjects, "pack"), true);
       for (const entry of [
         "config",
         "FETCH_HEAD",
@@ -1628,7 +1638,10 @@ async function checkoutRevision(
       const head = await lstat(join(gitDirectory, "HEAD")).catch(
         undefinedIfMissingFile,
       );
-      if (head === undefined) {
+      const refs = await lstat(join(gitDirectory, "refs")).catch(
+        undefinedIfMissingFile,
+      );
+      if (head === undefined || refs === undefined) {
         const common = await readFile(
           join(gitDirectory, "commondir"),
           "utf8",
@@ -1645,7 +1658,7 @@ async function checkoutRevision(
         if (
           await lstat(join(gitDirectory, "refs")).catch(undefinedIfMissingFile)
         )
-          await ensureOutputDirectory(join(gitDirectory, "refs"));
+          await ensureOutputDirectory(join(gitDirectory, "refs"), true);
         await git("init", "--quiet", "--template=");
       }
       const [common, objects, worktree] = await Promise.all([
@@ -1666,6 +1679,7 @@ async function checkoutRevision(
   }
   if (!retainedGit) await git("init", "--quiet");
   let locallyPinned = false;
+  let incompleteObjects = false;
   if (restoreIncomplete) {
     try {
       await git(
@@ -1674,13 +1688,23 @@ async function checkoutRevision(
         "--quiet",
         `${task.revision}^{commit}`,
       );
-      locallyPinned = true;
+      const reachable = await git(
+        "rev-list",
+        "--objects",
+        "--missing=print",
+        task.revision,
+      );
+      incompleteObjects = reachable
+        .split("\n")
+        .some((line) => line.startsWith("?"));
+      locallyPinned = !incompleteObjects;
     } catch (error) {
       if ((error as { code?: number }).code !== 1) throw error;
     }
   }
   if (!locallyPinned) {
     await git(
+      ...(incompleteObjects ? ["-c", "fetch.negotiationAlgorithm=noop"] : []),
       "fetch",
       "--quiet",
       "--no-tags",
@@ -1698,7 +1722,8 @@ async function checkoutRevision(
       .filter((entry) => entry.startsWith("120000 "))
       .map((entry) => entry.slice(entry.indexOf("	") + 1));
     const aliases = new Set<string>();
-    for (const requested of requestedPaths) {
+    const selectedPaths = new Set<string>();
+    for (const requested of restorePaths) {
       let selected = relative(path, resolve(path, expandHome(requested)))
         .split(sep)
         .join("/");
@@ -1720,16 +1745,20 @@ async function checkoutRevision(
           selected.slice(name.length + 1),
         );
       }
+      if (!relativePathIsOutside(selected)) selectedPaths.add(selected);
     }
-    const deleted = await gitOutput([
-      "--literal-pathspecs",
-      "ls-files",
-      "--deleted",
-      "-z",
-      "--",
-      ...restorePaths,
-      ...aliases,
-    ]);
+    const deleted =
+      selectedPaths.size !== 0 || aliases.size !== 0
+        ? await gitOutput([
+            "--literal-pathspecs",
+            "ls-files",
+            "--deleted",
+            "-z",
+            "--",
+            ...selectedPaths,
+            ...aliases,
+          ])
+        : Buffer.alloc(0);
     if (deleted.length !== 0) {
       await gitOutput(
         [
