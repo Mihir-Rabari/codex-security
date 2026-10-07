@@ -776,8 +776,18 @@ def _stopped_diff_candidate_decisions(
         if candidate_owner(item.get("sourceWorkerId")) is None
     }
     demoted_findings = {}
-    # Count identities once, but inspect every current row and supported payload:
-    # writers retain demoted findings on pending rows and later terminal surfaces.
+    for finding in current_findings:
+        if (
+            finding["provenance"].get("candidateReopened") is True
+            and (key := finding_candidate_key(finding)) is not None
+            and key[0] is None
+        ):
+            demoted_findings.setdefault(key, []).extend(
+                retained
+                for retained in _retained_findings(finding)
+                if finding_candidate_key(retained) == key
+            )
+    # Inspect all pending and terminal payloads for retained demoted findings.
     for field in ("deferred", "surfaces", "explicitExclusions"):
         items = current_coverage.get(field, [])
         for item in items if isinstance(items, list) else []:
@@ -841,7 +851,7 @@ def _stopped_diff_candidate_decisions(
             for retained in demoted_findings.get(finding_candidate_key(finding), [])
         )
 
-    # Checkpoint phase snapshots order overrides; retained coverage records later demotion.
+    # Phase snapshots order overrides; retained evidence records later demotion.
     findings.extend(
         finding
         for finding in checkpoint_findings
@@ -872,7 +882,7 @@ def _stopped_diff_candidate_decisions(
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
-        # Keep the existing checkpoint marker so frozen older scans remain readable.
+        # Retain the marker used by older frozen scans.
         "stoppedDiffCandidateDecisions": True,
     }
     decisions = {
@@ -907,8 +917,7 @@ def _stopped_diff_candidate_decisions(
                 ):
                     raise ValueError("Diff candidate summary is missing.")
                 phase_snapshot = _diff_candidate_phase_snapshot(candidate)
-                # A current ledger snapshot can establish that a finding checkpoint
-                # supersedes an older marked parent or generated terminal decision.
+                # The live phase can place a checkpoint after older marked or generated state.
                 for finding in checkpoint_findings:
                     if (
                         finding_candidate_key(finding) == (None, candidate_id)
@@ -945,8 +954,7 @@ def _stopped_diff_candidate_decisions(
                             if finding not in overrides or finding in current_overrides
                         ]
                         continue
-                    # Only a recorded override supplies ordering evidence for a
-                    # newer phase change. Legacy explicit findings keep precedence.
+                    # Only marked overrides yield to newer phases; legacy findings keep precedence.
                     findings = [finding for finding in findings if finding not in overrides]
                     finding_ids.discard(candidate_id)
                     authoritative.discard(candidate_id)

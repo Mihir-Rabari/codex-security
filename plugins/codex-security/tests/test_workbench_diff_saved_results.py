@@ -1004,6 +1004,100 @@ def test_stopped_diff_preserves_canonical_reopened_candidate_state(
     assert_saved_state()
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("ledger_state", ["missing", "matching"])
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("revised", [False, True])
+def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
+    tmp_path: Path, ledger_state: str, termination: str, revised: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate_id = checkpoint["coverage"]["deferred"][0]["candidateId"]
+    original = saved_candidate_finding(tmp_path, scan_id, candidate_id)
+    original["provenance"]["diffCandidateDecision"] = {"validation": {"disposition": "deferred"}}
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(surfaces=[], deferred=[])
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+
+    def publish(finding: dict) -> None:
+        staged.write_text(
+            json.dumps(
+                {
+                    "manifest": {"scan": {"complete": False}},
+                    "findings": {"findings": [finding]},
+                    "coverage": coverage,
+                }
+            )
+        )
+        run_workbench(
+            state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)
+        )
+
+    publish(original)
+    reopened = copy.deepcopy(original)
+    reopened["provenance"]["candidateReopened"] = True
+    if revised:
+        reopened["summary"] = "Revised evidence needs further validation."
+        reopened["provenance"]["previousFindings"] = [original]
+    coverage.update(
+        completeness="partial",
+        deferred=[
+            {
+                "id": "candidate-review",
+                "candidateId": candidate_id,
+                "reason": "Current review requires further validation.",
+            }
+        ],
+    )
+    publish(reopened)
+    if ledger_state == "missing":
+        ledger.unlink()
+    else:
+        candidate = json.loads(ledger.read_text())
+        candidate["validation"] = {"disposition": "deferred"}
+        ledger.write_text(json.dumps(candidate) + "\n")
+    originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    assert (
+        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"][
+            "candidates"
+        ]["unresolved"]
+        == 1
+    )
+    arguments = ["--message", "Stopped."] if termination == "fail-scan" else []
+    run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
+
+    def assert_reopened() -> dict:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == 1
+        pending = next(
+            row
+            for row in json.loads(coverage_path.read_text())["deferred"]
+            if row.get("candidateId") == candidate_id
+        )
+        assert pending["finding"]["summary"] == reopened["summary"]
+        assert pending["finding"]["provenance"]["candidateReopened"] is True
+        if revised:
+            assert original in pending["finding"]["provenance"]["previousFindings"]
+        assert all(path.read_bytes() == value for path, value in originals.items())
+        return pending
+
+    pending = assert_reopened()
+    if termination == "fail-scan":
+        ledger.write_text(
+            json.dumps(
+                {
+                    "candidate_id": candidate_id,
+                    "summary": "Later review",
+                    "validation": {"disposition": "suppressed"},
+                }
+            )
+            + "\n"
+        )
+        run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+        assert assert_reopened() == pending
+
+
 @pytest.mark.parametrize("ledger_state", ["missing", "malformed", "matching"])
 @pytest.mark.parametrize(
     "evidence_location",
