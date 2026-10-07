@@ -276,6 +276,22 @@ def _indexed_findings(
             [],
         ).append(row)
 
+    # A saved comparison between current targets does not bind their legacy history.
+    for identity, occurrences in list(grouped.items()):
+        current_targets = {
+            row["target_id"] for row in occurrences if row["repository_generation"] is not None
+        }
+        if len(current_targets) <= 1:
+            continue
+        current = []
+        for row in occurrences:
+            if row["repository_generation"] is None:
+                legacy_identity = (scan_repository_group(row), row["finding_id"])
+                grouped.setdefault(legacy_identity, []).append(row)
+            else:
+                current.append(row)
+        grouped[identity] = current
+
     findings = []
     for occurrences in grouped.values():
         latest = max(occurrences, key=lambda row: (row["created_at"], row["occurrence_id"]))
