@@ -175,50 +175,6 @@ def create_cli_scan(
     return launched
 
 
-def insert_scan(
-    connection: sqlite3.Connection,
-    *,
-    workspace_id: str,
-    scan_id: str,
-    mode: str,
-    status: str,
-    phase: str,
-    timestamp: str,
-    seal: str | None = None,
-    failure: str | None = None,
-    canceled: bool = False,
-) -> None:
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode,
-            scan_dir, status, phase, handoff_status, failure_message,
-            started_at, completed_at, created_at, updated_at, canceled_at,
-            seal_manifest_digest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            scan_id,
-            workspace_id,
-            "/tmp/target",
-            "fixture-revision",
-            ".",
-            mode,
-            f"/tmp/scans/{scan_id}",
-            status,
-            phase,
-            "delivered",
-            failure,
-            timestamp,
-            timestamp if status != "running" else None,
-            timestamp,
-            timestamp,
-            timestamp if canceled else None,
-            seal,
-        ),
-    )
-
-
 def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -669,14 +625,36 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
         workspace_id = connection.execute(
             "SELECT workspace_id FROM scans WHERE id = ?", (scan["scanId"],)
         ).fetchone()[0]
-        insert_scan(
-            connection,
-            workspace_id=workspace_id,
-            scan_id=f"{prefix}-ffff-4000-8000-000000000000",
-            mode="standard",
-            status="complete",
-            phase="reporting",
-            timestamp="2026-07-24T00:00:00Z",
+        ambiguous_scan_id = f"{prefix}-ffff-4000-8000-000000000000"
+        timestamp = "2026-07-24T00:00:00Z"
+        connection.execute(
+            """
+            INSERT INTO scans (
+                id, workspace_id, target_path, target_revision, scope, mode,
+                scan_dir, status, phase, handoff_status, failure_message,
+                started_at, completed_at, created_at, updated_at, canceled_at,
+                seal_manifest_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ambiguous_scan_id,
+                workspace_id,
+                "/tmp/target",
+                "fixture-revision",
+                ".",
+                "standard",
+                f"/tmp/scans/{ambiguous_scan_id}",
+                "complete",
+                "reporting",
+                "delivered",
+                None,
+                timestamp,
+                timestamp,
+                timestamp,
+                timestamp,
+                None,
+                None,
+            ),
         )
 
     for arguments in (

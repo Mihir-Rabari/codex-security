@@ -120,7 +120,6 @@ def _token_event(
     output_tokens: int,
     *,
     cached_input_tokens: int = 0,
-    reasoning_output_tokens: int = 0,
 ) -> dict[str, Any]:
     return _event(
         timestamp,
@@ -133,7 +132,7 @@ def _token_event(
                     "cached_input_tokens": cached_input_tokens,
                     "cache_write_input_tokens": 0,
                     "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning_output_tokens,
+                    "reasoning_output_tokens": 0,
                     "total_tokens": input_tokens + output_tokens,
                 }
             },
@@ -213,7 +212,6 @@ def _counts(
     input_tokens: int,
     cached_input_tokens: int,
     output_tokens: int,
-    reasoning_output_tokens: int = 0,
     *,
     cache_write_input_tokens: int = 0,
 ) -> dict[str, int]:
@@ -222,7 +220,7 @@ def _counts(
         "cachedInputTokens": cached_input_tokens,
         "cacheWriteInputTokens": cache_write_input_tokens,
         "outputTokens": output_tokens,
-        "reasoningOutputTokens": reasoning_output_tokens,
+        "reasoningOutputTokens": 0,
         "totalTokens": input_tokens + output_tokens,
     }
 

@@ -6,7 +6,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from workbench_test_support import create_saved_workspace, run_workbench
+from workbench_test_support import (
+    create_saved_workspace,
+    run_workbench,
+)
 
 
 @pytest.mark.parametrize("mode", ("standard", "deep"))

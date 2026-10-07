@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-from workbench_test_support import create_saved_workspace, run_workbench, start_delivered_scan
+from workbench_test_support import (
+    create_saved_workspace,
+    run_workbench,
+    start_delivered_scan,
+)
 
 
 def test_validation_clears_discovery_finding_count(tmp_path: Path) -> None:

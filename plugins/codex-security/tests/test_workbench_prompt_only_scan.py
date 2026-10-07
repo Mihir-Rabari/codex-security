@@ -6,6 +6,7 @@ import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Event
 from unittest import mock
@@ -26,8 +27,6 @@ def start_prompt_only_scan(
     *,
     thread_id: str = "thread-prompt-only-scan",
     mode: str = "standard",
-    target_summary: str = "Prompt-only scan",
-    user_context: str = "Inspect authentication boundaries",
     extra_args: tuple[str, ...] = (),
 ) -> dict[str, object]:
     return run_workbench(
@@ -42,9 +41,9 @@ def start_prompt_only_scan(
         "--mode",
         mode,
         "--target-summary",
-        target_summary,
+        "Prompt-only scan",
         "--user-context",
-        user_context,
+        "Inspect authentication boundaries",
         "--scan-root",
         str(scan_root),
         *extra_args,
@@ -57,8 +56,6 @@ def start_headless_standard_scan(
     scan_root: Path,
     *,
     thread_id: str = "thread-headless-standard-scan",
-    scope: str = ".",
-    target_summary: str = "Headless standard scan",
     user_context: str = "Inspect authentication boundaries",
 ) -> dict[str, object]:
     return run_workbench(
@@ -69,9 +66,9 @@ def start_headless_standard_scan(
         "--target-path",
         str(target),
         "--scope",
-        scope,
+        ".",
         "--target-summary",
-        target_summary,
+        "Headless standard scan",
         "--user-context",
         user_context,
         "--scan-root",
@@ -260,12 +257,9 @@ def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
             start_globals,
             {"scan_target_identity": record_target_identity},
         ),
+        closing(start_globals["connect"]()) as connection,
     ):
-        connection = start_globals["connect"]()
-        try:
-            started = start(connection, args)
-        finally:
-            connection.close()
+        started = start(connection, args)
 
     assert len(observed_metadata) == 1
     metadata = observed_metadata[0]
@@ -356,8 +350,7 @@ def test_prompt_registration_keeps_existing_scans_readable(
         return real_identity(*args, **kwargs)
 
     def register():
-        connection = namespace["connect"]()
-        try:
+        with closing(namespace["connect"]()) as connection:
             return start(
                 connection,
                 argparse.Namespace(
@@ -378,8 +371,6 @@ def test_prompt_registration_keeps_existing_scans_readable(
                 ),
                 headless_standard=False,
             )
-        finally:
-            connection.close()
 
     def read_scans():
         read = run_workbench(state_dir, "get-scan", "--scan-id", str(scan_id))

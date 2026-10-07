@@ -259,14 +259,55 @@ def configure_git_command(target: Path, key: str, script: Path) -> None:
     )
 
 
+def save_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    target: str,
+    scope: str,
+    mode: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "save-workspace",
+        "--workspace-id",
+        workspace_id,
+        "--target-path",
+        target,
+        "--scope",
+        scope,
+        "--mode",
+        mode,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def create_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    *args: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        workspace_id,
+        *args,
+        environment=environment,
+    )
+
+
 def create_saved_workspace(
     state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
 ) -> dict[str, object]:
     workspace_id = str(uuid.uuid4())
-    created = run_workbench(
+    created = create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         *(["--thread-id", thread_id] if thread_id else []),
         "--target-path",
@@ -283,16 +324,11 @@ def create_saved_workspace(
         "isWorktree": False,
         "reviewChangesSupported": False,
     }
-    return run_workbench(
+    return save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         mode,
         "--user-context",
         "Pay attention to uploaded archives.",
@@ -303,26 +339,8 @@ def create_saved_git_workspace(
     state_dir: Path, target: Path, *, mode: str = "standard"
 ) -> dict[str, object]:
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    return run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        mode,
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target))
+    return save_workspace(state_dir, workspace_id, str(target), ".", mode)
 
 
 def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
@@ -356,8 +374,6 @@ def write_completed_contract(
     scan_id: str,
     target: Path,
     *,
-    artifact_scan_id: str | None = None,
-    exclude_paths: list[str] | None = None,
     identity_anchor: str = "archive-entry-write-without-containment",
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
@@ -366,16 +382,13 @@ def write_completed_contract(
     diff_base_revision: str | None = None,
     diff_head_revision: str | None = None,
     snapshot_digest: str | None = None,
-    target_id: str | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
 ) -> None:
-    artifact_scan_id = artifact_scan_id or scan_id
-    exclude_paths = exclude_paths or []
     include_paths = include_paths or ["."]
     target_contract = {
         "kind": target_kind,
-        "targetId": target_id or stable_target_id(target),
+        "targetId": stable_target_id(target),
         "displayName": target.name,
         "snapshotDigest": snapshot_digest
         or (
@@ -393,7 +406,7 @@ def write_completed_contract(
     findings = {
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "findings": [
             {
                 "ruleId": "path-traversal.archive-extraction",
@@ -457,12 +470,12 @@ def write_completed_contract(
     coverage = {
         "documentType": "codex-security.coverage",
         "schemaVersion": "1.0",
-        "scanId": artifact_scan_id,
+        "scanId": scan_id,
         "mode": coverage_mode,
         "completeness": "complete",
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
-        "excludePaths": exclude_paths,
+        "excludePaths": [],
         "surfaces": [
             {
                 "id": "surface_archive_extraction",
@@ -478,7 +491,7 @@ def write_completed_contract(
         "documentType": "codex-security.scan-manifest",
         "schemaVersion": "1.0",
         "scan": {
-            "id": artifact_scan_id,
+            "id": scan_id,
             "producer": {
                 "name": "codex-security-plugin",
                 "version": source_plugin_version(),
@@ -487,7 +500,7 @@ def write_completed_contract(
             "startedAt": "2026-06-02T18:00:00Z",
             "completedAt": "2026-06-02T18:09:00Z",
             "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": exclude_paths},
+            "scope": {"includePaths": include_paths, "excludePaths": []},
             "coverageRef": "coverage.json",
             "findingsRef": "findings.json",
         },

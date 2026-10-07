@@ -8,6 +8,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     run_workbench,
+    save_workspace,
     stable_target_id,
     start_delivered_scan,
     write_completed_contract,
@@ -26,17 +27,8 @@ def complete_scan(
 ) -> dict[str, object]:
     workspace = create_saved_workspace(state_dir, target)
     if include_paths is not None:
-        workspace = run_workbench(
-            state_dir,
-            "save-workspace",
-            "--workspace-id",
-            str(workspace["id"]),
-            "--target-path",
-            str(target),
-            "--scope",
-            include_paths[0],
-            "--mode",
-            "standard",
+        workspace = save_workspace(
+            state_dir, str(workspace["id"]), str(target), include_paths[0], "standard"
         )
     started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
     scan_id = str(started["results"]["scanId"])

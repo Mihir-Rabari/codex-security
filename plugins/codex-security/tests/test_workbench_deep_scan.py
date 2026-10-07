@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    create_workspace,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    save_workspace,
     stable_target_id,
     start_delivered_scan,
     worker_paths,
@@ -2248,10 +2250,8 @@ def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path
     target.mkdir()
     workspace_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     for workspace_id in workspace_ids:
-        run_workbench(
+        create_workspace(
             state_dir,
-            "create-workspace",
-            "--workspace-id",
             workspace_id,
             "--thread-id",
             "thread-owner",
@@ -2261,16 +2261,11 @@ def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path
             "deep",
             environment=deep_environment(codex_home),
         )
-        run_workbench(
+        save_workspace(
             state_dir,
-            "save-workspace",
-            "--workspace-id",
             workspace_id,
-            "--target-path",
             str(target),
-            "--scope",
             ".",
-            "--mode",
             "deep",
             environment=deep_environment(codex_home),
         )
@@ -2565,10 +2560,8 @@ def test_pending_app_workspace_does_not_block_target_bootstrap(tmp_path: Path) -
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--thread-id",
         "thread-deep-scan",
