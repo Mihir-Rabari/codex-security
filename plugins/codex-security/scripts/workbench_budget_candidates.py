@@ -59,6 +59,7 @@ def recover_candidate_receipts(
             refs = row.get("receiptRefs", [])
             invalid = not isinstance(row.get("label"), str) or not row["label"]
             recovered = []
+            warning_start = len(warnings)
             if not isinstance(refs, list):
                 warnings.append(
                     f"Skipped malformed receipt references for coverage surface {index + 1}: expected an array."
@@ -84,6 +85,23 @@ def recover_candidate_receipts(
             if invalid:
                 row["disposition"] = "needs_follow_up"
                 coverage["completeness"] = "partial"
+                if isinstance(row.get("candidateId"), str) and not any(
+                    coverage_candidate_key(item) == coverage_candidate_key(row)
+                    for item in coverage.get("deferred", [])
+                    if isinstance(item, dict)
+                ):
+                    coverage.setdefault("deferred", []).append(
+                        {
+                            "candidateId": row["candidateId"],
+                            "reason": "\n".join(warnings[warning_start:]),
+                            **({"surfaceIds": [row["id"]]} if "id" in row else {}),
+                            **{
+                                field: copy.deepcopy(row[field])
+                                for field in ("sourceWorkerId", "candidate", "finding")
+                                if field in row
+                            },
+                        }
+                    )
         return parent
     _recover_unsealed_coverage(
         parent["coverage"],

@@ -937,4 +937,11 @@ def test_worker_receipt_recovery_preserves_optional_semantic_ids(
     decisions = [row for row in saved[2]["surfaces"] if row.get("candidateId") == "decision"]
     assert len(decisions) == 1
     assert decisions[0]["disposition"] == ("rejected" if receipt == "valid" else "needs_follow_up")
+    pending_decisions = [
+        row for row in saved[2]["deferred"] if row.get("candidateId") == "decision"
+    ]
+    assert len(pending_decisions) == int(receipt == "missing")
+    assert len(module.unresolved_candidates(saved[2], saved[1])) == (
+        2 if receipt == "missing" else 1
+    )
     assert result.read_bytes() == before
