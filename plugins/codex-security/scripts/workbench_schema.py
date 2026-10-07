@@ -868,6 +868,13 @@ MIGRATIONS = (
         """,
     ),
     (
+        42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
         45,
         "retain deep scan attempts and exact merge inputs",
         """
