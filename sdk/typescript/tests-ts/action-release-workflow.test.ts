@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,10 +9,22 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { runWorkflowScript } from "./support/workflow-script.js";
 
-type Step = { name: string; run?: string };
+type Step = {
+  name: string;
+  id?: string;
+  run?: string;
+  uses?: string;
+  with?: Record<string, string | boolean>;
+};
+type Job = {
+  steps: Step[];
+  permissions?: Record<string, string>;
+  needs?: string[];
+  outputs?: Record<string, string>;
+};
 const workflow = Bun.YAML.parse(
   readFileSync(
     new URL(
@@ -20,12 +33,18 @@ const workflow = Bun.YAML.parse(
     ),
     "utf8",
   ),
-) as { jobs: Record<string, { steps: Step[] }> };
+) as { jobs: Record<string, Job> };
+
+function step(job: string, name: string) {
+  const value = workflow.jobs[job]?.steps.find((step) => step.name === name);
+  if (!value) throw new Error(`Missing workflow step: ${job}/${name}`);
+  return value;
+}
 
 function script(job: string, name: string) {
-  const step = workflow.jobs[job]?.steps.find((step) => step.name === name);
-  if (!step?.run) throw new Error(`Missing workflow script: ${job}/${name}`);
-  return step.run;
+  const value = step(job, name);
+  if (!value.run) throw new Error(`Missing workflow script: ${job}/${name}`);
+  return value.run;
 }
 
 const reuse = script(
@@ -110,8 +129,179 @@ function fixture(includeAction = true) {
     git("checkout", "--detach", source);
     return sha;
   }
-  return { directory, git, write, commit, run, source, distribution };
+  return {
+    directory,
+    repository,
+    git,
+    write,
+    commit,
+    run,
+    source,
+    distribution,
+  };
 }
+
+test("runs CLI verification read-only and passes only its identified runtime lock to publication", () => {
+  const verification = workflow.jobs["action-verify"]!;
+  const publication = workflow.jobs["action"]!;
+  expect(verification.permissions).toEqual({ contents: "read" });
+  expect(publication.permissions).toEqual({ contents: "write" });
+  expect(publication.needs).toContain("action-verify");
+  expect(step("action", "Checkout verified CLI source").with).toMatchObject({
+    ref: "${{ needs.release.outputs.sha }}",
+    path: "release-source",
+    "persist-credentials": false,
+  });
+  const artifacts = verification.steps.filter((step) =>
+    step.uses?.startsWith("actions/upload-artifact@"),
+  );
+  expect(artifacts).toHaveLength(1);
+  expect(artifacts[0]?.with?.["path"]).toBe(
+    "release-source/github-action/runtime/package-lock.json",
+  );
+  expect(verification.outputs?.["runtime-lock-artifact"]).toBe(
+    `\${{ steps.${artifacts[0]!.id}.outputs.artifact-id }}`,
+  );
+  expect(
+    step("action", "Download verified CLI runtime lock").with,
+  ).toMatchObject({
+    "artifact-ids": "${{ needs.action-verify.outputs.runtime-lock-artifact }}",
+  });
+  const verificationCommands = script(
+    "action-verify",
+    "Validate the packaged Action",
+  )
+    .trim()
+    .split("\n");
+  expect(verificationCommands.at(-1)).toBe("npm run check-dist");
+  expect(
+    script("action", "Check Action distribution before publication").trim(),
+  ).toBe("npm run check-dist");
+  const actionPackage = JSON.parse(
+    readFileSync(
+      new URL("../../../github-action/package.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { scripts: Record<string, string> };
+  expect(actionPackage.scripts["check-dist"]).toBeString();
+  const publicationCommands = publication.steps
+    .map((step) => step.run ?? "")
+    .join("\n");
+  expect(publicationCommands).not.toMatch(
+    /test:cli|scripts\/linux-smoke\.mjs|npm ci --prefix runtime/u,
+  );
+});
+
+test("stages the verified runtime lock without copying verification workspace source or bundles", () => {
+  const release = fixture();
+  release.write(".gitattributes", "* text eol=lf\n");
+  const version = "99.1.2";
+  const packageName = "@openai/codex-security";
+  const integrity = "sha512-synthetic-verified-integrity";
+  const writeJson = (path: string, value: unknown) =>
+    release.write(path, `${JSON.stringify(value)}\n`);
+  writeJson("sdk/typescript/package.json", { name: packageName, version });
+  writeJson("github-action/package.json", {
+    name: "example-action",
+    version: "99.1.1",
+  });
+  writeJson("github-action/package-lock.json", {
+    version: "99.1.1",
+    packages: { "": { version: "99.1.1" } },
+  });
+  writeJson("github-action/runtime/package.json", {
+    dependencies: { [packageName]: "99.1.1" },
+  });
+  const source = "reviewed Action source\n";
+  const bundle = "reviewed Action bundle\n";
+  release.write("github-action/src/index.ts", source);
+  release.write("github-action/dist/index.cjs", bundle);
+  release.write("github-action/dist/post.cjs", bundle);
+  const sourceCommit = release.commit("Prepare reviewed Action source");
+  const verification = join(release.directory, "verification");
+  const publication = join(release.directory, "publication");
+  mkdirSync(verification);
+  mkdirSync(publication);
+  for (const workspace of [verification, publication]) {
+    release.git(
+      "clone",
+      "--local",
+      release.repository,
+      join(workspace, "release-source"),
+    );
+  }
+  const verifiedAction = join(verification, "release-source", "github-action");
+  for (const path of [
+    "src/index.ts",
+    "dist/index.cjs",
+    "dist/post.cjs",
+    "package.json",
+  ]) {
+    writeFileSync(
+      join(verifiedAction, path),
+      "modified by runtime verification\n",
+    );
+  }
+  const runtimeLock = `${JSON.stringify({
+    packages: {
+      "": { dependencies: { [packageName]: version } },
+      [`node_modules/${packageName}`]: { version, integrity },
+    },
+  })}\n`;
+  const artifactPath = step("action-verify", "Save verified CLI runtime lock")
+    .with?.["path"];
+  if (typeof artifactPath !== "string")
+    throw new Error("Missing runtime lock artifact path");
+  writeFileSync(join(verification, artifactPath), runtimeLock);
+  const runner = join(publication, "runner");
+  const download = join(runner, "action-runtime-lock");
+  mkdirSync(download, { recursive: true });
+  copyFileSync(
+    join(verification, artifactPath),
+    join(download, basename(artifactPath)),
+  );
+  const helper = join(
+    publication,
+    "automation",
+    "github-action",
+    "scripts",
+    "release.mjs",
+  );
+  mkdirSync(dirname(helper), { recursive: true });
+  copyFileSync(
+    new URL("../../../github-action/scripts/release.mjs", import.meta.url),
+    helper,
+  );
+  const result = runWorkflowScript(
+    publication,
+    script("action", "Stage verified CLI runtime lock"),
+    {
+      RELEASE_VERSION: version,
+      RELEASE_SHA: sourceCommit,
+      CLI_INTEGRITY: integrity,
+      RUNNER_TEMP: runner.replaceAll("\\", "/"),
+      GITHUB_WORKSPACE: publication.replaceAll("\\", "/"),
+    },
+    ["-e", "-o", "pipefail"],
+  );
+  expect(result.status, result.stderr).toBe(0);
+  const publishedAction = join(publication, "release-source", "github-action");
+  expect(readFileSync(join(publishedAction, "src/index.ts"), "utf8")).toBe(
+    source,
+  );
+  for (const path of ["dist/index.cjs", "dist/post.cjs"]) {
+    expect(readFileSync(join(publishedAction, path), "utf8")).toBe(bundle);
+  }
+  expect(
+    JSON.parse(readFileSync(join(publishedAction, "package.json"), "utf8")),
+  ).toEqual({
+    name: "example-action",
+    version,
+  });
+  expect(
+    readFileSync(join(publishedAction, "runtime/package-lock.json"), "utf8"),
+  ).toBe(runtimeLock);
+});
 
 test("reuses a generated Action commit derived from the exact CLI release", () => {
   const release = fixture();

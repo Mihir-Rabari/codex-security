@@ -4,8 +4,9 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { updateReleaseManifests, validateRelease, validateReleaseSource, writeReleaseMetadata } from '../scripts/release.mjs';
+import { stageRelease, updateReleaseManifests, validateRelease, validateReleaseSource, writeReleaseMetadata } from '../scripts/release.mjs';
 
 const version = '0.3.0';
 const actionCommit = 'b'.repeat(40);
@@ -21,6 +22,9 @@ async function fixture(t) {
   const actionRoot = join(root, 'github-action');
   await mkdir(join(actionRoot, 'runtime'), { recursive: true });
   await mkdir(join(actionRoot, 'build'));
+  await mkdir(join(actionRoot, 'dist'));
+  await writeFile(join(actionRoot, 'dist/index.cjs'), 'console.log("synthetic Action");\n');
+  await writeFile(join(actionRoot, 'dist/post.cjs'), 'console.log("synthetic cleanup");\n');
   await mkdir(join(root, 'sdk/typescript'), { recursive: true });
   await writeJson(join(root, 'sdk/typescript/package.json'), { name: packageName, version });
   await writeJson(join(actionRoot, 'package.json'), { name: 'codex-security-action', version: '0.2.0', private: true, dependencies: { '@actions/core': '3.0.1' } });
@@ -35,11 +39,16 @@ async function fixture(t) {
 }
 
 async function buildMetadata(actionRoot) {
+  const files = {};
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
+    const bytes = await readFile(join(actionRoot, file));
+    files[file] = { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
+  }
   await writeJson(join(actionRoot, 'build/release-manifest.json'), {
     actionVersion: version, cliVersion: version, status: 'unreleased',
     actionLockSha256: await digest(join(actionRoot, 'package-lock.json')),
     runtimeLockSha256: await digest(join(actionRoot, 'runtime/package-lock.json')),
-    sourceSha256: 'synthetic-source-hash', files: { 'dist/index.cjs': { sha256: 'synthetic-bundle-hash' } },
+    sourceSha256: 'synthetic-source-hash', files,
   });
 }
 
@@ -58,6 +67,35 @@ test('release preparation aligns manifests without changing locked Action depend
   assert.equal((await readJson(join(actionRoot, 'package.json'))).version, version);
 });
 
+test('publisher stages the tested runtime lock byte-for-byte without npm on PATH', async t => {
+  const { actionRoot, sourceCommit } = await fixture(t);
+  const runtimeLock = join(actionRoot, '../tested-runtime-lock.json');
+  const tested = await readJson(join(actionRoot, 'runtime/package-lock.json'));
+  const testedBytes = JSON.stringify(tested);
+  await writeFile(runtimeLock, testedBytes);
+  await writeJson(join(actionRoot, 'runtime/package-lock.json'), {});
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('../scripts/release.mjs', import.meta.url)),
+    'stage', version, sourceCommit, cliIntegrity, runtimeLock, actionRoot,
+  ], { env: { ...process.env, PATH: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(await readFile(join(actionRoot, 'runtime/package-lock.json'), 'utf8'), testedBytes);
+  await validateRelease(actionRoot, version, cliIntegrity);
+  await validateReleaseSource(actionRoot, sourceCommit);
+});
+
+test('publisher rejects a tested lock for a different CLI release or npm archive', async t => {
+  const { actionRoot, sourceCommit } = await fixture(t);
+  const runtimeLock = join(actionRoot, '../tested-runtime-lock.json');
+  const tested = await readJson(join(actionRoot, 'runtime/package-lock.json'));
+  tested.packages[`node_modules/${packageName}`].version = '0.2.0';
+  await writeJson(runtimeLock, tested);
+  await assert.rejects(stageRelease(actionRoot, version, sourceCommit, cliIntegrity, runtimeLock), /versions must agree/);
+  tested.packages[`node_modules/${packageName}`].version = version;
+  tested.packages[`node_modules/${packageName}`].integrity = 'sha512-other-tarball';
+  await writeJson(runtimeLock, tested);
+  await assert.rejects(stageRelease(actionRoot, version, sourceCommit, cliIntegrity, runtimeLock), /verified npm release/);
+});
+
 test('release metadata ties built locks to the verified CLI and immutable distribution commit', async t => {
   const { actionRoot, sourceCommit } = await fixture(t);
   await updateReleaseManifests(actionRoot, version);
@@ -72,10 +110,33 @@ test('release metadata ties built locks to the verified CLI and immutable distri
   assert.equal(metadata.cliIntegrity, cliIntegrity);
   assert.equal(metadata.npmTag, 'npm-v0.3.0');
   assert.equal(metadata.actionTag, 'action-v0.3.0');
-  assert.equal(metadata.files['dist/index.cjs'].sha256, 'synthetic-bundle-hash');
+  assert.equal(metadata.files['dist/index.cjs'].sha256, await digest(join(actionRoot, 'dist/index.cjs')));
   const first = await readFile(join(actionRoot, 'build/release-manifest.json'), 'utf8');
   await writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit);
   assert.equal(await readFile(join(actionRoot, 'build/release-manifest.json'), 'utf8'), first);
+});
+
+test('release metadata rejects a bundle changed or removed after the build', async t => {
+  const { actionRoot, sourceCommit } = await fixture(t);
+  await updateReleaseManifests(actionRoot, version);
+  await buildMetadata(actionRoot);
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
+    const path = join(actionRoot, file);
+    const original = await readFile(path);
+    const changed = Buffer.from(original);
+    changed[0] ^= 1;
+    await writeFile(path, changed);
+    await assert.rejects(writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit), /differs from the built release metadata/);
+    await rm(path);
+    await assert.rejects(writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit), { code: 'ENOENT' });
+    await writeFile(path, original);
+  }
+  const metadataPath = join(actionRoot, 'build/release-manifest.json');
+  const metadata = await readJson(metadataPath);
+  assert.equal(metadata.status, 'unreleased');
+  metadata.files['dist/index.cjs'].bytes += 1;
+  await writeJson(metadataPath, metadata);
+  await assert.rejects(writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit), /length differs/);
 });
 
 test('release refuses a stale CLI lock or metadata generated before the lock changed', async t => {

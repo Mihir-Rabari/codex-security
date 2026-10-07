@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -79,6 +79,13 @@ export async function prepareRelease(actionRoot, version, sourceCommit, cliInteg
   await validateRelease(actionRoot, version, cliIntegrity);
 }
 
+export async function stageRelease(actionRoot, version, sourceCommit, cliIntegrity, runtimeLock) {
+  releaseIdentity(version, sourceCommit, cliIntegrity);
+  await updateReleaseManifests(actionRoot, version);
+  await copyFile(runtimeLock, resolve(actionRoot, 'runtime/package-lock.json'));
+  await validateRelease(actionRoot, version, cliIntegrity);
+}
+
 export async function writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit) {
   const identity = releaseIdentity(version, sourceCommit, cliIntegrity, actionCommit);
   await validateReleaseSource(actionRoot, sourceCommit);
@@ -90,6 +97,11 @@ export async function writeReleaseMetadata(actionRoot, version, sourceCommit, cl
   for (const [key, value] of Object.entries(hashes)) {
     assert.equal(manifest[key], value, 'Rebuild the Action after updating its locks');
   }
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
+    const bytes = await readFile(resolve(actionRoot, file));
+    assert.equal(manifest.files[file].sha256, sha256(bytes), `${file} differs from the built release metadata`);
+    assert.equal(manifest.files[file].bytes, bytes.length, `${file} length differs from the built release metadata`);
+  }
   await writeJson(manifestPath, { ...manifest, status: 'released', ...identity });
 }
 
@@ -97,9 +109,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const [command, version, sourceCommit, cliIntegrity, ...rest] = process.argv.slice(2);
   if (command === 'prepare' && rest.length === 1) {
     await prepareRelease(resolve(rest[0]), version, sourceCommit, cliIntegrity);
+  } else if (command === 'stage' && rest.length === 2) {
+    await stageRelease(resolve(rest[1]), version, sourceCommit, cliIntegrity, resolve(rest[0]));
   } else if (command === 'metadata' && rest.length === 2) {
     await writeReleaseMetadata(resolve(rest[1]), version, sourceCommit, cliIntegrity, rest[0]);
   } else {
-    throw new Error('Usage: release.mjs prepare VERSION SOURCE_SHA CLI_INTEGRITY ACTION_ROOT | metadata VERSION SOURCE_SHA CLI_INTEGRITY ACTION_SHA ACTION_ROOT');
+    throw new Error('Usage: release.mjs prepare VERSION SOURCE_SHA CLI_INTEGRITY ACTION_ROOT | stage VERSION SOURCE_SHA CLI_INTEGRITY RUNTIME_LOCK ACTION_ROOT | metadata VERSION SOURCE_SHA CLI_INTEGRITY ACTION_SHA ACTION_ROOT');
   }
 }

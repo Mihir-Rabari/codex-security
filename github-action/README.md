@@ -277,8 +277,11 @@ publication, the release workflow exercises the Action's compatibility suite
 against the packed CLI candidate. After publication and provenance verification,
 the Action release workflow starts from that exact CLI source commit, updates
 the runtime pin and integrity lock, rebuilds the bundles, and runs the Action
-checks against the published package. It creates a distribution commit and an
-immutable `action-vX.Y.Z` tag with the same version as `npm-vX.Y.Z`.
+checks against the published package in a job with read-only repository
+permissions. A fresh publisher takes only the tested runtime lock, rebuilds
+from the same source, and verifies the bundle hashes without executing the CLI.
+It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
+same version as `npm-vX.Y.Z`.
 
 The Action distribution commit differs from the CLI source commit because the
 registry integrity lock is finalized after publication. Release metadata records

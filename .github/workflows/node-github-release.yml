@@ -701,28 +701,32 @@ jobs:
       # Use current checks when recovering releases that predate exact-version smoke.
       ref: ${{ github.sha }}
 
-  action:
-    name: publish matching Action
+  action-verify:
+    name: verify matching Action
     needs: [release, installed]
     if: needs.release.outputs.has-action == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      runtime-lock-artifact: ${{ steps.runtime-lock.outputs.artifact-id }}
     env:
       RELEASE_VERSION: ${{ needs.release.outputs.version }}
       RELEASE_SHA: ${{ needs.release.outputs.sha }}
       CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
 
     steps:
-      - name: Checkout release automation
+      - &action-checkout-automation
+        name: Checkout release automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: automation
           persist-credentials: false
 
-      - name: Checkout verified CLI source
+      - &action-checkout-source
+        name: Checkout verified CLI source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release.outputs.sha }}
@@ -730,7 +734,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up Node.js
+      - &action-setup-node
+        name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -742,7 +747,8 @@ jobs:
           sudo apt-get install --yes bubblewrap apparmor-profiles
           sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
 
-      - name: Reuse an existing immutable Action distribution
+      - &action-reuse-distribution
+        name: Reuse an existing immutable Action distribution
         id: distribution
         working-directory: release-source
         shell: bash
@@ -793,6 +799,63 @@ jobs:
           node scripts/linux-smoke.mjs
           npm audit --audit-level=high
           npm audit --prefix runtime --omit=dev --audit-level=high
+          npm run check-dist
+
+      - name: Save verified CLI runtime lock
+        id: runtime-lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: action-runtime-lock
+          path: release-source/github-action/runtime/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
+
+  action:
+    name: publish matching Action
+    needs: [release, action-verify]
+    if: needs.release.outputs.has-action == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ needs.release.outputs.sha }}
+      CLI_INTEGRITY: ${{ needs.release.outputs.integrity }}
+
+    steps:
+      - *action-checkout-automation
+      - *action-checkout-source
+      - *action-setup-node
+      - *action-reuse-distribution
+
+      - name: Download verified CLI runtime lock
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.action-verify.outputs.runtime-lock-artifact }}
+          path: ${{ runner.temp }}/action-runtime-lock
+          merge-multiple: true
+
+      - name: Stage verified CLI runtime lock
+        run: |
+          node automation/github-action/scripts/release.mjs stage \
+            "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+            "$RUNNER_TEMP/action-runtime-lock/package-lock.json" \
+            "$GITHUB_WORKSPACE/release-source/github-action"
+
+      # Rebuild from reviewed source in a fresh job; never run the CLI here.
+      - name: Install Action build dependencies
+        working-directory: release-source/github-action
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build Action distribution
+        if: steps.distribution.outputs.existing != 'true'
+        working-directory: release-source/github-action
+        run: npm run build
+
+      - name: Check Action distribution before publication
+        working-directory: release-source/github-action
+        run: npm run check-dist
 
       - name: Commit and verify release metadata
         working-directory: release-source

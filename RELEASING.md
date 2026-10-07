@@ -248,7 +248,10 @@ for that exact commit:
    so the checks also work for historical backfills.
 5. If the release source contains `action.yml`, the workflow prepares the
    Action from that exact source commit, pins its runtime to the verified npm
-   version and integrity, and builds and tests the distribution. It creates
+   version and integrity, and builds and tests the distribution in a job with
+   read-only repository permissions. A fresh publisher checks out the same
+   source, downloads only the tested runtime lock by artifact ID, and rebuilds
+   and verifies the bundles without executing the CLI. It creates
    `action-vX.Y.Z` and uploads the Action release manifest and SBOM to the
    existing `npm-vX.Y.Z` GitHub Release. A final status job reports publication,
    installation smoke, and Action results.
@@ -256,7 +259,8 @@ for that exact commit:
 The Action tag points to a generated distribution commit whose parent is the
 CLI release commit. That additional commit contains the runnable Action bundle
 and runtime lockfile. Its release manifest records both commits, both tags,
-the aligned version, and the npm integrity. Consumers can pin the Action's
+the aligned version, and the npm integrity. Metadata finalization verifies the
+bundle hashes against the files being published. Consumers can pin the Action's
 distribution commit from that manifest.
 
 Historical releases whose source predates `action.yml` skip Action publication
