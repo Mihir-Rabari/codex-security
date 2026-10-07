@@ -286,6 +286,7 @@ async function latestTargets(
   const related = new Set<string>();
   for (const target of registered)
     if ((await pathKey(target.target_path)) === current) related.add(target.id);
+  let gitMatchingUnavailable = false;
   const caller = await gitMarkerRoot(directory, signal, "outermost");
   if (caller !== null) {
     // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
@@ -312,6 +313,7 @@ async function latestTargets(
     for (const key of Object.keys(environment))
       if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];
     environment["CODEX_SECURITY_GIT"] = inspected.executable ?? "";
+    gitMatchingUnavailable = inspected.executable === null;
     const git =
       inspected.executable === null
         ? null
@@ -363,6 +365,10 @@ async function latestTargets(
     )
       return [scan];
   }
+  if (gitMatchingUnavailable)
+    throw new CodexSecurityError(
+      "No completed saved scan matched this exact path, and Git-based matching across worktrees or clones is unavailable. Use an explicit saved scan ID: codex-security dedupe --scan SCAN_ID",
+    );
   return [];
 }
 

@@ -7,6 +7,7 @@ import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import { savedScanWorkbench } from "../src/saved-scan-bootstrap.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { resolveCompletedScan } from "../src/saved-scan.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
@@ -384,6 +385,65 @@ test.skipIf(process.platform === "win32")(
     ).toBe(f.second.scanId);
   },
 );
+
+test("latest explains the explicit scan-ID fallback when history protects the host Git", async () => {
+  const f = await fixture(true);
+  const worktree = join(f.root, "other-worktree");
+  execFileSync(
+    "git",
+    ["-C", f.repository, "worktree", "add", "--detach", worktree],
+    { stdio: "pipe" },
+  );
+  const hostGit = await inspectTrustedExecutable("git", f.environment, []);
+  expect(hostGit.executable).not.toBeNull();
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      "unrelated-target",
+      dirname(hostGit.executable!),
+      "Unrelated synthetic target",
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:00:00Z",
+    );
+  } finally {
+    db.close();
+  }
+  const options = {
+    environment: {
+      ...f.environment,
+      PYTHON: f.python,
+      CODEX_SECURITY_GIT: hostGit.executable!,
+    },
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: worktree,
+  };
+  await expect(savedScanWorkbench("latest", options)).rejects.toThrow(
+    "codex-security dedupe --scan SCAN_ID",
+  );
+  const explicit = await savedScanWorkbench(f.first.scanId, options);
+  expect(
+    (
+      await resolveCompletedScan(f.first.scanId, {
+        currentDirectory: () => worktree,
+        runWorkbench: explicit,
+      })
+    ).scanId,
+  ).toBe(f.first.scanId);
+  const exactPath = await savedScanWorkbench("latest", {
+    ...options,
+    currentDirectory: f.repository,
+  });
+  expect(
+    (
+      await resolveCompletedScan("latest", {
+        currentDirectory: () => f.repository,
+        runWorkbench: exactPath,
+      })
+    ).scanId,
+  ).toBe(f.second.scanId);
+});
 
 test.skipIf(process.platform === "win32")(
   "Python rediscovery keeps protecting the caller checkout when a saved target is supplied",

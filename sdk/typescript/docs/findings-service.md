@@ -313,6 +313,11 @@ codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 A scan or workflow selector is required. `--scan`
 accepts a full ID, unique prefix, or `latest` for the current repository. The
 scan must be complete, with sealed artifacts and a local checkout available.
+Local `latest` lookup matches the exact checkout path without Git. Matching
+across worktrees or clones additionally requires a Git executable outside all
+saved scan targets. If an unrelated historical target includes the available
+Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
+saved scan ID instead.
 By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service. Explicit
 `--findings-url` retains the existing remote lookup and publication behavior.

@@ -510,6 +510,11 @@ stale vectors and a model provider for fresh reviews; it does not publish to
 Cloud. See [deduplication](findings-service.md#deduplicate-a-scan) for scope,
 credentials, and workflow resume behavior.
 
+For `dedupe --scan latest`, matching across worktrees or clones requires a Git
+executable outside all saved scan targets. If a historical target includes the
+available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
+explicit saved scan ID. Exact-path `latest` lookup still works without Git.
+
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
 rejected, including a `--model` or `--effort` flag plus its native equivalent.
