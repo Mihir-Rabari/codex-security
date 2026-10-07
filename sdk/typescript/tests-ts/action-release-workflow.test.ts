@@ -58,6 +58,9 @@ const detect = script("release", "Detect Action release source");
 const complete = script("complete", "Require completed release channels");
 const publish = script("action", "Publish immutable Action tag and metadata");
 const directories: string[] = [];
+const version = "99.1.2";
+const packageName = "@openai/codex-security";
+const integrity = "sha512-synthetic-verified-integrity";
 
 afterEach(() => {
   for (const directory of directories.splice(0)) {
@@ -68,9 +71,20 @@ afterEach(() => {
 function fixture(includeAction = true) {
   const directory = mkdtempSync(join(tmpdir(), "action release workflow "));
   directories.push(directory);
-  const repository = join(directory, "release source");
+  const repository = join(directory, "release-source");
   const output = join(directory, "outputs");
+  const npmMarker = join(directory, "npm-ran");
   mkdirSync(repository);
+  writeFileSync(npmMarker, "");
+  const helper = join(
+    directory,
+    "automation/github-action/scripts/release.mjs",
+  );
+  mkdirSync(dirname(helper), { recursive: true });
+  copyFileSync(
+    new URL("../../../github-action/scripts/release.mjs", import.meta.url),
+    helper,
+  );
   function git(...args: string[]) {
     return execFileSync(
       "git",
@@ -91,6 +105,18 @@ function fixture(includeAction = true) {
     mkdirSync(dirname(destination), { recursive: true });
     writeFileSync(destination, value);
   }
+  function writeJson(path: string, value: unknown) {
+    write(path, `${JSON.stringify(value)}\n`);
+  }
+  function updateJson(
+    path: string,
+    update: (value: Record<string, unknown>) => Record<string, unknown>,
+  ) {
+    writeJson(
+      path,
+      update(JSON.parse(readFileSync(join(repository, path), "utf8"))),
+    );
+  }
   function commit(message: string) {
     git("add", "--all");
     git("commit", "-m", message);
@@ -103,8 +129,12 @@ function fixture(includeAction = true) {
       script,
       {
         GITHUB_OUTPUT: output.replaceAll("\\", "/"),
-        RELEASE_VERSION: "99.1.2",
+        RELEASE_VERSION: version,
         RELEASE_SHA: source,
+        CLI_INTEGRITY: integrity,
+        GITHUB_WORKSPACE: directory.replaceAll("\\", "/"),
+        RUNNER_TEMP: directory.replaceAll("\\", "/"),
+        NPM_MARKER: npmMarker.replaceAll("\\", "/"),
         ...environment,
       },
       ["-e", "-o", "pipefail"],
@@ -113,20 +143,58 @@ function fixture(includeAction = true) {
   }
   git("init");
   write("README.md", "Synthetic CLI source\n");
-  if (includeAction) write("action.yml", "name: Synthetic Action\n");
+  writeJson("sdk/typescript/package.json", { name: packageName, version });
+  const actionPackage = {
+    name: "example-action",
+    version: "99.1.1",
+    scripts: { build: "node scripts/build.mjs" },
+    dependencies: { "example-build": "1.2.3" },
+  };
+  if (includeAction) {
+    write("action.yml", "name: Synthetic Action\n");
+    writeJson("github-action/package.json", actionPackage);
+    writeJson("github-action/package-lock.json", {
+      version: actionPackage.version,
+      lockfileVersion: 3,
+      packages: {
+        "": actionPackage,
+        "node_modules/example-build": { version: "1.2.3" },
+      },
+    });
+    writeJson("github-action/runtime/package.json", {
+      private: true,
+      dependencies: { [packageName]: "99.1.1" },
+    });
+  }
   const source = commit("Create release source");
-  function distribution(extraSourcePath?: string) {
+  function distribution(change?: () => void) {
+    writeJson("github-action/package.json", { ...actionPackage, version });
+    writeJson("github-action/package-lock.json", {
+      version,
+      lockfileVersion: 3,
+      packages: {
+        "": { ...actionPackage, version },
+        "node_modules/example-build": { version: "1.2.3" },
+      },
+    });
+    writeJson("github-action/runtime/package.json", {
+      private: true,
+      dependencies: { [packageName]: version },
+    });
+    writeJson("github-action/runtime/package-lock.json", {
+      lockfileVersion: 3,
+      packages: {
+        "": { dependencies: { [packageName]: version } },
+        [`node_modules/${packageName}`]: { version, integrity },
+      },
+    });
     for (const path of [
-      "github-action/package.json",
-      "github-action/package-lock.json",
-      "github-action/runtime/package.json",
-      "github-action/runtime/package-lock.json",
       "github-action/dist/index.cjs",
       "github-action/dist/post.cjs",
     ]) {
       write(path, "Synthetic generated release content\n");
     }
-    if (extraSourcePath) write(extraSourcePath, "Unrelated source change\n");
+    change?.();
     const sha = commit("Package Action release");
     git("tag", "action-v99.1.2", sha);
     git("checkout", "--detach", source);
@@ -137,10 +205,12 @@ function fixture(includeAction = true) {
     repository,
     git,
     write,
+    updateJson,
     commit,
     run,
     source,
     distribution,
+    npmMarker,
   };
 }
 
@@ -393,14 +463,114 @@ ${validate.run}`,
   },
 );
 
-test("reuses a generated Action commit derived from the exact CLI release", () => {
-  const release = fixture();
-  const distribution = release.distribution();
-  const result = release.run(reuse);
-  expect(result.status).toBe(0);
-  expect(result.output).toBe("existing=true\n");
-  expect(release.git("rev-parse", "HEAD")).toBe(distribution);
-});
+function reuseAndInstall(job: string) {
+  const steps = workflow.jobs[job]!.steps;
+  const reuse = step(job, "Reuse an existing immutable Action distribution");
+  const install = step(
+    job,
+    job === "action"
+      ? "Install Action build dependencies"
+      : "Install Action and CLI dependencies",
+  );
+  expect(steps.indexOf(reuse)).toBeLessThan(steps.indexOf(install));
+  return `npm() { printf 'npm\\n' >> "$NPM_MARKER"; }
+sfw() { "$@"; }
+${reuse.run}
+cd "$GITHUB_WORKSPACE/release-source/github-action"
+${install.run}`;
+}
+
+const changedDistributions: Array<{
+  name: string;
+  path: string;
+  update: (value: Record<string, unknown>) => Record<string, unknown>;
+  error: string;
+}> = [
+  {
+    name: "Action scripts",
+    path: "package.json",
+    update: (value) => ({ ...value, scripts: { build: "node changed.mjs" } }),
+    error: "must preserve the reviewed release source",
+  },
+  {
+    name: "Action dependencies",
+    path: "package.json",
+    update: (value) => ({
+      ...value,
+      dependencies: { "example-build": "9.9.9" },
+    }),
+    error: "must preserve the reviewed release source",
+  },
+  {
+    name: "Action lock dependencies",
+    path: "package-lock.json",
+    update: (value) => ({
+      ...value,
+      packages: {
+        ...(value["packages"] as Record<string, unknown>),
+        "node_modules/example-build": { version: "9.9.9" },
+      },
+    }),
+    error: "must preserve the reviewed release source",
+  },
+  {
+    name: "runtime scripts",
+    path: "runtime/package.json",
+    update: (value) => ({ ...value, scripts: { prepare: "node changed.mjs" } }),
+    error: "must preserve the reviewed release source",
+  },
+  {
+    name: "CLI version",
+    path: "runtime/package.json",
+    update: (value) => ({
+      ...value,
+      dependencies: { [packageName]: "99.1.3" },
+    }),
+    error: "Action and CLI release versions must agree",
+  },
+  {
+    name: "CLI integrity",
+    path: "runtime/package-lock.json",
+    update: (value) => ({
+      ...value,
+      packages: {
+        ...(value["packages"] as Record<string, unknown>),
+        [`node_modules/${packageName}`]: {
+          version,
+          integrity: "sha512-different",
+        },
+      },
+    }),
+    error: "Action must install the verified npm release",
+  },
+];
+
+for (const job of ["action-verify", "action"]) {
+  test(`${job} reuses the exact CLI release before installing dependencies`, () => {
+    const release = fixture();
+    const distribution = release.distribution();
+    const result = release.run(reuseAndInstall(job));
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toBe("existing=true\n");
+    expect(readFileSync(release.npmMarker, "utf8")).toContain("npm\n");
+    expect(release.git("rev-parse", "HEAD")).toBe(distribution);
+  });
+
+  test.each(changedDistributions)(
+    `${job} rejects changed $name before installing dependencies`,
+    ({ path, update, error }) => {
+      const release = fixture();
+      release.distribution(() =>
+        release.updateJson(`github-action/${path}`, update),
+      );
+      const result = release.run(reuseAndInstall(job));
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(error);
+      expect(result.output).toBe("");
+      expect(readFileSync(release.npmMarker, "utf8")).toBe("");
+    },
+  );
+}
 
 test("leaves the CLI source ready for first Action publication", () => {
   const release = fixture();
@@ -424,7 +594,9 @@ test("rejects an Action distribution derived from a different source commit", ()
 
 test("rejects unrelated source edits in an existing Action distribution", () => {
   const release = fixture();
-  release.distribution("github-action/src/index.ts");
+  release.distribution(() =>
+    release.write("github-action/src/index.ts", "Unrelated source change\n"),
+  );
   const result = release.run(reuse);
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain("outside release packaging");

@@ -111,9 +111,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await prepareRelease(resolve(rest[0]), version, sourceCommit, cliIntegrity);
   } else if (command === 'stage' && rest.length === 2) {
     await stageRelease(resolve(rest[1]), version, sourceCommit, cliIntegrity, resolve(rest[0]));
+  } else if (command === 'verify' && rest.length === 1) {
+    releaseIdentity(version, sourceCommit, cliIntegrity);
+    await validateReleaseSource(resolve(rest[0]), sourceCommit);
+    await validateRelease(resolve(rest[0]), version, cliIntegrity);
   } else if (command === 'metadata' && rest.length === 2) {
     await writeReleaseMetadata(resolve(rest[1]), version, sourceCommit, cliIntegrity, rest[0]);
   } else {
-    throw new Error('Usage: release.mjs prepare VERSION SOURCE_SHA CLI_INTEGRITY ACTION_ROOT | stage VERSION SOURCE_SHA CLI_INTEGRITY RUNTIME_LOCK ACTION_ROOT | metadata VERSION SOURCE_SHA CLI_INTEGRITY ACTION_SHA ACTION_ROOT');
+    throw new Error('Usage: release.mjs prepare VERSION SOURCE_SHA CLI_INTEGRITY ACTION_ROOT | stage VERSION SOURCE_SHA CLI_INTEGRITY RUNTIME_LOCK ACTION_ROOT | verify VERSION SOURCE_SHA CLI_INTEGRITY ACTION_ROOT | metadata VERSION SOURCE_SHA CLI_INTEGRITY ACTION_SHA ACTION_ROOT');
   }
 }

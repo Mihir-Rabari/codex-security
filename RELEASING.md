@@ -338,9 +338,11 @@ existing `npm-vX.Y.Z` tag. Supply the successful `node-release` run ID when
 automatic lookup is not enough. The workflow verifies the npm artifact and
 provenance again before it creates or updates the release, repeats the
 exact-version installation checks, and completes applicable Action publication.
-If `action-vX.Y.Z` already exists, recovery reuses its distribution commit and
-checks it against the CLI release identity. Do not move that tag or regenerate
-the release from newer Action source. A failure after npm publication can leave
+If `action-vX.Y.Z` already exists, recovery checks its package manifests and
+lockfiles against the reviewed source and CLI release identity before installing
+dependencies or running package scripts. It then reuses that distribution commit.
+Do not move that tag or regenerate the release from newer Action source.
+A failure after npm publication can leave
 the npm package or GitHub Release visible while later checks or Action
 publication remain incomplete; use the final workflow status to identify the
 remaining work.

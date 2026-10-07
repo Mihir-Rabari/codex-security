@@ -776,6 +776,9 @@ jobs:
               exit 1
             fi
             git checkout --detach "$action_sha"
+            node "$GITHUB_WORKSPACE/automation/github-action/scripts/release.mjs" verify \
+              "$RELEASE_VERSION" "$RELEASE_SHA" "$CLI_INTEGRITY" \
+              "$GITHUB_WORKSPACE/release-source/github-action"
             echo 'existing=true' >> "$GITHUB_OUTPUT"
           fi
 
