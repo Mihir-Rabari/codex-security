@@ -595,7 +595,7 @@ for (const legacy of [false, true]) {
       );
       await query(
         first.environment,
-        "DELETE FROM schema_migrations WHERE version = 42",
+        "DELETE FROM schema_migrations WHERE name = 'scope severity checkpoints to each scan'",
       );
       expect(
         (
