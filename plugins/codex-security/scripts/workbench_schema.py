@@ -868,8 +868,9 @@ MIGRATIONS = (
         );
         """,
     ),
+    (42, "editable scan names", "ALTER TABLE scans ADD COLUMN name TEXT;"),
     (
-        42,
+        50,
         "preserve severity assessments per scan",
         """
         CREATE TABLE scan_severity_assessments (
@@ -909,7 +910,7 @@ MIGRATIONS = (
         """,
     ),
     (
-        43,
+        51,
         "persist composition child membership",
         """
         ALTER TABLE scans ADD COLUMN parent_scan_role TEXT
@@ -919,7 +920,7 @@ MIGRATIONS = (
         """,
     ),
     (
-        44,
+        52,
         "reuse scan severity assessments",
         """
         CREATE INDEX scan_severity_reuse ON scan_severity_assessments
@@ -927,7 +928,7 @@ MIGRATIONS = (
         """,
     ),
     (
-        45,
+        53,
         "persist scan execution sessions",
         """
         CREATE TABLE scan_execution_threads (
@@ -942,9 +943,9 @@ MIGRATIONS = (
             SELECT scan_id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;
         """,
     ),
-    (46, "recover unindexed severity assessments", ""),
-    (48, "repair stored composition membership", ""),
-    (49, "repair archived composition paths", ""),
+    (54, "recover unindexed severity assessments", ""),
+    (55, "repair stored composition membership", ""),
+    (56, "repair archived composition paths", ""),
 )
 
 
@@ -1178,9 +1179,9 @@ def apply_migrations(
                     migrate_finding_workflow_columns(connection)
                 elif version == 39:
                     migrate_finding_workflow_review_columns(connection)
-                elif version in (43, 48, 49):
+                elif version in (51, 55, 56):
                     backfill_composition_children(connection)
-                elif version == 46:
+                elif version == 54:
                     backfill_unindexed_severity_assessments(connection)
             if version not in applied:
                 connection.execute(
@@ -1326,6 +1327,13 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    move_pre_release_migration(connection, 42, 50, "preserve severity assessments per scan")
+    move_pre_release_migration(connection, 43, 51, "persist composition child membership")
+    move_pre_release_migration(connection, 44, 52, "reuse scan severity assessments")
+    move_pre_release_migration(connection, 45, 53, "persist scan execution sessions")
+    move_pre_release_migration(connection, 46, 54, "recover unindexed severity assessments")
+    move_pre_release_migration(connection, 48, 55, "repair stored composition membership")
+    move_pre_release_migration(connection, 49, 56, "repair archived composition paths")
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")

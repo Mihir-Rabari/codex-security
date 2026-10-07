@@ -238,7 +238,10 @@ export function createExecutionCodex(
   } = session.source;
   const environment: ProcessEnvironment = {
     ...environmentWithGit(
-      pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
+      pluginExecutionEnvironment(python, {
+        ...withoutCodexHome(scanEnvironment),
+        CODEX_CLI_PATH: session.source.command.command,
+      }),
       git,
     ),
     ...(externalProvider === null
@@ -321,8 +324,7 @@ export function createExecutionCodex(
       : withoutOpenAiApiKeys(environment),
   );
   if (
-    checkPermissions ||
-    (process.platform === "win32" && codexPathOverride === undefined)
+    checkPermissions || process.platform === "win32"
   ) {
     codexPathOverride ??= environment["CODEX_CLI_PATH"]!;
     sdkEnvironment = bundledCodexSdkEnvironment(

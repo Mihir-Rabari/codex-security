@@ -26,6 +26,7 @@ import {
   bedrockProcessConfiguration,
   hasCommandAuth,
   mergedCodexConfig,
+  normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   scanCyberAccessConfig,
@@ -574,11 +575,12 @@ async function startReadOnlyCodexThread(
       : resolveCodexProfile(requestedConfig);
   const source = options.environment ?? process.env;
   let providerConfig: JsonObject = {};
+  let homeExecutionConfig: JsonObject = {};
   if (preparedFactory === undefined) {
-    const mergedConfig = deepMerge(
-      await readCodexHomeConfig(source, options.signal),
-      requestedConfig ?? {},
-    );
+    const homeConfig = await readCodexHomeConfig(source, options.signal);
+    homeExecutionConfig = resolveCodexProfile(homeConfig);
+    normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
+    const mergedConfig = deepMerge(homeConfig, requestedConfig ?? {});
     const requestedSettings = resolveCodexProfile({
       ...options.config?.codexOverrides,
       profiles: mergedConfig["profiles"] ?? {},
@@ -643,6 +645,13 @@ async function startReadOnlyCodexThread(
     options.inheritedPermissions,
   );
   const sdkConfig = prepared.config;
+  if (preparedFactory === undefined) {
+    const suppliedConfig = resolveCodexProfile(options.config?.codexOverrides ?? {});
+    normalizeLegacyWindowsSandboxOverride(suppliedConfig);
+    sdkConfig["windows"] = suppliedConfig["windows"] === undefined
+      ? homeExecutionConfig["windows"] ?? sdkConfig["windows"]
+      : resolveCodexProfile(config ?? {})["windows"];
+  }
   if (commandAuth)
     sdkConfig["model_providers"] = providerConfig["model_providers"]!;
   const configOverrides = prepared.overrides;

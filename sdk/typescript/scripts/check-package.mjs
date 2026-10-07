@@ -192,6 +192,7 @@ const allowedFiles = new Set([
     "project-config",
     "project-config-schema",
     "prompt-files",
+    "provider-profile",
     "scan-modes",
     "scan-settings",
     "errors",

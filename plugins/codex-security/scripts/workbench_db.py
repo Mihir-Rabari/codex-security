@@ -2757,6 +2757,7 @@ def scan_result(
         "mode": scan["mode"],
         "model": scan["model"],
         "diffTarget": stored_diff_target(scan),
+        "name": scan["name"],
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
         "remediationAvailable": remediation_available,
@@ -3310,6 +3311,10 @@ def main() -> None:
             result = begin_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "rename-scan":
+            result = scan_history.rename_scan(
+                connection, require_scan(connection, args.scan_id), args.name
+            )
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":

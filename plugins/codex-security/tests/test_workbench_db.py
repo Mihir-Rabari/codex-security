@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     SCRIPT,
     composition_payload,
     claim_remediation_resend,
@@ -68,14 +69,6 @@ GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {
@@ -681,7 +674,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (49,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

@@ -3400,7 +3400,8 @@ export class CodexSecurity {
         const ambientHome =
           environmentValue(source.environment, "CODEX_HOME") ??
           join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
+        runtime.credentialsAvailable = await initialCredentialsAvailable(
+          source.environment,
           ambientHome,
           runtime.codexHome,
         );
@@ -4402,7 +4403,7 @@ export function scanRuntimeCodexConfig(
             : {}),
           ...(protectedCredentialHome === undefined
             ? {}
-            : { [protectedCredentialHome]: "read" }),
+            : { [protectedCredentialHome]: { ".": "deny" } }),
           ...inheritedPermissions?.filesystem,
         },
         ...(inheritedPermissions === undefined

@@ -3060,3 +3060,130 @@ process.exit(0);
     ).rejects.toThrow(error);
   });
 });
+
+describe("incoming native runtime integration", () => {
+  test.each([
+    ["default", {}, "elevated"],
+    ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
+    ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
+    ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
+    [
+      "profile",
+      {
+        profile: "selected",
+        profiles: { selected: { windows: { sandbox: "unelevated" } } },
+      },
+      "unelevated",
+    ],
+  ] as const)(
+    "keeps MCP servers disabled with %s Windows settings",
+    async (name, homeConfig, sandbox) => {
+      const home = await temporaryDirectory("codex-security-comparison-");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          ...(name === "profile" ? {} : homeConfig),
+          mcp_servers: { inherited: { command: "synthetic-inherited" } },
+        }),
+      );
+      const executable = join(
+        home,
+        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+      );
+      await copyFile(resolveCodexCommand({}).command, executable);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        TEMP: process.env["TEMP"],
+        TMP: process.env["TMP"],
+        CODEX_HOME: home,
+        CODEX_CLI_PATH: executable,
+        OPENAI_API_KEY: "synthetic-key",
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      let config: CodexOptions["config"];
+      let codexPath: string | undefined;
+      let codexEnvironment: CodexOptions["env"];
+      const startThread = observeCodexOptions(codex, (options) => {
+        config = deepMerge(options.config ?? {}, launchConfig(options.configOverrides ?? []));
+        codexPath = options.codexPathOverride;
+        codexEnvironment = options.env;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                ...(name === "profile" ? homeConfig : {}),
+                mcp_servers: {
+                  synthetic: {
+                    command: "synthetic-integration",
+                    enabled: true,
+                  },
+                },
+              },
+            },
+          },
+        );
+        expect(config?.["mcp_servers"]).toEqual({
+          synthetic: { command: "synthetic-integration", enabled: false },
+          inherited: { enabled: false },
+        });
+        expect(config?.["windows"]).toEqual({ sandbox });
+        expect(codexPath).toBe(
+          process.platform === "win32"
+            ? win32.toNamespacedPath(executable)
+            : executable,
+        );
+        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+        const effective = await runCodexCommand(
+          resolveCodexCommand(environment),
+          [
+            "-C",
+            home,
+            "-c",
+            'mcp_servers.synthetic.command="synthetic-integration"',
+            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+              "-c",
+              `mcp_servers.${name}.enabled=false`,
+            ]),
+            "mcp",
+            "list",
+            "--json",
+          ],
+          environment,
+        );
+        expect(effective.success).toBe(true);
+        expect(
+          JSON.parse(effective.stdout).map(
+            (server: { name: string; enabled: boolean }) => ({
+              name: server.name,
+              enabled: server.enabled,
+            }),
+          ),
+        ).toEqual([
+          { name: "inherited", enabled: false },
+          { name: "synthetic", enabled: false },
+        ]);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+});
+
+function observeCodexOptions(
+  codex: NonNullable<ScanComparisonOptions["codex"]>,
+  observe: (options: CodexOptions) => void,
+) {
+  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
+    this: Codex,
+    options,
+  ) {
+    observe((this as unknown as { options: CodexOptions }).options);
+    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+  });
+}

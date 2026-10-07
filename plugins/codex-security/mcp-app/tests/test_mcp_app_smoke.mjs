@@ -79,6 +79,7 @@ assert.deepEqual(
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_SURFACE",
@@ -1427,6 +1428,10 @@ try {
   const updateScanContextFromApp = toolList.result.tools.find(
     (tool) => tool.name === "update_codex_security_scan_context_from_app",
   );
+  const renameScan = toolList.result.tools.find(
+    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
+  );
+  assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
   const submit = toolList.result.tools.find(
     (tool) => tool.name === "submit_codex_security_setup",
   );
@@ -2530,6 +2535,24 @@ try {
   assertNoError(deliveredWithoutToken);
 
   const longUserContext = "Prioritize tenant isolation. ".repeat(120).trim();
+  const renamedScan = await testServer.callTool(92020, {
+    name: "rename_codex_security_scan",
+    arguments: { scanId, name: "  - Release audit  " },
+  });
+  assertNoError(renamedScan);
+  assert.deepEqual(renamedScan.result.structuredContent, {
+    scanId,
+    name: "- Release audit",
+  });
+  const reopenedScan = await testServer.callTool(92021, {
+    name: "get_codex_security_scan",
+    arguments: { scanId },
+  });
+  assertNoError(reopenedScan);
+  assert.equal(
+    reopenedScan.result.structuredContent.scan.name,
+    "- Release audit",
+  );
   const updatedContext = await testServer.callTool(92010, {
     name: "update_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },

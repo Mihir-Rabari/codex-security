@@ -80,13 +80,14 @@ EXPECTED_MIGRATIONS = [
     (39, "store dedupe checkpoint bindings in columns"),
     (40, "index finding identity and comparison history"),
     (41, "checkpoint finding severity assessments"),
-    (42, "preserve severity assessments per scan"),
-    (43, "persist composition child membership"),
-    (44, "reuse scan severity assessments"),
-    (45, "persist scan execution sessions"),
-    (46, "recover unindexed severity assessments"),
-    (48, "repair stored composition membership"),
-    (49, "repair archived composition paths"),
+    (42, "editable scan names"),
+    (50, "preserve severity assessments per scan"),
+    (51, "persist composition child membership"),
+    (52, "reuse scan severity assessments"),
+    (53, "persist scan execution sessions"),
+    (54, "recover unindexed severity assessments"),
+    (55, "repair stored composition membership"),
+    (56, "repair archived composition paths"),
 ]
 
 
@@ -638,7 +639,7 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (48,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (49,)
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
@@ -770,7 +771,7 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-@pytest.mark.parametrize("previous_version", [41, 45, 46])
+@pytest.mark.parametrize("previous_version", [41, 53, 54])
 def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
     previous_version: int,
@@ -833,12 +834,12 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             namespace["now"],
             namespace["backfill_security_targets"],
         )
-        updated = previous_version == 46 or (previous_version == 45 and indexed)
+        updated = previous_version == 54 or (previous_version == 53 and indexed)
         if updated:
             connection.execute(
                 "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
             )
-        if previous_version >= 44:
+        if previous_version >= 52:
             assert (
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
@@ -1325,7 +1326,7 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (49,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (56,)
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1969,7 +1970,7 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     with sqlite3.connect(database) as connection:
         connection.execute("DROP INDEX scans_by_composition_parent")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 51")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         connection.execute(
@@ -2616,3 +2617,61 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
             ).fetchone()
             is not None
         ) is supported
+
+
+@pytest.mark.parametrize("history", ["main", "published-composition"])
+def test_workbench_upgrades_colliding_released_migration_histories(history: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    timestamp = "2026-09-01T00:00:00Z"
+    old_versions = {50: 42, 51: 43, 52: 44, 53: 45, 54: 46, 55: 48, 56: 49}
+    historical = [
+        (old_versions.get(version, version), name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if (version <= 42 if history == "main" else version != 42)
+    ]
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        create_migration_history(connection)
+        apply_historical_migrations(connection, namespace, historical, timestamp)
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("retained-workspace", timestamp, timestamp),
+        )
+        previous = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT name, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+        current = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT name, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+        assert all(row in current for row in previous)
+        assert connection.execute("SELECT id FROM workspaces").fetchone()[0] == "retained-workspace"
+        assert {row["name"] for row in connection.execute("PRAGMA table_info(scans)")} >= {
+            "name",
+            "parent_scan_role",
+        }
+        assert (
+            connection.execute("SELECT name FROM schema_migrations WHERE version = 42").fetchone()[
+                0
+            ]
+            == "editable scan names"
+        )
+        assert (
+            connection.execute("SELECT name FROM schema_migrations WHERE version = 50").fetchone()[
+                0
+            ]
+            == "preserve severity assessments per scan"
+        )
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'scan_severity_assessments'"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'scan_execution_threads'"
+        ).fetchone()

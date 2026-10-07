@@ -7,6 +7,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
 import { gitMarkerRoot } from "./targets.js";
+import { isGitMetadataDirectory, nullIfMissingFile } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -189,8 +191,26 @@ async function discover(
   signal?.throwIfAborted();
   for (const entry of entries) {
     signal?.throwIfAborted();
-    if (entry.name.toLowerCase() === ".git") continue;
+    if (
+      (process.platform === "win32" ? entry.name.toLowerCase() : entry.name) ===
+      ".git"
+    )
+      continue;
     const path = join(directory, entry.name);
+    if (entry.name.toLowerCase() === ".git") {
+      const marker = await stat(join(directory, ".git"), {
+        bigint: true,
+      }).catch(nullIfMissingFile);
+      if (marker !== null) {
+        const candidate = await lstat(path, { bigint: true });
+        if (candidate.dev === marker.dev && candidate.ino === marker.ino) {
+          continue;
+        }
+      }
+      if (entry.isDirectory() && (await isGitMetadataDirectory(path, signal))) {
+        continue;
+      }
+    }
     if (entry.isDirectory()) {
       for (const document of await discover(path, signal)) {
         documents.push(document);

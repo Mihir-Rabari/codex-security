@@ -10,6 +10,7 @@ import {
   type JsonObject,
   codexConfigOverrides,
   scanCompositionOverrides,
+  inlineToml,
   resolveCodexProfile,
   scanModelConfiguration,
   scanModelProvider,
@@ -34,6 +35,16 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 
 afterEach(cleanup);
+
+test("inline Codex overrides reject null values instead of emitting invalid TOML", () => {
+  for (const value of [null, { args: null }, { args: ["fixture", null] }]) {
+    expect(() => inlineToml(value)).toThrow(ConfigurationError);
+  }
+  const provider = { fixture: { args: ["fixture", 4], enabled: true } };
+  expect(parse(`model_providers = ${inlineToml(provider)}`)).toEqual({
+    model_providers: provider,
+  });
+});
 
 function runPinnedCodex(
   codexHome: string,
@@ -373,7 +384,7 @@ describe("Codex configuration", () => {
     });
 
     expect(merged).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       profiles: {
         elevated: {
           features: { elevated_windows_sandbox: true },
@@ -448,7 +459,7 @@ describe("Codex configuration", () => {
     const merged = await mergedCodexConfig({});
 
     expect(scanRuntimeCodexConfig(merged)).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
       default_permissions: "codex_security_scan",
       permissions: {
         codex_security_scan: {
@@ -640,9 +651,12 @@ describe("Codex configuration", () => {
               details,
             )) ||
           (process.platform === "win32" &&
-            details.includes(
+            (details.includes(
               "Restricted read-only access requires the elevated Windows sandbox backend",
-            ))
+            ) ||
+              details.includes(
+                "elevated Windows sandbox requires effective `:root` read access",
+              )))
         ) {
           expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
             0,
@@ -696,7 +710,7 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, await mergedCodexConfig({}));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
+      windows: { sandbox: "elevated" },
     });
 
     const result = runPinnedCodex(root, ["features", "list"]);
@@ -783,7 +797,7 @@ describe("Codex configuration", () => {
       model_reasoning_summary: "detailed",
       show_raw_agent_reasoning: true,
       windows: {
-        sandbox: "unelevated",
+        sandbox: "elevated",
       },
     });
   });
