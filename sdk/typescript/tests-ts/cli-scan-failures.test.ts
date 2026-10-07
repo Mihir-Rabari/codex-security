@@ -37,6 +37,7 @@ function failingScan(message: string, onRun?: () => void) {
       onRun?.();
       throw new CodexSecurityError(message);
     },
+    validate: async () => fakeResult(),
     preflight: async () => fakePreflight(),
     close: async () => {},
   });
