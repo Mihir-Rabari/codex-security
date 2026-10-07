@@ -2460,7 +2460,7 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
                 historical.append(
                     (42 if name == "persist repository identities" else version, name, sql)
                 )
-            apply_historical_migrations(connection, namespace, historical, "synthetic-original")
+            apply_historical_migrations(connection, historical, "synthetic-original")
         else:
             namespace["apply_schema_migrations"](
                 connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
