@@ -8848,7 +8848,15 @@ async function snapshotPatchTree(
     await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
     const entries = await dependencies.runRepositoryCommand(
       "git",
-      ["ls-files", "--stage", "--full-name", "-z"],
+      [
+        "--no-literal-pathspecs",
+        "ls-files",
+        "--stage",
+        "--full-name",
+        "-z",
+        "--",
+        ":/",
+      ],
       repository,
       { trim: false },
     );
