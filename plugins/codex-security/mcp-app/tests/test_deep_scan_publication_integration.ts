@@ -328,37 +328,82 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
   });
 }
 
-test("legacy discovery completion permits the first parent draft", async (t) => {
-  const fixture = await createFixture(t);
-  const { run, store, call } = fixture;
-  await commitReducers(fixture, [1, 2], [highId, lowId]);
-  const discovery = path.join(run.scanDir, "artifacts", "02_discovery");
-  await mkdir(discovery, { recursive: true });
-  await writeFile(path.join(discovery, "in_scope_files.txt"), "fixture.py\n");
-  await writeFile(path.join(discovery, "candidate_ledger.jsonl"), "");
-  const manifestPath = path.join(run.scanDir, "coordinator-manifest.json");
-  await writeFile(manifestPath, "{}\n");
-  const terminal = await store.finish({
-    scanId: run.scanId,
-    reason: "saturated",
-    manifestPath,
-    omittedWorkerIds: [],
-  });
-  assert.equal(terminal.status, "succeeded");
-  assert.equal(terminal.coordinatorGeneration, 1);
-  assert.equal(terminal.manifestPath, manifestPath);
-  assertSuccess(
-    await call("record_codex_security_scan_draft", {
+for (const outputFailure of [false, true]) {
+  test(`legacy discovery parent ${outputFailure ? "retains failure after an output write error" : "retains progress before first completion"}`, async (t) => {
+    const fixture = await createFixture(t);
+    const { run, store, call, runWorkbench } = fixture;
+    await commitReducers(fixture, [1, 2], [highId, lowId]);
+    const discovery = path.join(run.scanDir, "artifacts", "02_discovery");
+    await mkdir(discovery, { recursive: true });
+    await writeFile(path.join(discovery, "in_scope_files.txt"), "fixture.py\n");
+    await writeFile(path.join(discovery, "candidate_ledger.jsonl"), "");
+    const manifestPath = path.join(run.scanDir, "coordinator-manifest.json");
+    await writeFile(manifestPath, "{}\n");
+    const terminal = await store.finish({
       scanId: run.scanId,
-      complete: true,
-      findings: [],
-      coverage,
-    }),
-  );
-  assertSuccess(
-    await call("complete_codex_security_scan", { scanId: run.scanId }),
-  );
-});
+      reason: "saturated",
+      manifestPath,
+      omittedWorkerIds: [],
+    });
+    assert.equal(terminal.status, "succeeded");
+    assert.equal(terminal.coordinatorGeneration, 1);
+    assert.equal(terminal.manifestPath, manifestPath);
+    if (!outputFailure) {
+      assertSuccess(
+        await call(
+          "record_codex_security_scan_draft",
+          partial(run, "legacy-progress"),
+        ),
+      );
+      const progress = await checkpoints(run);
+      assert.ok(Object.keys(progress).length > 0);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /incomplete/,
+      );
+      assert.deepEqual(await checkpoints(run), progress);
+    }
+    assertSuccess(
+      await call("record_codex_security_scan_draft", {
+        scanId: run.scanId,
+        complete: true,
+        findings: [],
+        coverage,
+      }),
+    );
+    if (outputFailure) {
+      const report = path.join(run.scanDir, "report.html");
+      await mkdir(report);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /report\.html/,
+      );
+      await rm(report, { recursive: true });
+      const context = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+      assert.equal(
+        (context.scan as { progress: { status: string } }).progress.status,
+        "failed",
+      );
+      const interrupted = await snapshot(run);
+      assertToolError(
+        await call("record_codex_security_scan_draft", {
+          ...partial(run, "late-legacy-draft"),
+          complete: true,
+          threatModel: { summary: "Late replacement" },
+        }),
+      );
+      assert.deepEqual(await snapshot(run), interrupted);
+      assertToolError(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+        /running/,
+      );
+    } else {
+      assertSuccess(
+        await call("complete_codex_security_scan", { scanId: run.scanId }),
+      );
+    }
+  });
+}
 
 for (const complete of [false, true]) {
   test(`legacy terminal aggregate rejects late public drafts with complete=${complete}`, async (t) => {

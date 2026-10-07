@@ -2411,9 +2411,8 @@ def _require_current_deep_publication(
     # Legacy discovery-only runs still need a parent draft. Once finish selects
     # the canonical parent, only completion may replay it.
     if publication is None:
-        if draft["manifest"]["scan"].get("complete") is False or (
-            run["status"] != "running"
-            and run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
         ):
             raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
         return
