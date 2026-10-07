@@ -192,10 +192,11 @@ async function readTargets(
         signal,
       );
     // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
-    const compact = requestedId
-      .replace(/^urn:uuid:/, "")
-      .replace(/^\{+|\}+$/g, "")
-      .replaceAll("-", "");
+    const compact = trimBoundary(
+      requestedId.replace(/^urn:uuid:/, ""),
+      "{",
+      "}",
+    ).replaceAll("-", "");
     if (/^[0-9a-f]{32}$/i.test(compact)) {
       const id = compact
         .toLowerCase()
@@ -371,6 +372,18 @@ function repositoryOrigin(remote: string | null): string | null {
     host = remote.slice(0, colon).split("@").at(-1)!;
     path = remote.slice(colon + 1);
   }
-  path = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  path = trimBoundary(path, "/", "/").replace(/\.git$/, "");
   return host && path ? JSON.stringify([host.toLowerCase(), path]) : null;
+}
+
+function trimBoundary(
+  value: string,
+  leading: string,
+  trailing: string,
+): string {
+  let start = 0;
+  let end = value.length;
+  while (value[start] === leading) start++;
+  while (end > start && value[end - 1] === trailing) end--;
+  return value.slice(start, end);
 }

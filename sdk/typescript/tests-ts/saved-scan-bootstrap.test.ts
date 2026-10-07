@@ -253,6 +253,7 @@ test("saved-scan bootstrap supports IDs, prefixes and latest and persists one du
   for (const requestedId of [
     f.first.scanId.replaceAll("-", ""),
     `{${f.first.scanId.toUpperCase()}}`,
+    `{{${f.first.scanId}}}`,
     `urn:uuid:${f.first.scanId}`,
     "latest",
   ]) {
@@ -287,6 +288,9 @@ test("bootstrap fails before Python for ambiguous, absent, malformed and changed
   await expect(savedScanWorkbench("ffffffff", options)).rejects.toThrow(
     "not found",
   );
+  await expect(
+    savedScanWorkbench(f.first.scanId + "}".repeat(100_000) + "x", options),
+  ).rejects.toThrow("not found");
   const missing = join(f.root, "missing-state");
   await expect(
     savedScanWorkbench(f.first.scanId, {
@@ -737,6 +741,7 @@ connection.close()
 `;
     execFileSync(f.python, [
       "-I",
+      "-B",
       "-c",
       script,
       join(PLUGIN_ROOT, "scripts"),
