@@ -2073,7 +2073,7 @@ export async function main(
         await history(async () => {
           const findings = await listRepositoryFindings(
             dependencies.runWorkbench,
-            { repository },
+            { repository: requestedRepository },
           );
           if (findings === undefined) {
             throw new CodexSecurityError(

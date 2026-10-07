@@ -72,13 +72,7 @@ describe("CLI workbench", () => {
         ).toBe(0);
         const requested = preserveSpelling ? alias : canonical;
         expect(calls).toEqual([
-          [
-            "list-global-findings",
-            "--repository",
-            requested,
-            "--status",
-            "open",
-          ],
+          ["list-global-findings", "--repository", alias, "--status", "open"],
         ]);
         expect(JSON.parse(stdout.text())).toEqual({
           repository: requested,

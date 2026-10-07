@@ -24,6 +24,7 @@ sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 import workbench_native_indexes as indexes
 import workbench_target_state as state
+import workbench_target as target_module
 import workbench_feedback as feedback_module
 import workbench_db as workbench
 import workbench_scan_start as scan_start
@@ -259,6 +260,7 @@ with ExitStack() as stack:
             st_mode=stat.S_IFDIR, st_dev=7, st_ino=inode, st_birthtime_ns=birth
         )
         records = {
+            str(main): directory(18, 100), str(linked): directory(19, 100),
             str(common): directory(20, 100), str(objects): directory(21, 200),
             str(admin): directory(22, 300), str(admin.parent): directory(24, 300),
             str(linked / ".git"): SimpleNamespace(st_mode=stat.S_IFREG, st_dev=7, st_ino=25),
@@ -273,6 +275,8 @@ with ExitStack() as stack:
                 return b"worktree " + os.fsencode(active["root"]) + b"\0\0" if active["nul"] else None
             if arguments == config_command:
                 return active["config"]
+            if arguments == ("rev-parse", "--show-prefix"):
+                return b"\n"
             paths_by_command = {
                 ("rev-parse", "--show-toplevel"): active["root"],
                 ("rev-parse", "--path-format=absolute", "--git-common-dir"): common,
@@ -281,6 +285,9 @@ with ExitStack() as stack:
             }
             value = paths_by_command.get(arguments)
             return os.fsencode(value) + b"\n" if value is not None else None
+        def git_command(target, *arguments, **kwargs):
+            output = git_bytes(target, *arguments)
+            return SimpleNamespace(returncode=0 if output is not None else 1, stdout=output or b"")
         primary = root / "primary-checkout"
         def file_primary(configuration, selected_root=primary, forward=common):
             active.update(root=selected_root, gitdir=common, nul=False, config=configuration)
@@ -296,8 +303,8 @@ with ExitStack() as stack:
             except KeyError:
                 raise FileNotFoundError(errno.ENOENT, "Synthetic missing metadata", str(path)) from None
         # Keep directory checks inside the metadata fixture on every supported Python.
-        with patch.object(state, "git_bytes", git_bytes), \
-             patch.object(os.path, "realpath", side_effect=os.path.abspath), \
+        with patch.object(target_module, "git_command", git_command), \
+             patch.object(os.path, "realpath", side_effect=lambda path, **kwargs: os.path.abspath(path)), \
              patch.object(Path, "stat", recorded_stat), \
              patch.object(Path, "lstat", recorded_stat), \
              patch.object(Path, "is_dir", lambda path, *a, **k: stat.S_ISDIR(records[str(path)].st_mode)), \

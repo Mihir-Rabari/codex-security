@@ -625,6 +625,12 @@ class RepositoryIdentityCache:
     def for_path(self, target_path: str) -> RepositoryTargetState:
         row = self.targets_by_path.get(target_path)
         if row is None:
+            try:
+                canonical = str(Path(target_path).resolve())
+            except (OSError, RuntimeError):
+                canonical = None
+            row = self.targets_by_path.get(canonical)
+        if row is None:
             row = next(
                 (
                     target
