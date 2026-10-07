@@ -847,8 +847,9 @@ def test_newer_outcome_archives_owned_gap(
 
 @pytest.mark.parametrize("receipt", ["none", "valid", "missing", "unsafe", "null"])
 @pytest.mark.parametrize("checkpoint", [False, True])
+@pytest.mark.parametrize("worker_deferred", [[], None, 1, {}, "malformed"])
 def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
-    tmp_path: Path, generic_review_recovery, receipt: str, checkpoint: bool
+    tmp_path: Path, generic_review_recovery, receipt: str, checkpoint: bool, worker_deferred
 ) -> None:
     module, pending, terminal, binding = generic_review_recovery
     original = pending["coverage"]["deferred"][0]
@@ -860,6 +861,7 @@ def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
     )
     write_saved_parent(tmp_path, pending, 100)
     terminal["coverage"].pop("resolvedDeferred")
+    terminal["coverage"]["deferred"] = worker_deferred
     refs = {
         "none": [],
         "valid": ["artifacts/review.txt"],

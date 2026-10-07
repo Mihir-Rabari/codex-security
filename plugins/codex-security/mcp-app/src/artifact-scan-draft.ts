@@ -2718,6 +2718,7 @@ function normalizeCoverageEntries(
       typeof item.candidateId === "string" ? [item.candidateId] : [],
     ),
   );
+  const assignedDeferredIds = new Set<string>();
   const normalizedDeferred = deferred.map((item) => {
     item = normalizeLegacyCandidateEntry(item);
     const linked = Array.isArray(item.surfaceIds)
@@ -2730,22 +2731,27 @@ function normalizeCoverageEntries(
           ),
         }
       : item;
-    if (typeof item.id === "string") return linked;
+    if (typeof item.id === "string" && !assignedDeferredIds.has(item.id)) {
+      assignedDeferredIds.add(item.id);
+      return linked;
+    }
 
     const candidateId = item.candidateId;
     const baseId =
-      typeof candidateId === "string"
-        ? candidateId
-        : `deferred-${createHash("sha256")
-            .update(
-              JSON.stringify([
-                item.reason,
-                item.paths ?? [],
-                item.surfaceIds ?? [],
-              ]),
-            )
-            .digest("hex")
-            .slice(0, 16)}`;
+      typeof item.id === "string"
+        ? item.id
+        : typeof candidateId === "string"
+          ? candidateId
+          : `deferred-${createHash("sha256")
+              .update(
+                JSON.stringify([
+                  item.reason,
+                  item.paths ?? [],
+                  item.surfaceIds ?? [],
+                ]),
+              )
+              .digest("hex")
+              .slice(0, 16)}`;
     let id = baseId;
     let suffix = 2;
     while (
@@ -2756,6 +2762,7 @@ function normalizeCoverageEntries(
       suffix += 1;
     }
     deferredIds.add(id);
+    assignedDeferredIds.add(id);
     return { ...linked, id };
   });
   return {
@@ -2805,17 +2812,23 @@ function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
       typeof item.candidateId === "string" ? [item.candidateId] : [],
     ),
   );
+  const assignedIds = new Set<string>();
   return rows.map((item) => {
-    if (typeof item.id === "string") return item;
+    if (typeof item.id === "string" && !assignedIds.has(item.id)) {
+      assignedIds.add(item.id);
+      return item;
+    }
 
     const candidateId = item.candidateId;
     const baseId =
-      typeof candidateId === "string"
-        ? candidateId
-        : `deferred-${createHash("sha256")
-            .update(JSON.stringify(item))
-            .digest("hex")
-            .slice(0, 16)}`;
+      typeof item.id === "string"
+        ? item.id
+        : typeof candidateId === "string"
+          ? candidateId
+          : `deferred-${createHash("sha256")
+              .update(JSON.stringify(item))
+              .digest("hex")
+              .slice(0, 16)}`;
     let id = baseId;
     let suffix = 2;
     while (
@@ -2826,6 +2839,7 @@ function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
       suffix += 1;
     }
     ids.add(id);
+    assignedIds.add(id);
     return { ...item, id };
   });
 }

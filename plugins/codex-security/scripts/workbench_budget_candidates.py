@@ -50,6 +50,8 @@ def recover_candidate_receipts(
     parent = copy.deepcopy(parent)
     if source is not None:
         coverage = parent["coverage"]
+        if not isinstance(coverage.get("deferred"), list):
+            coverage["deferred"] = []
         for index, row in enumerate(coverage["surfaces"]):
             if not isinstance(row, dict) or row.get("disposition") not in (
                 "rejected",

@@ -592,3 +592,48 @@ for (const mode of ["standard", "diff"] as const) {
     }
   }
 }
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const duplicateId of [false, true]) {
+    test(`replays owner-distinct deferred rows in ${mode} (duplicate ID: ${duplicateId})`, async (t) => {
+      const f = await fixture(t, mode);
+      const original = {
+        id: "shared-gap",
+        candidateId: "candidate-a",
+        sourceWorkerId: "worker-a",
+        reason: "Original worker source proof remains.",
+        candidate: { evidence: "Original candidate evidence." },
+      };
+      const incoming = {
+        id: duplicateId ? original.id : "independent-gap",
+        candidateId: "candidate-b",
+        sourceWorkerId: "worker-b",
+        reason: "Independent worker source proof remains.",
+        candidate: { evidence: "Independent candidate evidence." },
+      };
+      await f.write(f.draft({ deferred: [original] }));
+      await f.write(f.draft({ deferred: [incoming] }));
+      const saved = await f.read();
+      assert.equal(saved.deferred.length, 2);
+      assert.equal(
+        new Set(saved.deferred.map((row: { id: string }) => row.id)).size,
+        2,
+      );
+      for (const row of [original, incoming]) {
+        const restored = saved.deferred.find(
+          (item: { sourceWorkerId: string }) =>
+            item.sourceWorkerId === row.sourceWorkerId,
+        );
+        assert.deepEqual({ ...restored, id: row.id }, row);
+      }
+      await f.write(
+        f.draft({
+          surfaces: saved.surfaces,
+          deferred: saved.deferred,
+          explicitExclusions: saved.explicitExclusions,
+        }),
+      );
+      assert.deepEqual((await f.read()).deferred, saved.deferred);
+    });
+  }
+}
