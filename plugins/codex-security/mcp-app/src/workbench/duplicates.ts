@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { parseJson } from "../helpers/json";
-import { transaction } from "./findings";
+import { transaction } from "./transaction";
 import { requireSqliteText } from "./database";
 
 export interface DedupeGroup {
