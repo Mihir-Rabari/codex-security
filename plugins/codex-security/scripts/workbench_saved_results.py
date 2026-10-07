@@ -2387,8 +2387,9 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def _require_current_deep_publication(
-    db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
 ) -> None:
+    scan_id = scan["id"]
     run = connection.execute(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -2407,13 +2408,14 @@ def _require_current_deep_publication(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    # Generation-one runs predate host publication metadata. Keep their existing
-    # draft path; adopted coordinators must carry their generation and selection.
+    # Legacy discovery-only runs still need a parent draft. Once finish selects
+    # the canonical parent, only completion may replay it.
     if publication is None:
-        if draft["manifest"]["scan"].get("complete") is False:
-            raise SystemExit(
-                "Deep Scan is terminal; incomplete progress cannot replace its publication."
-            )
+        if draft["manifest"]["scan"].get("complete") is False or (
+            run["status"] != "running"
+            and run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
         return
 
     # Match the durable reducer sequence used by coordinator recovery.
@@ -2468,7 +2470,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         if scan["mode"] == "deep":
-            _require_current_deep_publication(db, connection, scan_id, draft)
+            _require_current_deep_publication(db, connection, scan, draft)
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
