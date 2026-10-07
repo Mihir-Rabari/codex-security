@@ -2641,6 +2641,7 @@ async function executeWorkbench(
     : [workbenchScriptPath(), ...workbenchArgs];
   const execution = execFileAsync(pythonCommand, pythonArgs, {
     cwd: PLUGIN_ROOT,
+    windowsHide: true,
     env: stateDir
       ? { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir }
       : process.env,
