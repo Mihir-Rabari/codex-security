@@ -690,14 +690,38 @@ function reconcileScanDraft(
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );
-      const inferredMatches = findingIdentitySchema.safeParse(
-        (finding.provenance as JsonObject).preservedIdentity,
+      const preservedIdentity = (finding.provenance as JsonObject)
+        .preservedIdentity;
+      const generatedIdentity = findingIdentitySchema.safeParse(
+        preservedIdentity,
       ).success
-        ? matches.filter(
-            (current) =>
-              current.identity === undefined &&
-              containsSavedFinding(current, finding),
-          )
+        ? preservedIdentity
+        : matches.some((current) => current.identity !== undefined)
+          ? undefined
+          : finding.identity;
+      const generated = identifyFindings(result.findings);
+      const inferredMatches = generatedIdentity
+        ? matches.filter((current) => {
+            if (current.identity !== undefined) return false;
+            if (containsSavedFinding(current, finding)) return true;
+            const owner = (current.provenance as JsonObject).workerId;
+            const previousOwner = (finding.provenance as JsonObject).workerId;
+            return (
+              scanFindingIdentity(
+                generated[result.findings.indexOf(current)]!,
+              ) ===
+                scanFindingIdentity({
+                  ...finding,
+                  identity: generatedIdentity,
+                }) &&
+              JSON.stringify(findingLocationKeys(current)) ===
+                JSON.stringify(findingLocationKeys(finding)) &&
+              (typeof owner === "string" && owner ? owner : undefined) ===
+                (typeof previousOwner === "string" && previousOwner
+                  ? previousOwner
+                  : undefined)
+            );
+          })
         : [];
       if (inferredMatches.length > 0) {
         for (const current of inferredMatches)
@@ -1660,7 +1684,13 @@ function containsSavedFinding(
     if (isObject(original.provenance))
       delete original.provenance.preservedIdentity;
   }
-  return containsSavedValue(current, original);
+  return (
+    containsSavedValue(current, original) ||
+    (Array.isArray((current.provenance as JsonObject)?.previousFindings) &&
+      ((current.provenance as JsonObject).previousFindings as unknown[]).some(
+        (finding) => containsSavedValue(finding, original),
+      ))
+  );
 }
 
 function containsSavedValue(current: unknown, previous: unknown): boolean {
@@ -2294,7 +2324,7 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+function identifyFindings(findings: JsonObject[]): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
     const candidateId = (finding.extensions as JsonObject | undefined)
@@ -2315,7 +2345,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     return anchor;
   });
 
-  const identified: JsonObject[] = findings.map((finding, index) => {
+  return findings.map((finding, index) => {
     if (finding.identity !== undefined) return { ...finding };
     const identity: JsonObject = { anchor: anchors[index] };
     const extensions = finding.extensions as JsonObject | undefined;
@@ -2338,6 +2368,25 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       identity,
     };
   });
+}
+
+function findingLocationKeys(finding: JsonObject): string[] {
+  return (finding.locations as JsonObject[])
+    .map((location) =>
+      JSON.stringify([
+        location.path,
+        location.startLine,
+        location.endLine ?? location.startLine,
+      ]),
+    )
+    .sort();
+}
+
+function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+  const identified = identifyFindings(findings);
+  const anchors = identified.map(
+    (finding) => (finding.identity as JsonObject).anchor,
+  );
   // Keep generated siblings and independent worker findings when they reuse an ID.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
@@ -2354,15 +2403,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
           finding.ruleId,
           anchors[index],
           candidate,
-          (finding.locations as JsonObject[])
-            .map((location) =>
-              JSON.stringify([
-                location.path,
-                location.startLine,
-                location.endLine ?? location.startLine,
-              ]),
-            )
-            .sort(),
+          findingLocationKeys(finding),
         ])
       : undefined;
   });
