@@ -59,6 +59,8 @@ const caseSensitiveWindowsHistoryProbe = [
   "class WindowsPath(PureWindowsPath):",
   "    def expanduser(self):",
   "        return self",
+  "    def absolute(self):",
+  "        return self",
   "    def resolve(self, strict=False):",
   "        return self",
   "history.Path = WindowsPath",
