@@ -2190,16 +2190,10 @@ async function testReducerAttemptContext() {
         },
       });
       const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-      const prefix =
-        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
-      const encoded = invocation.argv.find((arg: string) =>
-        arg.startsWith(prefix),
-      );
-      assert.ok(encoded);
-      assert.deepEqual(
-        JSON.parse(JSON.parse(encoded.slice(prefix.length))),
-        deepReducer,
-      );
+      assertConfigOverrides(invocation.argv, {
+        "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
+          JSON.stringify(deepReducer),
+      });
     }
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
