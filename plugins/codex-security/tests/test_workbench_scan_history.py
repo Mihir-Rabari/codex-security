@@ -2050,3 +2050,73 @@ def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
         else:
             with pytest.raises(SystemExit, match="same repository"):
                 compare()
+
+
+@pytest.mark.parametrize("other_checkout", ("linked", "clone", "different-scope"))
+def test_originless_linked_comparison_without_birth_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_checkout: str
+) -> None:
+    import argparse
+
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_scan_history as history
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    (repository / "src").mkdir()
+    linked = tmp_path / "linked"
+    if other_checkout == "clone":
+        subprocess.run(["git", "clone", "-q", str(repository), str(linked)], check=True)
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=linked, check=True)
+    else:
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "fixture-linked", str(linked)],
+            cwd=repository,
+            check=True,
+        )
+    (linked / "src").mkdir(exist_ok=True)
+    state = tmp_path / "state"
+    before_target = repository / "src" if other_checkout == "different-scope" else repository
+    before = create_cli_scan(state, tmp_path / "results", before_target, target_revision=revision)
+    after = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("UPDATE scans SET repository_generation = NULL")
+        connection.execute("UPDATE security_targets SET repository_identity = NULL")
+        connection.commit()
+        monkeypatch.setattr(target_state, "_repository_birth_time_ns", lambda *_: None)
+        args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
+        require_scan = lambda db, id: db.execute(
+            "SELECT * FROM scans WHERE id = ?", (id,)
+        ).fetchone()
+        read_coverage = lambda row: json.loads(
+            (Path(row["scan_dir"]) / "coverage.json").read_text()
+        )
+        if other_checkout != "linked":
+            with pytest.raises(SystemExit, match="same repository"):
+                history.compare_scans(
+                    connection, args, require_scan=require_scan, read_coverage=read_coverage
+                )
+            return
+        result = history.compare_scans(
+            connection, args, require_scan=require_scan, read_coverage=read_coverage
+        )
+        assert result["afterScanId"] == after["scanId"]
+        before_id = connection.execute(
+            "SELECT id FROM finding_occurrences WHERE scan_id = ?", (before["scanId"],)
+        ).fetchone()[0]
+        after_id = connection.execute(
+            "SELECT id FROM finding_occurrences WHERE scan_id = ?", (after["scanId"],)
+        ).fetchone()[0]
+        args.matches_json = json.dumps(
+            {"matches": [confirmed_match(before_id, after_id)], "uncertain": []}
+        )
+        saved = history.save_scan_comparison(
+            connection,
+            args,
+            now=lambda: "2026-10-07T00:00:00Z",
+            require_scan=require_scan,
+            read_coverage=read_coverage,
+        )
+        assert saved["afterScanId"] == after["scanId"]

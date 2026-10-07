@@ -292,3 +292,66 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
     assert second["openFindingsCount"] == 1
     assert second["scanCount"] == 1
+
+
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize("same_target", (False, True))
+def test_native_completion_keeps_same_target_legacy_triage_without_matching(
+    tmp_path: Path, legacy: bool, same_target: bool
+) -> None:
+    from test_workbench_scan_history import create_cli_scan
+    from workbench_test_support import initialize_git_repository
+
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    first = create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        identity_anchor="same-stable-finding",
+        target_revision=revision,
+    )
+    first = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT repository_generation FROM scans WHERE id = ?", (first["scanId"],)
+            ).fetchone()[0]
+            is not None
+        )
+        if legacy:
+            connection.execute(
+                "UPDATE scans SET repository_generation = NULL WHERE id = ?",
+                (first["scanId"],),
+            )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        str(first["findings"][0]["occurrenceId"]),
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    next_target = repository
+    if not same_target:
+        next_target = tmp_path / "other"
+        revision = initialize_git_repository(next_target)
+    create_cli_scan(
+        state,
+        tmp_path / "results",
+        next_target,
+        identity_anchor="same-stable-finding",
+        target_revision=revision,
+    )
+    findings = run_workbench(state, "list-global-findings")["findings"]
+    assert len(findings) == (1 if same_target else 2)
+    current = next(row for row in findings if row["targetId"] == stable_target_id(next_target))
+    assert current["status"] == ("closed" if same_target else "open")
+    assert current["occurrenceCount"] == (2 if same_target else 1)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)

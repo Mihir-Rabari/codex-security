@@ -252,17 +252,34 @@ def _identity_digest(material: str) -> str:
     )
 
 
-def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | None:
-    target = Path(target)
+def _repository_worktree_location(target: Path) -> tuple[Path, str] | None:
     common_directory = _git_path(target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if common_directory is None:
-        return None
     worktree = _repository_worktree(target)
-    if worktree is None:
+    if common_directory is None or worktree is None:
         return None
     worktree_root, relative = worktree
     if not _registered_worktree(target, worktree_root, common_directory):
         return None
+    return common_directory, relative
+
+
+def same_repository_worktree(before: Path, after: Path) -> bool:
+    before_location = _repository_worktree_location(before)
+    after_location = _repository_worktree_location(after)
+    return (
+        before_location is not None
+        and after_location is not None
+        and before_location[1] == after_location[1]
+        and _same_existing_path(before_location[0], after_location[0])
+    )
+
+
+def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | None:
+    target = Path(target)
+    location = _repository_worktree_location(target)
+    if location is None:
+        return None
+    common_directory, relative = location
     object_directory = _git_path(
         target, "rev-parse", "--path-format=absolute", "--git-path", "objects"
     )

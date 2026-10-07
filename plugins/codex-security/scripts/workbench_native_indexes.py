@@ -109,6 +109,28 @@ def _indexed_findings(
     def generation_sql(alias: str) -> str:
         return f"{alias}.repository_generation" if identities.supports_generation else "NULL"
 
+    legacy_generations = (
+        {
+            row["target_id"]: row["generation"]
+            for row in connection.execute(
+                "SELECT target_id, MIN(repository_generation) AS generation FROM scans "
+                "WHERE repository_generation IS NOT NULL GROUP BY target_id "
+                "HAVING COUNT(DISTINCT repository_generation) = 1"
+            )
+        }
+        if identities.supports_generation
+        else {}
+    )
+
+    def repository_group(scan: sqlite3.Row | dict) -> tuple[str, str]:
+        identity = scan_repository_group(scan)
+        generation = legacy_generations.get(scan["target_id"])
+        return (
+            ("repository", generation)
+            if identity[0] == "target" and generation is not None
+            else identity
+        )
+
     target_filter, target_values = scope_sql("scans")
     before_filter, before_values = scope_sql("before_scans")
     after_filter, after_values = scope_sql("after_scans")
@@ -138,13 +160,13 @@ def _indexed_findings(
         """,
         (*before_values, *after_values),
     ):
-        before_repository = scan_repository_group(
+        before_repository = repository_group(
             {
                 "target_id": match["before_target_id"],
                 "repository_generation": match["before_generation"],
             }
         )
-        after_repository = scan_repository_group(
+        after_repository = repository_group(
             {
                 "target_id": match["after_target_id"],
                 "repository_generation": match["after_generation"],
@@ -235,7 +257,7 @@ def _indexed_findings(
         grouped.setdefault(
             group(
                 (
-                    scan_repository_group(row),
+                    repository_group(row),
                     row["finding_id"],
                 )
             ),
