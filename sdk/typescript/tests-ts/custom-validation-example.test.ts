@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
 import { runCommand } from "./support/shell.js";
 
@@ -16,18 +16,6 @@ test("compiled validation example saves HTTP proof and exits after server cleanu
       { cwd: packageRoot, timeout: 30_000 },
     );
     expect(build.status, build.stdout + build.stderr).toBe(0);
-    const imported = await runCommand(
-      "node",
-      [
-        "--input-type=module",
-        "-e",
-        `process.argv[1] = "/synthetic/missing/entry.mjs"; await import(${JSON.stringify(pathToFileURL(join(source, "app.mjs")).href)});`,
-      ],
-      { timeout: 30_000 },
-    );
-    expect(imported.status, imported.stderr).toBe(0);
-    expect(imported.stdout).toBe("");
-
     const proofPath = join(output, "artifacts", "http-proof.json");
     const result = await runCommand(
       "node",

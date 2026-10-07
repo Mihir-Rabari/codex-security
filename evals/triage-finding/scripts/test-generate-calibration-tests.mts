@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
@@ -13,13 +14,8 @@ const generator = path.join(
   "generate-calibration-tests.mts",
 );
 const dataset = path.join(evalDir, "datasets", "triage-calibration-seed.json");
-import {
-  selectedVariants,
-  variantCaseId,
-  inputId,
-  targetRepoPath,
-} from "./generate-calibration-tests.mts";
-import { plannedJobs } from "./hydrate-calibration-repos.mts";
+const require = createRequire(import.meta.url);
+const { parse } = createRequire(require.resolve("promptfoo"))("yaml");
 const trackedTests = path.join(evalDir, "tests", "calibration-oss.yaml");
 
 const tmpDir = fs.mkdtempSync(
@@ -53,25 +49,20 @@ assert.equal(
   trackedYaml,
   "tracked calibration tests are stale; run calibration:generate",
 );
-const variants = selectedVariants(
-  JSON.parse(fs.readFileSync(dataset, "utf8")),
-  {},
-);
-const ids = variants.map(({ testCase, variant }) =>
-  variantCaseId(testCase, variant),
-);
-assert.equal(new Set(ids).size, variants.length);
-for (const { testCase, variant } of variants) {
-  const id = variantCaseId(testCase, variant);
+const tests: {
+  metadata: Record<string, string>;
+  vars: Record<string, string>;
+}[] = parse(generatedYaml);
+const ids = tests.map((test) => test.vars.case_id);
+assert.equal(ids.length, 16);
+assert.equal(new Set(ids).size, ids.length);
+for (const test of tests) {
+  const id = test.vars.case_id;
   assert.match(id, /^case-[a-f0-9]{16}$/);
-  assert.equal(inputId(testCase, variant), id);
-  assert.equal(path.basename(targetRepoPath("/repos", testCase, variant)), id);
-  assert.ok(generatedYaml.includes(`case_id: ${id}`));
-}
-for (const job of plannedJobs(JSON.parse(fs.readFileSync(dataset, "utf8")), {
-  repoRoot: "/repos",
-})) {
-  assert.ok(ids.includes(path.basename(job.targetDir)));
+  assert.equal(test.metadata.case_id, id);
+  assert.equal(test.vars.expected_ids, id);
+  assert.equal(path.basename(test.vars.target_repo), id);
+  assert.ok(test.vars.finding_input.includes(`input_id: ${id}`));
 }
 assert.doesNotMatch(
   generatedYaml,
@@ -109,16 +100,15 @@ const smokeYaml = fs.readFileSync(generatedSmoke, "utf8");
 assert.equal((smokeYaml.match(/^- description:/gm) || []).length, 1);
 assert.match(smokeYaml, /calibration_variant: vulnerable/);
 assert.doesNotMatch(smokeYaml, /calibration_variant: fixed/);
-const selected = variants.find(
-  ({ testCase, variant }) =>
-    testCase.case_id === "oss-dompurify-ghsa-v8jm-5vwx-cfxm" &&
-    variant.variant_id === "vulnerable",
-);
-assert.ok(selected);
-assert.ok(
-  smokeYaml.includes(
-    `case_id: ${variantCaseId(selected.testCase, selected.variant)}`,
-  ),
+const smoke = parse(smokeYaml)[0];
+assert.equal(
+  smoke.vars.case_id,
+  tests.find(
+    (test) =>
+      test.metadata.calibration_case_id ===
+        "oss-dompurify-ghsa-v8jm-5vwx-cfxm" &&
+      test.metadata.calibration_variant === "vulnerable",
+  )!.vars.case_id,
 );
 
 console.log(
@@ -143,10 +133,21 @@ const relativeYaml = fs.readFileSync(relativeOutput, "utf8");
 assert.ok(
   relativeYaml.includes(`target_repo_root: ${JSON.stringify(explicitRoot)}`),
 );
-for (const job of plannedJobs(JSON.parse(fs.readFileSync(dataset, "utf8")), {
-  repoRoot: explicitRoot,
-})) {
-  assert.ok(
-    relativeYaml.includes(`target_repo: ${JSON.stringify(job.targetDir)}`),
-  );
-}
+const hydration = execFileSync(
+  process.execPath,
+  [
+    "--experimental-strip-types",
+    path.join(evalDir, "scripts", "hydrate-calibration-repos.mts"),
+    "--repo-root",
+    explicitRoot,
+    "--dry-run",
+  ],
+  { encoding: "utf8" },
+);
+const plannedPaths = hydration
+  .split("\n")
+  .filter((line) => line.startsWith("  "));
+assert.deepEqual(
+  (parse(relativeYaml) as typeof tests).map((test) => test.vars.target_repo),
+  plannedPaths.map((line) => line.slice(2)),
+);

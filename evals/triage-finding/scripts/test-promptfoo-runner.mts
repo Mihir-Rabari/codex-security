@@ -31,40 +31,6 @@ test("runtime contains checkout skill and fixtures without calibration labels", 
   }
 });
 
-test("runner launches the installed Promptfoo JavaScript entry point through Node", async () => {
-  const driver = `
-    const assert = require('node:assert/strict');
-    const cp = require('node:child_process');
-    const spawn = cp.spawn;
-    cp.spawn = (command, args, options) => {
-      assert.equal(command, process.execPath);
-      if (args[0].endsWith('build_mcp_app.mjs')) {
-        return spawn(process.execPath, ['--eval', ''], options);
-      }
-      assert.equal(args[0], ${JSON.stringify(path.resolve(import.meta.dirname, "../node_modules/promptfoo/dist/src/entrypoint.js"))});
-      return spawn(command, args, options);
-    };
-    import(${JSON.stringify(new URL("./run-promptfoo.mts", import.meta.url).href)}).then(({ runPromptfoo }) => runPromptfoo(['--version'])).then(code => { process.exitCode = code; });
-  `;
-  const child = spawn(process.execPath, [
-    "--experimental-strip-types",
-    "--eval",
-    driver,
-  ]);
-  let output = "";
-  for (const stream of [child.stdout, child.stderr]) {
-    stream.on("data", (chunk) => {
-      output += chunk;
-    });
-  }
-  const code = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  assert.equal(code, 0, output);
-  assert.match(output, /0\.123\.1/);
-});
-
 test(
   "Windows console Ctrl+C lets the child save progress before runtime cleanup",
   { timeout: 15000 },

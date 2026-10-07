@@ -110,9 +110,9 @@ async function runPromptfoo(
     process.on(signal, handler);
     return [signal, handler] as const;
   });
-  function runChild(command: string, args: string[], cwd: string) {
+  function runChild(args: string[], cwd: string) {
     return new Promise<number>((resolve, reject) => {
-      child = childProcess.spawn(command, args, {
+      child = childProcess.spawn(process.execPath, args, {
         cwd,
         env,
         stdio: "inherit",
@@ -134,7 +134,6 @@ async function runPromptfoo(
   }
   try {
     const built = await runChild(
-      process.execPath,
       [
         path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
         "--output",
@@ -145,29 +144,22 @@ async function runPromptfoo(
       path.join(PLUGIN_ROOT, "mcp-app"),
     );
     if (built !== 0) return built;
-    return await runChild(
-      process.execPath,
-      [PROMPTFOO_ENTRYPOINT, ...promptfooArgs],
-      EVAL_ROOT,
-    );
+    return await runChild([PROMPTFOO_ENTRYPOINT, ...promptfooArgs], EVAL_ROOT);
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
   }
 }
 
-function invokedAsMain() {
-  if (!process.argv[1]) return false;
+function runMain(filename: string, environment: NodeJS.ProcessEnv = {}) {
   try {
-    return fs.realpathSync(process.argv[1]) === import.meta.filename;
+    if (!process.argv[1] || fs.realpathSync(process.argv[1]) !== filename)
+      return;
   } catch {
     // A virtual entry point imports this module without invoking the runner.
-    return false;
+    return;
   }
-}
-
-if (invokedAsMain()) {
-  runPromptfoo(process.argv.slice(2))
+  runPromptfoo(process.argv.slice(2), environment)
     .then((code) => {
       process.exitCode = code;
     })
@@ -177,4 +169,6 @@ if (invokedAsMain()) {
     });
 }
 
-export { runPromptfoo, stageSkillRuntime };
+runMain(import.meta.filename);
+
+export { runMain, runPromptfoo, stageSkillRuntime };
