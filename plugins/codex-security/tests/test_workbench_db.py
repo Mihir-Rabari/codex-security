@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
     SCRIPT,
+    begin_thread_deep_scan,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -32,6 +34,7 @@ from workbench_test_support import (
     start_saved_scan,
     start_workspace_scan,
     triage_finding,
+    update_progress,
     write_completed_contract,
 )
 
@@ -55,14 +58,6 @@ GIT_UNAVAILABLE_WARNING = (
     "The scanned Git repository became unavailable while the scan was running; "
     "results were saved for the original revision."
 )
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {
@@ -136,10 +131,8 @@ def budget_scan_fixture(
     scan_id = str(registered["scanId"])
     if mode != "deep":
         return state_dir, target, scan_dir, scan_id, scan_dir / "candidate_ledger.jsonl"
-    run_workbench(
+    begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "sdk-thread",
         "--scan-id",
         scan_id,
@@ -792,10 +785,8 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
     assert listed[0]["model"] == "gpt-5.6-sol"
     assert listed[0]["reasoningEffort"] == "high"
 
-    updated = run_workbench(
+    updated = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -807,14 +798,7 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
     assert updated["model"] == "gpt-5.6-terra"
     assert updated["reasoningEffort"] == "low"
 
-    preserved = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-    )["scan"]
+    preserved = update_progress(state_dir, scan_id, "--phase", "discovery")["scan"]
     assert preserved["model"] == "gpt-5.6-terra"
     assert preserved["reasoningEffort"] == "low"
 
@@ -2883,10 +2867,8 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
     target.mkdir()
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    failed = run_workbench(
+    failed = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         str(started["results"]["scanId"]),
         "--review-items-total",
         "2",
@@ -2905,10 +2887,8 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -2918,26 +2898,12 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
         "6",
     )
 
-    phase_failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-        check=False,
-    )
+    phase_failed = update_progress(state_dir, scan_id, "--phase", "discovery", check=False)
     assert phase_failed["returncode"] != 0
     assert "earlier phase" in str(phase_failed["stderr"])
 
-    coverage_failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--review-items-completed",
-        "5",
-        check=False,
+    coverage_failed = update_progress(
+        state_dir, scan_id, "--review-items-completed", "5", check=False
     )
     assert coverage_failed["returncode"] != 0
     assert "cannot decrease" in str(coverage_failed["stderr"])
@@ -2948,36 +2914,14 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--mode",
-        "deep",
-    )
-    saved = run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target), "--mode", "deep")
+    saved = save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     assert started["results"]["progress"]["reviewPass"] is None
 
-    run_workbench(
+    update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "discovery",
@@ -2988,14 +2932,7 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
         "--review-items-completed",
         "0",
     )
-    updated = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--review-items-completed",
-        "22",
-    )
+    updated = update_progress(state_dir, scan_id, "--review-items-completed", "22")
     assert updated["scan"]["progress"]["reviewPass"] == 2
     assert updated["scan"]["progress"]["coverage"] == {
         "closedRows": 22,
@@ -3011,14 +2948,8 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
         "--workspace-id",
         str(standard["id"]),
     )
-    failed = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        str(standard_scan["results"]["scanId"]),
-        "--deep-review-pass",
-        "1",
-        check=False,
+    failed = update_progress(
+        state_dir, str(standard_scan["results"]["scanId"]), "--deep-review-pass", "1", check=False
     )
     assert failed["returncode"] != 0
     assert "Only Deep Scan" in str(failed["stderr"])
@@ -3033,14 +2964,7 @@ def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Pa
     scan_id = str(started["results"]["scanId"])
     started_at = str(started["results"]["progress"]["updatedAt"])
     time.sleep(0.001)
-    updated = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "validation",
-    )
+    updated = update_progress(state_dir, scan_id, "--phase", "validation")
     updated_at = str(updated["scan"]["progress"]["updatedAt"])
     assert updated_at > started_at
     time.sleep(0.001)

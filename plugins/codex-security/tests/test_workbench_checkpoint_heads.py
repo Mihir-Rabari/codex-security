@@ -16,6 +16,7 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     create_saved_workspace,
     fail_deep_scan,
+    preserve_scan_results,
     replay_saved_results,
     run_workbench,
     saved_binding,
@@ -90,15 +91,7 @@ def test_late_head_changes_require_explicit_recovery(
         is True
     )
     assert list((result.parent / "checkpoint-heads").iterdir()) == snapshots
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
-    )
+    preserve_scan_results(state, scan_id, "standard-worker-thread", environment=environment)
     assert manifest_path.read_bytes() == first_manifest
     recovered = run_workbench(
         state, "recover-scan-results", "--scan-id", scan_id, environment=environment
@@ -936,14 +929,8 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
         call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
     assert len(first) == 1
-    run_workbench(
-        state,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserve_scan_results(
+        state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
     replay = (
         json.loads((scan_dir / "findings.json").read_text()),

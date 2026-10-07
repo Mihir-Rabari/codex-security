@@ -12,6 +12,7 @@ from workbench_test_support import (
     stable_target_id,
     start_delivered_scan,
     triage_finding,
+    update_progress,
     write_completed_contract,
 )
 
@@ -233,12 +234,9 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="first-finding")
-    run_workbench(
+    triage_finding(
         state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
         str(older_first["findings"][0]["occurrenceId"]),
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -256,14 +254,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         relative_path="docs/extract.py",
     )
     latest_second = complete_scan(state_dir, second_target, identity_anchor="second-finding")
-    run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        str(older_running["results"]["scanId"]),
-        "--phase",
-        "discovery",
-    )
+    update_progress(state_dir, str(older_running["results"]["scanId"]), "--phase", "discovery")
     second_target.rename(tmp_path / "moved-second-repo")
 
     repositories = run_workbench(state_dir, "list-repositories")["repositories"]

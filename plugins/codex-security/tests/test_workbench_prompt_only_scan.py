@@ -18,6 +18,7 @@ from test_workbench_db import (
     initialize_git_repository,
     run_workbench,
 )
+from workbench_test_support import update_progress
 
 
 def start_prompt_only_scan(
@@ -211,14 +212,7 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     )
     assert updated["scan"]["userContext"] == updated_context
 
-    next_phase = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--phase",
-        "discovery",
-    )
+    next_phase = update_progress(state_dir, scan_id, "--phase", "discovery")
     assert next_phase["scan"]["progress"]["phase"] == "discovery"
     assert next_phase["scan"]["userContext"] == updated_context
 

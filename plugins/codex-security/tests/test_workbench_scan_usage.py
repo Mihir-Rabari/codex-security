@@ -13,11 +13,13 @@ from typing import Any
 
 import pytest
 from workbench_test_support import (
+    begin_thread_deep_scan,
     create_saved_workspace,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
     run_workbench,
     start_delivered_scan,
+    upsert_deep_scan_worker,
     write_completed_contract,
 )
 
@@ -534,10 +536,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
         "CODEX_STATE_DB": "",
     }
-    deep = run_workbench(
+    deep = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "scan-parent",
         "--target-path",
         str(target),
@@ -568,20 +568,13 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
     artifact.mkdir(parents=True)
     prompt = artifact / "prompt.md"
     prompt.write_text("Review the fixture target.\n", encoding="utf-8")
-    run_workbench(
+    upsert_deep_scan_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         str(uuid.uuid4()),
-        "--kind",
         "discovery",
-        "--status",
         "running",
-        "--prompt-path",
         str(prompt),
-        "--artifact-dir",
         str(artifact),
         "--sdk-thread-id",
         "sdk-worker",

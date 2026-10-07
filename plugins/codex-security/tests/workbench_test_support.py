@@ -17,6 +17,15 @@ from types import ModuleType
 from typing import Any
 from unittest import TestCase, mock
 
+BUDGET_COST = {
+    "model": "gpt-5.6-sol",
+    "inputTokens": 1250,
+    "cachedInputTokens": 200,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 30,
+    "estimatedUsd": 0.00625,
+}
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
 PLUGIN_MANIFEST = Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
@@ -178,6 +187,126 @@ def run_workbench(
     if not check:
         return {"returncode": completed.returncode, "stderr": completed.stderr}
     return json.loads(completed.stdout)
+
+
+def begin_thread_deep_scan(
+    state_dir: Path,
+    thread_id: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--thread-id",
+        thread_id,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def finish_deep_scan(
+    state_dir: Path,
+    scan_id: str,
+    terminal_reason: str,
+    manifest_path: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "finish-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--terminal-reason",
+        terminal_reason,
+        "--manifest-path",
+        manifest_path,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def claim_deep_scan_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "claim-deep-scan-dedup",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def update_progress(
+    state_dir: Path,
+    scan_id: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "update-progress",
+        "--scan-id",
+        scan_id,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def upsert_deep_scan_worker(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    kind: str,
+    status: str,
+    prompt_path: str,
+    artifact_dir: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--kind",
+        kind,
+        "--status",
+        status,
+        "--prompt-path",
+        prompt_path,
+        "--artifact-dir",
+        artifact_dir,
+        *args,
+        check=check,
+        environment=environment,
+    )
 
 
 def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
@@ -668,3 +797,67 @@ class ScanFixtureTestCase(TestCase):
 
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
+
+
+def get_deep_scan(
+    state_dir: Path,
+    scan_id: str,
+    thread_id: str,
+    *,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "get-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        thread_id,
+        environment=environment,
+    )
+
+
+def preserve_scan_results(
+    state_dir: Path,
+    scan_id: str,
+    thread_id: str,
+    *args: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        thread_id,
+        *args,
+        check=check,
+        environment=environment,
+    )
+
+
+def commit_deep_scan_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    result_path: str,
+    new_findings_count: str,
+    *args: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "commit-deep-scan-dedup",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--result-manifest-path",
+        result_path,
+        "--new-findings-count",
+        new_findings_count,
+        *args,
+        environment=environment,
+    )

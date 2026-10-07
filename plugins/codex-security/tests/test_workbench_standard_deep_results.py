@@ -13,12 +13,20 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    BUDGET_COST,
+    begin_thread_deep_scan,
+    claim_deep_scan_dedup,
+    commit_deep_scan_dedup,
     fail_deep_scan,
+    finish_deep_scan,
+    get_deep_scan,
+    preserve_scan_results,
     replay_saved_results,
     run_workbench,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    upsert_deep_scan_worker,
     worker_paths,
     write_checkpoint,
     write_completed_contract,
@@ -129,25 +137,11 @@ def test_stopped_deep_scan_ignores_late_worker_checkpoints_without_reducer(
         )
         assert rejected["returncode"] != 0
         assert "Canceled scans cannot recover" in str(rejected["stderr"])
-    wrong_owner = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "not-the-owner",
-        check=False,
-    )
+    wrong_owner = preserve_scan_results(state_dir, scan_id, "not-the-owner", check=False)
     assert wrong_owner["returncode"] != 0
     assert (scan_dir / "scan-manifest.json").read_bytes() == first_seal
-    refreshed = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    refreshed = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["scan"]
     expected_count = 1
     assert refreshed["findingCount"] == expected_count
@@ -276,14 +270,8 @@ def test_stopped_model_selection_survives_publication_retry(
     late = write_checkpoint(checkpoint_dir, checkpoint)
     head_path.write_text(json.dumps({"checkpoint": late.name}))
     environment = {"CODEX_HOME": str(codex_home)}
-    retried = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    retried = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["scan"]
     manifest_path = scan_dir / "scan-manifest.json"
     published = json.loads(manifest_path.read_text())["scan"]
@@ -300,15 +288,7 @@ def test_stopped_model_selection_survives_publication_retry(
             "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
             (json.dumps(frozen["sources"]), scan_id),
         )
-    run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
-    )
+    preserve_scan_results(state_dir, scan_id, "standard-worker-thread", environment=environment)
     assert manifest_path.read_bytes() == first_seal
     recovered = run_workbench(
         state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
@@ -918,14 +898,8 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     archived = result_path.parent / "attempts" / "attempt-01" / "checkpoints"
     write_checkpoint(archived, late)
 
-    preserved = run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserved = preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )["scan"]
     assert preserved["findingCount"] == 1
     assert preserved["findings"][0]["locations"][0]["startLine"] != 91
@@ -961,14 +935,8 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
             publication,
             environment=environment,
         )
-        after_race = run_workbench(
-            state_dir,
-            "get-deep-scan",
-            "--scan-id",
-            scan_id,
-            "--thread-id",
-            "standard-worker-thread",
-            environment=environment,
+        after_race = get_deep_scan(
+            state_dir, scan_id, "standard-worker-thread", environment=environment
         )["deepScan"]
         assert after_race["error"] == original
 
@@ -977,14 +945,8 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
             "UPDATE deep_scan_runs SET publication_error_message = ? WHERE scan_id = ?",
             (publication, scan_id),
         )
-    before_recovery = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    before_recovery = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert publication in before_recovery["error"]
     assert original in before_recovery["error"]
@@ -996,14 +958,8 @@ def test_existing_non_canceled_output_recovers_structured_publication_failure(
         scan_id,
         environment=environment,
     )
-    recovered = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment=environment,
+    recovered = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment=environment
     )["deepScan"]
     assert recovered["error"] == original
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -1044,12 +1000,9 @@ def test_canceled_scan_reports_noop_coordinator_publication(tmp_path: Path) -> N
             is None
         )
 
-    preserved = run_workbench(
+    preserved = preserve_scan_results(
         state_dir,
-        "preserve-scan-results",
-        "--scan-id",
         scan_id,
-        "--thread-id",
         "standard-worker-thread",
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -1113,14 +1066,8 @@ def test_canceled_scan_reseals_prepared_completion_with_frozen_sources(
     assert canceled.returncode == 0, canceled.stderr
     assert json.loads(manifest_path.read_text())["scan"]["status"] == "completed"
 
-    run_workbench(
-        state_dir,
-        "preserve-scan-results",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    preserve_scan_results(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
 
     assert json.loads(manifest_path.read_text())["scan"]["status"] == "canceled"
@@ -1207,20 +1154,12 @@ def deep_scan_fixture(
             ),
         )
         scan_id = str(registered["scanId"])
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--thread-id",
-            "standard-worker-thread",
-            "--scan-id",
-            scan_id,
-            environment=environment,
+        begin_thread_deep_scan(
+            state_dir, "standard-worker-thread", "--scan-id", scan_id, environment=environment
         )
     else:
-        begun = run_workbench(
+        begun = begin_thread_deep_scan(
             state_dir,
-            "begin-deep-scan",
-            "--thread-id",
             "standard-worker-thread",
             "--target-path",
             str(target),
@@ -1310,52 +1249,30 @@ def committed_standard_reducer(
         for worker_id in (discovery_worker_id, *additional_worker_ids)
         for argument in ("--input-worker-id", worker_id)
     ]
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         *input_worker_args,
         environment=environment,
     )
-    run_workbench(
+    upsert_deep_scan_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--kind",
         "dedup",
-        "--status",
         "running",
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--attempt",
         "1",
         environment=environment,
     )
     result_path.write_text(discovery_result.read_text())
-    committed = run_workbench(
-        state_dir,
-        "commit-deep-scan-dedup",
-        "--scan-id",
-        scan_id,
-        "--worker-id",
-        reducer_id,
-        "--result-manifest-path",
-        str(result_path),
-        "--new-findings-count",
-        "0",
-        environment=environment,
+    committed = commit_deep_scan_dedup(
+        state_dir, scan_id, reducer_id, str(result_path), "0", environment=environment
     )["deepScan"]
     return reducer_id, result_path, committed
 
@@ -1717,35 +1634,23 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, reducer_result = worker_paths(scan_dir, "canceled-reducer")
     environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--input-worker-id",
         worker_id,
         environment=environment,
     )
-    run_workbench(
+    upsert_deep_scan_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--kind",
         "dedup",
-        "--status",
         "running",
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--attempt",
         "1",
@@ -1786,35 +1691,23 @@ def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, reducer_result = worker_paths(scan_dir, "archived-reducer")
     environment = {"CODEX_HOME": str(codex_home)}
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--input-worker-id",
         worker_id,
         environment=environment,
     )
-    run_workbench(
+    upsert_deep_scan_worker(
         state_dir,
-        "upsert-deep-scan-worker",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--kind",
         "dedup",
-        "--status",
         "running",
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--attempt",
         "2",
@@ -1922,16 +1815,11 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
 
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, _ = worker_paths(scan_dir, "failed-reducer")
-    run_workbench(
+    claim_deep_scan_dedup(
         state_dir,
-        "claim-deep-scan-dedup",
-        "--scan-id",
         scan_id,
-        "--worker-id",
         reducer_id,
-        "--prompt-path",
         str(prompt_path),
-        "--artifact-dir",
         str(artifact_dir),
         "--input-worker-id",
         second_worker_id,
@@ -2087,20 +1975,13 @@ def test_independent_worker_candidate_ids_do_not_share_rejection(tmp_path: Path)
     environment = {"CODEX_HOME": str(codex_home)}
     for ordinal, name in enumerate(("rejecting", "reporting"), 1):
         prompt, output, result = worker_paths(scan_dir, name)
-        run_workbench(
+        upsert_deep_scan_worker(
             state_dir,
-            "upsert-deep-scan-worker",
-            "--scan-id",
             scan_id,
-            "--worker-id",
             f"00000000-0000-4000-8000-{ordinal:012}",
-            "--kind",
             "discovery",
-            "--status",
             "running",
-            "--prompt-path",
             str(prompt),
-            "--artifact-dir",
             str(output),
             "--attempt",
             "1",
@@ -2161,14 +2042,8 @@ def test_standard_worker_results_commit_and_recover_without_discovery_ledgers(
     assert workers[reducer_id]["resultManifestPath"] == str(reducer_result)
     assert not (scan_dir / "artifacts" / "02_discovery").exists()
 
-    recovered = run_workbench(
-        state_dir,
-        "get-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "standard-worker-thread",
-        environment={"CODEX_HOME": str(codex_home)},
+    recovered = get_deep_scan(
+        state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )["deepScan"]
     assert recovered["canonicalArtifacts"] is None
     assert recovered["workers"] == committed["workers"]
@@ -2180,14 +2055,10 @@ def test_standard_worker_results_finish_with_only_canonical_parent_manifest(
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     manifest_path = scan_dir / "scan-manifest.json"
 
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2229,12 +2100,9 @@ def test_standard_worker_results_ignore_incidental_legacy_discovery_artifacts(
     assert committed["canonicalArtifacts"] is None
 
     def recovered() -> dict[str, object]:
-        return run_workbench(
+        return get_deep_scan(
             state_dir,
-            "get-deep-scan",
-            "--scan-id",
             scan_id,
-            "--thread-id",
             "standard-worker-thread",
             environment={"CODEX_HOME": str(codex_home)},
         )["deepScan"]
@@ -2247,14 +2115,10 @@ def test_standard_worker_results_ignore_incidental_legacy_discovery_artifacts(
         relative_path="app.py",
         coverage_mode="deep_repository",
     )
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2298,14 +2162,10 @@ def test_standard_worker_deadline_can_finish_without_any_completed_worker(
             ((datetime.now(timezone.utc) - timedelta(hours=97)).isoformat(), scan_id),
         )
 
-    finished = run_workbench(
+    finished = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )["deepScan"]
@@ -2322,14 +2182,10 @@ def test_standard_worker_finish_preserves_running_state_when_parent_draft_is_inc
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(tmp_path)
     (scan_dir / "findings.json").unlink()
 
-    rejected = run_workbench(
+    rejected = finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
         check=False,
@@ -2349,14 +2205,10 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         tmp_path, budget=True
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    run_workbench(
+    finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(manifest_path),
         environment={"CODEX_HOME": str(codex_home)},
     )
@@ -2368,16 +2220,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         "--scan-id",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         "--message",
         warning,
     )["scan"]
@@ -2403,14 +2246,10 @@ def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Pa
     state_dir, codex_home, target, scan_dir, scan_id = standard_parent_results_fixture(
         tmp_path, budget=True
     )
-    run_workbench(
+    finish_deep_scan(
         state_dir,
-        "finish-deep-scan",
-        "--scan-id",
         scan_id,
-        "--terminal-reason",
         "capped",
-        "--manifest-path",
         str(scan_dir / "scan-manifest.json"),
         environment={"CODEX_HOME": str(codex_home)},
     )
@@ -2422,16 +2261,7 @@ def test_budget_exhaustion_rejects_incomplete_standard_result_draft(tmp_path: Pa
         "--scan-id",
         scan_id,
         "--cost-json",
-        json.dumps(
-            {
-                "model": "gpt-5.6-sol",
-                "inputTokens": 1250,
-                "cachedInputTokens": 200,
-                "cacheWriteInputTokens": 0,
-                "outputTokens": 30,
-                "estimatedUsd": 0.00625,
-            }
-        ),
+        json.dumps(BUDGET_COST),
         check=False,
     )
 
