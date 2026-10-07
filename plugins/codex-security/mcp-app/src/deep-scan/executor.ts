@@ -215,7 +215,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             appendSafeItemDiagnostic(diagnostics, event.item);
           } else if (event.type === "turn.completed") {
             turnCompleted = true;
-            if (!runtimeSettings.drainSessionRecords) break;
+            if (!runtimeSettings.drainSessionRecords) {
+              request.signal.removeEventListener("abort", forwardAbort);
+              break;
+            }
             // Requested budgets require the worker's final session records.
           } else if (event.type === "turn.failed") {
             throw new Error(event.error.message);

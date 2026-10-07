@@ -24,6 +24,7 @@ type WorkerExecutorConstructor = new (settings: {
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
   preflight = async () => ({ useOpenAiApiKey: false }),
+  drainSessionRecords = false,
 ): Promise<WorkerExecutorConstructor> {
   const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
@@ -73,7 +74,7 @@ async function bundledWorkerExecutor(
     profileConfigOverrides,
     "codex_security_deep_scan_worker",
     async () => ({}),
-    async () => ({ config: {} }),
+    async () => ({ config: {}, drainSessionRecords }),
     () => undefined,
     preflight,
     () => undefined,
@@ -119,13 +120,10 @@ test("does not start a bundled worker when its permission profile check fails", 
   expect(started).toBe(false);
 });
 
-test("drains completed bundled Deep Scan workers during coordinator cancellation", async () => {
+test("settles completed bundled Deep Scan workers during coordinator cancellation", async () => {
   const parentController = new AbortController();
-  const draining = Promise.withResolvers<void>();
-  const releaseDrain = Promise.withResolvers<void>();
   let workerSignal: AbortSignal | undefined;
   let iteratorClosed = false;
-  let settled = false;
   const WorkerExecutor = await bundledWorkerExecutor(async function* (
     signal: AbortSignal,
   ) {
@@ -137,12 +135,59 @@ test("drains completed bundled Deep Scan workers during coordinator cancellation
         item: { type: "agent_message", text: "worker completed" },
       };
       yield { type: "turn.completed" };
-      draining.resolve();
-      await releaseDrain.promise;
+      await new Promise<void>(() => {});
     } finally {
       iteratorClosed = true;
+      parentController.abort(
+        "coordinator canceled its remaining workers during cleanup",
+      );
     }
   });
+  const timeout = setTimeout(() => {
+    parentController.abort("completed bundled worker remained pending");
+  }, 1_000);
+
+  try {
+    const result = await runWorker(WorkerExecutor, parentController.signal);
+
+    expect(result).toEqual({
+      threadId: "fixture-worker-thread",
+    });
+    expect(iteratorClosed).toBe(true);
+    expect(parentController.signal.aborted).toBe(true);
+    expect(workerSignal).not.toBe(parentController.signal);
+    expect(workerSignal?.aborted).toBe(false);
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+test("drains completed bundled Deep Scan workers during coordinator cancellation", async () => {
+  const parentController = new AbortController();
+  const draining = Promise.withResolvers<void>();
+  const releaseDrain = Promise.withResolvers<void>();
+  let workerSignal: AbortSignal | undefined;
+  let iteratorClosed = false;
+  let settled = false;
+  const WorkerExecutor = await bundledWorkerExecutor(
+    async function* (signal: AbortSignal) {
+      workerSignal = signal;
+      try {
+        yield { type: "thread.started", thread_id: "fixture-worker-thread" };
+        yield {
+          type: "item.completed",
+          item: { type: "agent_message", text: "worker completed" },
+        };
+        yield { type: "turn.completed" };
+        draining.resolve();
+        await releaseDrain.promise;
+      } finally {
+        iteratorClosed = true;
+      }
+    },
+    undefined,
+    true,
+  );
   const outcome = runWorker(WorkerExecutor, parentController.signal).finally(
     () => {
       settled = true;
@@ -176,10 +221,14 @@ test("drains completed bundled Deep Scan workers during coordinator cancellation
 });
 
 test("propagates bundled Deep Scan worker shutdown failures", async () => {
-  const WorkerExecutor = await bundledWorkerExecutor(async function* () {
-    yield { type: "turn.completed" };
-    throw new Error("Synthetic worker shutdown failure");
-  });
+  const WorkerExecutor = await bundledWorkerExecutor(
+    async function* () {
+      yield { type: "turn.completed" };
+      throw new Error("Synthetic worker shutdown failure");
+    },
+    undefined,
+    true,
+  );
 
   await expect(
     runWorker(WorkerExecutor, new AbortController().signal),
