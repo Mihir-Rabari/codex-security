@@ -31,9 +31,13 @@ import {
   readCodexHomeConfig,
 } from "../auth.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   hasCommandAuth,
+  inlineToml,
   modelProviderConfigOverride,
+  normalizeLegacyWindowsSandboxOverride,
   resolveCommandAuthConfig,
+  resolveCodexProfile,
 } from "../config.js";
 import {
   reviewErrorInstructions,
@@ -207,6 +211,8 @@ export class CodexReviewRunner {
       ].find((value) => value?.trim());
       const args = ["app-server", "--stdio", "--disable", "plugins"];
       const config = await readCodexHomeConfig(environment, this.signal);
+      const executionConfig = resolveCodexProfile(config);
+      normalizeLegacyWindowsSandboxOverride(executionConfig);
       if (hasCommandAuth(config)) {
         args.push(
           ...modelProviderConfigOverride(
@@ -230,7 +236,7 @@ export class CodexReviewRunner {
         "--config",
         `sqlite_home=${JSON.stringify(directory)}`,
         "--config",
-        'windows.sandbox="unelevated"',
+        `windows=${inlineToml(executionConfig["windows"] ?? DEFAULT_CODEX_CONFIG["windows"]!)}`,
       );
       if (apiKey)
         args.push("--config", 'cli_auth_credentials_store="ephemeral"');

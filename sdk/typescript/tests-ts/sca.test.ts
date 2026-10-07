@@ -22,6 +22,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { JsonObject } from "../src/config.js";
 import { codexSecurityPrivatePaths } from "../src/auth.js";
+import { createProfileCodex } from "../src/provider-profile.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import {
   ScanInterruptedError,
@@ -186,7 +187,9 @@ async function fixture(
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
     codexOverrides?: JsonObject;
-    codexFactory?: (options: CodexOptions) => Codex;
+    codexFactory?: (
+      options: CodexOptions & { nativeProfile?: string },
+    ) => Codex | Promise<Codex>;
     linkedCodex?: boolean;
     codexLauncher?: string;
     wrappedCodex?: boolean;
@@ -551,15 +554,18 @@ test.each(["api key", "command"] as const)(
       gitHubConfig: "explicit",
       mcpConfig: initialConfig,
       codexOverrides: providerConfig,
-      codexFactory: (options) =>
-        new Codex({
-          ...options,
-          codexPathOverride: node,
-          env: {
-            ...options.env,
-            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+      codexFactory: ({ nativeProfile, ...options }) =>
+        createProfileCodex(
+          {
+            ...options,
+            codexPathOverride: node,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
           },
-        }),
+          nativeProfile!,
+        ),
     });
     await using security = f.client;
     const receipt = join(f.codexHome, "provider-children.jsonl");
@@ -567,10 +573,13 @@ test.each(["api key", "command"] as const)(
     await writeFile(
       preload,
       `import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const receipt = ${JSON.stringify(receipt)};
 const turn = existsSync(receipt) ? readFileSync(receipt, "utf8").trim().split("\\n").length + 1 : 1;
 const configPath = ${JSON.stringify(join(f.codexHome, "config.toml"))};
-appendFileSync(receipt, JSON.stringify({ argv: process.argv.slice(2), home: process.env.CODEX_HOME, sharedConfig: readFileSync(configPath, "utf8") }) + "\\n");
+const profileIndex = process.argv.indexOf('--profile');
+const profileConfig = profileIndex === -1 ? null : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
+appendFileSync(receipt, JSON.stringify({ argv: process.argv.slice(2), home: process.env.CODEX_HOME, sharedConfig: readFileSync(configPath, "utf8"), profileConfig }) + "\\n");
 // A concurrent client replaces the shared provider table before the next match.
 if (turn === 1) writeFileSync(configPath, ${JSON.stringify(replacementConfig)});
 const finding = { ...${JSON.stringify(triage())}, input_id: "match-" + turn, triage_item_id: "triage-" + turn };
@@ -598,6 +607,7 @@ process.exit(0);
             argv: string[];
             home: string;
             sharedConfig: string;
+            profileConfig: string;
           },
       );
     expect(children).toHaveLength(2);
@@ -623,14 +633,10 @@ process.exit(0);
       });
 
       expect(child.argv).toContain('model_provider="synthetic.provider"');
-      const providerOverrides = child.argv.filter((arg) =>
-        arg.startsWith("model_providers="),
-      );
-      expect(providerOverrides).toHaveLength(1);
-      expect(parseToml(providerOverrides[0]!)).toEqual({
+      expect(parseToml(child.profileConfig)).toEqual({
         model_providers: providerConfig.model_providers,
       });
-      expect(child.argv.some((arg) => arg.startsWith("model_providers."))).toBe(
+      expect(child.argv.some((arg) => /^model_providers[.=]/u.test(arg))).toBe(
         false,
       );
     }
