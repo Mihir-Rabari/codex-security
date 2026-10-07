@@ -4,6 +4,39 @@ import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("keeps supported validation outcomes and legacy dataflow details", () => {
+    const output = renderScanHistory(
+      {
+        title: "Synthetic saved finding",
+        severity: { level: "high" },
+        validation: {
+          status: "verified",
+          disposition: "confirmed",
+          result: "reachable",
+        },
+        attackPath: {
+          data_flow: {
+            source: "Synthetic upload handler",
+            sink: "Synthetic filesystem write",
+            outcome: "Writes outside the output path",
+          },
+        },
+      },
+      "finding",
+      { color: false },
+    );
+    for (const detail of [
+      "verified",
+      "confirmed",
+      "reachable",
+      "Synthetic upload handler",
+      "Synthetic filesystem write",
+      "Writes outside the output path",
+    ]) {
+      expect(output).toContain(detail);
+    }
+  });
+
   test.each([false, true])(
     "keeps both evidence catalogs when modern evidence is %s",
     (modern) => {

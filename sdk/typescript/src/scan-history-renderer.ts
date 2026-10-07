@@ -382,8 +382,15 @@ export function renderScanHistory(
         !Array.isArray(value)
       ) {
         if (key === "validation") {
-          if (typeof value["method"] === "string") {
-            sections.push(`Method: ${value["method"]}`);
+          for (const [fieldLabel, fieldKey] of [
+            ["Method", "method"],
+            ["Status", "status"],
+            ["Disposition", "disposition"],
+            ["Result", "result"],
+          ] as const) {
+            if (typeof value[fieldKey] === "string") {
+              sections.push(`${fieldLabel}: ${value[fieldKey]}`);
+            }
           }
           for (const [evidenceLabel, evidenceKey] of [
             ["Verified", "assertions"],
@@ -398,6 +405,7 @@ export function renderScanHistory(
           for (const [nestedLabel, nestedKey] of [
             ["Dataflow", "dataflow"],
             ["Dataflow", "dataFlow"],
+            ["Dataflow", "data_flow"],
             ["Reachability", "reachability"],
             ["Impact", "impact"],
             ["Likelihood", "likelihood"],
@@ -415,7 +423,9 @@ export function renderScanHistory(
               continue;
             }
             const attributes: ReadonlyArray<readonly [string, string]> =
-              nestedKey === "dataflow" || nestedKey === "dataFlow"
+              nestedKey === "dataflow" ||
+              nestedKey === "dataFlow" ||
+              nestedKey === "data_flow"
                 ? [
                     ["Source", "source"],
                     ["Sink", "sink"],

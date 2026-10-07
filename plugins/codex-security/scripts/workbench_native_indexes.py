@@ -338,6 +338,7 @@ def _indexed_active_findings(
             allowed_scan_ids=history_scan_ids,
             uncertain_scans=uncertain_scans,
             include_resolved=True,
+            through_scan_sequence=settings.get("through_scan_sequence"),
         ):
             pass
     combined = []
@@ -395,6 +396,7 @@ def _active_findings(
     matched_target_ids: set[str] | None = None,
     query: str = "",
     include_resolved: bool = False,
+    through_scan_sequence: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     target_filters = []
     target_values = []
@@ -407,6 +409,9 @@ def _active_findings(
         target_filters.append(f"scans.target_path IN ({placeholders})")
         target_values.extend(target_paths)
     target_filter = "" if not target_filters else "AND (" + " OR ".join(target_filters) + ")"
+    if through_scan_sequence is not None:
+        target_filter += " AND scans.rowid <= ?"
+        target_values.append(through_scan_sequence)
     repository_clauses, repository_values, _, _ = (
         scan_history.repository_scan_scope(connection, repository)
         if repository is not None
@@ -516,7 +521,15 @@ def _active_findings(
         else "0"
     )
     uncertain_by_finding: dict[tuple[str, str], set[str]] = {}
+    related_scans_by_finding: dict[tuple[str, str], set[str]] = {}
     if uncertain_scans:
+        groups_by_occurrence = {
+            occurrence_id: finding
+            for finding in _indexed_findings(
+                connection, allowed_scan_ids, allow_cross_target_matches=True
+            )
+            for occurrence_id in finding["occurrence_ids"]
+        }
         for occurrence in connection.execute(
             f"""
             SELECT occurrences.id, occurrences.finding_id,
@@ -528,10 +541,18 @@ def _active_findings(
             """,
             target_values,
         ):
-            if scans_with_uncertainty := uncertain_scans.get(occurrence["id"]):
-                uncertain_by_finding.setdefault(
-                    (occurrence["indexed_target_id"], occurrence["finding_id"]), set()
-                ).update(scans_with_uncertainty)
+            group = groups_by_occurrence.get(occurrence["id"])
+            group_occurrences = group["occurrence_ids"] if group else {occurrence["id"]}
+            scans_with_uncertainty = {
+                scan_id
+                for occurrence_id in group_occurrences
+                for scan_id in uncertain_scans.get(occurrence_id, ())
+            }
+            identity = (occurrence["indexed_target_id"], occurrence["finding_id"])
+            if group is not None:
+                related_scans_by_finding.setdefault(identity, set()).update(group["known_scan_ids"])
+            if scans_with_uncertainty:
+                uncertain_by_finding.setdefault(identity, set()).update(scans_with_uncertainty)
     rows = connection.execute(
         f"""
         WITH ranked_findings AS (
@@ -617,6 +638,12 @@ def _active_findings(
             if scan["scan_sequence"] <= row["scan_sequence"]:
                 break
             if scan["seal_manifest_digest"] is None:
+                continue
+            if scan["mode"] == "diff":
+                continue
+            if scan["id"] in related_scans_by_finding.get(
+                (row["indexed_target_id"], row["finding_id"]), ()
+            ):
                 continue
             if scan["id"] in uncertain_by_finding.get(
                 (row["indexed_target_id"], row["finding_id"]), ()

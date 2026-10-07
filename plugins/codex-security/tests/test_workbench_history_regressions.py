@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import json
 import runpy
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -732,3 +734,218 @@ def test_historical_latest_decision_does_not_reopen_without_a_later_scan(history
         ]
         == "closed"
     )
+
+
+@pytest.mark.parametrize("checkout", ["missing", "replaced", "previous-epoch-missing"])
+def test_missing_repository_history(tmp_path: Path, history, checkout: str):
+    state, root, repo = history
+    scan = create_cli_scan(state, root, repo)
+    repo.rename(tmp_path / "previous-repository")
+    if checkout != "missing":
+        repo.mkdir()
+    if checkout == "previous-epoch-missing":
+        scan = create_cli_scan(state, root, repo)
+        repo.rename(tmp_path / "newer-offline-repository")
+    missing = checkout != "replaced"
+    listed = run_workbench(state, "list-scans", "--repository", str(repo))["scans"]
+    assert [row["scanId"] for row in listed] == ([scan["scanId"]] if missing else [])
+    findings = run_workbench(
+        state, "list-global-findings", "--repository", str(repo), "--include-resolved"
+    )["findings"]
+    assert len(findings) == int(missing)
+
+
+@pytest.mark.parametrize("reason", ["false_positive", "already_fixed"])
+def test_newly_admitted_rediscovery_comparison(tmp_path: Path, history, reason: str):
+    state, root, repo = history
+    before = create_cli_scan(state, root, repo)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", before["scanId"])["scan"][
+        "findings"
+    ][0]["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        reason,
+        "--note",
+        "Synthetic decision.",
+    )
+    after = create_cli_scan(state, root, repo)
+    result = compare_scan_pair(state, before, after)
+    assert result["summary"]["reopened"] == 1
+
+
+def test_historical_comparison_does_not_use_later_rediscovery(tmp_path: Path, history):
+    state, root, repo = history
+    before = create_cli_scan(state, root, repo)
+    after = create_cli_scan(state, root, repo)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", after["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        "--note",
+        "Synthetic decision.",
+    )
+    latest = create_cli_scan(state, root, repo)
+    assert compare_scan_pair(state, after, latest)["summary"]["reopened"] == 1
+    assert compare_scan_pair(state, before, after)["summary"]["reopened"] == 0
+
+
+def test_semantic_alias_uncertainty_preserves_group(tmp_path: Path, history):
+    state, root, repo = history
+    scans = [
+        create_cli_scan(state, root, repo, identity_anchor=a)
+        for a in ["semantic-a", "semantic-b", "semantic-c"]
+    ]
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", s["scanId"])["scan"]["findings"][0]
+        for s in scans
+    ]
+    save_scan_matches(
+        state, scans[0], scans[1], confirmed_match(rows[0]["occurrenceId"], rows[1]["occurrenceId"])
+    )
+    save_scan_matches(
+        state,
+        scans[0],
+        scans[2],
+        uncertain=(
+            {
+                "beforeOccurrenceId": rows[0]["occurrenceId"],
+                "afterOccurrenceId": rows[2]["occurrenceId"],
+                "reason": "Synthetic uncertain recurrence.",
+            },
+        ),
+    )
+    listed = run_workbench(state, "list-global-findings")["findings"]
+    assert len(listed) == 2
+    assert {r["findingId"] for r in listed} & {rows[0]["findingId"], rows[1]["findingId"]}
+    create_cli_scan(state, root, repo, finding=False)
+    assert run_workbench(state, "list-global-findings")["findings"] == []
+
+
+def test_clean_diff_does_not_resolve_unchanged_source(tmp_path: Path, history):
+    state, root, repo = history
+    repo.rmdir()
+    initialize_git_repository(repo)
+    (repo / "src").mkdir()
+    (repo / "src" / "extract.py").write_text("synthetic archive extraction\n")
+    subprocess.run(["git", "-C", str(repo), "add", "src"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "Synthetic source"], check=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    previous = create_cli_scan(state, root, repo, target_revision=base)
+    (repo / "README.md").write_text("Unrelated documentation change\n")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "Synthetic documentation change"], check=True
+    )
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    scan = create_cli_scan(
+        state,
+        root,
+        repo,
+        complete=False,
+        target={"kind": "refs", "paths": [], "base": base, "head": head},
+    )
+    directory = Path(scan["scanDir"])
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        snapshot = connection.execute(
+            "SELECT target_snapshot_digest FROM scans WHERE id=?", (scan["scanId"],)
+        ).fetchone()[0]
+    write_completed_contract(
+        directory,
+        scan["scanId"],
+        repo,
+        target_kind="git_diff",
+        target_revision=head,
+        diff_base_revision=base,
+        diff_head_revision=head,
+        snapshot_digest=snapshot,
+        coverage_mode="branch_diff",
+        inventory_strategy="diff",
+    )
+    findings = json.loads((directory / "findings.json").read_text())
+    findings["findings"] = []
+    (directory / "findings.json").write_text(json.dumps(findings))
+    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(directory)], check=True)
+    run_workbench(state, "complete-scan", "--scan-id", scan["scanId"])
+    assert [row["scanId"] for row in run_workbench(state, "list-global-findings")["findings"]] == [
+        previous["scanId"]
+    ]
+    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
+    create_cli_scan(state, root, repo, finding=False, target_revision=head)
+    assert run_workbench(state, "list-global-findings")["findings"] == []
+
+
+@pytest.mark.parametrize("matched", [False, True])
+def test_owned_remediation_finishes_after_match_closure(tmp_path: Path, history, matched: bool):
+    state, root, repo = history
+    before = create_cli_scan(state, root, repo, identity_anchor="older-source")
+    before_occurrence = run_workbench(state, "get-scan", "--scan-id", before["scanId"])["scan"][
+        "findings"
+    ][0]["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        before_occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Synthetic older decision.",
+    )
+    after = create_cli_scan(state, root, repo, identity_anchor="newer-source")
+    after_occurrence = run_workbench(state, "get-scan", "--scan-id", after["scanId"])["scan"][
+        "findings"
+    ][0]["occurrenceId"]
+    request, token = str(uuid.uuid4()), str(uuid.uuid4())
+    run_workbench(
+        state,
+        "request-finding-remediation",
+        "--occurrence-id",
+        after_occurrence,
+        "--request-id",
+        request,
+        "--action-token",
+        token,
+    )
+    if matched:
+        save_scan_matches(
+            state, before, after, confirmed_match(before_occurrence, after_occurrence)
+        )
+    update = [
+        "set-finding-remediation",
+        "--occurrence-id",
+        after_occurrence,
+        "--request-id",
+        request,
+        "--action-token",
+        token,
+        "--expected-version",
+        "1",
+        "--state",
+        "failed",
+        "--summary",
+        "Synthetic generation failure.",
+    ]
+    wrong = update.copy()
+    wrong[wrong.index(token)] = str(uuid.uuid4())
+    rejected = run_workbench(state, *wrong, check=False)
+    assert rejected["returncode"] != 0
+    assert "different action token" in rejected["stderr"]
+    outcome = run_workbench(state, *update)
+    row = next(r for r in outcome["scan"]["findings"] if r["occurrenceId"] == after_occurrence)
+    assert row["remediationState"]["state"] == "failed"

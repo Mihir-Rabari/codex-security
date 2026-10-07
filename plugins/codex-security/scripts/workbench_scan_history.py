@@ -294,6 +294,8 @@ def _requested_repository(
         return requested, None
     try:
         metadata = repository.stat()
+    except FileNotFoundError:
+        return requested, None
     except OSError:
         metadata = None
     if (
@@ -625,9 +627,19 @@ def repository_scan_scope(
             values.extend(related_target_ids)
         clauses.append(f"({' OR '.join(repository_clauses)})")
         for target_id, (metadata, recorded) in verified_targets.items():
-            if metadata is None or not recorded:
+            if metadata is None:
+                ownership = _recorded_target_ownership(connection, target_id)
+                if ownership is None:
+                    continue
+                identity, epoch_start = ownership
+                target_inode = identity["target_inode"]
+                target_device = identity["target_device"]
+            elif recorded:
+                epoch_start = _ownership_epoch_start(connection, target_id, metadata)
+                target_inode = serialize_filesystem_identity(metadata.st_ino)
+                target_device = serialize_filesystem_identity(metadata.st_dev)
+            else:
                 continue
-            epoch_start = _ownership_epoch_start(connection, target_id, metadata)
             legacy_history = (
                 "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
                 if epoch_start is None
@@ -640,8 +652,8 @@ def repository_scan_scope(
             values.extend(
                 (
                     target_id,
-                    serialize_filesystem_identity(metadata.st_ino),
-                    serialize_filesystem_identity(metadata.st_dev),
+                    target_inode,
+                    target_device,
                 )
             )
             if epoch_start is not None:
@@ -1161,7 +1173,8 @@ def compare_scans(
             status = (
                 "reopened"
                 if any(
-                    row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+                    row["triage_status"] == "closed"
+                    and row["close_reason"] in {"already_fixed", "false_positive"}
                     for row in previous_rows
                 )
                 and any(current_triage[row["id"]]["status"] == "open" for row in current_rows)

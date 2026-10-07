@@ -2289,8 +2289,8 @@ def set_finding_remediation(
     summary = optional_text(args.summary, maximum=2400)
     verification_summary = optional_text(args.verification_summary, maximum=2400)
     with connection:
+        # An owned attempt may finish after a saved match inherits a triage closure.
         occurrence = require_occurrence(connection, args.occurrence_id)
-        require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
         current = connection.execute(
             "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
@@ -2354,7 +2354,6 @@ def set_finding_remediation(
         connection.execute("BEGIN IMMEDIATE")
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
-        require_finding_open(connection, occurrence["id"])
         replace_failure_summary = current["state"] == "failed" and args.state != "failed"
         updated = connection.execute(
             """
@@ -2716,7 +2715,7 @@ def _require_finding_checkout_owner(
 
 
 def _indexed_scan_findings(
-    connection: sqlite3.Connection, scan: sqlite3.Row
+    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: bool = False
 ) -> dict[str, dict[str, Any]]:
     if scan["target_id"] is None:
         scope = {"target_paths": {scan["target_path"]}}
@@ -2732,6 +2731,10 @@ def _indexed_scan_findings(
             if target is not None
             else {"target_ids": {scan["target_id"]}}
         )
+    if through_scan:
+        scope["through_scan_sequence"] = connection.execute(
+            "SELECT rowid FROM scans WHERE id = ?", (scan["id"],)
+        ).fetchone()[0]
     return {
         occurrence_id: finding
         for finding in native_indexes._indexed_active_findings(
@@ -2745,10 +2748,10 @@ def _indexed_scan_findings(
 
 
 def scan_finding_triage(
-    connection: sqlite3.Connection, scan: sqlite3.Row
+    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: bool = False
 ) -> dict[str, dict[str, Any]]:
     return finding_results.scan_finding_triage(
-        connection, scan, _indexed_scan_findings(connection, scan)
+        connection, scan, _indexed_scan_findings(connection, scan, through_scan=through_scan)
     )
 
 
@@ -3394,7 +3397,9 @@ def main() -> None:
                 args,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
-                finding_triage=scan_finding_triage,
+                finding_triage=lambda connection, scan: scan_finding_triage(
+                    connection, scan, through_scan=True
+                ),
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
                 require_matches=args.require_matches,
@@ -3406,7 +3411,9 @@ def main() -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
-                finding_triage=scan_finding_triage,
+                finding_triage=lambda connection, scan: scan_finding_triage(
+                    connection, scan, through_scan=True
+                ),
             )
         elif args.command == "list-global-findings":
             result = native_indexes.list_global_findings(
