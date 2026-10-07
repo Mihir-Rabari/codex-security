@@ -728,9 +728,11 @@ describe("durable workbench repository identities", () => {
     const result = runProbe("identity", repositories);
     const identities = result["identities"] as Record<string, string>;
 
-    expect(identities["repository"]).toMatch(
-      /^repository_sha256_[a-f0-9]{64}$/,
-    );
+    const identityPattern =
+      process.platform === "linux"
+        ? /^repository_v3_sha256_[a-f0-9]{64}$/
+        : /^repository_sha256_[a-f0-9]{64}$/;
+    expect(identities["repository"]).toMatch(identityPattern);
     expect(identities["worktree"]).toBe(identities["repository"]);
     expect(identities["worktreeServiceA"]).toBe(identities["serviceA"]);
     expect(identities["worktreeMixedCase"]).toBe(identities["mixedCase"]);
@@ -744,9 +746,7 @@ describe("durable workbench repository identities", () => {
     expect(result["descriptionEditIndependent"]).toBe(true);
     expect(result["descriptionModeIndependent"]).toBe(true);
     expect(result["descriptionAbsenceIndependent"]).toBe(true);
-    expect(result["markerlessRepositoryIdentity"]).toMatch(
-      /^repository_sha256_[a-f0-9]{64}$/,
-    );
+    expect(result["markerlessRepositoryIdentity"]).toMatch(identityPattern);
     expect(result["recycledInodeDistinguished"]).toBe(true);
     expect(result["casePreserved"]).toBe(true);
     expect(result["windowsLegacyBirthTime"]).toBe(41);

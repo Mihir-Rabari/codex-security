@@ -807,11 +807,22 @@ def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[s
 
 def _timestamp_ns(value: str) -> int | Fraction | None:
     try:
-        normalized = (
-            value[:-1] + "+00:00"
-            if isinstance(value, str) and value.endswith(("Z", "z"))
-            else value
-        )
+        # Python 3.10 requires three or six fractional digits; stored timestamps
+        # can come from newer runtimes that accept any RFC 3339 precision.
+        fraction = re.search(r"\.(\d+)(?:[Zz]|[+-]\d{2}:\d{2})$", value)
+        normalized = value
+        if (
+            fraction is not None
+            and fraction[1].isascii()
+            and re.search(r"[0-9]{2}:[0-9]{2}:[0-9]{2}$", value[: fraction.start()]) is not None
+        ):
+            normalized = (
+                value[: fraction.start(1)]
+                + fraction[1][:6].ljust(6, "0")
+                + value[fraction.end(1) :]
+            )
+        if normalized.endswith(("Z", "z")):
+            normalized = normalized[:-1] + "+00:00"
         timestamp = datetime.fromisoformat(normalized)
     except (TypeError, ValueError):
         return None
@@ -820,9 +831,8 @@ def _timestamp_ns(value: str) -> int | Fraction | None:
     delta = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
     nanoseconds = (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
     # datetime truncates RFC 3339 fractions after six digits; sealed timestamps retain them.
-    remainder = re.search(r"\.\d{6}(\d+)(?:[Zz]|[+-]\d{2}:\d{2})$", value)
-    if remainder is not None:
-        return nanoseconds + Fraction(Decimal("0." + remainder[1])) * 1000
+    if fraction is not None and len(fraction[1]) > 6:
+        return nanoseconds + Fraction(Decimal("0." + fraction[1][6:])) * 1000
     return nanoseconds
 
 
