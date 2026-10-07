@@ -9,14 +9,11 @@ import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { runNodePython } from "./support/python-probe.js";
 import type { ScanDraftInput } from "../src/accepted-audit.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-} from "./support/api-events.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { completedEvents } from "./support/api-events.js";
 
-const { temporaryDirectory, copyCompletedScan, cleanup } =
-  createApiTestFixtures();
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 const bundle = await build({
