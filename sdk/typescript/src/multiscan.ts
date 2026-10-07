@@ -1265,7 +1265,7 @@ async function loadResumableScan(
       // Scope spellings and tracked links are relative to the recorded checkout.
       if (matchedRoot !== checkout) {
         await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
-        await ensureOutputDirectory(dirname(matchedRoot));
+        await ensureOutputDirectory(dirname(recoveryCheckout));
       }
       try {
         await mkdir(matchedRoot, { mode: 0o700 });
@@ -1719,6 +1719,7 @@ async function checkoutRevision(
       "--no-tags",
       "--depth=1",
       "--no-auto-gc",
+      "--no-write-commit-graph",
       "--",
       task.repository,
       task.revision,
@@ -1726,7 +1727,7 @@ async function checkoutRevision(
   }
   await git("checkout", "--quiet", "--detach", task.revision);
   if (restoreIncomplete) {
-    const links = (await gitOutput(["ls-files", "--stage", "-z"]))
+    const links = (await gitOutput(["ls-tree", "-r", "-z", task.revision]))
       .toString("utf8")
       .split("\0")
       .filter((entry) => entry.startsWith("120000 "))
@@ -1763,9 +1764,22 @@ async function checkoutRevision(
     }
     const restoreAll = selectedPaths.has(".");
     const scopes = [...selectedPaths, ...aliases].map((name) =>
-      Buffer.from(name),
+      Buffer.from(process.platform === "win32" ? name.toLowerCase() : name),
     );
-    const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
+    const worktreeDeleted = await gitOutput(["ls-files", "--deleted", "-z"]);
+    const deletedPaths = Buffer.concat([
+      worktreeDeleted,
+      await gitOutput([
+        "diff",
+        "--cached",
+        "--name-only",
+        "--diff-filter=D",
+        "--no-renames",
+        "-z",
+        task.revision,
+        "--",
+      ]),
+    ]);
     const selectedDeleted: Buffer[] = [];
     let start = 0;
     for (
@@ -1774,16 +1788,26 @@ async function checkoutRevision(
       end = deletedPaths.indexOf(0, start)
     ) {
       const name = deletedPaths.subarray(start, end);
+      const comparisonName =
+        process.platform === "win32"
+          ? Buffer.from(name.toString("utf8").toLowerCase())
+          : name;
       if (
         scopes.some(
           (scope) =>
             restoreAll ||
-            name.equals(scope) ||
-            (name[scope.length] === 47 &&
-              name.subarray(0, scope.length).equals(scope)),
+            comparisonName.equals(scope) ||
+            (comparisonName[scope.length] === 47 &&
+              comparisonName.subarray(0, scope.length).equals(scope)),
         )
       ) {
-        selectedDeleted.push(deletedPaths.subarray(start, end + 1));
+        if (
+          start < worktreeDeleted.length ||
+          (await lstat(Buffer.concat([Buffer.from(path + sep), name])).catch(
+            undefinedIfMissingFile,
+          )) === undefined
+        )
+          selectedDeleted.push(deletedPaths.subarray(start, end + 1));
       }
       start = end + 1;
     }
