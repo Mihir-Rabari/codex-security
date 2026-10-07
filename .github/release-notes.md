@@ -1,4 +1,4 @@
-<!-- release-version: 0.2.1 -->
+<!-- release-version: 0.3.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -82,6 +82,7 @@
 - load saved feedback and align scan completion instructions ([#1264](https://github.com/openai/codex-security/pull/1264))
 - share workbench migration SQL ([#1333](https://github.com/openai/codex-security/pull/1333))
 - initialize workbench databases with Node SQLite ([#1335](https://github.com/openai/codex-security/pull/1335))
+- move findings and dashboard helpers to Node ([#1408](https://github.com/openai/codex-security/pull/1408))
 
 <!-- release-section: highlights:end -->
 
@@ -89,6 +90,8 @@
 
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+Review migration steps for these breaking changes:
+
+- move findings and dashboard helpers to Node ([#1408](https://github.com/openai/codex-security/pull/1408))
 
 <!-- release-section: upgrades:end -->
