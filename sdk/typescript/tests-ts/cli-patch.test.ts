@@ -8049,6 +8049,8 @@ describe("ordinary patch snapshot context", () => {
           : route === "saved"
             ? ["patch", "--scan", "scan-1"]
             : ["scan", directory, "--patch"];
+      const selectedDirectoryRemoved =
+        route !== "ordinary" && operation === "remove" && flag !== undefined;
       let modelCalls = 0;
       let assessmentCalls = 0;
       let redirectedSnapshotCommands = 0;
@@ -8149,7 +8151,11 @@ describe("ordinary patch snapshot context", () => {
       );
       expect(modelCalls).toBe(operation === "gitfile" ? 2 : 1);
       expect(assessmentCalls).toBe(
-        flag === "--assess-patch-risk" && operation !== "replace" ? 1 : 0,
+        flag === "--assess-patch-risk" &&
+          operation !== "replace" &&
+          !selectedDirectoryRemoved
+          ? 1
+          : 0,
       );
       expect(foreignGit("count-objects", "-v")).toBe(foreignObjects);
       expect(foreignGit("rev-parse", "HEAD")).toBe(foreignHead);
@@ -8167,6 +8173,23 @@ describe("ordinary patch snapshot context", () => {
           "Patch directory now resolves outside the selected repository",
         );
         expect(redirectedSnapshotCommands).toBe(0);
+        expect(await readFile(join(root, ".git/index"))).toEqual(index);
+        expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "main"));
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(root, "app.ts"), "utf8")).toBe("fixed\n");
+        return;
+      }
+      if (selectedDirectoryRemoved) {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Patch directory changed during patching",
+        );
+        expect(JSON.parse(outcome.stdout).patches).toMatchObject(
+          scan.findings.findings.map(() => ({
+            status: "verified",
+            files: ["keep.ts"],
+          })),
+        );
         expect(await readFile(join(root, ".git/index"))).toEqual(index);
         expect(git("rev-parse", "HEAD")).toBe(git("rev-parse", "main"));
         expect(git("ls-remote", "origin")).toBe("");
@@ -8476,6 +8499,7 @@ describe("verified patch caller identity", () => {
       [
         "move",
         "move-without-alias",
+        "directory-to-file",
         "source-edit",
         "destination-overwrite",
         "source-replacement",
@@ -8492,13 +8516,16 @@ describe("verified patch caller identity", () => {
     const requested =
       operation === "move" ||
       operation === "move-without-alias" ||
+      operation === "directory-to-file" ||
       operation === "removed-caller"
         ? component
         : alias;
     const remote = join(root, "remote.git");
     const redirected =
-      operation !== "stable-alias" && operation !== "removed-caller";
-    const blocked = redirected || operation === "removed-caller";
+      operation !== "stable-alias" &&
+      operation !== "removed-caller" &&
+      operation !== "directory-to-file";
+    const blocked = operation !== "stable-alias";
     await mkdir(component, { recursive: true });
     await writeFile(join(component, "app.ts"), "unsafe\n");
     await writeFile(join(component, "sibling.ts"), "original sibling\n");
@@ -8592,6 +8619,9 @@ describe("verified patch caller identity", () => {
                 await rm(component, { recursive: true });
                 await writeFile(component, "unreported source replacement\n");
               }
+            } else if (operation === "directory-to-file") {
+              await rm(component, { recursive: true });
+              await writeFile(component, "replacement fix\n");
             } else if (operation === "removed-caller")
               await rm(component, { recursive: true });
             else await writeFile(join(component, "app.ts"), "fixed\n");
@@ -8618,7 +8648,9 @@ describe("verified patch caller identity", () => {
       expect(outcome.stderr).toContain(
         "Patch directory changed during patching",
       );
-      if (operation === "removed-caller")
+      if (operation === "directory-to-file")
+        expect(await readFile(component, "utf8")).toBe("replacement fix\n");
+      else if (operation === "removed-caller")
         await expect(readFile(join(component, "app.ts"))).rejects.toMatchObject(
           {
             code: "ENOENT",
