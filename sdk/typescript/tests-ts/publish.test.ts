@@ -50,16 +50,12 @@ test("returns completed publication when cancellation arrives during receipt per
   const result = await publishScanInternal(
     "scan",
     { ...OPTIONS, signal: controller.signal },
-    dependencies(
-      publication,
-      {},
-      {
-        writeReceipt: async (receipt) => {
-          receipts.push(receipt);
-          controller.abort(new Error("Cancellation after saved receipt"));
-        },
+    dependencies(publication, {
+      writeReceipt: async (receipt) => {
+        receipts.push(receipt);
+        controller.abort(new Error("Cancellation after saved receipt"));
       },
-    ),
+    }),
   );
   expect(receipts).toHaveLength(1);
   expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
@@ -69,26 +65,22 @@ test("retains indeterminate publication evidence when reading the handoff fails"
   const publication = preparedPublication();
   const receipts: PublishScanResult[] = [];
   let file = "";
-  const injected = dependencies(
-    publication,
-    {},
-    {
-      runCodex: async (_command, _args, input) => {
-        file = publicationData(input).handoffFile;
-        await writeHandoff(input, [
-          handoffRecord(publication, publication.issues[0]!, {
-            identifier: "SEC-123",
-          }),
-        ]);
-        await rename(file, `${file}.saved`);
-        await mkdir(file);
-        return { exitCode: 0, stdout: "", stderr: "" };
-      },
-      writeReceipt: async (receipt) => {
-        receipts.push(receipt);
-      },
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      file = publicationData(input).handoffFile;
+      await writeHandoff(input, [
+        handoffRecord(publication, publication.issues[0]!, {
+          identifier: "SEC-123",
+        }),
+      ]);
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return { exitCode: 0, stdout: "", stderr: "" };
     },
-  );
+    writeReceipt: async (receipt) => {
+      receipts.push(receipt);
+    },
+  });
   await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
     "could not verify every completed mutation",
   );
@@ -102,28 +94,24 @@ test("retains indeterminate publication evidence when reading the handoff fails"
 test("preserves unreadable handoff diagnostics when every connector outcome failed", async () => {
   const publication = preparedPublication();
   const receipts: PublishScanResult[] = [];
-  const injected = dependencies(
-    publication,
-    {},
-    {
-      runCodex: async (_command, _args, input) => {
-        const file = publicationData(input).handoffFile;
-        await rename(file, `${file}.saved`);
-        await mkdir(file);
-        return {
-          exitCode: 0,
-          stdout: issueEvent(publication.issues[0]!, {
-            status: "failed",
-            error: "Synthetic connector failure",
-          }),
-          stderr: "",
-        };
-      },
-      writeReceipt: async (receipt) => {
-        receipts.push(structuredClone(receipt));
-      },
+  const injected = dependencies(publication, {
+    runCodex: async (_command, _args, input) => {
+      const file = publicationData(input).handoffFile;
+      await rename(file, `${file}.saved`);
+      await mkdir(file);
+      return {
+        exitCode: 0,
+        stdout: issueEvent(publication.issues[0]!, {
+          status: "failed",
+          error: "Synthetic connector failure",
+        }),
+        stderr: "",
+      };
     },
-  );
+    writeReceipt: async (receipt) => {
+      receipts.push(structuredClone(receipt));
+    },
+  });
   await expect(publishScanInternal("scan", OPTIONS, injected)).rejects.toThrow(
     "EISDIR",
   );

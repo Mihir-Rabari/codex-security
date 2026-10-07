@@ -939,7 +939,6 @@ async function collectPublicationHandoffEvidence(
       {
         source: "handoff",
         status: "invalid",
-        rawLine: "",
         possibleMutation: true,
         resolution: resolveClaims([]),
         error: `Could not read the Linear publication handoff: ${errorMessage(error)}`,
