@@ -432,6 +432,15 @@ function reconcileScanDraft(
   terminalReplacesHistory = false,
 ): { input: ScanDraftInput; acceptProgress: boolean } {
   let result = structuredClone(input);
+  const retainedFinal =
+    input.complete === false
+      ? savedSources.find(({ input }) => input.complete !== false)
+      : undefined;
+  if (terminalReplacesHistory && retainedFinal) {
+    savedSources = savedSources.filter(
+      ({ modifiedMs }) => modifiedMs >= retainedFinal.modifiedMs,
+    );
+  }
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
@@ -497,10 +506,6 @@ function reconcileScanDraft(
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
-  const retainedFinal =
-    input.complete === false
-      ? savedSources.find(({ input }) => input.complete !== false)
-      : undefined;
   const retainedIndex = retainedFinal
     ? savedSources.indexOf(retainedFinal)
     : -1;

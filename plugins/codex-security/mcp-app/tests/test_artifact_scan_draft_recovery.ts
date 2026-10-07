@@ -2492,3 +2492,80 @@ for (const layout of ["standard", "diff"] as const) {
     }
   }
 }
+
+for (const [layout, history] of [
+  ["deep", "empty"],
+  ["deep", "outstanding"],
+  ["deep", "tied"],
+  ["standard", "empty"],
+] as const) {
+  test(`${layout}: retained terminal history stays ordered after ${history} progress`, async (t) => {
+    const f = await fixture(t, layout);
+    const stale = {
+      id: "old-work",
+      reason: "Earlier review",
+      surfaceIds: ["old-surface"],
+    };
+    const surface = {
+      id: "old-surface",
+      label: "Earlier surface",
+      disposition: "needs_follow_up",
+      reason: "Review pending",
+      receiptRefs: [],
+    };
+    await f.write({
+      ...f.draft({ deferred: [stale], surfaces: [surface] }),
+      findings: [findingFor("old-finding")],
+    });
+    const checkpointRoot = path.join(f.root, "checkpoints");
+    const oldCheckpoints = new Set(await readdir(checkpointRoot));
+    const current = { id: "new-work", reason: "Current review" };
+    const pending = history === "outstanding" ? [current] : [];
+    await f.write(f.draft({ deferred: pending }, true));
+    const terminal = await f.read();
+    assert.deepEqual(terminal.deferred, layout === "deep" ? pending : [stale]);
+    const oldContents = new Map<string, string>();
+    for (const name of await readdir(checkpointRoot)) {
+      const filename = path.join(checkpointRoot, name);
+      const old = oldCheckpoints.has(name);
+      const time = old && history !== "tied" ? 100 : 200;
+      await utimes(filename, time, time);
+      if (old) oldContents.set(name, await readFile(filename, "utf8"));
+    }
+    for (const name of ["findings.json", "coverage.json", "scan-manifest.json"])
+      await utimes(path.join(f.root, name), 200, 200);
+    const result = await f.write({
+      ...f.draft(),
+      findings:
+        history === "outstanding" ? [findingFor("current-finding")] : [],
+    });
+    const retainsOld = layout === "standard" || history === "tied";
+    const expectedDeferred = retainsOld ? [stale] : pending;
+    assert.deepEqual(result.coverage.deferred, expectedDeferred);
+    assert.deepEqual(result.coverage.surfaces, retainsOld ? [surface] : []);
+    assert.equal(
+      result.coverage.completeness,
+      expectedDeferred.length ? "partial" : "complete",
+    );
+    assert.deepEqual(await f.read(), result.coverage);
+    const findings = await readJson(f.root, "findings.json");
+    assert.deepEqual(
+      findings.findings
+        .map((row: ReturnType<typeof findingFor>) => row.provenance.candidateId)
+        .sort(),
+      history === "outstanding"
+        ? ["current-finding"]
+        : retainsOld
+          ? ["old-finding"]
+          : [],
+    );
+    const manifest = await readJson(f.root, "scan-manifest.json");
+    if (layout === "deep" && history === "empty")
+      assert.notEqual(manifest.scan.complete, false);
+    for (const [name, contents] of oldContents)
+      assert.equal(
+        await readFile(path.join(checkpointRoot, name), "utf8"),
+        contents,
+      );
+  });
+}
