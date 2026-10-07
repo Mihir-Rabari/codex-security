@@ -17,12 +17,13 @@ def test_standard_publication_preserves_legacy_review_extension(
     scan.coverage["reviews"] = reviews
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     if stopped:
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
-        published = workbench_api["recover_scan_results"](
-            workbench_db, Namespace(scan_id=scan.scan_id)
+        published = workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
         )["scan"]
     else:
         published = complete(workbench_api, workbench_db, scan)

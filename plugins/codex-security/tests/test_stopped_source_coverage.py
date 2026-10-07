@@ -1708,3 +1708,92 @@ def test_precommit_deferred_links_keep_actual_host_surface(
             if variant != "changed":
                 assert proof["retainedHostSurface"] in row["surfaceIds"]
         assert all(path.read_bytes() == value for path, value in saved.items())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory access modes require POSIX")
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("second", [False, True])
+@pytest.mark.parametrize("merge_state", ["merging", "buffered", "merged"])
+def test_retained_two_surface_actual_recovery(
+    workbench_api, workbench_db, publication_scan, count, second, merge_state
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the real checkpoint producer")
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    worker = add_worker(workbench_db, scan)
+    reducer = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = ? WHERE result_manifest_path = ?",
+            (merge_state, str(worker)),
+        )
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', status = 'failed', merge_state = 'none' WHERE result_manifest_path = ?",
+            (str(reducer),),
+        )
+    reducer.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "sourceCoverage": {
+                    "completeness": "complete",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                    "reviews": [],
+                },
+            }
+        )
+    )
+    result = subprocess.run(
+        [
+            node,
+            "--experimental-strip-types",
+            str(Path(__file__).resolve().parents[1] / "mcp-app/tests/retained_reducer_fixture.mjs"),
+            str(scan.scan_dir),
+            str(worker),
+            str(reducer),
+            str(count),
+            str(second).lower(),
+            scan.scan_id,
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    proof = json.loads(result.stdout)
+    saved = {p: p.read_bytes() for p in (scan.scan_dir / "workers").rglob("*.json")}
+    api, context = workbench_api["saved_results"], workbench_api["_WORKBENCH_DB_CONTEXT"]
+    api.fail_scan(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            cost_json=None,
+            message="Synthetic interrupted reduction.",
+        ),
+    )
+    for replay in (False, True):
+        if replay:
+            api.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        reasons = ["Retained accepted proof remains."] + (
+            ["Independent second proof remains."] if second else []
+        )
+        rows = [row for row in coverage["deferred"] if row.get("reason") in reasons]
+        assert len(rows) == len(reasons), rows
+        assert sorted(row["reason"] for row in rows) == sorted(reasons)
+        for row in rows:
+            assert set(row["surfaceIds"]) == set(proof["expectedSurfaceIds"])
+        assert all(p.read_bytes() == content for p, content in saved.items())

@@ -1259,6 +1259,10 @@ def merge_saved_results(
                         surface_ids.get(value, value) if isinstance(value, str) else value
                         for value in original["surfaceIds"]
                     ]
+                    for value in (source, original):
+                        links = value.get("surfaceIds")
+                        if isinstance(links, list) and all(isinstance(link, str) for link in links):
+                            value["surfaceIds"] = sorted(set(links))
                 for value in (source, original):
                     descriptions = value.pop("provenance", None)
                     if isinstance(descriptions, dict):

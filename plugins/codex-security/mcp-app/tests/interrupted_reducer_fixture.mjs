@@ -7,7 +7,9 @@ import { importSource } from "./import-module.ts";
 
 const { validateReducerArtifacts, projectDiscoveryCoverage } =
   await importSource(
-    fileURLToPath(new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)),
+    fileURLToPath(
+      new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+    ),
   );
 const { createDeepScanArtifacts: artifactsForScan } = await importSource(
   fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
