@@ -1,5 +1,5 @@
 import { readJson } from "./support/json.ts";
-import { finding as draftFinding } from "./scan-draft-fixture.ts";
+import { workerDraft, finding as draftFinding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import type {
@@ -112,9 +112,8 @@ try {
     findings: [fresh],
     scope: { summary: largeText },
     coverage: {
+      ...workerDraft([]).coverage,
       completeness: "partial",
-      surfaces: [],
-      explicitExclusions: [],
       deferred: [
         { candidateId: "pending-review", reason: "Review remains pending." },
       ],
