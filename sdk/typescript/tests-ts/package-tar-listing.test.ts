@@ -20,6 +20,7 @@ import {
   archive,
   cleanCompressedPayload,
   octal,
+  oldGnuSparseRecord,
   paxRecords,
   tarRecord,
 } from "./package-tar-fixtures.js";
@@ -381,6 +382,12 @@ describe("npm package tar listings", () => {
           import.meta.url,
         ),
       );
+      const oldGnuText = Buffer.alloc(32 * 1024);
+      const oldGnuExtents = Array.from({ length: 32 }, (_, index) => {
+        oldGnuText.write("Public contents.", index * 1024);
+        return { offset: index * 1024, size: 512 };
+      });
+      oldGnuExtents.push({ offset: oldGnuText.length, size: 0 });
       const middle = Math.floor(cleanCompressedPayload.length / 2);
       const cases = [
         {
@@ -420,6 +427,30 @@ describe("npm package tar listings", () => {
         },
         { name: "png", files: [["logo.png", logo, true]] },
         {
+          name: "oldgnu-brotli",
+          files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
+        },
+        { name: "oldgnu-png", files: [["logo.png", logo, "oldgnu"]] },
+        {
+          name: "oldgnu-continuations",
+          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+          extents: oldGnuExtents,
+        },
+        {
+          name: "oldgnu-continuation-marker",
+          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+          extents: oldGnuExtents,
+          metadataMarker: "continuation",
+          error: "npm tarball contains an internal reference.",
+        },
+        {
+          name: "oldgnu-metadata-boundary-marker",
+          files: [["helpers.mjs", oldGnuText, "oldgnu"]],
+          extents: oldGnuExtents,
+          metadataMarker: "boundary",
+          error: "npm tarball contains an internal reference.",
+        },
+        {
           name: "global-sparse-keys",
           files: [["runtime.mjs.br", cleanCompressedPayload, false]],
           globalSparse: true,
@@ -436,6 +467,21 @@ describe("npm package tar listings", () => {
           error: "npm tarball contains an internal reference.",
         },
         {
+          name: "sparse-header-map-boundary-marker",
+          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+          headerMapMarker: true,
+          error: "npm tarball contains an internal reference.",
+        },
+        {
+          name: "sparse-tail-header-boundary-marker",
+          files: [
+            ["runtime.mjs.br", cleanCompressedPayload, true],
+            ["extra.mjs", Buffer.from("Public contents."), false],
+          ],
+          tailBoundaryMarker: true,
+          error: "npm tarball contains an internal reference.",
+        },
+        {
           name: "map-padding-marker",
           files: [["runtime.mjs.br", cleanCompressedPayload, true]],
           mapMarker: true,
@@ -449,16 +495,27 @@ describe("npm package tar listings", () => {
         },
       ] satisfies {
         name: string;
-        files: [string, Buffer, boolean | "0.1-tail"][];
+        files: [string, Buffer, boolean | "0.1-tail" | "oldgnu"][];
+        extents?: { offset: number; size: number }[];
+        metadataMarker?: "continuation" | "boundary";
         globalSparse?: boolean;
         mapMarker?: boolean;
+        headerMapMarker?: boolean;
         tailMarker?: boolean;
+        tailBoundaryMarker?: boolean;
         error?: string;
       }[];
       for (const scenario of cases) {
         const records = scenario.files.map(([name, contents, sparse]) => {
           const path = `package/_bundled_plugin/${name}`;
           if (!sparse) return tarRecord(contents, { name: path });
+          if (sparse === "oldgnu")
+            return oldGnuSparseRecord(
+              contents,
+              path,
+              scenario.extents,
+              scenario.metadataMarker,
+            );
           if (sparse === "0.1-tail") {
             return Buffer.concat([
               tarRecord(
@@ -481,6 +538,12 @@ describe("npm package tar listings", () => {
           const map = Buffer.alloc(512);
           map.write(`1\n0\n${contents.length}\n`);
           if (scenario.mapMarker) map.write("go/synthetic-reference", 128);
+          const tail = scenario.tailBoundaryMarker
+            ? Buffer.alloc((512 - (contents.length % 512)) % 512 || 512)
+            : scenario.tailMarker
+              ? Buffer.from("go/synthetic-reference")
+              : Buffer.alloc(0);
+          if (scenario.tailBoundaryMarker) tail.write("go/", tail.length - 3);
           return Buffer.concat([
             tarRecord(
               paxRecords({
@@ -491,16 +554,17 @@ describe("npm package tar listings", () => {
               }),
               { name: "PaxHeaders/asset", type: 0x78 },
             ),
-            tarRecord(
-              Buffer.concat([
-                map,
-                contents,
-                ...(scenario.tailMarker
-                  ? [Buffer.from("go/synthetic-reference")]
-                  : []),
-              ]),
-              { name: "package/GNUSparseFile.1/asset" },
-            ),
+            tarRecord(Buffer.concat([map, contents, tail]), {
+              name: "package/GNUSparseFile.1/asset",
+              ...(scenario.headerMapMarker
+                ? {
+                    reserved: Buffer.concat([
+                      Buffer.alloc(9),
+                      Buffer.from("go/"),
+                    ]),
+                  }
+                : {}),
+            }),
           ]);
         });
         const archivePath = join(root, `${scenario.name}.tgz`);

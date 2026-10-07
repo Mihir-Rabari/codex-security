@@ -66,6 +66,57 @@ export function tarRecord(
   ]);
 }
 
+export function oldGnuSparseRecord(
+  contents: Buffer,
+  name: string,
+  extents = [{ offset: 0, size: contents.length }],
+  metadataMarker?: "continuation" | "boundary",
+): Buffer {
+  const stored = Buffer.concat(
+    extents.flatMap(({ offset, size }, index) => [
+      contents.subarray(offset, offset + size),
+      Buffer.alloc(index < extents.length - 1 ? (512 - (size % 512)) % 512 : 0),
+    ]),
+  );
+  const record = tarRecord(stored, {
+    name,
+    type: 0x53,
+    magic: "ustar ",
+    version: " \0",
+  });
+  const header = record.subarray(0, blockSize);
+  const continuations = [];
+  let remaining = extents;
+  let map = header;
+  let start = 386;
+  let count = 4;
+  do {
+    for (const [index, extent] of remaining.slice(0, count).entries()) {
+      octal(extent.offset, 12).copy(map, start + index * 24);
+      octal(extent.size, 12).copy(map, start + index * 24 + 12);
+    }
+    remaining = remaining.slice(count);
+    map[start + count * 24] = remaining.length > 0 ? 1 : 0;
+    if (remaining.length > 0) {
+      map = Buffer.alloc(blockSize);
+      continuations.push(map);
+      start = 0;
+      count = 21;
+    }
+  } while (remaining.length > 0);
+  octal(contents.length, 12).copy(header, 483);
+  if (metadataMarker === "continuation")
+    continuations.at(-1)!.write("go/test", 505);
+  if (metadataMarker === "boundary") header.write("go/", 509);
+  header.fill(0x20, 148, 156);
+  octal(
+    header.reduce((sum, byte) => sum + byte, 0),
+    8,
+    "\0 ",
+  ).copy(header, 148);
+  return Buffer.concat([header, ...continuations, record.subarray(blockSize)]);
+}
+
 export function archive(...records: Buffer[]): Buffer {
   return Buffer.concat([...records, Buffer.alloc(blockSize * 2)]);
 }

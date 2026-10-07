@@ -17,7 +17,7 @@ type PackageTarEntries = {
   readTarArchive: (archiveBytes: Buffer) => {
     entries: PlainTarEntry[];
     files: Map<string, Buffer>;
-    metadata: Buffer;
+    metadata: (Buffer | string)[];
   };
 };
 
@@ -35,7 +35,12 @@ const { assertPublicPackageContents } = (await import(
 
 function plainTarEntries(bytes: Buffer): PlainTarEntry[] {
   const archive = readTarArchive(bytes);
-  assertPublicPackageContents(archive.files, archive.metadata);
+  assertPublicPackageContents(
+    archive.files,
+    Buffer.concat(
+      archive.metadata.filter((part): part is Buffer => Buffer.isBuffer(part)),
+    ),
+  );
   return archive.entries;
 }
 
@@ -80,7 +85,7 @@ describe("plain npm tar entries", () => {
 
   test("rejects unsupported entry types and malformed extended headers", () => {
     for (const type of [
-      0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x4c, 0x53, 0x67, 0x78,
+      0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x4c, 0x67, 0x78,
     ]) {
       expect(() =>
         plainTarEntries(

@@ -9,6 +9,12 @@ function headerText(header, start, end) {
   return header.subarray(start, end).toString("utf8").split("\0", 1)[0];
 }
 
+function octalNumber(header, start, end) {
+  const field = headerText(header, start, end).trim();
+  if (!/^[0-7]*$/u.test(field)) invalidTarEntry();
+  return Number.parseInt(field || "0", 8);
+}
+
 function paxAttributes(contents) {
   const attributes = new Map();
   let offset = 0;
@@ -58,8 +64,9 @@ function sparseMap(contents) {
   return { contents, extents, dataOffset };
 }
 
-export function assertStoredSparseContents(sparseFiles, extractedFiles) {
-  for (const [path, { contents, extents, dataOffset }] of sparseFiles) {
+export function assertStoredSparseContents(archive, extractedFiles) {
+  const sparseMetadata = new Map();
+  for (const [path, { contents, extents, dataOffset }] of archive.sparseFiles) {
     const extracted = extractedFiles.get(path);
     let metadata;
     // GNU tar pads stored extents; libarchive also accepts packed extents.
@@ -91,8 +98,15 @@ export function assertStoredSparseContents(sparseFiles, extractedFiles) {
       }
     }
     if (metadata === undefined) invalidTarEntry();
-    assertPublicText(metadata.toString("utf8"));
+    sparseMetadata.set(path, metadata);
   }
+  assertPublicText(
+    Buffer.concat(
+      archive.metadata.map((part) =>
+        typeof part === "string" ? sparseMetadata.get(part) : part,
+      ),
+    ).toString("utf8"),
+  );
 }
 
 export function readTarArchive(archiveBytes) {
@@ -114,9 +128,14 @@ export function readTarArchive(archiveBytes) {
 
     const signature = header.subarray(257, 265).toString("latin1");
     const directory = header[156] === 0x35;
+    const oldSparse = header[156] === 0x53;
     const extended = header[156] === 0x78 || header[156] === 0x67;
     if (
-      (header[156] !== 0 && header[156] !== 0x30 && !directory && !extended) ||
+      (header[156] !== 0 &&
+        header[156] !== 0x30 &&
+        !directory &&
+        !extended &&
+        !oldSparse) ||
       (signature !== "ustar\0" + "00" &&
         signature !== "ustar  \0" &&
         signature !== "\0".repeat(8))
@@ -140,23 +159,40 @@ export function readTarArchive(archiveBytes) {
       invalidTarEntry();
     assertPublicText(path);
 
-    const sizeField = headerText(header, 124, 136).trim();
-    if (!/^[0-7]*$/u.test(sizeField)) invalidTarEntry();
+    const headerSize = octalNumber(header, 124, 136);
     const paxSize = extended ? undefined : attribute("size");
     if (paxSize !== undefined && !/^[0-9]+$/u.test(paxSize)) invalidTarEntry();
-    const size =
-      paxSize === undefined
-        ? Number.parseInt(sizeField || "0", 8)
-        : Number(paxSize);
-    const contentsEnd = offset + blockSize + size;
-    const nextOffset =
-      offset + blockSize + Math.ceil(size / blockSize) * blockSize;
+    const size = paxSize === undefined ? headerSize : Number(paxSize);
+    let contentsStart = offset + blockSize;
+    const oldSparseExtents = [];
+    if (oldSparse) {
+      let map = header;
+      let start = 386;
+      let count = 4;
+      for (;;) {
+        for (let index = 0; index < count; index++) {
+          const field = start + index * 24;
+          const offset = octalNumber(map, field, field + 12);
+          const size = octalNumber(map, field + 12, field + 24);
+          if (offset !== 0 || size !== 0)
+            oldSparseExtents.push({ offset, size });
+        }
+        if (map[start + count * 24] === 0) break;
+        map = archiveBytes.subarray(contentsStart, contentsStart + blockSize);
+        if (map.length !== blockSize) invalidTarEntry();
+        contentsStart += blockSize;
+        start = 0;
+        count = 21;
+      }
+    }
+    const contentsEnd = contentsStart + size;
+    const nextOffset = contentsStart + Math.ceil(size / blockSize) * blockSize;
     if (nextOffset > archiveBytes.byteLength || (directory && size !== 0)) {
       invalidTarEntry();
     }
 
     if (extended) {
-      const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
+      const contents = archiveBytes.subarray(contentsStart, contentsEnd);
       archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
       const destination =
         header[156] === 0x67 ? globalAttributes : nextAttributes;
@@ -169,17 +205,24 @@ export function readTarArchive(archiveBytes) {
       if (directory)
         archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
       else {
-        const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
+        const contents = archiveBytes.subarray(contentsStart, contentsEnd);
+        archiveMetadata.push(archiveBytes.subarray(offset, contentsStart));
         if (
-          Number.parseInt(nextAttributes.get("GNU.sparse.major"), 10) === 1 &&
+          (oldSparse ||
+            Number.parseInt(nextAttributes.get("GNU.sparse.major"), 10) ===
+              1) &&
           /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
-        )
-          sparseFiles.set(path, sparseMap(contents));
-        else archiveFiles.set(path, contents);
-        archiveMetadata.push(
-          header,
-          archiveBytes.subarray(contentsEnd, nextOffset),
-        );
+        ) {
+          sparseFiles.set(
+            path,
+            oldSparse
+              ? { contents, extents: oldSparseExtents, dataOffset: 0 }
+              : sparseMap(contents),
+          );
+          // Retain sparse framing in order with the surrounding headers and padding.
+          archiveMetadata.push(path);
+        } else archiveFiles.set(path, contents);
+        archiveMetadata.push(archiveBytes.subarray(contentsEnd, nextOffset));
       }
       entries.push({ path, size });
       nextAttributes.clear();
@@ -202,7 +245,7 @@ export function readTarArchive(archiveBytes) {
   return {
     entries,
     files: archiveFiles,
-    metadata: Buffer.concat(archiveMetadata),
+    metadata: archiveMetadata,
     sparseFiles,
     deferredFiles,
   };

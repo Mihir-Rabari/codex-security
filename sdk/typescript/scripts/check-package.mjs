@@ -54,7 +54,10 @@ const archiveBytes = gunzipSync(compressedArchive, {
 const storedArchive = readTarArchive(archiveBytes);
 const rawEntries = storedArchive.entries;
 validatePackagePaths(rawEntries.map(({ path }) => path));
-assertPublicPackageContents(storedArchive.files, storedArchive.metadata);
+assertPublicPackageContents(
+  storedArchive.files,
+  Buffer.concat(storedArchive.metadata.filter(Buffer.isBuffer)),
+);
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
 const characterLocale =
@@ -312,7 +315,7 @@ for (const path of storedArchive.sparseFiles.keys()) {
   storedArchive.deferredFiles.set(path, archiveFile(path));
 }
 assertPublicPackageContents(storedArchive.deferredFiles);
-assertStoredSparseContents(storedArchive.sparseFiles, archiveFiles);
+assertStoredSparseContents(storedArchive, archiveFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(
