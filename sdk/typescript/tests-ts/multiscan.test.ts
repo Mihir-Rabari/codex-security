@@ -760,6 +760,14 @@ describe("multiscan", () => {
         recoverScan: async (scanDir, prompts) => {
           expect(prompts.scanPrompt).toBe("Shared scan instructions.");
           await completedScan(scanDir);
+          const findingsPath = join(scanDir, "findings.json");
+          const saved = JSON.parse(
+            await readFile(findingsPath, "utf8"),
+          ) as ScanResult["findings"];
+          for (const finding of saved.findings)
+            finding.severity.level = severity;
+          await writeFile(findingsPath, JSON.stringify(saved));
+          await reseal(scanDir);
           const recovered = fakeResult([severity]);
           return {
             coverage: recovered.coverage,
