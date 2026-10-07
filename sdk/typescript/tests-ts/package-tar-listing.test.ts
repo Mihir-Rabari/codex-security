@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { brotliCompressSync, gzipSync } from "node:zlib";
+import { brotliCompressSync, brotliDecompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 import {
   archive,
@@ -404,6 +404,17 @@ describe("npm package tar listings", () => {
         unicodeCompressedPayload,
         unicodeCompressedPayload.indexOf("Go/w") - 4,
       );
+      const leadingMarker = cleanCompressedPayload.indexOf("Go/w");
+      expect(leadingMarker).toBeGreaterThan(0);
+      const repositoryCompressedPayload = Buffer.from(cleanCompressedPayload);
+      const repositoryMarker = Buffer.from(
+        ["github.com", "openai", "openai"].join("/"),
+      );
+      repositoryMarker.copy(repositoryCompressedPayload, 300);
+      const repositoryMarkerEnd = 300 + repositoryMarker.length;
+      expect(
+        brotliDecompressSync(repositoryCompressedPayload).toString("utf8"),
+      ).toMatch(/^[A-Za-z0-9]+$/u);
       const middle = Math.floor(cleanCompressedPayload.length / 2);
       const cases = [
         {
@@ -413,6 +424,36 @@ describe("npm package tar listings", () => {
         {
           name: "unicode-brotli",
           files: [["runtime.mjs.br", unicodeCompressedPayload, true]],
+        },
+        {
+          name: "sparse-brotli-leading-delimiter",
+          files: [
+            [
+              "runtime.mjs.br.part-000",
+              cleanCompressedPayload.subarray(0, leadingMarker),
+              false,
+            ],
+            [
+              "runtime.mjs.br.part-001",
+              cleanCompressedPayload.subarray(leadingMarker),
+              true,
+            ],
+          ],
+        },
+        {
+          name: "sparse-brotli-trailing-delimiter",
+          files: [
+            [
+              "runtime.mjs.br.part-000",
+              repositoryCompressedPayload.subarray(0, repositoryMarkerEnd),
+              true,
+            ],
+            [
+              "runtime.mjs.br.part-001",
+              repositoryCompressedPayload.subarray(repositoryMarkerEnd),
+              false,
+            ],
+          ],
         },
         {
           name: "mixed-split-brotli",
