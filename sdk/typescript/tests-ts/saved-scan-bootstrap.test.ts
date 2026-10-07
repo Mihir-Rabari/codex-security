@@ -2,7 +2,14 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
@@ -402,7 +409,7 @@ test("latest explains the explicit scan-ID fallback when history protects the ho
   try {
     db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
       "unrelated-target",
-      dirname(hostGit.executable!),
+      dirname(await realpath(hostGit.executable!)),
       "Unrelated synthetic target",
       "2026-01-01T00:00:00Z",
       "2026-01-01T00:00:00Z",
