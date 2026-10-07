@@ -4,6 +4,13 @@ import path from "node:path";
 import type { ApiProvider, ProviderOptions } from "promptfoo";
 
 type CodexProvider = ApiProvider & {
+  getCodexInstanceForTurn(
+    environment: NodeJS.ProcessEnv,
+    config: ProviderOptions["config"],
+    apiKey?: string,
+  ): Promise<{
+    activeInstance: { exec: { executablePath: string; pathDirs: string[] } };
+  }>;
   callApiInternal(
     prompt: Parameters<ApiProvider["callApi"]>[0],
     context: Parameters<ApiProvider["callApi"]>[1],
@@ -11,6 +18,26 @@ type CodexProvider = ApiProvider & {
     config: ProviderOptions["config"],
   ): ReturnType<ApiProvider["callApi"]>;
 };
+
+function resolveCommand(
+  command: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  return /[/\\]/.test(command)
+    ? command
+    : execFileSync(
+        process.platform === "win32"
+          ? path.join(process.env.SystemRoot!, "System32", "where.exe")
+          : "/bin/sh",
+        process.platform === "win32"
+          ? [command]
+          : ["-c", 'command -v "$1"', "triage-node", command],
+        { cwd, env: environment, encoding: "utf8" },
+      )
+        .trim()
+        .split(/\r?\n/)[0];
+}
 
 // Resolve the throwaway runtime when the provider runs, not when Promptfoo
 // persists its configuration for --resume or --retry-errors.
@@ -33,6 +60,27 @@ export default class TriageProvider implements ApiProvider {
         basePath: this.config.basePath,
         options: this.options,
       })) as CodexProvider;
+      const getInstance = provider.getCodexInstanceForTurn.bind(provider);
+      provider.getCodexInstanceForTurn = async (
+        environment,
+        config,
+        apiKey,
+      ) => {
+        const instance = await getInstance(environment, config, apiKey);
+        // The pinned provider exposes its selected SDK executor before creating
+        // thread options. Extend this call's config without changing selection
+        // or the SDK's bundled-tool PATH handling.
+        const { executablePath, pathDirs } = instance.activeInstance.exec;
+        const executable = realpathSync(
+          resolveCommand(executablePath, process.cwd(), environment),
+        );
+        config.additional_directories = [
+          ...(config.additional_directories ?? []),
+          path.dirname(executable),
+          ...pathDirs,
+        ];
+        return instance;
+      };
       const callApiInternal = provider.callApiInternal.bind(provider);
       // The pinned Codex provider merges prompt overrides and renders case
       // variables before this call. Keep that upstream behavior for each case.
@@ -49,33 +97,15 @@ export default class TriageProvider implements ApiProvider {
             process.execPath) ||
           process.execPath;
         const environment = { ...process.env, ...config.cli_env };
-        const resolveNodeCommand = (command: string) =>
-          /[/\\]/.test(command)
-            ? command
-            : execFileSync(
-                process.platform === "win32"
-                  ? path.join(process.env.SystemRoot!, "System32", "where.exe")
-                  : "/bin/sh",
-                process.platform === "win32"
-                  ? [command]
-                  : ["-c", 'command -v "$1"', "triage-node", command],
-                {
-                  cwd: runtimeRoot,
-                  env: environment,
-                  encoding: "utf8",
-                },
-              )
-                .trim()
-                .split(/\r?\n/)[0];
         let nodeCommand: string;
         try {
-          nodeCommand = resolveNodeCommand(requestedNode);
+          nodeCommand = resolveCommand(requestedNode, runtimeRoot, environment);
           accessSync(
             path.resolve(runtimeRoot, nodeCommand),
             process.platform === "win32" ? constants.F_OK : constants.X_OK,
           );
         } catch {
-          nodeCommand = resolveNodeCommand("node");
+          nodeCommand = resolveCommand("node", runtimeRoot, environment);
         }
         const nodePath = realpathSync(path.resolve(runtimeRoot, nodeCommand));
         return callApiInternal(prompt, context, options, {

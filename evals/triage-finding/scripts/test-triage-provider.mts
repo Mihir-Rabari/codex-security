@@ -220,12 +220,13 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         row.overrides.join("\n"),
         /permissions\.triage_runtime_only\.filesystem\.:workspace_roots="read"/,
       );
-      assert.deepEqual(
-        row.directories,
-        row.nodePath === customNode || row.nodePath === selectedNode
-          ? [path.join(root, "case"), path.dirname(row.nodePath)]
-          : [path.dirname(row.nodePath)],
-      );
+      assert.deepEqual(row.directories, [
+        ...(row.nodePath === customNode || row.nodePath === selectedNode
+          ? [path.join(root, "case")]
+          : []),
+        path.dirname(row.nodePath),
+        path.dirname(fakeCodex),
+      ]);
     }
     assert.equal(rows.filter((row) => row.nodePath === customNode).length, 5);
     assert.equal(rows.filter((row) => row.nodePath === selectedNode).length, 1);
@@ -349,6 +350,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       assert.deepEqual(row.directories, [
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
+        path.dirname(fakeCodex),
       ]);
     }
   },
@@ -377,7 +379,7 @@ test(
     fs.writeFileSync(
       fakeCodex,
       `#!${process.execPath}
-const details = {node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
+const details = {executable:require('node:fs').realpathSync(process.argv[1]), path:process.env.PATH, node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
 console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-thread'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify(details)}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
@@ -406,7 +408,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     });
     Object.assign(process.env, environment);
     const { loadApiProvider } = await import("promptfoo");
-    const load = (template: string | undefined) =>
+    const load = (
+      template: string | undefined,
+      command = fakeCodex,
+      cliEnvironment: Record<string, string> = {},
+    ) =>
       loadApiProvider(
         `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
         {
@@ -414,11 +420,12 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
           options: {
             config: {
               working_dir: root,
-              codex_path_override: fakeCodex,
+              codex_path_override: command,
               skip_git_repo_check: true,
               model: "gpt-5.5",
               maxRetries: 0,
               cli_env: {
+                ...cliEnvironment,
                 EXTRA_MARKER: "{{marker}}",
                 ...(template === undefined
                   ? {}
@@ -471,6 +478,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         assert.deepEqual(captured.directories, [
           ...(overrides ? [extra] : []),
           path.dirname(node),
+          path.dirname(fakeCodex),
         ]);
         if (overrides) assert.equal(captured.marker, node);
         assert.deepEqual(context, saved);
@@ -481,6 +489,55 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
       } finally {
         await provider.cleanup?.();
       }
+    }
+    const alias = path.join(root, "codex-alias");
+    fs.symlinkSync(fakeCodex, alias);
+    const selectedPath = `${root}${path.delimiter}${process.env.PATH}`;
+    for (const command of [
+      fakeCodex,
+      path.relative(process.cwd(), fakeCodex),
+      path.basename(fakeCodex),
+      alias,
+    ]) {
+      const provider = await load(nodes[0], command, { PATH: selectedPath });
+      try {
+        const result = await provider.callApi("synthetic");
+        assert.equal(result.error, undefined);
+        const captured = JSON.parse(String(result.output));
+        assert.equal(captured.executable, fakeCodex);
+        assert.equal(captured.path, selectedPath);
+        assert.deepEqual(captured.directories, [path.dirname(nodes[0]), root]);
+      } finally {
+        await provider.cleanup?.();
+      }
+    }
+    const otherCodex = path.join(root, "other", "codex");
+    fs.mkdirSync(path.dirname(otherCodex));
+    fs.copyFileSync(fakeCodex, otherCodex);
+    const selectedCodex = await load(nodes[0], "{{selected_codex}}");
+    try {
+      await Promise.all(
+        [fakeCodex, otherCodex, fakeCodex].map(async (command) => {
+          const context = {
+            vars: { selected_codex: command },
+            prompt: { raw: "synthetic", label: "synthetic" },
+          };
+          const result = await selectedCodex.callApi("synthetic", context);
+          assert.equal(result.error, undefined);
+          const captured = JSON.parse(String(result.output));
+          assert.equal(captured.executable, command);
+          assert.deepEqual(captured.directories, [
+            path.dirname(nodes[0]),
+            path.dirname(command),
+          ]);
+          assert.deepEqual(context, {
+            vars: { selected_codex: command },
+            prompt: { raw: "synthetic", label: "synthetic" },
+          });
+        }),
+      );
+    } finally {
+      await selectedCodex.cleanup?.();
     }
     const mixed = await load("{{prefix}}/{{env.NODE_BASENAME}}");
     try {
@@ -513,7 +570,10 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         const captured = JSON.parse(String(result.output));
         const selected = fs.realpathSync(expected!);
         assert.equal(captured.node, selected);
-        assert.deepEqual(captured.directories, [path.dirname(selected)]);
+        assert.deepEqual(captured.directories, [
+          path.dirname(selected),
+          path.dirname(fakeCodex),
+        ]);
       } finally {
         await provider.cleanup?.();
       }
