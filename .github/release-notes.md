@@ -77,6 +77,7 @@
 - inherit null overrides and preserve literal paths ([#1290](https://github.com/openai/codex-security/pull/1290))
 - resolve path aliases consistently across scan workflows ([#1267](https://github.com/openai/codex-security/pull/1267))
 - include text files in scans regardless of extension ([#1347](https://github.com/openai/codex-security/pull/1347))
+- replace language parsers with source previews ([#1391](https://github.com/openai/codex-security/pull/1391))
 
 <!-- release-section: highlights:end -->
 
