@@ -1175,6 +1175,7 @@ export function createCodexSecurityServer(): McpServer {
                   },
                   runWorkbench,
                   signal,
+                  draft.coverage.resolvedDeferred as JsonObject[] | undefined,
                 );
               },
               onStopped: async (run) => {

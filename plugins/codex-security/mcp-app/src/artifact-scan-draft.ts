@@ -207,11 +207,31 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   input: ScanDraftInput,
   runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
+  retainedWorkerClosures?: JsonObject[],
 ): Promise<ScanDraftResult> {
+  const parentInput =
+    retainedWorkerClosures === undefined
+      ? input
+      : { ...input, coverage: { ...input.coverage } };
+  if (retainedWorkerClosures !== undefined)
+    delete parentInput.coverage.resolvedDeferred;
   return recordCodexSecurityScanDraft(
     context,
-    input,
+    parentInput,
     async (draft, expectedDigest, checkpoint) => {
+      // These closures came from accepted child coverage, not a parent model request.
+      if (retainedWorkerClosures?.length) {
+        draft.coverage.resolvedDeferred = structuredClone(
+          retainedWorkerClosures,
+        );
+        checkpoint = {
+          ...checkpoint,
+          coverage: {
+            ...checkpoint.coverage,
+            resolvedDeferred: structuredClone(retainedWorkerClosures),
+          },
+        };
+      }
       const checkpointPath = await artifactDestination(
         context,
         ["drafts", `${randomUUID()}.checkpoint.json`],
@@ -444,6 +464,7 @@ export async function preserveScanDraft(
     context,
     "current",
     currentCheckpointName,
+    archivedSources !== undefined,
   );
   const archived =
     context.layout === "worker"
@@ -714,9 +735,11 @@ export async function preserveScanDraft(
   result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
   );
-  result.coverage.surfaces = normalizeSurfaces(
-    result.coverage.surfaces as JsonObject[],
-  );
+  if (archivedSources === undefined)
+    result.coverage.surfaces = normalizeSurfaces(
+      result.coverage.surfaces as JsonObject[],
+    );
+  else normalizeSavedScanCoverage([result]);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
 }
@@ -1097,6 +1120,7 @@ function reconcileDeferredSurfaces(
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
+  skipInvalid = false,
 ): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
   const metadata = await lstatIfExists(
     join(context.root, "checkpoint-head.json"),
@@ -1112,12 +1136,20 @@ async function readCheckpointHead(
     ["checkpoint-head.json"],
     label,
   );
-  const head = parseJsonObject(saved.contents, label);
+  let head: JsonObject;
+  try {
+    head = parseJsonObject(saved.contents, label);
+  } catch (error) {
+    if (skipInvalid) return;
+    throw error;
+  }
   if (
     typeof head.checkpoint !== "string" ||
     !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
-  )
+  ) {
+    if (skipInvalid) return;
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
+  }
   // Reselecting an immutable checkpoint updates only the head file.
   return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
 }
@@ -1150,7 +1182,9 @@ async function readSavedCheckpoints(
   }
 
   const head =
-    kind === "current" ? await readCheckpointHead(context, kind) : undefined;
+    kind === "current"
+      ? await readCheckpointHead(context, kind, skipInvalid)
+      : undefined;
   const checkpointHead = head?.checkpoint;
 
   const checkpoints: Array<SavedScanDraft & { name: string }> = [];
@@ -1218,7 +1252,8 @@ async function readSavedCheckpoints(
   if (
     checkpointHead !== undefined &&
     checkpointHead !== excludedCheckpoint &&
-    !checkpoints.some(({ head }) => head)
+    !checkpoints.some(({ head }) => head) &&
+    !skipInvalid
   ) {
     throw new Error("scan checkpoint: current checkpoint head is missing.");
   }
@@ -1386,23 +1421,29 @@ export async function readArchivedWorkerCheckpoints(
     const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
       [];
     const attemptContext = { ...context, root: attemptRoot };
-    // Origin matching needs readable snapshots, not checkpoint selection order.
-    const head = skipInvalid
-      ? undefined
-      : await readCheckpointHead(attemptContext, "archived");
+    const head = await readCheckpointHead(
+      attemptContext,
+      "archived",
+      skipInvalid,
+    );
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
-      checkpointHead = parsePersistedScanDraft(
-        parseJsonObject(
-          await readArtifactText(
-            attemptContext,
-            ["checkpoints", head.checkpoint],
+      try {
+        checkpointHead = parsePersistedScanDraft(
+          parseJsonObject(
+            await readArtifactText(
+              attemptContext,
+              ["checkpoints", head.checkpoint],
+              "archived scan checkpoint head",
+            ),
             "archived scan checkpoint head",
           ),
-          "archived scan checkpoint head",
-        ),
-      );
-      requireMatchingScan(context, checkpointHead);
+        );
+        requireMatchingScan(context, checkpointHead);
+      } catch (error) {
+        if (!skipInvalid) throw error;
+        checkpointHead = undefined;
+      }
     }
     const resultMetadata = await lstatIfExists(
       join(attemptRoot, "result.json"),

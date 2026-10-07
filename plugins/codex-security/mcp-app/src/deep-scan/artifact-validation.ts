@@ -330,53 +330,56 @@ export function projectDiscoveryCoverage(
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
     `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
-  const project = (
-    field: string,
-    item: Record<string, unknown>,
-    source: Record<string, unknown> = item,
-  ) => {
+  const project = (field: string, item: Record<string, unknown>) => {
+    const matches = (saved: unknown) => {
+      const original =
+        typeof saved === "string"
+          ? { question: saved }
+          : structuredClone(saved);
+      const normalized = structuredClone(item);
+      if (isRecord(original) && original.id === undefined) delete normalized.id;
+      if (field === "surfaces" && isRecord(original)) {
+        original.receiptRefs ??= [];
+        normalized.receiptRefs ??= [];
+        if (
+          receiptDigests !== undefined &&
+          !(original.receiptRefs as string[]).every((ref, index) => {
+            const digest = receiptDigests.get(ref);
+            return (
+              digest !== undefined &&
+              digest ===
+                receiptDigests.get((normalized.receiptRefs as string[])[index]!)
+            );
+          })
+        )
+          return false;
+        for (const row of [original, normalized])
+          row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
+            if (!ref.startsWith(archivePrefix)) return ref;
+            const saved = ref.slice(archivePrefix.length);
+            return /^attempt-[0-9]+\//u.test(saved)
+              ? saved.slice(saved.indexOf("/") + 1)
+              : ref;
+          });
+      }
+      return isDeepStrictEqual(original, normalized);
+    };
     const original = history.find((historical) =>
       ((historical.coverage[field] as unknown[] | undefined) ?? []).some(
-        (saved) =>
-          (["surfaces", "deferred"].includes(field)
-            ? [item, source]
-            : [item]
-          ).some((current) => {
-            const original =
-              typeof saved === "string"
-                ? { question: saved }
-                : structuredClone(saved);
-            const normalized = structuredClone(current);
-            if (field === "surfaces" && isRecord(original)) {
-              original.receiptRefs ??= [];
-              normalized.receiptRefs ??= [];
-              if (
-                receiptDigests !== undefined &&
-                !(original.receiptRefs as string[]).every((ref, index) => {
-                  const digest = receiptDigests.get(ref);
-                  return (
-                    digest !== undefined &&
-                    digest ===
-                      receiptDigests.get(
-                        (normalized.receiptRefs as string[])[index]!,
-                      )
-                  );
-                })
-              )
-                return false;
-              for (const row of [original, normalized])
-                row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
-                  if (!ref.startsWith(archivePrefix)) return ref;
-                  const saved = ref.slice(archivePrefix.length);
-                  return /^attempt-[0-9]+\//u.test(saved)
-                    ? saved.slice(saved.indexOf("/") + 1)
-                    : ref;
-                });
-            }
-            return isDeepStrictEqual(original, normalized);
-          }),
+        matches,
       ),
     );
+    const currentSources =
+      (originalCoverage[field] as unknown[] | undefined) ?? [];
+    const savedSource =
+      currentSources.find(
+        (saved) => isRecord(saved) && saved.id === item.id && matches(saved),
+      ) ??
+      currentSources.find(matches) ??
+      ((original?.coverage[field] as unknown[] | undefined) ?? []).find(
+        matches,
+      );
+    const source = isRecord(savedSource) ? savedSource : {};
     const origin = original
       ? { workerId: worker.id, attempt: original.attempt }
       : provenance;
@@ -407,11 +410,7 @@ export function projectDiscoveryCoverage(
     return result;
   };
   const projectedSurfaces = surfaces.map((surface, index) => {
-    const item = project(
-      "surfaces",
-      surface,
-      (originalCoverage.surfaces as Record<string, unknown>[])[index],
-    );
+    const item = project("surfaces", surface);
     return {
       ...item,
       id: `${prefix(item)}-surface-${index + 1}`,
@@ -437,11 +436,7 @@ export function projectDiscoveryCoverage(
     ).map((item) => project("explicitExclusions", item)),
     deferred: (coverage.deferred as Record<string, unknown>[]).map(
       (item, index) => {
-        const projected = project(
-          "deferred",
-          item,
-          (originalCoverage.deferred as Record<string, unknown>[])[index],
-        );
+        const projected = project("deferred", item);
         return {
           ...projected,
           id: `${prefix(projected)}-deferred-${index + 1}`,

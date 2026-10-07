@@ -158,6 +158,10 @@ export async function readDeepReductionSources(
             }
           }),
         );
+        normalizeSavedScanCoverage([
+          result,
+          ...archived.map(({ input }) => input),
+        ]);
         if (archived.length) {
           result = (
             await preserveScanDraft(
@@ -173,10 +177,6 @@ export async function readDeepReductionSources(
             )
           ).input;
         }
-        normalizeSavedScanCoverage([
-          result,
-          ...archived.map(({ input }) => input),
-        ]);
         result.findings = result.findings.map((finding, index) => ({
           ...finding,
           provenance: {
@@ -191,26 +191,14 @@ export async function readDeepReductionSources(
             coverage,
             worker,
             artifactPrefix,
-            archived.flatMap(({ input, attempt }, index) => {
+            archived.flatMap(({ attempt }, index) => {
               const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
               return number === undefined
                 ? []
                 : [
                     {
                       attempt: Number(number),
-                      coverage: {
-                        ...input.coverage,
-                        deferred: [
-                          ...(input.coverage.deferred as JsonObject[]),
-                          ...(originalArchivedCoverage[index]
-                            .deferred as JsonObject[]),
-                        ],
-                        surfaces: [
-                          ...(input.coverage.surfaces as JsonObject[]),
-                          ...(originalArchivedCoverage[index]
-                            .surfaces as JsonObject[]),
-                        ],
-                      },
+                      coverage: originalArchivedCoverage[index],
                     },
                   ];
             }),

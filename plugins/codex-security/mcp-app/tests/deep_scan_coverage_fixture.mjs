@@ -788,6 +788,7 @@ export async function publishCoverageFixture(
         draft,
         runWorkbench,
         signal,
+        draft.coverage.resolvedDeferred,
       );
     },
   });
@@ -981,7 +982,47 @@ export async function publishCoverageFixture(
   }
   if (omitCoverageIds) {
     for (const field of ["surfaces", "deferred"]) {
-      const ids = parentCoverage[field].flatMap((row) =>
+      const retainedArchive =
+        directFile && namedRetry && changedRetry
+          ? parentCoverage[field].filter((row) =>
+              field === "surfaces"
+                ? row.label === "Earlier independent route"
+                : row.reason === "An earlier independent observation.",
+            )
+          : [];
+      if (directFile && namedRetry && changedRetry) {
+        assert.equal(
+          retainedArchive.length,
+          1,
+          "the independent archived observation remains",
+        );
+        const row = retainedArchive[0];
+        assert.equal(row.provenance.attempt, 1);
+        const worker = accepted.persistedWorkers.find(
+          (worker) => worker.id === row.provenance.workerId,
+        );
+        const savedPath = path.join(
+          path.dirname(worker.artifactDir),
+          "attempts",
+          "attempt-01",
+          "result.json",
+        );
+        const saved = JSON.parse(rawSources.get(savedPath));
+        assert.ok(
+          saved.coverage[field].some(
+            (source) =>
+              source.id === row.provenance.sourceId &&
+              (field === "surfaces"
+                ? source.label === row.label
+                : source.reason === row.reason),
+          ),
+          "archived sourceId describes the immutable saved observation",
+        );
+      }
+      const currentRows = parentCoverage[field].filter(
+        (row) => !retainedArchive.includes(row),
+      );
+      const ids = currentRows.flatMap((row) =>
         typeof row.provenance.sourceId === "string"
           ? [row.provenance.sourceId]
           : [],
@@ -990,9 +1031,9 @@ export async function publishCoverageFixture(
         ids.length,
         directFile
           ? competingIds
-            ? parentCoverage[field].length / 2
+            ? currentRows.length / 2
             : 0
-          : parentCoverage[field].length,
+          : currentRows.length,
         "sourceId must describe an identity persisted in the worker source",
       );
       if (directFile && competingIds)

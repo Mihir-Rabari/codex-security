@@ -8,8 +8,12 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { workerDraft, scanId } from "./scan-draft-fixture.ts";
 
 const source = fileURLToPath(new URL("../src", import.meta.url));
-const { recordCodexSecurityWorkerScanDraft, parsePersistedScanDraft } =
-  await importSource(path.join(source, "artifact-scan-draft.ts"));
+const {
+  recordCodexSecurityWorkerScanDraft,
+  parsePersistedScanDraft,
+  saveScanDraftCheckpoint,
+  readArchivedWorkerCheckpoints,
+} = await importSource(path.join(source, "artifact-scan-draft.ts"));
 const { readDeepReductionSources, recordCodexSecurityDeepReduction } =
   await importSource(path.join(source, "artifact-deep-reducer.ts"));
 const { validateDiscoveryArtifacts } = await importSource(
@@ -418,3 +422,150 @@ test("accepted direct-file terminal outcome retains generic archive evidence wit
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+for (const kind of ["anonymous", "duplicate", "malformed-current"] as const) {
+  for (const history of [false, true]) {
+    test(`accepted retry ${kind} keeps saved source identities (archive: ${history})`, async () => {
+      const f = await fixture();
+      try {
+        if (history) {
+          await recordCodexSecurityWorkerScanDraft(
+            f.workerContext,
+            workerDraft([], { complete: false }),
+          );
+          await archiveDirectory(
+            f.output,
+            path.join(f.workerRoot, "attempts/attempt-01"),
+          );
+          await rm(f.output, { recursive: true, force: true });
+          await mkdir(f.output);
+        }
+        const surfaces =
+          kind === "duplicate"
+            ? ["First route", "Second route"].map((label) => ({
+                id: "shared",
+                label,
+                disposition: "needs_follow_up",
+                receiptRefs: [],
+              }))
+            : [
+                {
+                  label: "Synthetic route",
+                  disposition: "needs_follow_up",
+                  receiptRefs: [],
+                },
+              ];
+        const deferred = [
+          {
+            ...(kind === "anonymous" ? {} : { id: "review" }),
+            reason: "Synthetic review remains.",
+            ...(kind === "duplicate" ? { surfaceIds: ["shared"] } : {}),
+          },
+        ];
+        const input = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "partial",
+            surfaces,
+            explicitExclusions: [],
+            deferred,
+          },
+        });
+        if (kind === "malformed-current") {
+          await mkdir(path.join(f.output, "checkpoints"));
+          await writeFile(
+            path.join(f.output, "checkpoints/obsolete.json"),
+            "{invalid checkpoint",
+          );
+        }
+        await writeFile(f.resultPath, JSON.stringify(input));
+        const original = await readFile(f.resultPath);
+        await validateDiscoveryArtifacts(
+          { workersRoot: path.dirname(f.workerRoot) },
+          f.resultPath,
+          scanId,
+        );
+        const sources = await readDeepReductionSources(f.context);
+        const coverage = sources.discoveries[0].coverage;
+        assert.equal(coverage.surfaces.length, surfaces.length);
+        assert.equal(coverage.deferred.length, deferred.length);
+        assert.equal(coverage.deferred[0].provenance.sourceId, deferred[0].id);
+        if (kind === "duplicate") {
+          assert.deepEqual(
+            new Set(coverage.deferred[0].surfaceIds),
+            new Set(coverage.surfaces.map((row: { id: string }) => row.id)),
+          );
+        } else {
+          assert.equal(coverage.surfaces[0].provenance.sourceId, undefined);
+        }
+        assert.deepEqual(await readFile(f.resultPath), original);
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const reopen of [false, true]) {
+  test(`archived selected checkpoint preserves ${reopen ? "reopened review" : "closure control"} after torn publication`, async () => {
+    const f = await fixture();
+    try {
+      const pending = workerDraft([], {
+        complete: false,
+        coverage: {
+          completeness: "partial",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [{ id: "review", reason: "Synthetic review remains." }],
+        },
+      });
+      const closed = workerDraft([], {
+        complete: true,
+        coverage: {
+          completeness: "complete",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+          resolvedDeferred: [
+            { id: "review", reason: "Synthetic review completed." },
+          ],
+        },
+      });
+      await saveScanDraftCheckpoint(f.workerContext, pending);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await saveScanDraftCheckpoint(f.workerContext, closed);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // A selected immutable checkpoint can outlive a failed replaceable result write.
+      await writeFile(f.resultPath, JSON.stringify(reopen ? closed : pending));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await saveScanDraftCheckpoint(f.workerContext, reopen ? pending : closed);
+      await archiveDirectory(
+        f.output,
+        path.join(f.workerRoot, "attempts/attempt-01"),
+      );
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(workerDraft([], { complete: true })),
+      );
+      const saved = await readArchivedWorkerCheckpoints(f.workerContext, true);
+      assert.deepEqual(
+        saved[0].input.coverage,
+        (reopen ? pending : closed).coverage,
+      );
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const { discoveries } = await readDeepReductionSources(f.context);
+      assert.equal(discoveries[0].coverage.deferred.length, reopen ? 1 : 0);
+      if (reopen)
+        assert.equal(
+          discoveries[0].coverage.deferred[0].reason,
+          "Synthetic review remains.",
+        );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
