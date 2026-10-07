@@ -515,3 +515,133 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     assert any(later_finding["findingId"] in row["matchedFindingIds"] for row in open_rows) == (
         expected == "open"
     )
+
+
+@pytest.mark.parametrize("saved_legacy_alias", [False, True])
+@pytest.mark.parametrize("saved_current_match", [False, True])
+def test_saved_legacy_alias_survives_current_linked_match(
+    tmp_path, monkeypatch, saved_legacy_alias, saved_current_match
+):
+    import test_workbench_scan_history as producer
+
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    original_write = producer.write_completed_contract
+
+    def write_current_completion(scan_dir, scan_id, target, **values):
+        original_write(scan_dir, scan_id, target, **values)
+        p = scan_dir / "scan-manifest.json"
+        manifest = json.loads(p.read_text())
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            started_at = connection.execute(
+                "SELECT started_at FROM scans WHERE id=?", (scan_id,)
+            ).fetchone()[0]
+        manifest["scan"]["startedAt"] = started_at
+        manifest["scan"]["completedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        p.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(producer, "write_completed_contract", write_current_completion)
+    first = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-first-control",
+    )
+    first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
+        "findings"
+    ][0]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_finding["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    second = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    second_finding = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"][
+        "findings"
+    ][0]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id=?", (second["scanId"],)
+        )
+    assert first_finding["findingId"] != second_finding["findingId"]
+    if saved_legacy_alias:
+        result = producer.save_scan_matches(
+            state,
+            first,
+            second,
+            producer.confirmed_match(first_finding["occurrenceId"], second_finding["occurrenceId"]),
+        )
+        assert result["comparable"] is True
+    current = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    current_finding = run_workbench(state, "get-scan", "--scan-id", current["scanId"])["scan"][
+        "findings"
+    ][0]
+    later = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        linked,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert second_finding["findingId"] == current_finding["findingId"]
+    assert current_finding["findingId"] != later_finding["findingId"]
+    if saved_current_match:
+        result = producer.save_scan_matches(
+            state,
+            current,
+            later,
+            producer.confirmed_match(
+                current_finding["occurrenceId"], later_finding["occurrenceId"]
+            ),
+        )
+        assert result["comparable"] is True
+    global_rows = run_workbench(state, "list-global-findings")["findings"]
+    scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    linked_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
+        "findings"
+    ]
+    for rows in [global_rows, scoped_rows]:
+        first_row = next(row for row in rows if first["scanId"] in row["knownScanIds"])
+        second_row = next(row for row in rows if second["scanId"] in row["knownScanIds"])
+        assert first_row["status"] == "closed"
+        assert second_row["status"] == ("closed" if saved_legacy_alias else "open")
+        assert (first["scanId"] in second_row["knownScanIds"]) == saved_legacy_alias
+    for rows in [global_rows, linked_rows]:
+        linked_row = next(row for row in rows if later["scanId"] in row["knownScanIds"])
+        assert linked_row["status"] == "open"

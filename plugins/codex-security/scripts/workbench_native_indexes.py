@@ -286,7 +286,7 @@ def _indexed_findings(
         current = []
         for row in occurrences:
             if row["repository_generation"] is None:
-                legacy_identity = (scan_repository_group(row), row["finding_id"])
+                legacy_identity = (scan_repository_group(row), identity[1])
                 grouped.setdefault(legacy_identity, []).append(row)
             else:
                 current.append(row)
