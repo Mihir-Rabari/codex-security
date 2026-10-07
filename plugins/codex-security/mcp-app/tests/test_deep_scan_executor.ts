@@ -1314,6 +1314,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerPermissionProfileOverride(workerLaunch.args),
               'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
             );
+            assert.equal(
+              workerLaunch.args.some((arg) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+              false,
+            );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);

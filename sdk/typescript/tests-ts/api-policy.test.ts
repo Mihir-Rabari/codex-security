@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -18,6 +19,7 @@ import type {
 import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
+import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   InvalidTargetError,
   OutputDirectoryNotEmptyError,
@@ -55,12 +57,14 @@ async function setup(
     secureOutput?: (path: string) => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
+    environment?: NodeJS.ProcessEnv;
   } = {},
 ) {
   const f = await fixture();
   const codexHome = join(f.root, "codex-home");
   await mkdir(codexHome);
   const runtime = preparedRuntime(codexHome);
+  Object.assign(runtime.environment, options.environment);
   const createCodex = mock((_config: CodexOptions) => {
     return {
       startThread: (threadOptions: ThreadOptions) => {
@@ -91,7 +95,10 @@ async function setup(
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment: { CODEX_SECURITY_STATE_DIR: join(f.root, "state") },
+      environment: {
+        CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
+        ...options.environment,
+      },
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -151,6 +158,54 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
+  test.each([false, true])(
+    "grants only the resolved runtime executable to policy turns (configured alias: %p)",
+    async (configuredAlias) => {
+      const executable = await realpath(
+        runtime.resolveCodexCommand({}).command,
+      );
+      const runtimeFixture = await fixture();
+      const selected = join(
+        runtimeFixture.root,
+        process.platform === "win32" ? "codex.exe" : "codex",
+      );
+      if (configuredAlias) await symlink(executable, selected, "file");
+      const f = await setup({
+        ...(configuredAlias
+          ? { environment: { CODEX_CLI_PATH: selected } }
+          : {}),
+      });
+      const sharedConfigPath = join(f.runtime.codexHome, "config.toml");
+      await writeCodexConfig(sharedConfigPath, scanRuntimeCodexConfig({}));
+      const sharedConfig = await readFile(sharedConfigPath, "utf8");
+
+      await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
+
+      const overrides = f.configuration()!.configOverrides!;
+      expect(overrides).toHaveLength(1);
+      expect(parseToml(overrides[0]!)).toEqual({
+        permissions: {
+          codex_security_policy: {
+            filesystem: {
+              ":minimal": "read",
+              ":workspace_roots": "read",
+              [executable]: { ".": "read" },
+            },
+          },
+        },
+      });
+      expect(f.threads).toHaveLength(3);
+      for (const thread of f.threads) {
+        expect(thread.additionalDirectories).not.toContain(dirname(executable));
+        expect(thread.additionalDirectories).not.toContain(f.runtime.codexHome);
+        expect(thread.approvalPolicy).toBe("never");
+        expect(thread.networkAccessEnabled).toBe(false);
+      }
+      expect(await readFile(sharedConfigPath, "utf8")).toBe(sharedConfig);
+      await f.security.close();
+    },
+  );
+
   test("requires private output before starting a policy turn", async () => {
     const onOutputDirReady = mock();
     const secured = mock(async (_path: string) => {
