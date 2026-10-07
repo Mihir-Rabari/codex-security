@@ -266,6 +266,7 @@ async function latestTargets(
     );
     const protectedRoots = [
       caller,
+      ...registered.map((target) => target.target_path),
       ...roots.filter((root): root is string => root !== null),
     ];
     const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");

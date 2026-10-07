@@ -815,3 +815,54 @@ test("latest follows progress timestamps and excludes canceled scans", async () 
     db.close();
   }
 });
+
+test.skipIf(process.platform === "win32")(
+  "latest never executes Git from a saved non-Git target",
+  async () => {
+    const f = await fixture(true);
+    const other = join(f.root, "non-git-target");
+    await mkdir(other);
+    const marker = join(f.root, "non-git-probed");
+    await writeFile(
+      join(other, "git"),
+      '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nprintf "not-git\\n"\n',
+      { mode: 0o700 },
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.prepare("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+        "non-git-target",
+        other,
+        "Synthetic non-Git target",
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+      );
+      db.prepare(
+        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+      ).run(other, "non-git-target", f.second.scanId);
+    } finally {
+      db.close();
+    }
+    const workbench = await savedScanWorkbench("latest", {
+      environment: {
+        ...f.environment,
+        PYTHON: f.python,
+        PATH: other + delimiter + f.environment.PATH,
+        TEST_GIT_PROBE: marker,
+      },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: f.repository,
+    });
+    expect(
+      (
+        await resolveCompletedScan("latest", {
+          currentDirectory: () => f.repository,
+          runWorkbench: workbench,
+        })
+      ).scanId,
+    ).toBe(f.first.scanId);
+    expect(existsSync(marker)).toBe(false);
+  },
+);
