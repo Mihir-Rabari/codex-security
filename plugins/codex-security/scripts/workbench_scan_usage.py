@@ -443,12 +443,7 @@ def scan_execution_attribution(
     owner_json = run["usage_owner_json"] if "usage_owner_json" in run.keys() else None
     legacy = False
     if owner_json is None:
-        legacy = (
-            connection.execute(
-                "SELECT 1 FROM deep_scan_attempts WHERE scan_id = ? LIMIT 1", (scan["id"],)
-            ).fetchone()
-            is None
-        )
+        legacy = True
         roots = _scan_root_thread_ids(connection, scan, None)
         owner = {
             "threadId": roots[0] if roots else None,
@@ -636,7 +631,11 @@ def _discover_rollout_sessions(
 def _discover_recorded_worker_sessions(codex_home: Path, roots: set[str]) -> list[RolloutSession]:
     recorded: dict[str, list[RolloutSession]] = {}
     children: dict[str, set[str]] = {}
-    for candidate in sorted((codex_home / "sessions").rglob("*.jsonl")):
+    for candidate in sorted(
+        candidate
+        for directory in ("sessions", "archived_sessions")
+        for candidate in (codex_home / directory).rglob("*.jsonl")
+    ):
         path = _rollout_path(str(candidate))
         if path is None:
             continue

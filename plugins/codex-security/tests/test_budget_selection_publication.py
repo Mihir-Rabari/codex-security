@@ -631,20 +631,10 @@ os._exit(87)
         }
         saved_scan = workbench_api["require_scan"](db, scan.scan_id)
         resumed = workbench_api["scan_history"].cli_scan_resume(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             db,
             saved_scan,
             workbench_api["require_workspace"](db, saved_scan["workspace_id"]),
-            **{
-                name: workbench_api[source]
-                for name, source in {
-                    "parse_scan_recipe": "parse_scan_recipe",
-                    "scan_contract": "scan_contract",
-                    "require_scan_directory": "require_canonical_scan_directory",
-                    "artifact_path": "artifact_path",
-                    "read_json_object": "read_json_object",
-                    "workbench_completion_binding": "workbench_completion_binding",
-                }.items()
-            },
         )
         assert resumed["scanId"] == scan.scan_id
         assert resumed["threadId"] == thread_id
@@ -806,20 +796,10 @@ def test_budget_resume_keeps_explicit_stop_and_unselected_guards(
     saved_scan = workbench_api["require_scan"](workbench_db, scan.scan_id)
     with pytest.raises(SystemExit, match="cannot resume"):
         workbench_api["scan_history"].cli_scan_resume(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             saved_scan,
             workbench_api["require_workspace"](workbench_db, saved_scan["workspace_id"]),
-            **{
-                name: workbench_api[source]
-                for name, source in {
-                    "parse_scan_recipe": "parse_scan_recipe",
-                    "scan_contract": "scan_contract",
-                    "require_scan_directory": "require_canonical_scan_directory",
-                    "artifact_path": "artifact_path",
-                    "read_json_object": "read_json_object",
-                    "workbench_completion_binding": "workbench_completion_binding",
-                }.items()
-            },
         )
 
 

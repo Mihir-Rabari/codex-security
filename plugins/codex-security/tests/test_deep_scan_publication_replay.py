@@ -152,7 +152,8 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
             digest = after_selection.pop("publicationSha256")
             assert len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
             if "publicationSha256" in before_selection:
-                assert digest == before_selection.pop("publicationSha256")
+                before_digest = before_selection.pop("publicationSha256")
+                assert digest == before_digest
             assert after_selection == before_selection
             run_after["finalization_input_json"] = run_before["finalization_input_json"]
         assert run_after == run_before

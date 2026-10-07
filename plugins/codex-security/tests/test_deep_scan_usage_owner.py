@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from test_workbench_scan_usage import _event, _rollout, _state_graph
+import pytest
+from test_workbench_scan_usage import _event, _rollout, _state_graph, _token_event
 from workbench_test_support import run_workbench
 
 
@@ -97,3 +99,108 @@ def test_original_usage_turn_survives_join_and_coordinator_recovery(tmp_path: Pa
         state, "get-scan", "--scan-id", begun["scanId"], environment=environment
     )["scan"]
     assert original["executionAttribution"]["owner"] == owner
+
+
+@pytest.mark.parametrize("migrated", [False, True])
+@pytest.mark.parametrize("attempt", [False, True])
+def test_migrated_owner_accounting_survives_first_worker_attempt(
+    tmp_path: Path, migrated: bool, attempt: bool, workbench_api, monkeypatch
+) -> None:
+    from workbench_scan_usage import collect_scan_usage, scan_execution_attribution
+
+    state = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    environment = {
+        "CODEX_HOME": str(tmp_path / "codex"),
+        "CODEX_SQLITE_HOME": str(tmp_path / "native"),
+        "CODEX_STATE_DB": "",
+    }
+    timestamp = datetime.now(timezone.utc)
+    parent = _rollout(
+        tmp_path,
+        "legacy-owner",
+        [
+            _event(timestamp, "turn_context", {"turn_id": "original-turn", "model": "gpt-5.6-sol"}),
+        ],
+    )
+    _state_graph(environment, {"legacy-owner": parent}, [])
+    begun = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "legacy-owner",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        environment=environment,
+    )["deepScan"]
+    database = state / "workbench.sqlite3"
+    if migrated:
+        # Migration 48 adds a nullable owner to pre-existing runs, without an original turn binding.
+        with sqlite3.connect(database) as connection:
+            connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN usage_owner_json")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 48")
+        run_workbench(
+            state,
+            "get-deep-scan",
+            "--scan-id",
+            begun["scanId"],
+            "--thread-id",
+            "legacy-owner",
+            environment=environment,
+        )
+    if attempt:
+        artifact = Path(begun["scanDir"]) / "artifacts" / "first-worker"
+        artifact.mkdir(parents=True)
+        prompt = artifact / "prompt.md"
+        prompt.write_text("Review the synthetic target.\n")
+        run_workbench(
+            state,
+            "upsert-deep-scan-worker",
+            "--scan-id",
+            begun["scanId"],
+            "--worker-id",
+            str(uuid.uuid4()),
+            "--kind",
+            "discovery",
+            "--status",
+            "running",
+            "--prompt-path",
+            str(prompt),
+            "--artifact-dir",
+            str(artifact),
+            environment=environment,
+        )
+    counted = datetime.fromisoformat(begun["createdAt"].replace("Z", "+00:00")) + timedelta(
+        microseconds=1
+    )
+    _rollout(
+        tmp_path,
+        "legacy-owner",
+        [
+            _event(
+                counted,
+                "event_msg",
+                {
+                    "type": "task_started",
+                    "turn_id": "original-turn",
+                    "started_at": int(counted.timestamp()),
+                },
+            ),
+            _event(counted, "turn_context", {"turn_id": "original-turn", "model": "gpt-5.6-sol"}),
+            _token_event(counted, 100, 10),
+        ],
+        task_started_at=counted,
+    )
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        scan = workbench_api["require_scan"](connection, begun["scanId"])
+        attribution = scan_execution_attribution(connection, scan)
+        assert bool(attribution.get("legacy")) is migrated
+        usage = collect_scan_usage(connection, scan)
+    assert usage["inputTokens"] == 100
+    assert usage["outputTokens"] == 10

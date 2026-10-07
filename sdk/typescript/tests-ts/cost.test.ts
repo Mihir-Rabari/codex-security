@@ -5,6 +5,7 @@ import {
   cp,
   mkdir,
   readFile,
+  rename,
   unlink,
   symlink,
   writeFile,
@@ -2131,6 +2132,74 @@ describe("live scan cost tracking", () => {
 });
 
 describe("recorded Deep worker homes", () => {
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "retains archived worker usage: recorded=%s archived=%s",
+    async (recorded, archived) => {
+      const home = await codexHome();
+      const workerHome = recorded ? await codexHome() : home;
+      const at = "2026-09-01T00:00:02Z";
+      await writeSession(home, "owner", {});
+      const worker = await writeSession(workerHome, "worker", {});
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "turn_context",
+            timestamp: at,
+            payload: { turn_id: "worker-turn", model: "gpt-5.6-sol" },
+          },
+          {
+            type: "token_usage_record",
+            timestamp: at,
+            payload: {
+              thread_id: "worker",
+              turn_id: "worker-turn",
+              response_id: "worker-response",
+              model: "gpt-5.6-sol",
+              usage: { input_tokens: 1_000, output_tokens: 0 },
+            },
+          },
+        ]) + "\n",
+      );
+      if (archived) {
+        const directory = join(workerHome, "archived_sessions");
+        await mkdir(directory, { recursive: true });
+        await rename(worker, join(directory, "worker.jsonl"));
+      }
+      const costs: Readonly<ScanCost>[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory: join(home, "scan"),
+        model: "gpt-5.6-sol",
+        maxCostUsd: 0.003,
+        onCost: (cost) => costs.push(cost),
+        onCostLowerBound: (cost) => costs.push(cost),
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        workerCodexHome: workerHome,
+        executionThreadIds: ["worker"],
+        owner: { threadId: "owner", turnId: "owner-turn", startedAt: at },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("owner");
+      try {
+        await tracker.refresh();
+        expect(costs.at(-1)?.inputTokens).toBe(1_000);
+        expect(costs.at(-1)?.estimatedUsd).toBeCloseTo(0.004, 10);
+        expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0.003);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("only enforces a priced subtotal from a valid attributed usage partition", () => {
     const known = {
       model: "gpt-5.6-sol",
