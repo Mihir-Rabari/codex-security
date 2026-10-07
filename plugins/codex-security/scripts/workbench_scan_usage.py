@@ -204,7 +204,24 @@ def collect_scan_usage(
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     model_usage: dict[str | None, dict[str, int]] = {}
-    for copies in sessions.values():
+    children: dict[str | None, list[str]] = {}
+    for thread_id, copies in sessions.items():
+        children.setdefault(copies[0].parent_thread_id, []).append(thread_id)
+    pending = deque(
+        thread_id
+        for thread_id, copies in sessions.items()
+        if copies[0].parent_thread_id not in sessions
+    )
+    ordered_thread_ids: list[str] = []
+    while pending:
+        thread_id = pending.popleft()
+        ordered_thread_ids.append(thread_id)
+        pending.extend(children.get(thread_id, []))
+    # Keep unresolved lineage in the existing accounting checks as well.
+    ordered = set(ordered_thread_ids)
+    ordered_thread_ids.extend(thread_id for thread_id in sessions if thread_id not in ordered)
+    for thread_id in ordered_thread_ids:
+        copies = sessions[thread_id]
         session = copies[0]
         owner_turn_id = None
         if (

@@ -661,6 +661,8 @@ def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> N
         "external-shared-home",
         "external-missing-copy",
         "external-missing-child",
+        "external-current-middle-missing",
+        "external-current-middle-complete",
         "unavailable",
     ],
 )
@@ -861,7 +863,17 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             "external-shared-home",
             "external-missing-copy",
             "external-missing-child",
+            "external-current-middle-missing",
+            "external-current-middle-complete",
         }:
+            if worker_home.startswith("external-current-middle"):
+                grandchild_id = f"grandchild-{index}"
+                worker_threads[grandchild_id] = _rollout(
+                    root,
+                    grandchild_id,
+                    [_token_event(counted, index * 11, 2)],
+                    parent_thread_id=child_id,
+                )
             # Native keeps rollouts in its Codex home even when its SQLite
             # index lives elsewhere and recovery chooses a different index.
             sessions = selected_home / "sessions" / "2026" / "01" / "01"
@@ -892,6 +904,27 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                         "INSERT INTO thread_spawn_edges VALUES (?, ?)", (first_id, child_id)
                     )
                     worker_threads[child_id].unlink()
+        if worker_home.startswith("external-current-middle"):
+            # Recovery's current index sees the grandchild while its parent
+            # rollout is restored later from the worker's original home.
+            with sqlite3.connect(environment["CODEX_STATE_DB"]) as connection:
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    [
+                        (f"discovery-{index}", str(worker_threads[f"discovery-{index}"])),
+                        (
+                            child_id,
+                            str(root / "missing-middle.jsonl")
+                            if worker_home.endswith("missing")
+                            else str(worker_threads[child_id]),
+                        ),
+                        (grandchild_id, str(worker_threads[grandchild_id])),
+                    ],
+                )
+                connection.executemany(
+                    "INSERT INTO thread_spawn_edges VALUES (?, ?)",
+                    [(f"discovery-{index}", child_id), (child_id, grandchild_id)],
+                )
         result = _complete_scan(fixture)["scan"]["usage"]
         assert snapshot.read_bytes() == original_bytes
         return result
@@ -924,8 +957,12 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
             assert usage == {
                 "coverage": "complete",
                 "source": "codex_rollout",
-                **_counts(index * 77, 0, 13),
-                "threadCount": 4,
+                **_counts(
+                    index * (88 if worker_home.startswith("external-current-middle") else 77),
+                    0,
+                    15 if worker_home.startswith("external-current-middle") else 13,
+                ),
+                "threadCount": 5 if worker_home.startswith("external-current-middle") else 4,
                 "modelUsage": (
                     [
                         {"model": None, **_counts(index * 47, 0, 8)},
@@ -933,7 +970,17 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                         {"model": "model-beta", **_counts(index * 10, 0, 2)},
                     ]
                     if copied_rollout
-                    else [{"model": None, **_counts(index * 77, 0, 13)}]
+                    else [
+                        {
+                            "model": None,
+                            **_counts(
+                                index
+                                * (88 if worker_home.startswith("external-current-middle") else 77),
+                                0,
+                                15 if worker_home.startswith("external-current-middle") else 13,
+                            ),
+                        }
+                    ]
                 ),
             }
 
