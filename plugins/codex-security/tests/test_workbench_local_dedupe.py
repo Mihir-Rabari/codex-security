@@ -233,3 +233,31 @@ def test_local_cache_migration_keeps_service_and_local_rows_separate(workbench_a
                 "SELECT finding_id, cache_key FROM local_finding_embeddings"
             )
         ] == [("local", "cached-input")]
+
+
+def test_finding_body_update_invalidates_local_search_and_pending_groups(
+    workbench_api, workbench_db
+):
+    prepared = prepare(workbench_api, workbench_db, [finding(1)])
+    request(workbench_api, workbench_db, "embed", entries=[entry(prepared)])
+    changed = {**finding(1), "title": "Updated evidence from another scan"}
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE findings SET details_json = ? WHERE id = ?",
+            (json.dumps(changed, sort_keys=True), "finding-1"),
+        )
+    assert request(
+        workbench_api,
+        workbench_db,
+        "neighbors",
+        findingId="finding-1",
+        cacheKeys=prepared["cacheKeys"],
+    ) == {"error": "finding_changed"}
+    assert request(
+        workbench_api,
+        workbench_db,
+        "commit",
+        groups=[["finding-1"]],
+        cacheKeys=prepared["cacheKeys"],
+    ) == {"error": "finding_changed"}
+    assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == [changed]

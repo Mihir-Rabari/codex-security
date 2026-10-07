@@ -895,6 +895,18 @@ MIGRATIONS = (
         DELETE FROM finding_embeddings WHERE cache_key IS NOT NULL;
         """,
     ),
+    (
+        45,
+        "invalidate local embeddings when finding bodies change",
+        """
+        CREATE TRIGGER invalidate_local_finding_embedding
+        AFTER UPDATE OF details_json ON findings
+        WHEN OLD.details_json IS NOT NEW.details_json
+        BEGIN
+            DELETE FROM local_finding_embeddings WHERE finding_id = NEW.id;
+        END;
+        """,
+    ),
 )
 
 
