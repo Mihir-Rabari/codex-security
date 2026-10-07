@@ -2477,3 +2477,83 @@ def test_findings_only_reducer_retains_headless_parent_coverage(
     assert any(row.get("reason") == "Synthetic review remains" for row in coverage["deferred"])
     assert any(row.get("label") == "Synthetic pending surface" for row in coverage["surfaces"])
     assert any(row.get("reason") == "Synthetic exclusion" for row in coverage["explicitExclusions"])
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("metadata", ["stale", "bound", "missing"])
+@pytest.mark.parametrize("layout", ["independent", "same-owner"])
+def test_bound_worker_identity_restoration_ignores_stale_raw_ownership(
+    tmp_path: Path, retry: bool, metadata: str, layout: str
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
+    original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
+    original["provenance"]["candidateId"] = "synthetic-shared-candidate"
+    original["identity"] = {"anchor": "synthetic-explicit-worker"}
+    for name in ("findings.json", "scan-manifest.json", "coverage.json"):
+        (scan_dir / name).unlink()
+    worker_id, result = accepted_standard_worker(
+        state, home, scan_dir, scan_id, name="first-discovery"
+    )
+    workers = [(worker_id, result)]
+    if layout == "independent":
+        workers.append(
+            accepted_standard_worker(state, home, scan_dir, scan_id, name="second-discovery")
+        )
+    observations = []
+    for index in range(2):
+        finding = copy.deepcopy(original)
+        if index:
+            finding.pop("identity")
+        provenance = finding["provenance"]
+        if metadata == "missing":
+            provenance.pop("workerId", None)
+        else:
+            provenance["workerId"] = (
+                "synthetic-stale-worker"
+                if metadata == "stale"
+                else workers[index % len(workers)][0]
+            )
+        observations.append(finding)
+    for index, (_, path) in enumerate(workers):
+        document = json.loads(path.read_text())
+        document["findings"] = observations if layout == "same-owner" else [observations[index]]
+        path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, deep=True, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    expected = 2 if layout == "independent" else 1
+    assert scan["findingCount"] == expected
+    assert len({row["findingId"] for row in scan["findings"]}) == expected
+    if metadata == "stale":
+        assert {row["provenance"]["workerId"] for row in scan["findings"]} == {
+            "synthetic-stale-worker"
+        }
+    retained = scan["findings"]
+    run_workbench(state, "recover-scan-results", "--scan-id", scan_id)
+    assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["findings"] == retained
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_unbound_parent_history_retains_each_saved_worker_context(tmp_path: Path, retry: bool):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    parent = document["findings"][0]
+    parent["identity"] = {"anchor": "synthetic-parent-observation"}
+    parent["provenance"].update(workerId="synthetic-parent-worker", candidateId="shared-candidate")
+    historical = copy.deepcopy(parent)
+    historical["identity"] = {"anchor": "synthetic-historical-worker"}
+    historical["provenance"]["workerId"] = "synthetic-historical-owner"
+    parent["provenance"]["previousFindings"] = [historical]
+    current = copy.deepcopy(historical)
+    current.pop("identity")
+    document["findings"] = [parent, current]
+    path.write_text(json.dumps(document))
+    stop_draft(tmp_path, state, home, scan_id, retry=retry)
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert not scan["resultsRecoveryNeeded"]
+    assert scan["findingCount"] == 2
+    assert {row["identity"]["anchor"] for row in scan["findings"]} == {
+        "synthetic-parent-observation",
+        "synthetic-historical-worker",
+    }

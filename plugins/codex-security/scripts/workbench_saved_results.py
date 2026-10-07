@@ -627,30 +627,38 @@ def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> N
 
 def _saved_worker_owner(provenance: Any, owner: str | None) -> str | None:
     worker_id = provenance.get("workerId") if isinstance(provenance, dict) else None
-    return worker_id if isinstance(worker_id, str) and worker_id else owner
+    return owner or (worker_id if isinstance(worker_id, str) and worker_id else None)
 
 
 def _retained_findings(
     finding: dict[str, Any], owner: str | None = None
 ) -> Iterator[tuple[dict[str, Any], str | None]]:
     """Yield canonical and historical findings with their saved worker context."""
-    pending = [(finding, owner)]
+    pending = [(finding, owner, owner is not None)]
     seen: set[int] = set()
     while pending:
-        current, owner = pending.pop()
+        current, owner, bound_owner = pending.pop()
         marker = id(current)
         if marker in seen:
             continue
         seen.add(marker)
         provenance = current.get("provenance")
         if isinstance(provenance, dict):
-            owner = _saved_worker_owner(provenance, owner)
+            # Registered sources keep their bound owner; unbound parent history
+            # can carry a different worker on each retained observation.
+            owner = (
+                _saved_worker_owner(provenance, owner)
+                if bound_owner
+                else _saved_worker_owner(provenance, None) or owner
+            )
         yield current, owner
         if not isinstance(provenance, dict):
             continue
         previous = provenance.get("previousFindings")
         if isinstance(previous, list):
-            pending.extend((item, owner) for item in reversed(previous) if isinstance(item, dict))
+            pending.extend(
+                (item, owner, bound_owner) for item in reversed(previous) if isinstance(item, dict)
+            )
         sources = provenance.get("sourceFindings")
         if isinstance(sources, list):
             pending.extend(
@@ -659,6 +667,7 @@ def _retained_findings(
                     source["id"].rsplit(":", 1)[0]
                     if isinstance(source.get("id"), str) and ":" in source["id"]
                     else owner,
+                    bound_owner or (isinstance(source.get("id"), str) and ":" in source["id"]),
                 )
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
