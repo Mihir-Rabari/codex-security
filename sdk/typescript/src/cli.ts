@@ -197,6 +197,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  workbenchEnvironment,
   sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -1314,10 +1315,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   },
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
-    let environment: NodeJS.ProcessEnv = {
-      ...exportEnvironment(),
-      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
-    };
+    let environment: NodeJS.ProcessEnv =
+      protectedRoot === undefined
+        ? {
+            ...exportEnvironment(),
+            CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
+          }
+        : workbenchEnvironment(process.env);
     if (protectedRoot !== undefined) {
       protectedRoot =
         (await gitMarkerRoot(protectedRoot, signal, "outermost")) ??

@@ -1,7 +1,8 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { CodexSecurity } from "../src/api.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import {
@@ -9,12 +10,13 @@ import {
   completedEvents,
   preparedRuntime,
 } from "./support/api-events.js";
-import { dependencies } from "./cli-fixtures.js";
+import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { TestClient } from "./support/api-client.js";
 import { createCliTest } from "./support/cli-run.js";
 import { throwing } from "./support/errors.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 describe("CLI scan validation preflight", () => {
   test.each([
@@ -274,3 +276,110 @@ for (const changed of ["unchanged", "content", "head"] as const)
       await rm(root, { recursive: true, force: true });
     }
   });
+
+test("empty scan validation preserves configured Git ignore rules", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "empty scan validation preserves configured Git ignore rules",
+    )
+  )
+    return;
+  const root = await temporaryDirectory("empty-scan-git-config-");
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const globalConfig = join(root, "gitconfig");
+  const ignoreFile = join(root, "ignore");
+  const overrides = {
+    GIT_CONFIG_GLOBAL: globalConfig,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((name) => [name, process.env[name]]),
+  );
+  Object.assign(process.env, overrides);
+  try {
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(ignoreFile, "ignored.txt\n");
+    git(repository, "init", "-q", "-b", "main");
+    git(
+      repository,
+      "config",
+      "--file",
+      globalConfig,
+      "core.excludesFile",
+      ignoreFile,
+    );
+    const source = join(repository, "source.ts");
+    await writeFile(source, "export const value = 1;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "initial");
+    await writeFile(
+      join(repository, "ignored.txt"),
+      "Synthetic ignored content.\n",
+    );
+    const python = await resolvePluginPython({
+      environment: process.env,
+      protectedRoot: repository,
+    });
+    const registered = await runWorkbench(
+      { python, pluginRoot: PLUGIN_ROOT, environment: process.env },
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          repository,
+          mode: "standard",
+          target: { kind: "repository", paths: [] },
+          config: {},
+        }),
+      ],
+    );
+    const result = fakeResult();
+    result.manifest.scan.id = String(registered["scanId"]);
+    const scan = spyOn(CodexSecurity.prototype, "run").mockResolvedValue(
+      result,
+    );
+    try {
+      const outcomes = [];
+      for (const changed of [false, true]) {
+        if (changed) await writeFile(source, "export const value = 2;\n");
+        const cli = createCliTest(main);
+        const exitCode = await cli.runCli(
+          ["scan", repository, "--python", python, "--validate", "--json"],
+          undefined,
+        );
+        outcomes.push({
+          exitCode,
+          stderr: cli.stderr.text(),
+          validation: JSON.parse(cli.stdout.text()).validation,
+        });
+      }
+      expect(
+        outcomes.map(({ exitCode }) => exitCode),
+        JSON.stringify(outcomes),
+      ).toEqual([0, 2]);
+      expect(outcomes[0]!.validation).toEqual({
+        status: "complete",
+        findings: 0,
+      });
+      expect(outcomes[1]!.validation).toMatchObject({
+        status: "failed",
+        message: expect.stringContaining("Scan target contents changed"),
+      });
+    } finally {
+      scan.mockRestore();
+    }
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
