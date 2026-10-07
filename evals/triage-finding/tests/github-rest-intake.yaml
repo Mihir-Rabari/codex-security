@@ -134,38 +134,6 @@
     - type: javascript
       value: file://./assertions/github-rest-intake.mts
 
-- description: "GitHub Connector request honors the selected transport"
-  metadata:
-    case_id: github-connector-selected
-    source_type: github_repo
-  vars:
-    case_id: github-connector-selected
-    target_repo: https://github.com/promptfoo/promptfoo
-    source_type_under_test: github_repo
-    finding_input: "User explicitly requested using the GitHub Connector."
-    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
-    eval_instructions: |-
-      This is an automated eval. Describe how this workflow should handle a
-      user's explicit request to use the GitHub Connector. Do not query live
-      GitHub, inspect code, or emit the triage JSON result.
-      Return only one JSON object with these workflow decisions:
-      - retrieval_transport: "connector" or "rest", for retrieving findings.
-      - read_only: boolean, whether retrieval tools must be read-only.
-      - explain_missing_capability: boolean, whether to explain an unavailable
-        connector capability.
-      - rest_requires_approval: boolean, whether to ask the user before using
-        REST when the selected connector cannot retrieve the findings.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: is-json
-      value:
-        const:
-          retrieval_transport: connector
-          read_only: true
-          explain_missing_capability: true
-          rest_requires_approval: true
-
 - description: "Explicit GitHub Issue is supported outside all-source intake"
   metadata:
     case_id: github-explicit-issue

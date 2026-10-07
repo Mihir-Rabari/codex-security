@@ -57,8 +57,6 @@ The explicit Connector case returns a three-field JSON decision for transport,
 fallback, and account/repository scope. The code-scanning case returns request
 paths and query parameters as JSON. Other intake cases use freeform answers.
 
-The selected-connector contract also grades read-only retrieval, missing capabilities and approval before REST fallback with the built-in JSON-schema assertion. Expected decision values stay outside the model prompt.
-
 ## Calibration Dataset
 
 `datasets/triage-calibration-seed.json` is the first OSS-only calibration dataset for scaling beyond the synthetic fixture app. It contains public OSS vulnerable/fixed commit pairs. Each dataset variant becomes one Promptfoo test case in `tests/calibration-oss.yaml`, and each test points Codex at a pinned local checkout under `artifacts/calibration-repos/`.

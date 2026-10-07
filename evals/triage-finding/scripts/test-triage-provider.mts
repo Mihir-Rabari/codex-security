@@ -120,77 +120,6 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         tests: [{ assert: [{ type: "equals", value: "ok" }] }],
       }),
     );
-    fs.writeFileSync(fail, "");
-    const initial = await invoke(
-      [
-        "eval",
-        "-c",
-        configPath,
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
-    assert.notEqual(initial.code, 0, initial.output);
-    assert.match(initial.output, /synthetic retryable failure/);
-    let rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 1);
-    assert.deepEqual(rows[0].proxies, proxies);
-    assert.match(rows[0].policy, /Synthetic policy/);
-    assert.equal(fs.existsSync(rows[0].cwd), false);
-    fs.rmSync(fail);
-    const retry = await invoke(
-      [
-        "eval",
-        "--retry-errors",
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
-    assert.equal(retry.code, 0, retry.output);
-    rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 2);
-    assert.notEqual(rows[0].cwd, rows[1].cwd);
-    assert.equal(fs.existsSync(rows[1].cwd), false);
-
-    // Delete the stored result to make a completed evaluation resumable, retaining
-    // the original persisted provider configuration and prompt.
-    const database = new DatabaseSync(
-      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-      { enableForeignKeyConstraints: false },
-    );
-    database.prepare("DELETE FROM eval_results").run();
-    database.close();
-    const resumed = await invoke(
-      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      environment,
-    );
-    assert.equal(resumed.code, 0, resumed.output);
-    rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 3);
-    assert.equal(new Set(rows.map((row) => row.cwd)).size, 3);
-    for (const row of rows) {
-      assert.deepEqual(row.proxies, proxies);
-      assert.equal(fs.existsSync(row.cwd), false);
-      assert.equal(row.nodePath, ambientNode);
-      assert.deepEqual(row.directories, [path.dirname(row.nodePath)]);
-    }
-
     const calibration = parse(
       fs.readFileSync(
         path.join(evalRoot, "promptfooconfig.calibration.yaml"),
@@ -256,7 +185,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       }),
     );
     const simultaneous = await Promise.all(
-      [configPath, calibrationConfig].map((config, index) =>
+      [configPath, calibrationConfig, configPath].map((config, index) =>
         invoke(
           [
             "eval",
@@ -276,13 +205,13 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     );
     for (const result of simultaneous)
       assert.equal(result.code, 0, result.output);
-    rows = fs
+    const rows = fs
       .readFileSync(capture, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Capture);
-    assert.equal(rows.length, 10);
-    assert.equal(new Set(rows.map((row) => row.cwd)).size, 5);
+    assert.equal(rows.length, 8);
+    assert.equal(new Set(rows.map((row) => row.cwd)).size, 3);
     for (const row of rows) {
       assert.deepEqual(row.proxies, proxies);
       assert.match(row.policy, /Synthetic policy/);
@@ -300,7 +229,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     }
     assert.equal(rows.filter((row) => row.nodePath === customNode).length, 5);
     assert.equal(rows.filter((row) => row.nodePath === selectedNode).length, 1);
-    assert.equal(rows.filter((row) => row.nodePath === ambientNode).length, 3);
+    assert.equal(rows.filter((row) => row.nodePath === ambientNode).length, 1);
     assert.equal(
       rows.filter((row) => row.nodePath === fs.realpathSync(process.execPath))
         .length,

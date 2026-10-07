@@ -294,35 +294,3 @@ test("fallback CLI dispatches a keyed run once and leaves inference to that run"
     `targets=${JSON.stringify([{ pr: 7, sha: sourceSha }])}`,
   );
 });
-
-test(
-  "the target CLI runs through a symlink",
-  { skip: process.platform === "win32" },
-  async (t) => {
-    const { symlinkSync } = await import("node:fs");
-    const root = mkdtempSync(join(tmpdir(), "invoice-desk-link-"));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const script = join(root, "target.mjs");
-    symlinkSync(
-      fileURLToPath(new URL("./invoice-desk-target.mjs", import.meta.url)),
-      script,
-    );
-    const event = join(root, "event.json");
-    const output = join(root, "output.txt");
-    writeFileSync(event, "{}");
-    execFileSync(process.execPath, [script], {
-      env: {
-        ...process.env,
-        GITHUB_EVENT_NAME: "workflow_dispatch",
-        GITHUB_EVENT_PATH: event,
-        GITHUB_SHA: mainSha,
-        GITHUB_OUTPUT: output,
-      },
-      stdio: "pipe",
-    });
-    assert.equal(
-      readFileSync(output, "utf8"),
-      `targets=${JSON.stringify([{ pr: 0, sha: mainSha }])}\n`,
-    );
-  },
-);

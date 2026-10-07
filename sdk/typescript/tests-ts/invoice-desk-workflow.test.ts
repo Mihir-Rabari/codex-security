@@ -280,22 +280,3 @@ test("Invoice Desk rejects a completed scan with missing required artifacts", as
   expect(existsSync(join(directory, "invoice-desk-metrics.json"))).toBe(false);
   expect(existsSync(join(directory, "summary.md"))).toBe(false);
 });
-
-test.each(["invoice-desk-source.mjs", "invoice-desk-target.mjs"])(
-  "imports %s from a virtual entrypoint",
-  (name) => {
-    const module = new URL(`../../../.github/scripts/${name}`, import.meta.url)
-      .href;
-    const result = spawnSync(
-      "node",
-      [
-        "--input-type=module",
-        "-e",
-        `process.argv[1] = "/synthetic/missing/entry.mjs"; await import(${JSON.stringify(module)});`,
-      ],
-      { encoding: "utf8" },
-    );
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-  },
-);

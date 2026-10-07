@@ -29,9 +29,9 @@ function parseArgs(argv: string[]) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dataset") {
-      args.dataset = argv[++index];
+      args.dataset = path.resolve(argv[++index]);
     } else if (arg === "--repo-root") {
-      args.repoRoot = argv[++index];
+      args.repoRoot = path.resolve(argv[++index]);
     } else if (arg === "--case") {
       args.caseId = argv[++index];
     } else if (arg === "--variant") {
@@ -43,11 +43,7 @@ function parseArgs(argv: string[]) {
     }
   }
 
-  return {
-    ...args,
-    dataset: path.resolve(args.dataset),
-    repoRoot: path.resolve(args.repoRoot),
-  };
+  return args;
 }
 
 function plannedJobs(
@@ -77,7 +73,7 @@ function runGit(args: string[], directory: string, stderr?: "ignore" | "pipe") {
 
 function gitOutput(args: string[], cwd: string) {
   try {
-    return runGit(args, cwd, "ignore").trim();
+    return runGit(args, cwd, "ignore");
   } catch {
     return null;
   }
@@ -118,41 +114,26 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
   return "hydrated";
 }
 
-function printPlan(jobs: ReturnType<typeof plannedJobs>) {
-  const variantWord = jobs.length === 1 ? "variant" : "variants";
-  console.log(`would hydrate ${jobs.length} calibration ${variantWord}`);
-  for (const job of jobs) {
-    console.log(
-      `${job.caseId}/${job.variantId} <- ${job.repoUrl} @ ${job.checkoutRef}`,
-    );
-    console.log(`  ${job.targetDir}`);
-  }
-}
-
-function hydrate(jobs: ReturnType<typeof plannedJobs>) {
-  const variantWord = jobs.length === 1 ? "variant" : "variants";
-  console.log(`hydrating ${jobs.length} calibration ${variantWord}`);
-  for (const job of jobs) {
-    const status = ensureGitCheckout(job);
-    console.log(
-      `${status}: ${job.caseId}/${job.variantId} @ ${job.checkoutRef}`,
-    );
-  }
-}
-
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
   const jobs = plannedJobs(dataset, args);
 
-  if (jobs.length === 0) {
-    throw new Error("No calibration variants matched the requested filters.");
-  }
-
-  if (args.dryRun) {
-    printPlan(jobs);
-  } else {
-    hydrate(jobs);
+  const variantWord = jobs.length === 1 ? "variant" : "variants";
+  console.log(
+    `${args.dryRun ? "would hydrate" : "hydrating"} ${jobs.length} calibration ${variantWord}`,
+  );
+  for (const job of jobs) {
+    if (args.dryRun) {
+      console.log(
+        `${job.caseId}/${job.variantId} <- ${job.repoUrl} @ ${job.checkoutRef}`,
+      );
+      console.log(`  ${job.targetDir}`);
+    } else {
+      console.log(
+        `${ensureGitCheckout(job)}: ${job.caseId}/${job.variantId} @ ${job.checkoutRef}`,
+      );
+    }
   }
 }
 
@@ -163,5 +144,3 @@ if (
 ) {
   main();
 }
-
-export { plannedJobs };
