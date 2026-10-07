@@ -1382,12 +1382,7 @@ export class CodexSecurity {
                     options: workbenchOptions,
                   };
                 }
-                notifyObserver(
-                  "onOutputArchived",
-                  options.onOutputArchived,
-                  options.onObserverError,
-                  archiveDir,
-                );
+                notifyObserver(options, "onOutputArchived")(archiveDir);
               },
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
@@ -3234,10 +3229,7 @@ export class CodexSecurity {
         );
       }
     } catch (recoveryError) {
-      notifyObserver(
-        "onWarning",
-        options.onWarning,
-        options.onObserverError,
+      notifyObserver(options, "onWarning")(
         `Could not restore previous scan output: ${errorMessage(recoveryError)}`,
       );
     }
