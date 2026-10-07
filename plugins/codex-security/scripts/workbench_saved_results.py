@@ -1246,7 +1246,13 @@ def merge_saved_results(
     reconciled_surface_ids: dict[tuple[str | None, str], str] = {}
 
     def project_missing_record(
-        field: str, item: dict[str, Any], index: int, worker: Any, source: dict[str, Any]
+        field: str,
+        item: dict[str, Any],
+        index: int,
+        worker: Any,
+        source: dict[str, Any],
+        *,
+        receipts_resolved: bool = False,
     ) -> dict[str, Any]:
         # Retain projectDiscoveryCoverage worker ownership.
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
@@ -1294,7 +1300,7 @@ def merge_saved_results(
         if field == "surfaces":
             original = source_rows[index - 1] if isinstance(source_rows, list) else item
             result["id"] = surface_id(original, index)
-            if origin := projection_origins.get(id(original)):
+            if not receipts_resolved and (origin := projection_origins.get(id(original))):
                 result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
             previous = retained_coverage_record("surfaces", result)
             if previous is not None and isinstance(previous.get("id"), str):
@@ -1458,7 +1464,11 @@ def merge_saved_results(
     }
 
     def project_record(
-        field: str, item: dict[str, Any], source_item: dict[str, Any] | None = None
+        field: str,
+        item: dict[str, Any],
+        source_item: dict[str, Any] | None = None,
+        *,
+        receipts_resolved: bool = False,
     ) -> dict[str, Any]:
         original = item if source_item is None else source_item
         origin = projection_origins.get(id(original))
@@ -1498,8 +1508,10 @@ def merge_saved_results(
             if accepted is not None:
                 _, relative, _, _, source = accepted
         worker = workers_by_id[worker_id]
-        result = project_missing_record(field, item, index, worker, source)
-        if field == "surfaces":
+        result = project_missing_record(
+            field, item, index, worker, source, receipts_resolved=receipts_resolved
+        )
+        if field == "surfaces" and not receipts_resolved:
             result["receiptRefs"] = coverage_receipts(result, worker, relative)
         return result
 
@@ -2111,7 +2123,8 @@ def merge_saved_results(
     if isinstance(coverage.get("surfaces"), list):
         for _, owner, source_surface, surface in surface_updates:
             original_surface = surface
-            surface = project_record("surfaces", surface, source_surface)
+            # Generic updates already resolve each receipt at its saved source.
+            surface = project_record("surfaces", surface, source_surface, receipts_resolved=True)
             reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface["id"]
             if surface not in coverage["surfaces"] and (
                 surface is original_surface or retained_coverage_record("surfaces", surface) is None
