@@ -271,6 +271,34 @@ order is last update descending, then severity descending for findings, then ID
 ascending. Text sorts ignore case; severity and member counts use their natural
 order. The dashboard uses the same unauthenticated endpoint as the API.
 
+### Migrating direct dashboard helper calls
+
+The Python `workbench_db.py dashboard` command has been retired. Direct helper
+callers can use the existing Node helper from an installed plugin directory:
+
+```bash
+scripts/launch_codex_security_mcp --helper dashboard < dashboard-request.json
+```
+
+On Windows, use `scripts\launch_codex_security_mcp.cmd --helper dashboard` with
+the same JSON on stdin. The request wraps the dashboard query in `payload` and
+specifies the absolute directory containing the existing `workbench.sqlite3`:
+
+```json
+{
+  "stateDirectory": "/absolute/path/to/state",
+  "payload": {
+    "view": "findings",
+    "sort": "activity",
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+Use an absolute Windows path on Windows. The SDK, service API, and
+`codex-security` CLI already use the Node implementation and need no changes.
+
 ## Deduplicate a scan
 
 Publish the scan first, or import its findings with `repositoryId`. Then run:
