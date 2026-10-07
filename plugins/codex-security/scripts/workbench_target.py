@@ -532,6 +532,24 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
+def _directory_link_boundary(target: Path, path: Path, linked_prefixes: dict[str, bool]) -> Path:
+    # The index can retain descendants of a directory replaced by a link.
+    # Keep the link's identity in snapshots without following its contents.
+    prefix = target
+    for component in path.relative_to(target).parts[:-1]:
+        prefix /= component
+        key = str(prefix)
+        if key not in linked_prefixes:
+            metadata = prefix.lstat()
+            linked_prefixes[key] = bool(
+                stat.S_ISLNK(metadata.st_mode)
+                or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            )
+        if linked_prefixes[key]:
+            return prefix
+    return path
+
+
 def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -587,21 +605,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
         path = target.joinpath(*relative.parts[scope_depth:])
         try:
-            # The index can retain descendants of a directory replaced by a link.
-            # Keep the link's identity in snapshots without following its contents.
-            prefix = target
-            for component in path.relative_to(target).parts[:-1]:
-                prefix /= component
-                key = str(prefix)
-                if key not in linked_prefixes:
-                    prefix_metadata = prefix.lstat()
-                    linked_prefixes[key] = bool(
-                        stat.S_ISLNK(prefix_metadata.st_mode)
-                        or getattr(prefix_metadata, "st_reparse_tag", 0) & 0x20000000
-                    )
-                if linked_prefixes[key]:
-                    path = prefix
-                    break
+            path = _directory_link_boundary(target, path, linked_prefixes)
             metadata = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             # The index can retain deleted paths, including directory-to-file replacements.
@@ -619,6 +623,41 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 paths.extend(nested_paths)
                 continue
         paths.extend(source_directory_snapshot_paths(path))
+
+    # Git omits empty untracked directories from its file listing. Inventory
+    # junction identities independently of whether their targets contain files.
+    pending = [target]
+    while pending:
+        directory = pending.pop()
+        directories = git_bytes(
+            directory,
+            "--no-literal-pathspecs",
+            "ls-files",
+            "--others",
+            "--directory",
+            "--exclude-standard",
+            "-z",
+            "--",
+            # Match directory descendants, never the selected directory itself.
+            ":(glob)**/*/",
+        )
+        if directories is None:
+            raise SystemExit("Could not inspect directories in the selected Git working tree.")
+        for raw_path in (item for item in directories.split(b"\0") if item):
+            try:
+                path = _directory_link_boundary(
+                    target, directory / os.fsdecode(raw_path), linked_prefixes
+                )
+                metadata = path.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+            ):
+                paths.append(path)
+            elif stat.S_ISDIR(metadata.st_mode):
+                pending.append(path)
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 

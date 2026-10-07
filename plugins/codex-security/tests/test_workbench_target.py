@@ -99,7 +99,15 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
 )
 @pytest.mark.parametrize(
     "change",
-    ["unchanged", "unrelated_file", "junction_target", "same_content_target", "target_contents"],
+    [
+        "unchanged",
+        "unrelated_file",
+        "junction_target",
+        "same_content_target",
+        "target_contents",
+        "target_emptied",
+        "target_populated",
+    ],
 )
 def test_reviewed_patch_preserves_junction_boundaries(
     tmp_path: Path,
@@ -120,7 +128,8 @@ def test_reviewed_patch_preserves_junction_boundaries(
     junction = source / "dependencies" / "linked_directory"
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "source.txt").write_text("original contents\n")
+    if change != "target_populated":
+        (outside / "source.txt").write_text("original contents\n")
     junction_factory(junction, outside)
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
@@ -150,8 +159,10 @@ def test_reviewed_patch_preserves_junction_boundaries(
             else "different target contents\n"
         )
         junction_factory(junction, junction_target)
-    elif change == "target_contents":
+    elif change in {"target_contents", "target_populated"}:
         (junction / "source.txt").write_text("changed outside the snapshot boundary\n")
+    elif change == "target_emptied":
+        (junction / "source.txt").unlink()
     elif change == "unrelated_file":
         (source / "unrelated.txt").write_text("outside the reviewed patch\n")
     if change == "unrelated_file" or (
