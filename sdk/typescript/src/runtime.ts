@@ -1578,11 +1578,10 @@ export async function runWorkbench(
     }
     const command = native
       ? (node?.executable ?? process.execPath)
-      : (options.python ??
-        (await resolvePluginPython({
+      : (options.python ??= await resolvePluginPython({
           environment: options.environment,
           signal: options.signal,
-        })));
+        }));
     const result = await runCodexCommand(
       { command },
       native
