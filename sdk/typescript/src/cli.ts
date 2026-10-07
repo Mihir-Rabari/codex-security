@@ -7011,7 +7011,11 @@ async function hashPublicationFile(
     constants.O_RDONLY |
       (constants.O_NOFOLLOW ?? 0) |
       (constants.O_NONBLOCK ?? 0),
-  );
+  ).catch((error: unknown) => {
+    if (isJsonObject(error) && error["code"] === "EACCES") return undefined;
+    throw error;
+  });
+  if (file === undefined) return undefined;
   try {
     const opened = await file.stat();
     if (

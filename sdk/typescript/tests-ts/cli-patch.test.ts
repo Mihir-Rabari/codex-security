@@ -3671,6 +3671,21 @@ describe("patch change tracking", () => {
       await writeFile(join(outside, "file"), content);
       await symlink(join(outside, "file"), join(directory, source));
     } else await writeFile(join(directory, source), content);
+    const unreadable =
+      change === "different" &&
+      process.platform !== "win32" &&
+      process.getuid?.() !== 0
+        ? join(directory, ".cache/unreadable")
+        : undefined;
+    if (unreadable) {
+      await mkdir(dirname(unreadable), { recursive: true });
+      await writeFile(unreadable, "Unrelated ignored content\n");
+      await chmod(unreadable, 0);
+      await expect(readFile(unreadable)).rejects.toMatchObject({
+        code: "EACCES",
+      });
+    }
+    const permissions = unreadable ? await stat(unreadable) : undefined;
     const before = git("rev-parse", "HEAD");
     const index = await readFile(join(directory, ".git/index"));
     const result = resultWithFindings(["high"]);
@@ -3714,6 +3729,20 @@ describe("patch change tracking", () => {
         },
       },
     );
+    if (unreadable && permissions) {
+      expect(await stat(unreadable)).toMatchObject({
+        mode: permissions.mode,
+        uid: permissions.uid,
+        gid: permissions.gid,
+      });
+      await expect(readFile(unreadable)).rejects.toMatchObject({
+        code: "EACCES",
+      });
+      await chmod(unreadable, 0o600);
+      expect(await readFile(unreadable, "utf8")).toBe(
+        "Unrelated ignored content\n",
+      );
+    }
     const blocked = [
       "move",
       "copy",
