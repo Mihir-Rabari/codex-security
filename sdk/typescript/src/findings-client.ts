@@ -28,9 +28,11 @@ class FindingsHttpError extends CodexSecurityError {
   static async fromResponse(
     response: Response,
     message: string,
+    signal?: AbortSignal,
   ): Promise<FindingsHttpError> {
     // Gateways can return plain text or HTML instead of the service's JSON error.
     const body: unknown = await response.json().catch(() => undefined);
+    signal?.throwIfAborted();
     const error = parseFindingsErrorResponse(body);
     return new FindingsHttpError(
       error?.message ? `${message} ${error.message}` : message,
@@ -79,6 +81,7 @@ export class FindingsClient {
               ? " Import the finding with its repositoryId through POST /v1/bulk/findings before deduplicating."
               : ""
           }`,
+          this.signal,
         );
       }
       return (await response.json()) as FindingNeighborhood;
@@ -149,6 +152,7 @@ export class FindingsClient {
       throw await FindingsHttpError.fromResponse(
         response,
         `Findings API POST /${path} failed (HTTP ${response.status}).`,
+        this.signal,
       );
     }
     return await response.json();

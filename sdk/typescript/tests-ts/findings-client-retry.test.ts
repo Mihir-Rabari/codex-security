@@ -48,6 +48,27 @@ test("publishing preserves conflict details without retrying", async () => {
   expect(requests).toBe(1);
 });
 
+test("publishing preserves cancellation while reading an error response", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Synthetic caller cancellation");
+  const request = mock(async (_url: URL, init: RequestInit) => {
+    expect(init.signal).toBe(controller.signal);
+    const response = new Response(null, { status: 409 });
+    response.json = async () => {
+      controller.abort(reason);
+      throw new DOMException("Synthetic aborted body read", "AbortError");
+    };
+    return response;
+  });
+  const client = new FindingsClient(
+    "http://synthetic.test",
+    controller.signal,
+    request,
+  );
+  await expect(client.publish([], scope.repositoryId)).rejects.toBe(reason);
+  expect(request).toHaveBeenCalledTimes(1);
+});
+
 test.each([
   "<html>Gateway unavailable</html>",
   '{"error":',
