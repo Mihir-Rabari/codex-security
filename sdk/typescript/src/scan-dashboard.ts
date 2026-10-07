@@ -1,6 +1,6 @@
 import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
-import { stripVTControlCharacters } from "node:util";
+import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
 import { isRecord } from "./record.js";
 import type { ScanBudget } from "./api.js";
@@ -1415,10 +1415,7 @@ function budgetBar(cost: number, limit: number): string {
 }
 
 function terminalText(value: string): string {
-  return stripVTControlCharacters(value).replaceAll(
-    /[\u0000-\u001F\u007F]/gu,
-    " ",
-  );
+  return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
 }
 
 function fitLine(value: string, width: number): string {

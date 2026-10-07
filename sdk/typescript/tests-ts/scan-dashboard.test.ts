@@ -70,6 +70,10 @@ describe("live scan dashboard", () => {
     ],
     ["CJK", () => "START " + "界".repeat(500_000) + " END"],
     [
+      "unterminated terminal controls",
+      () => "START" + "\u001B]".repeat(40_000) + " END",
+    ],
+    [
       "Japanese prose",
       () =>
         "START " +
@@ -148,6 +152,61 @@ describe("live scan dashboard", () => {
           paths: [],
         });
         expect(lastFrame(stderr)).toContain(cluster);
+        dashboard.stop();
+      }
+    },
+  );
+
+  test.each([
+    ["CSI", "MARK\u001B[31m界👩🏽‍💻\u001B[0mEND", "MARK界👩🏽‍💻END"],
+    [
+      "OSC with BEL",
+      "MARK\u001B]8;;https://example.com\u0007界👩🏽‍💻\u001B]8;;\u0007END",
+      "MARK界👩🏽‍💻END",
+    ],
+    ["OSC with ST", "MARK\u001B]0;title\u001B\\界👩🏽‍💻END", "MARK界👩🏽‍💻END"],
+    ["OSC with C1 ST", "MARK\u001B]0;title\u009C界👩🏽‍💻END", "MARK界👩🏽‍💻END"],
+    ["incomplete CSI", "MARK\u001B[", "MARK ["],
+    ["incomplete OSC", "MARK\u001B]!!! diagnostic", "MARK ]!!! diagnostic"],
+    [
+      "OSC interrupted by another escape",
+      "MARK\u001B]!!!before\u001B[31mafter\u001B[0m\u0007tailEND",
+      "MARK ]!!!beforeafter tailEND",
+    ],
+  ] as const)(
+    "retains visible text while escaping %s",
+    (_name, value, expected) => {
+      for (const view of ["prose", "code", "details"] as const) {
+        const stderr = capture(true);
+        const input = new DashboardTestInput();
+        const dashboard = createDashboard(
+          { ...stderr.stream, columns: 120, rows: 24 },
+          { input, color: false },
+        );
+        dashboard.start();
+        if (view === "details") {
+          input.emit("data", "d");
+          dashboard.recordDetails({
+            threadId: "synthetic-thread",
+            parentThreadId: null,
+            event: {
+              type: "response_item",
+              payload: { type: "function_call_output", output: value },
+            },
+          });
+        } else {
+          dashboard.record({
+            id: "escaped-text",
+            kind: "message",
+            status: "completed",
+            description:
+              view === "code" ? "```text\n" + value + "\n```" : value,
+            paths: [],
+          });
+        }
+        expect(lastFrame(stderr)).toContain(expected);
+        expect(stderr.text()).not.toContain("\u001B]");
+        expect(stderr.text()).not.toContain("\u001B[31m");
         dashboard.stop();
       }
     },
