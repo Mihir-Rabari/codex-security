@@ -101,7 +101,8 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
@@ -223,7 +224,8 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         os.utime(result, ns=(300, 300))
         if parent_surfaces != "no-parent":
             os.utime(scan.scan_dir / "coverage.json", ns=(200, 200))
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
@@ -323,7 +325,8 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
     else:
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
@@ -401,7 +404,8 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         drafts[label] = draft
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
@@ -631,7 +635,8 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -688,7 +693,8 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
             }
         )
     )
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
@@ -795,7 +801,8 @@ def test_rejected_retry_preserves_original_finding_history(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -919,7 +926,8 @@ def test_stopped_recovery_keeps_current_parent_projection(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1030,7 +1038,8 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
         os.utime(head, ns=(200, 200))
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
@@ -1079,7 +1088,8 @@ def test_accepted_worker_missing_completeness_keeps_valid_findings(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1151,7 +1161,8 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1254,7 +1265,8 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1354,7 +1366,8 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1485,7 +1498,8 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -1707,7 +1721,8 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
@@ -2062,7 +2077,8 @@ def test_deferred_projection_preserves_each_referenced_source_surface(
     original = result.read_bytes()
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
