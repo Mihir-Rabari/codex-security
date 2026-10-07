@@ -1116,8 +1116,9 @@ def test_budget_legacy_saved_pending_surface_refresh_uses_original_evidence(
 
 
 @pytest.mark.parametrize("decision", ["suppressed", "not_applicable", "deferred"])
+@pytest.mark.parametrize("authored", [False, True])
 def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
-    tmp_path: Path, workbench_api, decision: str
+    tmp_path: Path, workbench_api, decision: str, authored: bool
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
         tmp_path, extra_files={"updated.py": "# updated evidence\n"}
@@ -1135,6 +1136,16 @@ def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
         "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
         "validation": {"disposition": decision},
     }
+    if authored:
+        path = scan_dir / "coverage.json"
+        coverage = json.loads(path.read_text())
+        surface = next(
+            row
+            for row in coverage["surfaces"]
+            if row.get("candidateId") == original["candidate_id"]
+        )
+        surface.update(label="Authored review", notes="Retained authored annotation.")
+        path.write_text(json.dumps(coverage))
     ledger.write_text(json.dumps(current) + "\n")
     complete_budget_scan(state_dir, scan_id)
     coverage = json.loads((scan_dir / "coverage.json").read_text())
