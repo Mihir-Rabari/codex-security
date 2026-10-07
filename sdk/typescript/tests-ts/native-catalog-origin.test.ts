@@ -1,3 +1,4 @@
+import { CODEX_EXECUTABLE_VERSION } from "../src/version.js";
 import * as childProcess from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -161,7 +162,7 @@ test.each(["home", "selected", "selected-profile", "recipe"] as const)(
       { encoding: "utf8" },
     );
     expect(version.status, version.stderr).toBe(0);
-    expect(version.stdout).toContain("0.162.0-alpha.16");
+    expect(version.stdout).toContain(CODEX_EXECUTABLE_VERSION);
     // The same relative home setting succeeds in its original native file layer.
     for (const cwd of [discovery, merge]) {
       const control = startup(cwd);

@@ -8,7 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
@@ -33,7 +33,7 @@ import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import { DeepScanProgressTracker } from "../src/deep-progress.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { createApiTestFixtures } from "./support/api-events.js";
-import { tokenUsageEvent } from "./support/usage-rollout.js";
+import { tokenUsageEvent, writeSession } from "./support/usage-rollout.js";
 
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
@@ -45,6 +45,7 @@ afterEach(cleanup);
 async function fixture(
   partialCheckpoint?: "active" | "completed",
   native = false,
+  observeSubagents = false,
 ) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -83,6 +84,7 @@ async function fixture(
     preflightConfig: JsonObject;
   }> = [];
   const threadScans = new Map<string, string>();
+  const observedSubagents: Array<{ id: string; mode: string }> = [];
   const completedPrompts: string[] = [];
   const commands: string[] = [];
   const parentPhases: unknown[] = [];
@@ -369,6 +371,22 @@ async function fixture(
                       },
                     }) + "\n",
                   );
+                  if (observeSubagents) {
+                    const subagentId = randomUUID();
+                    await writeSession(
+                      home,
+                      subagentId,
+                      {},
+                      {
+                        parent: thread.id,
+                        cwd: threadOptions.workingDirectory,
+                      },
+                    );
+                    observedSubagents.push({
+                      id: subagentId,
+                      mode: record.mode,
+                    });
+                  }
                   yield { type: "thread.started", thread_id: thread.id };
                   if (record.mode === "standard") {
                     const draft = {
@@ -571,6 +589,7 @@ async function fixture(
     records,
     launches,
     threadScans,
+    observedSubagents,
     completedPrompts,
     commands,
     parentPhases,
@@ -2148,3 +2167,101 @@ test("budgeted resume retries pending child retirement before rejecting unavaila
   expect(h.records.size).toBe(2);
   expect(h.commands).not.toContain("complete-budget-exhausted-scan");
 });
+
+test.each(["relative", "absolute", "profile"] as const)(
+  "Deep instruction files retain their parent origin across fresh and resumed workers (%s)",
+  async (origin) => {
+    const h = await fixture();
+    const instructionPath = join(h.root, "instructions.md");
+    await writeFile(instructionPath, "Synthetic instructions for this scan.\n");
+    const selected =
+      origin === "absolute" ? instructionPath : "../instructions.md";
+    const configuration: JsonObject =
+      origin === "profile"
+        ? {
+            profile: "selected",
+            profiles: { selected: { model_instructions_file: selected } },
+          }
+        : { model_instructions_file: selected };
+    const options = { ...h.options, knowledgeBasePaths: undefined };
+    h.stopBeforeSealing();
+    await using first = h.makeClient(configuration);
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+    await using resumed = h.makeClient(configuration);
+    await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+    expect(h.launches.length).toBeGreaterThanOrEqual(3);
+    for (const launch of h.launches) {
+      const instructions = launch.options.config![
+        "model_instructions_file"
+      ] as string;
+      expect(
+        await readFile(
+          resolve(launch.threadOptions.workingDirectory!, instructions),
+          "utf8",
+        ),
+      ).toBe("Synthetic instructions for this scan.\n");
+      expect(instructions).toBe(instructionPath);
+    }
+    expect(
+      h.records.get(h.launches[0]!.options.env!["CODEX_SECURITY_SCAN_ID"]!)!
+        .mode,
+    ).toBe("standard");
+    expect(
+      h.launches.some(
+        (launch) =>
+          h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!
+            .mode === "deep",
+      ),
+    ).toBe(true);
+  },
+);
+
+test.each(["standard", "deep"] as const)(
+  "Deep worker observations retain shared numbering across fresh and resumed %s launches",
+  async (mode) => {
+    const h = await fixture(undefined, false, true);
+    const observed: Array<{ kind: "observed"; worker: number }> = [];
+    const sessions: Array<{ threadId: string; worker?: number }> = [];
+    const options = {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      onWorkerEvent: (event: { kind: "observed"; worker: number }) =>
+        observed.push(event),
+      onSessionEvent: (event: { threadId: string; worker?: number }) =>
+        sessions.push(event),
+    };
+    h.stopBeforeSealing();
+    await using first = h.makeClient();
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+    await using resumed = h.makeClient();
+    await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+    const selectedIds = new Set(
+      h.observedSubagents
+        .filter((row) => row.mode === mode)
+        .map((row) => row.id),
+    );
+    const expected = new Set(
+      sessions
+        .filter((row) => selectedIds.has(row.threadId))
+        .map((row) => row.worker),
+    );
+    expect(expected.size).toBe(selectedIds.size);
+    expect(expected.size).toBeGreaterThan(0);
+    const delivered = new Set(observed.map((row) => row.worker));
+    for (const number of expected) expect(delivered.has(number!)).toBe(true);
+  },
+);

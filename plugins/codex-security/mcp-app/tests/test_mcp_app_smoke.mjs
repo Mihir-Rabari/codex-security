@@ -1429,7 +1429,7 @@ try {
     (tool) => tool.name === "update_codex_security_scan_context_from_app",
   );
   const renameScan = toolList.result.tools.find(
-    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
+    (tool) => tool.name === "rename_codex_security_scan",
   );
   assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
   const submit = toolList.result.tools.find(

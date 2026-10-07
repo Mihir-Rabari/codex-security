@@ -317,10 +317,12 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
         ? [`\\${path.relative(path.parse(root).root, root)}\\link\\..\\home`]
         : []),
     ];
+    const literalHome = path.join(root, "literal home ");
+    if (process.platform !== "win32") await mkdir(literalHome);
     for (const [home, expectedPath] of [
       ...homes.map((home) => [home, home]),
-      [" ~/target/home ", path.join(root, "target", "home")],
-      [`  ${path.join(root, "home")}  `, path.join(root, "home")],
+      ["~/target/home", path.join(root, "target", "home")],
+      ...(process.platform === "win32" ? [] : [[literalHome, literalHome]]),
     ]) {
       process.env.CODEX_HOME = home;
       const expectedHome = await realpath(expectedPath);

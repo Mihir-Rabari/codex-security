@@ -170,6 +170,10 @@ export async function prepareNativeScan(
       [":workspace_roots", "write"],
       ...Object.entries(savedPermissions?.filesystem ?? {}),
       ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
+      ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
+        path,
+        { ".": "deny" },
+      ]),
       ...(input.parentSandbox.globScanMaxDepth === undefined
         ? []
         : [

@@ -1681,6 +1681,13 @@ export class CodexSecurity {
       )(stateDirectory, scanDir, await bundledPluginRoot());
       notifyObserver(options, "onOutputDirReady")(scanDir);
       checkOpen();
+      const instructionsFile = session.sessionConfig["model_instructions_file"];
+      if (mode === "deep" && typeof instructionsFile === "string") {
+        session.sessionConfig["model_instructions_file"] = resolve(
+          scanDir,
+          expandHome(instructionsFile, session.source.environment),
+        );
+      }
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
       const expectation: ScanExpectation = {
@@ -2393,6 +2400,7 @@ export class CodexSecurity {
                   onActivity: options.onActivity,
                   onProgress: reportScanProgress,
                   onSessionEvent: options.onSessionEvent,
+                  onWorkerEvent: options.onWorkerEvent,
                   onWorkerStatus: options.onWorkerStatus,
                   onReconnect: options.onReconnect,
                   onTrustedAccessStatus: options.onTrustedAccessStatus,

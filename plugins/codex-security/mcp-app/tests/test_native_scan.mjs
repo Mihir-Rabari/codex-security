@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -120,7 +121,7 @@ function syntheticPermissionAppServer() {
     if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   };
   const selectedProvider = config.model_providers?.[config.model_provider];
-  capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
+  capture({ kind: "preflight", argv, cwd: process.cwd(), home: process.env.CODEX_HOME, marker: process.env.NATIVE_PROFILE_MARKER,
     providerToken: selectedProvider && process.env[selectedProvider.env_key],
     providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
@@ -160,6 +161,7 @@ for (const scenario of [
   "provider",
   "credential-store",
   "nested-settings",
+  "literal-home",
   "openrouter-env-key",
   "fireworks-env-key",
   "openrouter-bearer",
@@ -180,9 +182,12 @@ for (const scenario of [
           : false,
     },
     async () => {
-      const root = await realpath(
+      const createdRoot = await realpath(
         await mkdtemp(join(tmpdir(), "native-config-merge-")),
       );
+      const root =
+        scenario === "literal-home" ? `${createdRoot} ` : createdRoot;
+      if (root !== createdRoot) await rename(createdRoot, root);
       const executable = join(root, "codex");
       const capture = join(root, "observations.jsonl");
       const externalProvider = scenario.startsWith("openrouter-")
@@ -237,7 +242,7 @@ else {
     ["--config", "-c"].includes(arg) ? [parse(argv[index + 1])] : []));
   const selectedProvider = effective.model_providers?.[effective.model_provider];
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
-    kind: process.argv.includes("login") ? "login" : "exec", argv,
+    kind: process.argv.includes("login") ? "login" : "exec", argv, home: process.env.CODEX_HOME,
     providerToken: selectedProvider && process.env[selectedProvider.env_key],
     providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
@@ -308,7 +313,12 @@ else {
           const prepared = await prepareNativeScan({
             ...input(),
             recipe,
-            parentSandbox: { filesystemDenies: ["/current/private"] },
+            parentSandbox: {
+              filesystemDenies: ["/current/private"],
+              ...(scenario === "nested-settings"
+                ? { literalFilesystemDenies: ["/current/[private]"] }
+                : {}),
+            },
             model: "synthetic-current-model",
           });
           const ambient = prepared.client.dependencies.ambientExecution;
@@ -429,6 +439,7 @@ else {
               assert.equal(effective.features.goals, false);
               assert.equal(effective.features.api_key_model_discovery, false);
             }
+            if (scenario === "literal-home") assert.equal(row.home, root);
             const filesystem =
               effective.permissions[effective.default_permissions].filesystem;
             assert.equal(
@@ -438,6 +449,13 @@ else {
             );
             assert.equal(filesystem[":root"], "read");
             assert.equal(filesystem["/current/private"], "deny");
+            if (scenario === "nested-settings")
+              assert.deepEqual(
+                { ...filesystem["/current/[private]"] },
+                {
+                  ".": "deny",
+                },
+              );
             if (recipe) assert.equal(filesystem["/saved/private"], "deny");
             assert.equal(effective.approval_policy, "never");
           }
@@ -1090,7 +1108,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
       ["", defaultHome, "synthetic-default", 2],
       [" \t\n", defaultHome, "synthetic-default", 2],
       [explicitHome, explicitHome, "synthetic-explicit", 4],
-      [" ~/explicit ", explicitHome, "synthetic-explicit", 4],
+      ["~/explicit", explicitHome, "synthetic-explicit", 4],
       ...(process.platform === "win32"
         ? []
         : [[spacedHome, spacedHome, "synthetic-spaced", 3]]),
