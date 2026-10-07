@@ -39,37 +39,35 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        mode: [baseline, isolated, parallel]
-        exclude:
-          - os: windows-latest
-            mode: isolated
+        # Bound isolated process lifetimes while https://github.com/oven-sh/bun/issues/34069 is pending release.
+        mode:
+          - baseline
+          - isolated-1
+          - isolated-2
+          - isolated-3
+          - isolated-4
+          - isolated-5
+          - isolated-6
+          - isolated-7
+          - parallel
         include:
           - mode: baseline
             args: ""
-          - mode: isolated
-            args: --isolate
           - mode: parallel
             args: --parallel=2
-          - os: windows-latest
-            mode: isolated-1
+          - mode: isolated-1
             args: --isolate --shard=1/7
-          - os: windows-latest
-            mode: isolated-2
+          - mode: isolated-2
             args: --isolate --shard=2/7
-          - os: windows-latest
-            mode: isolated-3
+          - mode: isolated-3
             args: --isolate --shard=3/7
-          - os: windows-latest
-            mode: isolated-4
+          - mode: isolated-4
             args: --isolate --shard=4/7
-          - os: windows-latest
-            mode: isolated-5
+          - mode: isolated-5
             args: --isolate --shard=5/7
-          - os: windows-latest
-            mode: isolated-6
+          - mode: isolated-6
             args: --isolate --shard=6/7
-          - os: windows-latest
-            mode: isolated-7
+          - mode: isolated-7
             args: --isolate --shard=7/7
           - os: windows-latest
             mode: shard-1
