@@ -21,23 +21,66 @@ Before version `1.0.0`, minor releases may change the public API.
 
 ## Install
 
-```bash
-npm install @openai/codex-security
-npx @openai/codex-security --version
-```
-
 Supported runtimes:
 
 - Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, on macOS, Linux, or Windows.
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
   findings. Python 3.10 also needs `tomli`.
 
+### Install the CLI
+
+Install the CLI globally and sign in:
+
+```bash
+npm install --global @openai/codex-security
+cs --version
+cs login
+```
+
+`cs` is a short alias for `codex-security`; both commands run the same CLI.
+The installation creates both commands in npm's global executable directory,
+which must be on your `PATH`. If `cs` already names another tool, use
+`codex-security` instead.
+
+From your repository directory, optionally draft security guidance before scanning:
+
+```bash
+cs policy .
+```
+
+The command saves a draft outside the checkout. Review the proposed diff and
+notes, edit the draft as needed, then copy it to the displayed `Policy target`
+so future scans use it. Generating the draft alone does not install it.
+Skip this step to keep an existing policy or scan without one. See
+[Generate a security policy](#generate-a-security-policy) for details.
+
+Then run a scan:
+
+```bash
+cs scan .
+```
+
+To run without a global installation, replace `cs` in these examples with
+`npx @openai/codex-security`, for example:
+
+```bash
+npx @openai/codex-security scan .
+```
+
+### Install the TypeScript SDK
+
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
 ## Authentication
 
 Sign in with ChatGPT:
 
 ```bash
-npx @openai/codex-security login
+cs login
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -45,7 +88,7 @@ These keys apply to the current command without replacing your saved login.
 To save an API key instead, pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
+printenv OPENAI_API_KEY | cs login --with-api-key
 ```
 
 SDK calls accept `auth: "auto" | "chatgpt" | "api-key"`. The default, `"auto"`,
@@ -67,7 +110,7 @@ allows it. Otherwise, open an SSH tunnel from your local machine:
 ssh -L 1455:localhost:1455 user@remote-host
 ```
 
-Run `npx @openai/codex-security login` in that SSH session, then open its sign-in
+Run `cs login` in that SSH session, then open its sign-in
 URL in your local browser. Keep SSH connected until login finishes.
 
 ### Amazon Bedrock
@@ -297,11 +340,13 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
+After [installing the CLI](#install-the-cli), choose your scan scope:
+
 ```bash
-npx @openai/codex-security scan .
-npx @openai/codex-security scan . --path src --path tests
-npx @openai/codex-security scan . --diff origin/main --json
-npx @openai/codex-security scan . --dry-run
+cs scan .
+cs scan . --path src --path tests
+cs scan . --diff origin/main --json
+cs scan . --dry-run
 ```
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
@@ -314,8 +359,8 @@ scans, custom validation, imports, patching, and integrations.
 ### Generate a security policy
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api
+cs policy .
+cs policy . --path services/api
 ```
 
 `policy` drafts `SECURITY.md` outside the checkout. Review the draft before
@@ -329,8 +374,8 @@ headless use, artifacts, and review requirements.
 Export saved findings or a threat model without starting another analysis:
 
 ```bash
-npx @openai/codex-security export --scan SCAN_ID --export-format sarif --output results.sarif
-npx @openai/codex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export --scan SCAN_ID --export-format sarif --output results.sarif
+cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
 The SDK provides `exportArtifact()` for the same offline operations. See
@@ -377,7 +422,7 @@ system, see [SDK records deduplication](docs/dedupe-records.md).
 ### Running without Docker
 
 ```bash
-npx @openai/codex-security serve --port 3000
+cs serve --port 3000
 ```
 
 Open `http://127.0.0.1:3000/dashboard`. Startup and listing need no API key;
