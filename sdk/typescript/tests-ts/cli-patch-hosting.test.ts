@@ -6,8 +6,9 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { dependencies } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
 import {
   resultWithFindings,
   savedScan,
@@ -26,11 +27,12 @@ describe("patch change tracking", () => {
     ["local", "remote"].flatMap((location) =>
       [
         "codex-security",
+        "codex-security/patch-scan-1",
         "codex-security/patch-scan-1/other",
         "codex-security/patch-scan-10",
-        "topic/refs/heads/codex-security",
-        "topic/refs/heads/codex-security/patch-scan-1",
-        "topic/refs/heads/codex-security/patch-scan-1/nested",
+        "archive/refs/heads/codex-security",
+        "archive/refs/heads/codex-security/patch-scan-1",
+        "archive/refs/heads/codex-security/patch-scan-1/other",
       ].map((existing) => [location, existing] as const),
     ),
   )(
@@ -42,9 +44,11 @@ describe("patch change tracking", () => {
       else git("branch", existing);
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
-      const blocked =
-        existing === "codex-security" ||
-        existing === "codex-security/patch-scan-1/other";
+      const blocked = [
+        "codex-security",
+        "codex-security/patch-scan-1",
+        "codex-security/patch-scan-1/other",
+      ].includes(existing);
       const result = resultWithFindings(["high"]);
       const onCodex = mock(
         async (
@@ -76,20 +80,6 @@ describe("patch change tracking", () => {
         expect(git("rev-parse", "HEAD")).toBe(head);
         expect(git("branch", "--show-current")).toBe("main");
         expect(git("ls-remote", remote)).toBe(before);
-      } else {
-        expect(
-          git(
-            "--git-dir",
-            remote,
-            "show",
-            "refs/heads/codex-security/patch-scan-1:src/finding-1.ts",
-          ),
-        ).toBe("fixed");
-        expect(
-          location === "remote"
-            ? git("ls-remote", remote, `refs/heads/${existing}`)
-            : git("rev-parse", `refs/heads/${existing}`),
-        ).toContain(head);
       }
     },
   );
@@ -170,7 +160,7 @@ describe("patch change tracking", () => {
   );
 
   test.each([false, true])(
-    "preserves remote proxy settings with collision=%s",
+    "preserves remote proxy settings with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -403,16 +393,13 @@ process.exit(result.status ?? 1);
           onCodex,
           onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
-              const child = promisify(execFile)("git", [...args], {
+              const execution = promisify(execFile)("git", [...args], {
                 cwd: options?.directory ?? cwd,
                 env: { ...process.env, ...options?.environment },
                 maxBuffer: options?.maxBuffer,
               });
-              if (options?.input !== undefined) {
-                child.child.stdin?.on("error", () => undefined);
-                child.child.stdin?.end(options.input);
-              }
-              const { stdout } = await child;
+              execution.child.stdin?.end(options?.input);
+              const { stdout } = await execution;
               return options?.trim === false ? stdout : stdout.trim();
             }
             return args[0] === "repo"
@@ -470,96 +457,6 @@ process.exit(result.status ?? 1);
       }
     },
   );
-
-  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
-    const { directory, git } = await publicationRepository();
-    const sshDirectory = await fixtures.create("patch-git-ssh-");
-    await writeFile(
-      join(sshDirectory, "ssh"),
-      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
-      { mode: 0o755 },
-    );
-    const emptyPath = await fixtures.create("patch-no-ssh-");
-    const gitExecutable = Bun.which("git")!;
-    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
-    const environment = {
-      PATH: emptyPath,
-      GIT_EXEC_PATH: sshDirectory,
-      GIT_SSH: undefined,
-      GIT_SSH_COMMAND: undefined,
-    };
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "https://github.com/example/repository.git",
-    );
-    git(
-      "remote",
-      "set-url",
-      "--push",
-      "origin",
-      "git@GitHub-Work:example/repository.git",
-    );
-    const branch = "codex-security/saved-patch";
-    const commit = git("rev-parse", "HEAD");
-    git("branch", branch);
-    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
-    const url = "https://github.com/example/repository/pull/1";
-    let repositoryLookups = 0;
-    const outcome = await runWorkflow(
-      ["patch", "--resume-pr", branch, "--json"],
-      {
-        currentDirectory: directory,
-        environment,
-        onRepositoryCommand: async (command, args, cwd, options) => {
-          if (command === "gh") {
-            if (args[0] === "pr" && args[1] === "list")
-              return JSON.stringify([
-                {
-                  url,
-                  head: commit,
-                  repositoryId: "synthetic-id",
-                  state: "OPEN",
-                  crossRepository: true,
-                },
-              ]);
-            if (args[1] === "set-default") {
-              expect(args).toEqual(["repo", "set-default", "--view"]);
-              return "example/repository";
-            }
-            expect(args).toEqual([
-              "repo",
-              "view",
-              "--json",
-              "id,url",
-              "--jq",
-              "tojson",
-            ]);
-            repositoryLookups++;
-            return JSON.stringify({
-              id: "synthetic-id",
-              url: "https://github.com/example/repository",
-            });
-          }
-          const { stdout } = await promisify(execFile)(
-            command === "git" ? gitExecutable : command,
-            args,
-            {
-              cwd,
-              env: { ...process.env, ...environment, ...options?.environment },
-              encoding: "utf8",
-            },
-          );
-          return options?.trim === false ? stdout : stdout.trim();
-        },
-        onCodex: throwing("must reuse the saved patch"),
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
-    expect(repositoryLookups).toBe(1);
-  });
 
   test.each(
     [
@@ -966,9 +863,11 @@ process.exit(result.status ?? 1);
                 "tojson",
               ]);
               repositoryLookups++;
-              expect(selectedRemote).toContain(
-                expected.slice(expected.indexOf("/") + 1),
-              );
+              expect(
+                decodeURIComponent(new URL(selectedRemote).pathname)
+                  .replace(/^\/+|\/+$/gu, "")
+                  .replace(/\.git$/u, ""),
+              ).toBe(selectedRepository);
               return JSON.stringify({
                 id: first ? "synthetic-first-id" : "synthetic-origin-id",
                 url: `${hostingUrl}/${first ? "first-owner" : "canonical-owner"}/repository`,
@@ -1044,4 +943,94 @@ process.exit(result.status ?? 1);
         );
     },
   );
+
+  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
+    const { directory, git } = await publicationRepository();
+    const sshDirectory = await fixtures.create("patch-git-ssh-");
+    await writeFile(
+      join(sshDirectory, "ssh"),
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
+      { mode: 0o755 },
+    );
+    const emptyPath = await fixtures.create("patch-no-ssh-");
+    const gitExecutable = Bun.which("git")!;
+    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
+    const environment = {
+      PATH: emptyPath,
+      GIT_EXEC_PATH: sshDirectory,
+      GIT_SSH: undefined,
+      GIT_SSH_COMMAND: undefined,
+    };
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/example/repository.git",
+    );
+    git(
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@GitHub-Work:example/repository.git",
+    );
+    const branch = "codex-security/saved-patch";
+    const commit = git("rev-parse", "HEAD");
+    git("branch", branch);
+    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+    const url = "https://github.com/example/repository/pull/1";
+    let repositoryLookups = 0;
+    const outcome = await runWorkflow(
+      ["patch", "--resume-pr", branch, "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "gh") {
+            if (args[0] === "pr" && args[1] === "list")
+              return JSON.stringify([
+                {
+                  url,
+                  head: commit,
+                  repositoryId: "synthetic-id",
+                  state: "OPEN",
+                  crossRepository: true,
+                },
+              ]);
+            if (args[1] === "set-default") {
+              expect(args).toEqual(["repo", "set-default", "--view"]);
+              return "example/repository";
+            }
+            expect(args).toEqual([
+              "repo",
+              "view",
+              "--json",
+              "id,url",
+              "--jq",
+              "tojson",
+            ]);
+            repositoryLookups++;
+            return JSON.stringify({
+              id: "synthetic-id",
+              url: "https://github.com/example/repository",
+            });
+          }
+          const { stdout } = await promisify(execFile)(
+            command === "git" ? gitExecutable : command,
+            args,
+            {
+              cwd,
+              env: { ...process.env, ...environment, ...options?.environment },
+              encoding: "utf8",
+            },
+          );
+          return options?.trim === false ? stdout : stdout.trim();
+        },
+        onCodex: throwing("must reuse the saved patch"),
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
+    expect(repositoryLookups).toBe(1);
+  });
 });

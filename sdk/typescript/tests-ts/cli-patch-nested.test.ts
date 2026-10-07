@@ -29,106 +29,81 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
-  test.each(["uncommitted", "committed", "committed and uncommitted"] as const)(
-    "publishes the complete mixed patch with %s nested changes",
-    async (change) => {
-      const { directory, git, remote } = await publicationRepository();
-      const nested = join(directory, "nested");
-      await mkdir(nested);
-      const nestedGit = repositoryGit(nested);
-      nestedGit("init", "--initial-branch=main");
-      nestedGit("config", "user.name", "Synthetic User");
-      nestedGit("config", "user.email", "synthetic@example.test");
-      await writeFile(join(nested, "app.ts"), "original\n");
-      nestedGit("add", ".");
-      nestedGit("commit", "-m", "Synthetic nested baseline");
-      await writeFile(join(directory, "root.ts"), "root original\n");
-      git("add", "nested", "root.ts");
-      git("commit", "-m", "Synthetic gitlink");
-      const rootBefore = git("rev-parse", "HEAD");
-      const remoteBefore = git("ls-remote", "origin");
-      const before = nestedGit("rev-parse", "HEAD");
-      let after = before;
-      let nestedIndex = await readFile(join(nested, ".git/index"));
-      let assessments = 0;
-      const outcome = await runWorkflow(
-        [
-          "patch",
-          "Synthetic issue",
-          "--assess-patch-risk",
-          "--create-pr",
-          "--json",
-        ],
-        {
-          currentDirectory: directory,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
-          onCodex: async (_args, output) => {
-            if (
-              output?.appServer?.prompt.includes(
-                "$codex-security:assess-patch-risk",
-              )
-            ) {
-              assessments++;
-              const artifact = JSON.parse(
-                output.appServer.prompt
-                  .split("\n")
-                  .find((line) => line.startsWith('{"path":'))!,
-              );
-              const patch = await readFile(artifact.path, "utf8");
-              expect(patch).toContain("-original");
-              expect(patch).toContain("+fixed");
-              expect(artifact.changedFiles).toContain("nested/app.ts");
-              expect(artifact.changedFiles).toContain("root.ts");
-              output.stdout.write(patchRiskAssessment().report);
-              return 0;
-            }
-            await writeFile(join(nested, "app.ts"), "fixed\n");
-            await writeFile(join(directory, "root.ts"), "root fixed\n");
-            if (change !== "uncommitted")
-              nestedGit("commit", "-am", "Synthetic nested update");
-            if (change === "committed and uncommitted")
-              await writeFile(join(nested, "extra.ts"), "uncommitted\n");
-            after = nestedGit("rev-parse", "HEAD");
-            nestedIndex = await readFile(join(nested, ".git/index"));
-            output?.stdout.write("Fixed and checked.");
+  test("publishes a committed nested update after assessing its content", async () => {
+    const { directory, git, remote } = await publicationRepository();
+    const nested = join(directory, "nested");
+    await mkdir(nested);
+    const nestedGit = repositoryGit(nested);
+    nestedGit("init", "--initial-branch=main");
+    nestedGit("config", "user.name", "Synthetic User");
+    nestedGit("config", "user.email", "synthetic@example.test");
+    await writeFile(join(nested, "app.ts"), "original\n");
+    nestedGit("add", ".");
+    nestedGit("commit", "-m", "Synthetic nested baseline");
+    git("add", "nested");
+    git("commit", "-m", "Synthetic gitlink");
+    const before = nestedGit("rev-parse", "HEAD");
+    let after = before;
+    let nestedIndex = await readFile(join(nested, ".git/index"));
+    let assessments = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic issue",
+        "--assess-patch-risk",
+        "--create-pr",
+        "--json",
+      ],
+      {
+        currentDirectory: directory,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          if (
+            output?.appServer?.prompt.includes(
+              "$codex-security:assess-patch-risk",
+            )
+          ) {
+            assessments++;
+            const artifact = JSON.parse(
+              output.appServer.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            );
+            const patch = await readFile(artifact.path, "utf8");
+            expect(patch).toContain("-original");
+            expect(patch).toContain("+fixed");
+            expect(artifact.changedFiles).toContain("nested/app.ts");
+            output.stdout.write(patchRiskAssessment().report);
             return 0;
-          },
+          }
+          await writeFile(join(nested, "app.ts"), "fixed\n");
+          nestedGit("commit", "-am", "Synthetic nested update");
+          after = nestedGit("rev-parse", "HEAD");
+          nestedIndex = await readFile(join(nested, ".git/index"));
+          output?.stdout.write("Fixed and checked.");
+          return 0;
         },
-      );
-      expect(assessments).toBe(1);
-      if (change !== "committed") {
-        expect(outcome.exitCode, outcome.stderr).toBe(2);
-        expect(git("rev-parse", "HEAD")).toBe(rootBefore);
-        expect(git("ls-remote", "origin")).toBe(remoteBefore);
-        expect(await readFile(join(directory, "root.ts"), "utf8")).toBe(
-          "root fixed\n",
-        );
-        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
-        expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
-        return;
-      }
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(after).not.toBe(before);
-      expect(git("ls-tree", "HEAD", "nested")).toBe(
-        `160000 commit ${after}\tnested`,
-      );
-      expect(
-        repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
-      ).toBe(`160000 commit ${after}\tnested`);
-      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
-      expect(
-        repositoryGit(remote)("show", `${git("rev-parse", "HEAD")}:root.ts`),
-      ).toBe("root fixed");
-      expect(git("status", "--porcelain")).toBe("");
-      expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
-      expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
-    },
-  );
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(assessments).toBe(1);
+    expect(after).not.toBe(before);
+    expect(git("ls-tree", "HEAD", "nested")).toBe(
+      `160000 commit ${after}\tnested`,
+    );
+    expect(
+      repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
+    ).toBe(`160000 commit ${after}\tnested`);
+    expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+    expect(git("status", "--porcelain")).toBe("");
+    expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
+    expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+  });
 
   test.each(
     ["root", "package", "recursive"].flatMap((scope) =>
@@ -651,6 +626,7 @@ describe("patch change tracking", () => {
           return 0;
         },
       );
+      const gitTrace: unknown[] = [];
       const outcome = await runWorkflow(
         [
           "patch",
@@ -660,13 +636,49 @@ describe("patch change tracking", () => {
         ],
         {
           currentDirectory: scope === "root" ? root : join(root, "package"),
-          onRepositoryCommand: runGitRepositoryCommand,
+          onRepositoryCommand: async (command, args, cwd, options) => {
+            const directory = options?.directory ?? cwd;
+            try {
+              const stdout = await runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                trim: false,
+              });
+              if (
+                args.includes("rev-parse") &&
+                ["--is-inside-git-dir", "--show-toplevel"].includes(
+                  args.at(-1) ?? "",
+                )
+              )
+                gitTrace.push({ args, cwd: directory, stdout });
+              return options?.trim === false ? stdout : stdout.trim();
+            } catch (error) {
+              const failure = error as Error & {
+                code?: unknown;
+                stdout?: unknown;
+                stderr?: unknown;
+              };
+              gitTrace.push({
+                args,
+                cwd: directory,
+                message: failure.message,
+                code: failure.code,
+                stdout: failure.stdout,
+                stderr: failure.stderr,
+              });
+              throw error;
+            }
+          },
           onCodex,
         },
       );
+      const diagnostics = JSON.stringify({
+        outcome,
+        modelCalls: onCodex.mock.calls.length,
+        gitTrace,
+      });
       const clean = operation === "init" || operation === "deinit";
-      expect(outcome.exitCode, outcome.stderr).toBe(clean ? 2 : 0);
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
+      expect(outcome.exitCode, diagnostics).toBe(clean ? 2 : 0);
+      expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject({
         applied: !clean,
         files: clean
           ? []
@@ -680,7 +692,7 @@ describe("patch change tracking", () => {
                 ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
                 : [`${prefix}/app.ts`],
       });
-      expect(onCodex).toHaveBeenCalledTimes(
+      expect(onCodex, diagnostics).toHaveBeenCalledTimes(
         operation === "init-commit" ? 2 : 1,
       );
       expect(await readFile(join(root, ".git/index"))).toEqual(index);
@@ -796,6 +808,7 @@ describe("patch change tracking", () => {
           "build.log\ngenerated.txt\n",
         );
         await writeFile(join(root, "build.log"), "outer tracked log\n");
+        await writeFile(join(root, ".gitignore"), "outer-generated.txt\n");
       }
       inner("add", ".");
       inner("commit", "-m", "Synthetic inner baseline");
@@ -845,6 +858,7 @@ describe("patch change tracking", () => {
         git("add", "local.txt");
       }
       const parentIndex = await readFile(join(root, ".git", "index"));
+      let expectedAlternateIndex = parentIndex;
       let childIndex = await readFile(join(nested, ".git", "index"));
       if (settings === "alternate-index") {
         await writeFile(alternateIndex, parentIndex);
@@ -868,36 +882,52 @@ describe("patch change tracking", () => {
               expect([root, directory, nested]).toContain(resolve(args[1]!));
             }
             const index = options?.environment?.["GIT_INDEX_FILE"];
-            if (
-              index !== undefined &&
-              index !== gitEnvironment.GIT_INDEX_FILE
-            ) {
+            if (index !== undefined) {
               expect(cwd).toBe(root);
-              const checkout = selectedWorktree;
-              const indices = snapshots.get(checkout) ?? new Set<string>();
-              indices.add(index);
-              snapshots.set(checkout, indices);
+              if (
+                gitEnvironment.GIT_INDEX_FILE === undefined ||
+                resolve(options?.directory ?? cwd, index) !==
+                  resolve(target, gitEnvironment.GIT_INDEX_FILE)
+              ) {
+                const checkout = selectedWorktree;
+                const indices = snapshots.get(checkout) ?? new Set<string>();
+                indices.add(index);
+                snapshots.set(checkout, indices);
+              }
             }
             const environment = { ...gitEnvironment, ...options?.environment };
             if (selectedWorktree === nested) {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();
-              expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
-                gitEnvironment.GIT_OBJECT_DIRECTORY,
-              );
+              const objects = environment["GIT_OBJECT_DIRECTORY"];
+              expect(
+                objects === undefined
+                  ? objects
+                  : resolve(options?.directory ?? cwd, objects),
+              ).toBe(gitEnvironment.GIT_OBJECT_DIRECTORY);
               expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
             } else {
-              expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
-                args.join(" ") ===
-                  "rev-parse --path-format=absolute --git-path objects" &&
-                  options?.environment?.["GIT_OBJECT_DIRECTORY"] === "."
-                  ? "."
-                  : gitEnvironment.GIT_OBJECT_DIRECTORY,
-              );
-              expect(environment["GIT_COMMON_DIR"]).toBe(
-                gitEnvironment.GIT_COMMON_DIR,
-              );
+              if (index === undefined)
+                expect(environment["GIT_INDEX_FILE"]).toBe(
+                  gitEnvironment.GIT_INDEX_FILE,
+                );
               const commandDirectory = options?.directory ?? cwd;
+              for (const name of [
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_COMMON_DIR",
+              ] as const) {
+                const value = environment[name];
+                const objectDirectoryProbe =
+                  name === "GIT_OBJECT_DIRECTORY" &&
+                  args.join(" ") ===
+                    "rev-parse --path-format=absolute --git-path objects" &&
+                  options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
+                expect(
+                  value === undefined || objectDirectoryProbe
+                    ? value
+                    : resolve(commandDirectory, value),
+                ).toBe(objectDirectoryProbe ? "." : gitEnvironment[name]);
+              }
               expect(commandDirectory).toBe(target);
               if (environment["GIT_DIR"] !== undefined)
                 expect(resolve(commandDirectory, environment["GIT_DIR"])).toBe(
@@ -923,6 +953,14 @@ describe("patch change tracking", () => {
               return 0;
             }
             if (operation === "new-ignored") {
+              await writeFile(join(root, "outer-generated.txt"), "outer fix\n");
+              await runGitRepositoryCommand(
+                "git",
+                ["add", "-f", "outer-generated.txt"],
+                root,
+                { environment: gitEnvironment },
+              );
+              expectedAlternateIndex = await readFile(alternateIndex);
               await writeFile(join(nested, "generated.txt"), "generated fix\n");
               inner("add", "-f", "generated.txt");
               childIndex = await readFile(join(nested, ".git", "index"));
@@ -961,7 +999,7 @@ describe("patch change tracking", () => {
         operation === "ignored"
           ? []
           : operation === "new-ignored"
-            ? ["package/nested/generated.txt"]
+            ? ["outer-generated.txt", "package/nested/generated.txt"]
             : [
                 "package/app.ts",
                 ...(operation !== "modify" ? ["package/nested"] : []),
@@ -974,7 +1012,11 @@ describe("patch change tracking", () => {
       if (operation === "ignored")
         expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
       if (settings === "alternate-index")
-        expect(await readFile(alternateIndex)).toEqual(parentIndex);
+        expect(await readFile(alternateIndex)).toEqual(expectedAlternateIndex);
+      if (operation === "new-ignored")
+        expect(await readFile(join(root, "outer-generated.txt"), "utf8")).toBe(
+          "outer fix\n",
+        );
       expect([...snapshots.keys()].sort()).toEqual([root, nested].sort());
       expect(snapshots.get(root)!.size).toBe(2);
       expect(snapshots.get(nested)!.size).toBe(operation === "remove" ? 1 : 2);
@@ -1070,6 +1112,107 @@ describe("patch change tracking", () => {
         expect(await readlink(join(root, "local.env"))).toBe(
           "absent-synthetic-target",
         );
+    },
+  );
+
+  test.each(["uncommitted", "committed", "committed and uncommitted"] as const)(
+    "publishes the complete mixed patch with %s nested changes",
+    async (change) => {
+      const { directory, git, remote } = await publicationRepository();
+      const nested = join(directory, "nested");
+      await mkdir(nested);
+      const nestedGit = repositoryGit(nested);
+      nestedGit("init", "--initial-branch=main");
+      nestedGit("config", "user.name", "Synthetic User");
+      nestedGit("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      nestedGit("add", ".");
+      nestedGit("commit", "-m", "Synthetic nested baseline");
+      await writeFile(join(directory, "root.ts"), "root original\n");
+      git("add", "nested", "root.ts");
+      git("commit", "-m", "Synthetic gitlink");
+      const rootBefore = git("rev-parse", "HEAD");
+      const remoteBefore = git("ls-remote", "origin");
+      const before = nestedGit("rev-parse", "HEAD");
+      let after = before;
+      let nestedIndex = await readFile(join(nested, ".git/index"));
+      let assessments = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              assessments++;
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              );
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("-original");
+              expect(patch).toContain("+fixed");
+              expect(artifact.changedFiles).toContain("nested/app.ts");
+              expect(artifact.changedFiles).toContain("root.ts");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+            await writeFile(join(directory, "root.ts"), "root fixed\n");
+            if (change !== "uncommitted")
+              nestedGit("commit", "-am", "Synthetic nested update");
+            if (change === "committed and uncommitted")
+              await writeFile(join(nested, "extra.ts"), "uncommitted\n");
+            after = nestedGit("rev-parse", "HEAD");
+            nestedIndex = await readFile(join(nested, ".git/index"));
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(assessments).toBe(1);
+      if (change !== "committed") {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(git("rev-parse", "HEAD")).toBe(rootBefore);
+        expect(git("ls-remote", "origin")).toBe(remoteBefore);
+        expect(await readFile(join(directory, "root.ts"), "utf8")).toBe(
+          "root fixed\n",
+        );
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+        expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(after).not.toBe(before);
+      expect(git("ls-tree", "HEAD", "nested")).toBe(
+        `160000 commit ${after}\tnested`,
+      );
+      expect(
+        repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
+      ).toBe(`160000 commit ${after}\tnested`);
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      expect(
+        repositoryGit(remote)("show", `${git("rev-parse", "HEAD")}:root.ts`),
+      ).toBe("root fixed");
+      expect(git("status", "--porcelain")).toBe("");
+      expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
+      expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
     },
   );
 });

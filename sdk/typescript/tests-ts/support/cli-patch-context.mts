@@ -91,14 +91,33 @@ for (const kind of [
       await mkdir(join(parent, "config"));
       await writeFile(
         join(parent, "config", "config.yml"),
-        parent === selectedParent
-          ? "selected configuration\n"
-          : "different configuration\n",
+        "different configuration\n",
       );
     }
-    environment[kind.startsWith("gh") ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR"] =
-      selectedAlias ? "../config" : `${relative(repository, alias)}/../config`;
+    const configVariable = kind.startsWith("gh")
+      ? "GH_CONFIG_DIR"
+      : "GLAB_CONFIG_DIR";
+    environment[configVariable] = selectedAlias
+      ? "../config"
+      : `${relative(repository, alias)}/../config`;
+    const selectedConfiguration = execFileSync(
+      process.execPath,
+      [
+        "--input-type=commonjs",
+        "--eval",
+        'process.stdout.write(require("node:path").resolve(process.env[process.argv[1]], "config.yml"))',
+        configVariable,
+      ],
+      {
+        cwd: selectedAlias ? alias : repository,
+        env: environment,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    await writeFile(selectedConfiguration, "selected configuration\n");
   }
+  let patched = false;
   const output = capture();
   const error = capture();
   const exitCode = await main(
@@ -109,6 +128,7 @@ for (const kind of [
       currentDirectory: selectedAlias ? alias : repository,
       environment,
       onCodex: async (_args, output) => {
+        patched = true;
         await writeFile(join(repository, "app.ts"), "fixed\n");
         output?.stdout.write("Patch complete.");
         return 0;
@@ -144,7 +164,9 @@ for (const kind of [
             },
           );
           if (contents !== "selected configuration\n")
-            throw new Error("Provider configuration changed after patching");
+            throw new Error(
+              `Provider configuration changed ${patched ? "after" : "before"} patching`,
+            );
         }
         return args[1] === "create"
           ? "https://github.example.test/example/repository/pull/17"
