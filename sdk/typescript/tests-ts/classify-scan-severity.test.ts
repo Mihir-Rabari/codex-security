@@ -375,7 +375,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
   await query(environment, "DROP TABLE scan_severity_assessments");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (42, 46)",
+    "DELETE FROM schema_migrations WHERE version IN (50, 52, 54)",
   );
   expect(
     await readScanSeverityClassification(
@@ -389,7 +389,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 50",
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
@@ -409,9 +409,15 @@ test("migration preserves assessments for unindexed scan directories", async () 
   expect(
     await query(
       environment,
-      "SELECT version FROM schema_migrations WHERE version = 42",
+      "SELECT version FROM schema_migrations WHERE version = 50",
     ),
-  ).toEqual([{ version: 42 }]);
+  ).toEqual([{ version: 50 }]);
+  expect(
+    await query(
+      environment,
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'scan_severity_reuse'",
+    ),
+  ).toEqual([{ name: "scan_severity_reuse" }]);
 });
 
 test("changed rubric, context, or evidence invalidates matching checkpoints", async () => {
@@ -715,7 +721,7 @@ test("migrates existing databases without changing findings and reads older stat
   await query(environment, "DROP TABLE scan_severity_classifications");
   await query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 42)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 50, 52)",
   );
   expect(
     (

@@ -7935,6 +7935,7 @@ describe("incoming native runtime integration", () => {
         join(ambientHome, "codex-security", "config.toml"),
         "[deep_scan]\nworkers = 5\n",
       );
+      let recipe: JsonObject | undefined;
       const client = new TestClient(
         {},
         {
@@ -7943,19 +7944,26 @@ describe("incoming native runtime integration", () => {
             USERPROFILE: root,
           },
           ...scanRuntimeDependencies(codexHome, scanDir),
-          createCodex: codexFactory(deepSettingsCaptured),
+          runWorkbench: async (_options, args, input) => {
+            if (args[0] === "list-scans")
+              throw new Error("deep scan settings captured");
+            if (args[0] === "register-cli-scan")
+              recipe = JSON.parse(input!).recipe;
+            return mockWorkbench(args, input);
+          },
         },
       );
 
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      expect(
-        await readFile(
-          join(codexHome, "codex-security", "config.toml"),
-          "utf8",
-        ),
-      ).toContain("workers = 5");
+      expect(recipe).toMatchObject({
+        deepScanResolved: true,
+        deepScan: { workers: 5 },
+      });
+      expect(existsSync(join(codexHome, "codex-security", "config.toml"))).toBe(
+        false,
+      );
       await client.close();
     },
   );

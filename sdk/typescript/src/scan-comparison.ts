@@ -1101,7 +1101,9 @@ function comparisonPrompt(
 }
 
 function characterCount(value: string): number {
-  return value[Symbol.iterator]().reduce((count) => count + 1, 0);
+  let count = 0;
+  for (const _character of value) count += 1;
+  return count;
 }
 
 function cataloguePages(input: CataloguePage): CataloguePage[] {

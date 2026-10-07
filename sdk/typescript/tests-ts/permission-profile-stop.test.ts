@@ -66,9 +66,13 @@ test("cancellation drains a preflight child that ignores graceful termination", 
   }
 }, 10000);
 
-test.each([false, true])(
-  "rejects an exited preflight child while a descendant retains its pipes (resumed: %p)",
-  async (resumed) => {
+test.each(
+  [false, true].flatMap((resumed) =>
+    ["exit", "RPC"].map((failure) => ({ resumed, failure })),
+  ),
+)(
+  "preserves preflight diagnostics and drains children ($failure, resumed: $resumed)",
+  async ({ resumed, failure: failureKind }) => {
     const root = await mkdtemp(join(tmpdir(), "permission-exit-"));
     const executable = join(root, "synthetic-codex.exe");
     const script = join(root, "preflight.cjs");
@@ -79,6 +83,11 @@ test.each([false, true])(
         const request = JSON.parse(line);
         if (request.method === "initialize") console.log(JSON.stringify({ id: request.id, result: {} }));
         if (request.method === "config/read") {
+          process.stderr.write("synthetic preflight detail\\n");
+          if (${JSON.stringify(failureKind)} === "RPC") {
+            console.log(JSON.stringify({ id: request.id, error: { code: -32001, message: "synthetic RPC detail" } }));
+            return;
+          }
           const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
           process.stderr.write("descendant:" + descendant.pid + "\\n", () => process.exit(1));
         }
@@ -124,13 +133,27 @@ test.each([false, true])(
       );
       expect(failure).toBeInstanceOf(Error);
       expect(failure).not.toBeInstanceOf(ScanPermissionError);
-      expect(failure).toMatchObject({
-        message: "Codex permission preflight ended before its response.",
-      });
-      expect(child!.exitCode).toBe(1);
+      expect((failure as Error).message).toContain(
+        "synthetic preflight detail",
+      );
+      if (failureKind === "RPC") {
+        expect((failure as Error).message).toContain('"code":-32001');
+        expect((failure as Error).message).toContain("synthetic RPC detail");
+      } else {
+        expect((failure as Error).message).toContain(
+          "Codex permission preflight ended before its response.",
+        );
+        expect(child!.exitCode).toBe(1);
+        expect(descendantPid).toBeDefined();
+      }
+      expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
       expect(child!.stdout!.destroyed).toBe(true);
-      expect(descendantPid).toBeDefined();
       expect(spawning).toHaveBeenCalledTimes(1);
+      expect(spawning.mock.calls[0]?.[2]).toMatchObject({
+        cwd: root,
+        windowsHide: true,
+        env: expect.objectContaining({ PATH: process.env["PATH"] ?? "" }),
+      });
     } finally {
       spawning.mockRestore();
       clearTimeout(timeout);

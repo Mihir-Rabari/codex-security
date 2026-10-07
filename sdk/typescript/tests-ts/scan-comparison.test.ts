@@ -120,6 +120,7 @@ describe("semantic scan comparison", () => {
   test("reconciles finding groups with native Node 20 built-ins", () => {
     const script = `
 Reflect.deleteProperty(Map, "groupBy");
+Reflect.deleteProperty(Object.getPrototypeOf(Object.getPrototypeOf(""[Symbol.iterator]())), "reduce");
 const { matchScanFindings } = await import(${JSON.stringify(new URL("../src/scan-comparison.ts", import.meta.url).href)});
 const input = {
   before: [{ findingId: "same-control", occurrenceId: "old" }],

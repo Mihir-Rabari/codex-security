@@ -24,7 +24,7 @@ def test_read_only_classification_recovers_missing_legacy_rows(
         connection.row_factory = sqlite3.Row
         workbench_api["apply_schema_migrations"](
             connection,
-            tuple(item for item in workbench_api["MIGRATIONS"] if item[0] <= 42),
+            tuple(item for item in workbench_api["MIGRATIONS"] if item[0] <= 50),
             workbench_api["now"],
             workbench_api["backfill_security_targets"],
         )
