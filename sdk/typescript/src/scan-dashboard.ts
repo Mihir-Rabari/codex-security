@@ -273,7 +273,7 @@ export class ScanDashboard {
         input.on("data", this.#onInput);
         this.#stream.write(ENABLE_ALTERNATE_SCROLL);
       }
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch (error) {
       try {
         this.stop();
@@ -554,7 +554,7 @@ export class ScanDashboard {
   #refresh(): void {
     if (this.#timer === null) return;
     try {
-      this.#render();
+      this.#stream.write(this.#frame());
     } catch {}
   }
 
@@ -565,10 +565,6 @@ export class ScanDashboard {
       this.#refreshPending = false;
       this.#refresh();
     });
-  }
-
-  #render(): void {
-    this.#stream.write(this.#frame());
   }
 
   #frame(): string {
