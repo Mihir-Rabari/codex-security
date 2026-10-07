@@ -20,6 +20,7 @@ import { hostname } from "node:os";
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   posix,
@@ -46,6 +47,7 @@ import {
   bundledPluginRoot,
   environmentValue,
   expandHome,
+  isPythonPathCandidate,
   executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
@@ -1246,12 +1248,20 @@ async function loadResumableScan(
   if (!matchesOutcome) return undefined;
   const reportSealed = await hasSealedReport(path, manifest, signal);
   const pythonPath =
-    reportSealed || configuredPythonPath === undefined
+    reportSealed ||
+    configuredPythonPath === undefined ||
+    !isPythonPathCandidate(configuredPythonPath)
       ? undefined
       : relative(
           matchedRoot,
           await canonicalCreationPath(
-            resolve(expandHome(configuredPythonPath)),
+            resolve(
+              expandHome(configuredPythonPath) +
+                (process.platform === "win32" &&
+                extname(configuredPythonPath) === ""
+                  ? ".exe"
+                  : ""),
+            ),
           ),
         );
   const checkoutPython =
@@ -1727,6 +1737,18 @@ async function checkoutRevision(
   }
   await git("checkout", "--quiet", "--detach", task.revision);
   if (restoreIncomplete) {
+    const ignoreCase =
+      process.platform === "win32" ||
+      (
+        await git("config", "--bool", "core.ignorecase").catch(
+          (error: unknown) => {
+            if ((error as { code?: number }).code === 1) return "false";
+            throw error;
+          },
+        )
+      ).trim() === "true";
+    const comparisonPath = (name: string) =>
+      ignoreCase ? name.toLowerCase() : name;
     const links = (await gitOutput(["ls-tree", "-r", "-z", task.revision]))
       .toString("utf8")
       .split("\0")
@@ -1745,7 +1767,9 @@ async function checkoutRevision(
       const visited = new Set<string>();
       for (;;) {
         const name = links.find(
-          (link) => selected === link || selected.startsWith(link + "/"),
+          (link) =>
+            comparisonPath(selected) === comparisonPath(link) ||
+            comparisonPath(selected).startsWith(comparisonPath(link) + "/"),
         );
         if (name === undefined || visited.has(name)) break;
         visited.add(name);
@@ -1764,7 +1788,7 @@ async function checkoutRevision(
     }
     const restoreAll = selectedPaths.has(".");
     const scopes = [...selectedPaths, ...aliases].map((name) =>
-      Buffer.from(process.platform === "win32" ? name.toLowerCase() : name),
+      Buffer.from(comparisonPath(name)),
     );
     const worktreeDeleted = await gitOutput(["ls-files", "--deleted", "-z"]);
     const deletedPaths = Buffer.concat([
@@ -1788,10 +1812,9 @@ async function checkoutRevision(
       end = deletedPaths.indexOf(0, start)
     ) {
       const name = deletedPaths.subarray(start, end);
-      const comparisonName =
-        process.platform === "win32"
-          ? Buffer.from(name.toString("utf8").toLowerCase())
-          : name;
+      const comparisonName = ignoreCase
+        ? Buffer.from(name.toString("utf8").toLowerCase())
+        : name;
       if (
         scopes.some(
           (scope) =>

@@ -5890,3 +5890,208 @@ for (const linked of [false, true]) {
     expect(runs).toHaveBeenCalledTimes(1);
   },
 );
+
+for (const configured of [false, true]) {
+  test(`retained spelling recovery keeps a bare PATH interpreter configured=${configured}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "bare-interpreter-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const runs = mock(completeRun);
+    const initial = await runMultiscan(options(paths, client(runs)));
+    const receipt = (await results(initial.resultsPath)).find(
+      (row) => row["status"] === "completed",
+    )!;
+    const output = receipt["outputDir"] as string;
+    await appendFile(
+      join(output, "report.md"),
+      "Refresh this synthetic report.\n",
+    );
+    const checkout = join(paths.output, "checkouts", "repo");
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, ".git"), { recursive: true });
+    await rm(source.path, { recursive: true });
+    const python = basename(PYTHON);
+    const code = `import {runMultiscan} from ${JSON.stringify(join(dirname(import.meta.path), "..", "src", "multiscan.ts"))};
+      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: configured ? { pythonPath: python } : {} })};
+      options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
+      options.recoverScan=async()=>undefined;
+      console.log(JSON.stringify(await runMultiscan(options)));`;
+    const summary = JSON.parse(
+      execFileSync(process.execPath, ["-e", code], {
+        cwd: checkout,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: dirname(PYTHON) + delimiter + (process.env["PATH"] ?? ""),
+          PYTHON: configured ? undefined : python,
+        },
+      }),
+    );
+    expect(summary).toMatchObject({ completed: 1, skipped: 1 });
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(
+      await lstat(join(checkout, ".git")).catch(() => undefined),
+    ).toBeUndefined();
+  });
+}
+
+for (const nested of [false, true]) {
+  test(`retained spelling recovery preserves accepted alias casing nested=${nested}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "case-alias-source");
+    await symlink("src", join(source.path, "alias"), "dir");
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Tracked scope alias",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    const caseInsensitive = await realpath(join(source.path, "ALIAS")).then(
+      () => true,
+      () => false,
+    );
+    const requested =
+      (caseInsensitive ? "ALIAS" : "alias") + (nested ? "/APP.TS" : "");
+    const scope = !caseInsensitive && nested ? "alias/app.ts" : requested;
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},${scope}\n`,
+    );
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const checkout = join(
+      paths.output,
+      "recovery-checkouts",
+      "repo",
+      "attempt-2",
+    );
+    git(
+      paths.root,
+      "clone",
+      "--quiet",
+      "-c",
+      "core.symlinks=true",
+      source.path,
+      checkout,
+    );
+    const campaign = options(paths, client(runs), {
+      recoverScan: async () => undefined,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+
+    await rm(join(checkout, "alias"));
+    await rm(join(checkout, "src"), { recursive: true });
+    await writeFile(
+      join(checkout, "retained.txt"),
+      "Keep unrelated recovery bytes.\n",
+    );
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
+      "Keep unrelated recovery bytes.\n",
+    );
+  });
+}
+
+(process.platform === "win32" ? test : test.skip)(
+  "retained spelling recovery restores an extensionless Windows interpreter link",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "extensionless-python-source");
+    await symlink(await realpath(PYTHON), join(source.path, "python.exe"));
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Tracked interpreter link",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${revision}\n`,
+    );
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const checkout = join(
+      paths.output,
+      "recovery-checkouts",
+      "repo",
+      "attempt-2",
+    );
+    git(
+      paths.root,
+      "clone",
+      "--quiet",
+      "-c",
+      "core.symlinks=true",
+      source.path,
+      checkout,
+    );
+    const alias = join(checkout, "python");
+    const runs = mock(
+      async (
+        root: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: alias,
+          protectedRoot: root,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(await realpath(PYTHON));
+        return completedScan(settings.outputDir!, "complete", root);
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      config: { pythonPath: alias },
+      recoverScan: async () => undefined,
+    });
+    const initial = await runMultiscan(campaign);
+    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    const receipt = (await results(initial.resultsPath)).find(
+      (row) => row["status"] === "completed",
+    )!;
+    await appendFile(
+      join(receipt["outputDir"] as string, "report.md"),
+      "Refresh this synthetic report.\n",
+    );
+
+    await rm(join(checkout, "python.exe"));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(await realpath(join(checkout, "python.exe"))).toBe(
+      await realpath(PYTHON),
+    );
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
