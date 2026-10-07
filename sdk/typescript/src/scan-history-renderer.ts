@@ -87,21 +87,20 @@ export function renderScanHistory(
   ): void => {
     const available = width - indent - 2;
     let line = "";
-    let first = true;
     // Scope paths arrive as whole entries because whitespace can be part of a filename.
     const words =
       typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
     for (const word of words) {
       if (line.length > 0 && line.length + word.length + 1 > available) {
-        lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
-        first = false;
+        lines.push(`${prefix || " ".repeat(indent)}${line}`);
+        prefix = undefined;
         line = word;
       } else {
         line = line.length > 0 ? `${line} ${word}` : word;
       }
     }
     if (line.length > 0) {
-      lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
+      lines.push(`${prefix || " ".repeat(indent)}${line}`);
     }
   };
 
