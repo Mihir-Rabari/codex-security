@@ -1323,7 +1323,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         {},
       ];
       const sqliteHomes = settings.map((_, index) =>
-        index === 0 ? "" : index === 1 ? ` ${path.join(fixture.root, `scan-state-${index}`)} ` : path.join(fixture.root, `scan-state-${index}`),
+        index === 0
+          ? ""
+          : index === 1
+            ? ` ${path.join(fixture.root, `scan-state-${index}`)} `
+            : path.join(fixture.root, `scan-state-${index}`),
       );
       const providerKeys = settings.map((_, index) =>
         index === 0 ? undefined : ` synthetic-gateway-key-${index} `,
@@ -1613,8 +1617,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment!.CODEX_HOME,
               await realpath(codexHome),
             );
-            assert.equal(workerLaunch.environment!.CODEX_SQLITE_HOME, sqliteHomes[index]);
-            assert.equal(invocation.argv.some((arg: string) => arg.startsWith("sqlite_home=")), false);
+            assert.equal(
+              workerLaunch.environment!.CODEX_SQLITE_HOME,
+              sqliteHomes[index],
+            );
+            assert.equal(
+              invocation.argv.some((arg: string) =>
+                arg.startsWith("sqlite_home="),
+              ),
+              false,
+            );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
               path.join(fixture.root, "ambient-plugin"),
@@ -2857,7 +2869,13 @@ if (stdin.includes('COMPLETE_THEN_HANG')) { writeFileSync(completionMarkerPath, 
   );
   await chmod(scriptPath, 0o755);
   process.env.FAKE_CODEX_MARKER = markerPath;
-  return { root, markerPath, preflightMarkerPath, completionMarkerPath, executablePath: scriptPath };
+  return {
+    root,
+    markerPath,
+    preflightMarkerPath,
+    completionMarkerPath,
+    executablePath: scriptPath,
+  };
 }
 
 function assertReadOnlyWorkerPolicy(args: readonly string[]) {
@@ -3033,7 +3051,6 @@ async function testCancelCompletedWorkerDrain() {
   }
 }
 
-
 async function testCompletedWorkerFlushesBeforeSettling() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;
@@ -3100,4 +3117,3 @@ async function testCompletedWorkerFlushesBeforeSettling() {
     restoreEnv("CODEX_CLI_PATH", previousPath);
   }
 }
-

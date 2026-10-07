@@ -821,7 +821,7 @@ function readSessionChunk(
         repository,
       );
       session.pendingLine = [];
-        }
+    }
     lineStart = newline + 1;
   }
 }

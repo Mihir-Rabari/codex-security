@@ -1072,7 +1072,10 @@ export class CodexSecurity {
         }
       };
       const outputSchema = securityPolicyStageOutputSchema();
-      const nativeSessionConfig = { command: this.#codexCommand(), workingDirectory: outputDir };
+      const nativeSessionConfig = {
+        command: this.#codexCommand(),
+        workingDirectory: outputDir,
+      };
       const run = async (
         stage: SecurityPolicyStage,
         prompt: string,
@@ -1562,7 +1565,10 @@ export class CodexSecurity {
           `Could not track scan activity: ${errorMessage(error)}`,
         );
       };
-      const nativeSessionConfig = { command: this.#codexCommand(), workingDirectory: scanDir };
+      const nativeSessionConfig = {
+        command: this.#codexCommand(),
+        workingDirectory: scanDir,
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,

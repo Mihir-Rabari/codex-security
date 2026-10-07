@@ -209,7 +209,9 @@ export async function readNativeSessionSqliteHome(
       context: "helper",
       configOverrides: [],
     });
-    return typeof config.sqlite_home === "string" ? config.sqlite_home : undefined;
+    return typeof config.sqlite_home === "string"
+      ? config.sqlite_home
+      : undefined;
   });
 }
 
