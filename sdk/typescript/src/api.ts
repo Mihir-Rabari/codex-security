@@ -4874,13 +4874,13 @@ function selectedWorkerRuntimeConfig(
     : [];
   const providerEnvironment = Object.fromEntries(
     providerEnvironmentNames.flatMap((name) => {
-      const value =
-        environment[name] ??
-        (process.platform === "win32"
-          ? Object.entries(environment).find(
-              ([key]) => key.toUpperCase() === name.toUpperCase(),
-            )?.[1]
-          : undefined);
+      const key =
+        process.platform === "win32"
+          ? Object.keys(environment)
+              .sort()
+              .find((key) => key.toUpperCase() === name.toUpperCase())
+          : name;
+      const value = key === undefined ? undefined : environment[key];
       return value === undefined ? [] : [[name, value]];
     }),
   );

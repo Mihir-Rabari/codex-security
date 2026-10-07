@@ -74,6 +74,8 @@
 - reuse client construction and scan data ([#1374](https://github.com/openai/codex-security/pull/1374))
 - simplify report formatting and scan completion ([#1366](https://github.com/openai/codex-security/pull/1366))
 - remove duplicate benchmark checks and line collection ([#1359](https://github.com/openai/codex-security/pull/1359))
+- inherit null overrides and preserve literal paths ([#1290](https://github.com/openai/codex-security/pull/1290))
+- resolve path aliases consistently across scan workflows ([#1267](https://github.com/openai/codex-security/pull/1267))
 
 <!-- release-section: highlights:end -->
 
