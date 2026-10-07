@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
@@ -226,6 +226,37 @@ test("initialized stores retain their environment across findings operations", a
     entries.map(({ finding }) => finding),
   );
   expect(await readdir(directory)).toEqual(["state with spaces"]);
+});
+
+test("findings stores retain their Python interpreter after changing directories", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "findings-python-"));
+  directories.push(directory);
+  const first = join(directory, "first");
+  const second = join(directory, "second", "nested");
+  await Promise.all([mkdir(first), mkdir(second, { recursive: true })]);
+  const python = await resolvePluginPython();
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      "--eval",
+      `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
+const store = new SqliteFindingsStore();
+await store.initialize();
+await store.insert(${JSON.stringify([embedded(1)])});
+process.chdir(${JSON.stringify(second)});
+console.log(JSON.stringify(await store.list({ limit: 50, offset: 0 })));`,
+    ],
+    {
+      cwd: first,
+      env: {
+        ...process.env,
+        PYTHON: relative(first, python),
+        CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+      },
+    },
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(JSON.parse(result.stdout.toString()).findings).toEqual([finding(1)]);
 });
 
 test("escapes terminal controls in database helper diagnostics", async () => {
