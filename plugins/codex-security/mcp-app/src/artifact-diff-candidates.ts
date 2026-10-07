@@ -169,12 +169,21 @@ export function refreshDiffCandidateHistory(
               );
           }
         }
+        const previousCandidate = surface.candidate ?? pending?.candidate;
+        const snapshot = candidateSnapshot(previousCandidate, candidate);
+        if (
+          previousCandidate !== undefined &&
+          !isDeepStrictEqual(previousCandidate, snapshot)
+        )
+          surface.originalCandidates = exactUnion(
+            Array.isArray(surface.originalCandidates)
+              ? surface.originalCandidates
+              : [],
+            [previousCandidate],
+          );
         return {
           ...surface,
-          candidate: candidateSnapshot(
-            surface.candidate ?? pending?.candidate,
-            candidate,
-          ),
+          candidate: snapshot,
           ...(surface.finding === undefined && pending?.finding !== undefined
             ? { finding: pending.finding }
             : {}),

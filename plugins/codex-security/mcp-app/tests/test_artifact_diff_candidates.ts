@@ -3511,3 +3511,80 @@ for (const outcome of ["reportable", "suppressed", "not_applicable"] as const) {
     }
   });
 }
+
+for (const complete of [false, true]) {
+  for (const transition of [
+    "reopen",
+    "replace",
+    "unchanged",
+    "authored",
+  ] as const) {
+    test(`generated terminal refresh retains accepted snapshot ${transition}/${complete}`, async (t) => {
+      const original: FixtureObject = {
+        ...candidate("generated-history", "suppressed", "ignore"),
+        evidence: "Original discovery evidence.",
+        validation: {
+          disposition: "suppressed",
+          counterevidence_or_proof_gap: "Original validation evidence.",
+        },
+        attack_path: {
+          decision: "ignore",
+          counterevidence: "Original attack-path evidence.",
+        },
+      };
+      const context = await fixture(t, [original]);
+      const first = { ...draft(), complete };
+      if (transition === "authored")
+        first.coverage.surfaces.push({
+          candidateId: original.candidate_id,
+          candidate: original,
+          label: "Authored terminal review.",
+          disposition: "rejected",
+          notes: "Authored terminal evidence remains authoritative.",
+        });
+      await recordCodexSecurityScanDraft(context, first);
+      const accepted = await readCoverage(context);
+      assert.deepEqual(accepted.surfaces[0].candidate, original);
+      const updated =
+        transition === "unchanged"
+          ? original
+          : {
+              ...candidate(
+                original.candidate_id,
+                transition === "replace" ? "not_applicable" : "deferred",
+              ),
+              evidence: "New discovery evidence.",
+            };
+      await writeLedger(context, [updated]);
+      const current = { ...draft(), complete };
+      for (const replay of [false, true]) {
+        await recordCodexSecurityScanDraft(context, current);
+        const published = await readCoverage(context);
+        const contains = (value: unknown): boolean =>
+          isDeepStrictEqual(value, original) ||
+          (Array.isArray(value)
+            ? value.some(contains)
+            : value !== null &&
+              typeof value === "object" &&
+              Object.values(value).some(contains));
+        assert.ok(
+          contains(published),
+          `prior accepted phase/evidence snapshot survives replay=${replay}`,
+        );
+        assert.equal(
+          published.surfaces[0].disposition,
+          transition === "authored" || transition === "unchanged"
+            ? "rejected"
+            : transition === "replace"
+              ? "not_applicable"
+              : "needs_follow_up",
+        );
+        if (transition === "authored")
+          assert.equal(
+            published.surfaces[0].notes,
+            "Authored terminal evidence remains authoritative.",
+          );
+      }
+    });
+  }
+}
