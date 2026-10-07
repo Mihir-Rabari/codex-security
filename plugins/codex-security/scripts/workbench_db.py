@@ -2708,7 +2708,10 @@ def _require_finding_checkout_owner(
         ):
             return target
         raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
-    if target is not None:
+    if target is not None and scan["target_id"] is not None:
+        if scan_history._same_registered_repository(connection, scan, scan):
+            return target
+    elif target is not None:
         clauses, values, _, _ = scan_history.repository_scan_scope(
             connection, target["current_path"]
         )
@@ -2724,20 +2727,18 @@ def _require_finding_checkout_owner(
 def _indexed_scan_findings(
     connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: bool = False
 ) -> dict[str, dict[str, Any]]:
-    if scan["target_id"] is None:
-        scope = {"target_paths": {scan["target_path"]}}
-    else:
-        target = connection.execute(
-            "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    if (
+        connection.execute(
+            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
         ).fetchone()
-        scope = (
-            {
-                "repository": target["current_path"],
-                "matched_target_ids": scan_history.saved_repository_target_ids(connection, scan),
-            }
-            if target is not None
-            else {"target_ids": {scan["target_id"]}}
-        )
+        is None
+    ):
+        return {}
+    scope = (
+        {"target_paths": {scan["target_path"]}}
+        if scan["target_id"] is None
+        else {"target_ids": scan_history.saved_repository_target_ids(connection, scan)}
+    )
     if through_scan:
         scope["through_scan_sequence"] = connection.execute(
             "SELECT rowid FROM scans WHERE id = ?", (scan["id"],)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import runpy
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from test_workbench_scan_history import (
@@ -1186,3 +1188,138 @@ def test_unrelated_uncertainty_does_not_resurrect_resolved_alias(
         )
     findings = run_workbench(state, "list-global-findings", "--target-id", target)["findings"]
     assert findings == []
+
+
+@pytest.mark.parametrize("unrelated", [False, True])
+def test_scoped_history_does_not_parse_unrelated_comparisons(tmp_path, unrelated):
+    state, root = tmp_path / "state", tmp_path / "scans"
+    other = tmp_path / "other"
+    other.mkdir()
+    unrelated_json = set()
+    if unrelated:
+        pair = [create_cli_scan(state, root, other, finding=False) for _ in range(2)]
+        save_scan_matches(state, *pair)
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            unrelated_json = {
+                r[0] for r in connection.execute("SELECT result_json FROM scan_comparisons")
+            }
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scan = create_cli_scan(state, root, repository)
+    ns = runpy.run_path(str(SCRIPT), run_name="scoped_history_read_fixture")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
+        parsed = []
+        original = json.loads
+
+        def loads(value, *args, **kwargs):
+            if isinstance(value, str) and value in unrelated_json:
+                parsed.append(value)
+            return original(value, *args, **kwargs)
+
+        with patch.object(json, "loads", loads):
+            indexed = ns["_indexed_scan_findings"](connection, row)
+        assert len(indexed) == 1
+        assert parsed == []
+
+
+def test_empty_comparison_does_not_rebuild_aggregate_triage(tmp_path):
+    state, root = tmp_path / "state", tmp_path / "scans"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    pair = [create_cli_scan(state, root, repository, finding=False) for _ in range(2)]
+    save_scan_matches(state, *pair)
+    ns = runpy.run_path(str(SCRIPT), run_name="empty_history_read_fixture")
+    calls = []
+
+    def triage(connection, scan):
+        calls.append(scan["id"])
+        return {}
+
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        compared = ns["scan_history"].compare_scans(
+            connection,
+            argparse.Namespace(before_scan_id=pair[0]["scanId"], after_scan_id=pair[1]["scanId"]),
+            require_scan=ns["require_scan"],
+            read_coverage=ns["coverage_for_comparison"],
+            finding_triage=triage,
+        )
+    assert compared["summary"]["persisting"] == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize("identity", ["recorded", "legacy-null", "legacy-transition"])
+def test_migrated_sealed_comparisons_keep_legacy_ownership(history, identity):
+    state, root, repository = history
+    scans = [
+        create_cli_scan(state, root, repository, identity_anchor=anchor)
+        for anchor in ("semantic-a", "semantic-b")
+    ]
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in scans
+    ]
+    if identity != "recorded":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute("UPDATE scans SET target_device=NULL, target_inode=NULL")
+    if identity == "legacy-transition":
+        repository.rename(repository.with_name("previous-checkout"))
+        repository.mkdir()
+        create_cli_scan(state, root, repository)
+        repository.rename(repository.with_name("replacement-checkout"))
+        repository.with_name("previous-checkout").rename(repository)
+        rejected = run_workbench(
+            state,
+            "save-scan-comparison",
+            "--before-scan-id",
+            scans[0]["scanId"],
+            "--after-scan-id",
+            scans[1]["scanId"],
+            "--matches-json",
+            json.dumps(
+                {
+                    "matches": [confirmed_match(rows[0]["occurrenceId"], rows[1]["occurrenceId"])],
+                    "uncertain": [],
+                }
+            ),
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+        assert "same repository target" in rejected["stderr"]
+    else:
+        result = save_scan_matches(
+            state, *scans, confirmed_match(rows[0]["occurrenceId"], rows[1]["occurrenceId"])
+        )
+        assert result["summary"]["persisting"] == 1
+        assert compare_scan_pair(state, *scans)["summary"]["persisting"] == 1
+
+
+def test_scan_history_fixture_does_not_require_python_test_extras(history):
+    state, root, repository = history
+    script = "\n".join(
+        [
+            "import sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from workbench_test_support import create_cli_scan, run_workbench",
+            "state, root, repository = map(Path, sys.argv[2:])",
+            "scan = create_cli_scan(state, root, repository)",
+            "assert run_workbench(state, 'get-scan', '--scan-id', scan['scanId'])['scan']['findings']",
+        ]
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            script,
+            str(Path(__file__).parent),
+            str(state),
+            str(root),
+            str(repository),
+        ],
+        check=True,
+    )

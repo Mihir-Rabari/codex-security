@@ -113,6 +113,7 @@ def _indexed_findings(
     *,
     allow_cross_target_matches: bool = False,
 ) -> Iterator[dict[str, Any]]:
+    admitted = json.dumps(sorted(allowed_scan_ids))
     parents: dict[tuple[str, str], tuple[str, str]] = {}
     compatible_scan_pairs: dict[tuple[str, str], bool] = {}
 
@@ -133,12 +134,14 @@ def _indexed_findings(
         JOIN scans AS before_scans ON before_scans.id = before.scan_id
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
-        WHERE before_scans.target_id = after_scans.target_id
+        WHERE (before_scans.target_id = after_scans.target_id
             OR (before_scans.target_id IS NULL AND after_scans.target_id IS NULL
                 AND before_scans.target_path = after_scans.target_path)
-            OR (? AND before_scans.target_id IS NOT NULL AND after_scans.target_id IS NOT NULL)
+            OR (? AND before_scans.target_id IS NOT NULL AND after_scans.target_id IS NOT NULL))
+            AND before_scans.id IN (SELECT value FROM json_each(?))
+            AND after_scans.id IN (SELECT value FROM json_each(?))
         """,
-        (allow_cross_target_matches,),
+        (allow_cross_target_matches, admitted, admitted),
     ):
         if (
             match["before_scan_id"] not in allowed_scan_ids
@@ -166,7 +169,8 @@ def _indexed_findings(
         row["indexed_target_id"]: row["id"]
         for row in connection.execute(
             "SELECT COALESCE(target_id, target_path) AS indexed_target_id, id FROM scans "
-            "WHERE status = 'complete' ORDER BY rowid"
+            "WHERE status = 'complete' AND id IN (SELECT value FROM json_each(?)) ORDER BY rowid",
+            (admitted,),
         )
         if row["id"] in allowed_scan_ids
     }
@@ -216,8 +220,10 @@ def _indexed_findings(
         JOIN scans ON scans.id = occurrences.scan_id
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-        WHERE targets.id IS NOT NULL OR scans.target_id IS NULL
-        """
+        WHERE (targets.id IS NOT NULL OR scans.target_id IS NULL)
+            AND scans.id IN (SELECT value FROM json_each(?))
+        """,
+        (admitted,),
     ):
         if row["scan_id"] in allowed_scan_ids:
             grouped.setdefault(group((row["indexed_target_id"], row["finding_group"])), []).append(
@@ -295,9 +301,65 @@ def _indexed_active_findings(
     **settings: Any,
 ) -> Iterator[dict[str, Any]]:
     allowed_scan_ids: set[str] = set()
+    connection.create_function(
+        "codex_security_finding_group",
+        2,
+        lambda occurrence_id, finding_id: f"finding:{finding_id}",
+        deterministic=True,
+    )
+    scope = {
+        key: settings[key]
+        for key in (
+            "repository",
+            "target_ids",
+            "target_paths",
+            "matched_target_ids",
+            "through_scan_sequence",
+        )
+        if key in settings
+    }
+    for _ in _active_findings(
+        connection,
+        read_coverage,
+        allowed_scan_ids=allowed_scan_ids,
+        uncertain_scans={},
+        include_resolved=True,
+        **scope,
+    ):
+        pass
+    if allowed_scan_ids and any(
+        settings.get(key) is not None for key in ("repository", "target_ids", "target_paths")
+    ):
+        history_targets: set[str] = set()
+        history_paths: set[str] = set()
+        visited_targets: set[str] = set()
+        for scan in connection.execute(
+            "SELECT * FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
+            (json.dumps(sorted(allowed_scan_ids)),),
+        ):
+            if scan["target_id"] is None:
+                history_paths.add(scan["target_path"])
+            elif scan["target_id"] not in visited_targets:
+                visited_targets.add(scan["target_id"])
+                history_targets.update(scan_history.saved_repository_target_ids(connection, scan))
+        for _ in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=allowed_scan_ids,
+            uncertain_scans={},
+            include_resolved=True,
+            target_ids=history_targets or None,
+            target_paths=history_paths or None,
+            through_scan_sequence=settings.get("through_scan_sequence"),
+        ):
+            pass
     uncertain_scans: dict[str, set[str]] = {}
+    admitted = json.dumps(sorted(allowed_scan_ids))
     for comparison in connection.execute(
-        "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons"
+        "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
+        "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
+        "AND after_scan_id IN (SELECT value FROM json_each(?))",
+        (admitted, admitted),
     ):
         for match in json.loads(comparison["result_json"]).get("uncertain", []):
             uncertain_scans.setdefault(match["beforeOccurrenceId"], set()).add(
@@ -306,29 +368,7 @@ def _indexed_active_findings(
             uncertain_scans.setdefault(match["afterOccurrenceId"], set()).add(
                 comparison["before_scan_id"]
             )
-    connection.create_function(
-        "codex_security_finding_group",
-        2,
-        lambda occurrence_id, finding_id: f"finding:{finding_id}",
-        deterministic=True,
-    )
     query = settings.get("query", "")
-    if (
-        settings.get("repository") is not None
-        or settings.get("target_ids") is not None
-        or settings.get("target_paths") is not None
-    ):
-        # Apply the same ownership checks to linked history, while retaining the
-        # requested checkout's presentation rows below, including linked uncertainty.
-        for _ in _active_findings(
-            connection,
-            read_coverage,
-            allowed_scan_ids=allowed_scan_ids,
-            uncertain_scans=uncertain_scans,
-            include_resolved=True,
-            through_scan_sequence=settings.get("through_scan_sequence"),
-        ):
-            pass
     active = {
         row["occurrence_id"]: row
         for row in _active_findings(

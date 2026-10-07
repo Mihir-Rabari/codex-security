@@ -1694,7 +1694,7 @@ async function testResolvedGlobalFindings(
       `import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from test_workbench_scan_history import create_cli_scan, run_workbench
+from workbench_test_support import create_cli_scan, run_workbench
 state, root, repository = map(Path, sys.argv[2:])
 scan = create_cli_scan(state, root, repository)
 occurrence = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]["occurrenceId"]

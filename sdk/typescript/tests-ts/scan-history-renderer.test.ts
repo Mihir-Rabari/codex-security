@@ -4,6 +4,29 @@ import type { JsonObject } from "../src/config.js";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("keeps supported attack-path caveats", () => {
+    const output = renderScanHistory(
+      {
+        title: "Synthetic saved finding",
+        severity: { level: "high" },
+        attackPath: {
+          assumptions: ["Synthetic attacker can submit archives"],
+          controls: ["Existing path authorization check"],
+          blindspots: ["Unreviewed synthetic deployment setting"],
+        },
+      },
+      "finding",
+      { color: false },
+    );
+    for (const detail of [
+      "Synthetic attacker can submit archives",
+      "Existing path authorization check",
+      "Unreviewed synthetic deployment setting",
+    ]) {
+      expect(output).toContain(detail);
+    }
+  });
+
   test("keeps supported validation outcomes and legacy dataflow details", () => {
     const output = renderScanHistory(
       {

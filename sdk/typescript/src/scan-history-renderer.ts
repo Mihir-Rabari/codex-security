@@ -460,6 +460,9 @@ export function renderScanHistory(
             : key === "attackPath"
               ? [
                   ["Precondition", "preconditions"],
+                  ["Assumption", "assumptions"],
+                  ["Existing control", "controls"],
+                  ["Blind spot", "blindspots"],
                   ["Limitation", "limitations"],
                 ]
               : [];

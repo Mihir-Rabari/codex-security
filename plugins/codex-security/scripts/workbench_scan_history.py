@@ -935,6 +935,7 @@ def _same_registered_repository(
     connection: sqlite3.Connection, before: sqlite3.Row, after: sqlite3.Row
 ) -> bool:
     paths = []
+    verified_scans = []
     missing_checkout = False
     for scan in (before, after):
         target = connection.execute(
@@ -959,11 +960,24 @@ def _same_registered_repository(
             except OSError:
                 return False
             else:
-                if not stored_filesystem_identity_matches(
+                epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
+                legacy_identity = scan["target_device"] is None and scan["target_inode"] is None
+                # Migrated seals predate filesystem identity; retain the existing
+                # legacy allowance only before a recorded ownership transition.
+                if (
+                    legacy_identity
+                    and epoch_start is None
+                    and before["target_id"] == after["target_id"]
+                ):
+                    scan = {
+                        **dict(scan),
+                        "target_device": serialize_filesystem_identity(metadata.st_dev),
+                        "target_inode": serialize_filesystem_identity(metadata.st_ino),
+                    }
+                elif not stored_filesystem_identity_matches(
                     scan["target_device"], metadata.st_dev
                 ) or not stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino):
                     return False
-                epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
             if epoch_start is not None:
                 sequence = connection.execute(
                     "SELECT rowid AS ownership_sequence FROM scans WHERE id = ?",
@@ -972,6 +986,7 @@ def _same_registered_repository(
                 if sequence is None or sequence["ownership_sequence"] <= epoch_start:
                     return False
         paths.append(target["current_path"])
+        verified_scans.append(scan)
     if missing_checkout:
         return (
             before["target_id"] == after["target_id"]
@@ -984,8 +999,7 @@ def _same_registered_repository(
             is not None
         )
     return _same_repository(
-        before,
-        after,
+        *verified_scans,
         before_target_path=paths[0],
         after_target_path=paths[1],
         require_ownership=True,
@@ -1116,8 +1130,8 @@ def compare_scans(
     comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
-    previous_triage = finding_triage(connection, before)
-    current_triage = finding_triage(connection, after)
+    previous_triage = finding_triage(connection, before) if before_findings else {}
+    current_triage = finding_triage(connection, after) if after_findings else {}
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
     occurrences = {
