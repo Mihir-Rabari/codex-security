@@ -21,10 +21,33 @@ fixing security vulnerabilities in your code.
 Requires Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, and Python 3.10+.
 Python 3.10 also requires `tomli`.
 
+Install the CLI globally and sign in:
+
 ```bash
-npm install @openai/codex-security
-npx @openai/codex-security login
-npx @openai/codex-security scan /path/to/repository
+npm install --global @openai/codex-security
+codex-security login
+```
+
+This installs `codex-security` in npm's global executable directory, which must
+be on your `PATH`. To run without a global installation, replace `codex-security`
+in these examples with `npx @openai/codex-security`.
+
+From your repository directory, optionally draft a new or updated `SECURITY.md`
+to describe the project's security boundaries and what should count as a finding:
+
+```bash
+codex-security policy .
+```
+
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft as needed, then copy only `SECURITY.md` to the **Policy target** shown in the
+output. The command leaves repository files unchanged. You can skip this step to
+keep your existing policy or scan without one.
+
+Run your scan from the repository directory:
+
+```bash
+codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -54,6 +77,12 @@ for scan options, cost limits, and patching after a scan.
 
 ## TypeScript SDK
 
+Install the package locally in your TypeScript project:
+
+```bash
+npm install @openai/codex-security
+```
+
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
 
@@ -72,16 +101,25 @@ validation, severity classification, owner suggestions, and result handling.
 
 ## Generate SECURITY.md
 
-Draft security guidance for a repository or one of its components:
+Use `policy` to propose a new policy or changes to an existing one. To draft
+guidance for one component, select its directory with `--path`:
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+codex-security policy .
+codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout. Review it before installing it
-as guidance for future scans. See the [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy)
-for supporting documents and SDK usage.
+Scans read root and component `SECURITY.md` files. If your existing policy is
+current, you can scan with it directly. If you generate an update, review the
+diff before replacing the file and keep its vulnerability-reporting instructions.
+If the command reports that the policy is already up to date, no copy is needed.
+
+Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
+instructions. Keep those instructions; these files do not automatically provide
+repository-wide scan guidance. Keep supporting architecture and threat-model
+documents outside the repository. See the
+[policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
+locations, open decisions, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 

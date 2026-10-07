@@ -21,9 +21,21 @@ Before version `1.0.0`, minor releases may change the public API.
 
 ## Install
 
+Install the CLI globally:
+
+```bash
+npm install --global @openai/codex-security
+codex-security --version
+```
+
+This installs `codex-security` in npm's global executable directory, which must
+be on your `PATH`. To run without a global installation, replace `codex-security`
+in CLI examples with `npx @openai/codex-security`.
+
+For the TypeScript SDK, install the package locally in your project:
+
 ```bash
 npm install @openai/codex-security
-npx @openai/codex-security --version
 ```
 
 Supported runtimes:
@@ -37,7 +49,7 @@ Supported runtimes:
 Sign in with ChatGPT:
 
 ```bash
-npx @openai/codex-security login
+codex-security login
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
@@ -297,11 +309,25 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
+From your repository directory, optionally draft `SECURITY.md` to describe the
+project's security boundaries and what should count as a finding:
+
 ```bash
-npx @openai/codex-security scan .
-npx @openai/codex-security scan . --path src --path tests
-npx @openai/codex-security scan . --diff origin/main --json
-npx @openai/codex-security scan . --dry-run
+codex-security policy .
+```
+
+Review the saved draft, proposed diff, and owner review notes. Edit the draft as
+needed, then copy only `SECURITY.md` to the displayed **Policy target**. Scans use
+the new policy after you copy it into place. You can keep an existing policy or
+skip policy setup and scan immediately.
+
+Run your scan:
+
+```bash
+codex-security scan .
+codex-security scan . --path src --path tests
+codex-security scan . --diff origin/main --json
+codex-security scan . --dry-run
 ```
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
@@ -314,12 +340,14 @@ scans, custom validation, imports, patching, and integrations.
 ### Generate a security policy
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api
+codex-security policy .
+codex-security policy . --path services/api
 ```
 
-`policy` drafts `SECURITY.md` outside the checkout. Review the draft before
-installing it; it guides future scans. The SDK provides `generatePolicy()`,
+`policy` drafts new or updated `SECURITY.md` guidance outside the checkout and
+leaves existing policies unchanged. Scans can use an applicable root or component
+policy directly. Review a proposed update before copying it to the displayed
+**Policy target**. The SDK provides `generatePolicy()`,
 `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
 headless use, artifacts, and review requirements.

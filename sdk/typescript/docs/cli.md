@@ -157,8 +157,10 @@ reasoning-summary configuration.
 
 ## Generate a security policy
 
-`policy` drafts `SECURITY.md` guidance for later scans. Review the draft before
-copying it into the checkout; the command saves it outside the repository.
+`policy` optionally drafts new or updated `SECURITY.md` guidance describing the
+project's security boundaries and what should count as a finding. The command
+saves the draft outside the repository and leaves existing files unchanged.
+Scans use the draft after you review it and copy it into the checkout.
 
 ```bash
 codex-security policy .
@@ -175,6 +177,16 @@ Inherited policies may refer to ancestor `SECURITY.md` files or the checkout's
 Linked worktrees and initialized submodules use their own roots. For a separate
 Git directory, set `core.worktree` to the checkout's absolute path; use
 `git worktree repair` for moved linked worktrees.
+
+If your existing root or component `SECURITY.md` already describes the relevant
+security boundaries, you can scan with it directly. From the repository root, use
+`policy .` to propose an update to the root policy, or
+`policy . --path services/api` for a component policy.
+
+A `.github/SECURITY.md` or `docs/SECURITY.md` often describes how to report
+vulnerabilities. Keep those instructions: these files do not automatically
+provide repository-wide scan guidance. Use a root `SECURITY.md` for that guidance,
+or a component `SECURITY.md` for guidance specific to that directory.
 
 Generation describes the system, builds a threat model, then drafts the policy.
 In a terminal it asks about facts the source cannot establish and previews the
@@ -199,9 +211,20 @@ enforcement is required. See the
 
 ### Review the draft
 
-Preserve reporting instructions and obtain owner approval for exclusions,
-accepted risks, and severity decisions. Check linked `.github/SECURITY.md` and
-`docs/SECURITY.md` files: installing the draft can affect their guidance too.
+1. Open the saved `SECURITY.md` and review the proposed diff and owner review
+   notes. Edit the draft as needed. Preserve reporting instructions and confirm
+   exclusions, accepted risks, and severity decisions with the project owner.
+2. If you choose to use the draft, copy only the reviewed `SECURITY.md` to the
+   displayed **Policy target**. Check linked `.github/SECURITY.md` and
+   `docs/SECURITY.md` files: replacing the target can affect their guidance too.
+   Keep supporting architecture and threat-model documents outside the repository.
+3. Run `codex-security scan .`. Later scans read the policy at its repository
+   location.
+
+If the command reports that `SECURITY.md` is already up to date, no copy is
+needed; review any owner review notes and continue to the scan. You can leave
+questions blank during generation. Keep unresolved decisions explicit in any
+policy you adopt, or scan without adopting the draft while you resolve them.
 Regenerate if relevant source or neighboring policies changed during generation.
 
 Use an empty output directory outside every enclosing checkout and its Git
