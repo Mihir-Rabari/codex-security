@@ -131,6 +131,8 @@ test.skipIf(process.platform === "win32")(
     const directory = await mkdtemp(join(tmpdir(), "database-info-node-"));
     directories.push(directory);
     const repository = join(directory, "repository");
+    const other = join(directory, "other");
+    await mkdir(other);
     const bin = join(repository, "node_modules", ".bin");
     await mkdir(bin, { recursive: true });
     await writeFile(
@@ -149,7 +151,10 @@ printf '%s\n' '{"databasePath":"shim"}'
         process.execPath,
         "--eval",
         `const { SqliteFindingsStore } = await import(${JSON.stringify(new URL("../src/server/sqlite-store.ts", import.meta.url).href)});
-await new SqliteFindingsStore().initialize();`,
+const store = new SqliteFindingsStore();
+await store.initialize();
+process.chdir(${JSON.stringify(other)});
+await store.initialize();`,
       ],
       {
         cwd: repository,
