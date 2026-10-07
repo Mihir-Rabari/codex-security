@@ -12,7 +12,6 @@ import {
   rename,
   rm,
   rmdir,
-  stat,
   truncate,
   utimes,
   writeFile,
@@ -1762,6 +1761,40 @@ async function checkoutRevision(
       .filter((entry) => entry.startsWith("120000 "))
       .map((entry) => entry.slice(entry.indexOf("	") + 1));
     const aliases = new Set<string>();
+    const canonicalTrackedPath = async (
+      requested: string,
+      visited: Set<string>,
+    ): Promise<string> => {
+      for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
+        try {
+          await realpath(ancestor);
+          return canonicalCreationPath(requested);
+        } catch (error) {
+          undefinedIfMissingFile(error as NodeJS.ErrnoException);
+        }
+        const name = links.find(
+          (link) =>
+            comparisonPath(link) ===
+            comparisonPath(relative(path, ancestor).split(sep).join("/")),
+        );
+        if (name !== undefined && !visited.has(name)) {
+          visited.add(name);
+          aliases.add(name);
+          const target = (
+            await gitOutput(["show", `${task.revision}:${name}`])
+          ).toString("utf8");
+          return canonicalTrackedPath(
+            (isAbsolute(target)
+              ? target
+              : `${path}${sep}${dirname(name)}${sep}${target}`) +
+              requested.slice(ancestor.length),
+            visited,
+          );
+        }
+        if (dirname(ancestor) === ancestor)
+          return canonicalCreationPath(requested);
+      }
+    };
     const selectedPaths = new Set<string>();
     for (const requested of restorePaths) {
       let selected =
@@ -1787,10 +1820,11 @@ async function checkoutRevision(
         selected = posix.join(
           relative(
             path,
-            await canonicalCreationPath(
+            await canonicalTrackedPath(
               isAbsolute(target)
                 ? target
                 : `${path}${sep}${dirname(name)}${sep}${target}`,
+              visited,
             ),
           )
             .split(sep)
@@ -1848,14 +1882,13 @@ async function checkoutRevision(
             end !== -1;
             end = name.lastIndexOf(47, end - 1)
           ) {
-            const ancestor = await stat(
+            const ancestor = await lstat(
               Buffer.concat([Buffer.from(path + sep), name.subarray(0, end)]),
             ).catch((error: NodeJS.ErrnoException) => {
               if (error.code === "ENOTDIR") return null;
               return undefinedIfMissingFile(error);
             });
-            if (ancestor !== undefined)
-              return ancestor?.isDirectory() ? undefined : null;
+            if (ancestor !== undefined && !ancestor?.isDirectory()) return null;
           }
           return undefined;
         });

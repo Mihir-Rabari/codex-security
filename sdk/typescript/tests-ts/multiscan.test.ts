@@ -6253,9 +6253,14 @@ for (const missingCode of ["native", "ENOENT"]) {
   }
 }
 
-for (const parentThroughLink of [false, true]) {
+for (const { parentThroughLink, missing } of [
+  { parentThroughLink: false, missing: "alias" },
+  { parentThroughLink: true, missing: "alias" },
+  { parentThroughLink: true, missing: "jump" },
+  { parentThroughLink: true, missing: "both" },
+]) {
   testPosix(
-    `retained requested-file recovery follows physical alias parent=${parentThroughLink}`,
+    `retained requested-file recovery follows physical alias parent=${parentThroughLink} missing=${missing}`,
     async () => {
       const paths = await fixture();
       const source = await repository(
@@ -6316,7 +6321,8 @@ for (const parentThroughLink of [false, true]) {
         "attempt-2",
       );
       git(paths.root, "clone", "--quiet", source.path, checkout);
-      await rm(join(checkout, "alias"));
+      if (missing !== "jump") await rm(join(checkout, "alias"));
+      if (missing !== "alias") await rm(join(checkout, "jump"));
       await rm(join(checkout, "nested", "src", "app.ts"));
       await writeFile(
         join(checkout, "retained.txt"),
@@ -6353,6 +6359,101 @@ for (const parentThroughLink of [false, true]) {
       expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
         "Preserve retained recovery data.\n",
       );
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
+for (const linked of [false, true]) {
+  testPosix(
+    `retained requested-file recovery preserves directory-link ancestor=${linked}`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "retained-directory-source");
+      await mkdir(join(source.path, "src", "nested", "inside"), {
+        recursive: true,
+      });
+      await writeFile(
+        join(source.path, "src", "nested", "inside", "keep.ts"),
+        "export const keep = true;\n",
+      );
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Nested retained source",
+      );
+      source.revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+      );
+      const selected = { standard: { target: ["src", "src/app.ts"] } };
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted")), {
+          maxAttempts: 1,
+          scanOptionsByMode: selected,
+        }),
+      );
+      const runs = mock(completedConfiguredPaths);
+      const campaign = options(paths, client(runs), {
+        recoverScan: async () => undefined,
+        scanOptionsByMode: selected,
+      });
+      const initial = await runMultiscan(campaign);
+      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+      const ledger = await readFile(initial.resultsPath);
+      const checkout = join(
+        paths.output,
+        "recovery-checkouts",
+        "repo",
+        "attempt-2",
+      );
+      git(paths.root, "clone", "--quiet", source.path, checkout);
+      await rm(join(checkout, "src", "app.ts"));
+      await rm(join(checkout, "src", "nested", "inside", "keep.ts"));
+      const nested = join(checkout, "src", "nested");
+      const destination = join(checkout, "retained-directory");
+      if (linked) {
+        await rm(nested, { recursive: true });
+        await mkdir(join(destination, "inside"), { recursive: true });
+        await writeFile(
+          join(destination, "inside", "retained.txt"),
+          "Preserve directory-link data.\n",
+        );
+        await symlink("../retained-directory", nested, "dir");
+      }
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+        await readFile(join(source.path, "src", "app.ts")),
+      );
+      if (linked) {
+        expect((await lstat(nested)).isSymbolicLink()).toBe(true);
+        expect(
+          await readFile(join(destination, "inside", "retained.txt"), "utf8"),
+        ).toBe("Preserve directory-link data.\n");
+        expect(
+          await lstat(join(destination, "inside", "keep.ts")).then(
+            () => true,
+            () => false,
+          ),
+        ).toBe(false);
+      } else {
+        expect(await readFile(join(nested, "inside", "keep.ts"))).toEqual(
+          await readFile(
+            join(source.path, "src", "nested", "inside", "keep.ts"),
+          ),
+        );
+      }
       expect(await readFile(initial.resultsPath)).toEqual(ledger);
       expect(runs).toHaveBeenCalledTimes(1);
     },
