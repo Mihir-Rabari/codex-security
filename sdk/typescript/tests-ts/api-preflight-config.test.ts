@@ -71,6 +71,34 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.each([
+    ["approval-only", { approval_policy: "never" }],
+    ["windows-only", { windows: { sandbox: "unelevated" } }],
+  ])(
+    "preserves %s inline-profile identity in saved recipes",
+    async (_name, profile) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "selected.config.toml"),
+        'model_provider = "fireworks"\n',
+      );
+      const original = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "selected",
+            profiles: { selected: profile as JsonObject },
+          },
+        },
+        home,
+      );
+      const saved = scanPreflightCodexConfig(original);
+      const replayed = await mergedCodexConfig({ codexOverrides: saved }, home);
+      expect(scanModelProvider(replayed)).toBe(scanModelProvider(original));
+      expect(saved["profile"]).toBe("selected");
+      expect(saved["profiles"]).toEqual({ selected: {} });
+    },
+  );
+
   test("preserves resolved file-profile model files and tool exclusions", async () => {
     const home = await temporaryDirectory();
     await writeFile(

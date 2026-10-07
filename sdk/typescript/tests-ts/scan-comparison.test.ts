@@ -1271,6 +1271,12 @@ describe("semantic scan comparison", () => {
 
   test.each([
     ["default", {}, "elevated"],
+    ["file", { profile: "selected" }, "unelevated"],
+    [
+      "file-explicit",
+      { profile: "selected", windows: { sandbox: "elevated" } },
+      "elevated",
+    ],
     ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
     ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
     ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
@@ -1289,10 +1295,20 @@ describe("semantic scan comparison", () => {
       await writeFile(
         join(home, "config.toml"),
         stringify({
-          ...(name === "profile" ? {} : homeConfig),
+          ...(name === "profile"
+            ? {}
+            : name.startsWith("file")
+              ? { windows: { sandbox: "elevated" } }
+              : homeConfig),
           mcp_servers: { inherited: { command: "synthetic-inherited" } },
         }),
       );
+      if (name.startsWith("file")) {
+        await writeFile(
+          join(home, "selected.config.toml"),
+          '[windows]\nsandbox = "unelevated"\n',
+        );
+      }
       const executable = join(
         home,
         process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
@@ -1324,7 +1340,9 @@ describe("semantic scan comparison", () => {
             workingDirectory: home,
             config: {
               codexOverrides: {
-                ...(name === "profile" ? homeConfig : {}),
+                ...(name === "profile" || name.startsWith("file")
+                  ? homeConfig
+                  : {}),
                 mcp_servers: {
                   synthetic: {
                     command: "synthetic-integration",

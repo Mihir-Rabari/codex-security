@@ -4866,7 +4866,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     for (const [name, profile] of Object.entries(profiles)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
-      if (Object.keys(projected).length === 0) continue;
+      if (Object.keys(projected).length === 0 && name !== selectedProfile)
+        continue;
       sanitized[name] = projected;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
@@ -4988,18 +4989,23 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const instructionsFile = resolved["model_instructions_file"];
-  if (typeof instructionsFile === "string") {
-    resolved["model_instructions_file"] = resolve(
-      workingDirectory,
-      expandHome(instructionsFile, environment),
-    );
+  for (const key of [
+    "model_instructions_file",
+    "model_catalog_json",
+    "experimental_compact_prompt_file",
+  ]) {
+    const path = resolved[key];
+    if (typeof path === "string") {
+      resolved[key] = resolve(workingDirectory, expandHome(path, environment));
+    }
   }
   return {
     ...Object.fromEntries(
       [
         "features",
         "model_instructions_file",
+        "model_catalog_json",
+        "experimental_compact_prompt_file",
         "model_verbosity",
         "web_search",
         "windows",

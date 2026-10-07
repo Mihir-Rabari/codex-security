@@ -1697,6 +1697,8 @@ describe("CodexSecurity orchestration", () => {
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
+              model_catalog_json: "profile-catalog.json",
+              experimental_compact_prompt_file: "profile-compact.md",
               model_verbosity: "high",
               windows: { sandbox: "unelevated" },
             },
@@ -1724,6 +1726,19 @@ describe("CodexSecurity orchestration", () => {
         const instructions = `Synthetic instructions for scan ${index}.\n`;
         if (typeof instructionsFile === "string") {
           await writeFile(resolve(scanDir, instructionsFile), instructions);
+        }
+        for (const key of [
+          "model_catalog_json",
+          "experimental_compact_prompt_file",
+        ]) {
+          const path = resolveCodexProfile(overrides)[key];
+          if (typeof path === "string")
+            await writeFile(
+              resolve(scanDir, path),
+              key === "model_catalog_json"
+                ? '{"models":[]}\n'
+                : `Synthetic compact prompt for scan ${index}.\n`,
+            );
         }
         return new TestClient(
           {
@@ -1797,6 +1812,21 @@ describe("CodexSecurity orchestration", () => {
                         "utf8",
                       ),
                     ).toBe(instructions);
+                  }
+                  for (const key of [
+                    "model_catalog_json",
+                    "experimental_compact_prompt_file",
+                  ]) {
+                    const path = resolveCodexProfile(overrides)[key];
+                    expect(workerConfig[key]).toBe(
+                      typeof path === "string"
+                        ? resolve(scanDir, path)
+                        : undefined,
+                    );
+                    if (typeof path === "string")
+                      expect(
+                        await readFile(workerConfig[key] as string, "utf8"),
+                      ).toBe(await readFile(resolve(scanDir, path), "utf8"));
                   }
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
@@ -3658,6 +3688,7 @@ describe("CodexSecurity orchestration", () => {
       undefined,
     ],
     ["managed provider selection retains matching", "managed", undefined],
+    ["relative model files preserve scan origin", "model-files", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
@@ -3691,7 +3722,24 @@ describe("CodexSecurity orchestration", () => {
         requires_openai_auth: false,
         http_headers: { "X-Synthetic-Key": "synthetic-managed-secret" },
       };
+      const modelFiles: Record<string, string> =
+        failure === "model-files"
+          ? {
+              model_instructions_file: "../instructions.md",
+              model_catalog_json: "../catalog.json",
+              experimental_compact_prompt_file: "../compact.md",
+            }
+          : {};
+      for (const [name, contents] of [
+        ["instructions.md", "Synthetic instructions.\n"],
+        ["catalog.json", '{"models":[]}\n'],
+        ["compact.md", "Synthetic compact prompt.\n"],
+      ]) {
+        if (failure === "model-files")
+          await writeFile(join(root, name!), contents!);
+      }
       const providerConfig = {
+        ...modelFiles,
         features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
         model_provider: "synthetic.provider",
@@ -3841,7 +3889,11 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed" || failure === "managed") {
+              if (
+                failure === "dismissed" ||
+                failure === "managed" ||
+                failure === "model-files"
+              ) {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -3868,6 +3920,12 @@ describe("CodexSecurity orchestration", () => {
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
                 ...providerConfig,
+                ...Object.fromEntries(
+                  Object.entries(modelFiles).map(([key, value]) => [
+                    key,
+                    resolve(scanDir, value),
+                  ]),
+                ),
                 features: {
                   ...providerConfig.features,
                   ...(failure === "budget-context"
@@ -3893,6 +3951,17 @@ describe("CodexSecurity orchestration", () => {
                 value.includes("synthetic-comparison-header"),
               ),
             ).toBe(false);
+            for (const [key, path] of Object.entries(modelFiles)) {
+              expect(options?.config?.codexOverrides?.[key]).toBe(
+                resolve(scanDir, path),
+              );
+              expect(
+                await readFile(
+                  options?.config?.codexOverrides?.[key] as string,
+                  "utf8",
+                ),
+              ).toBe(await readFile(resolve(scanDir, path), "utf8"));
+            }
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -3993,7 +4062,9 @@ describe("CodexSecurity orchestration", () => {
         ).toEqual(
           failure === "budget"
             ? ["another-open-finding"]
-            : failure === "dismissed" || failure === "managed"
+            : failure === "dismissed" ||
+                failure === "managed" ||
+                failure === "model-files"
               ? []
               : undefined,
         );
@@ -4015,7 +4086,11 @@ describe("CodexSecurity orchestration", () => {
         expect(
           commands.some(([command]) => command === "list-global-findings"),
         ).toBe(true);
-        if (failure === "dismissed" || failure === "managed") {
+        if (
+          failure === "dismissed" ||
+          failure === "managed" ||
+          failure === "model-files"
+        ) {
           expect(JSON.parse(savedComparisonInput!)).toMatchObject({
             matches: [
               {

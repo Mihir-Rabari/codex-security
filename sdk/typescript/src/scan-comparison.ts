@@ -24,6 +24,7 @@ import {
   deepMerge,
   hasCommandAuth,
   mergedCodexConfig,
+  readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
   resolveCommandAuthConfig,
@@ -569,7 +570,13 @@ async function startReadOnlyCodexThread(
     configuredCodexHome(source),
   );
   const suppliedConfig = resolveCodexProfile(
-    options.config?.codexOverrides ?? {},
+    deepMerge(
+      await readCodexFileProfile(
+        options.config?.codexOverrides ?? {},
+        configuredCodexHome(source),
+      ),
+      options.config?.codexOverrides ?? {},
+    ),
   );
   normalizeLegacyWindowsSandboxOverride(suppliedConfig);
   const windows =

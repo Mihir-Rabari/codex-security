@@ -3068,7 +3068,13 @@ describe("CLI", () => {
             args,
             capture().stream,
             stderr.stream,
-            dependencies({ environment: { CODEX_HOME: home } }),
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
           ),
         ).toBe(0);
         expect(stderr.text()).toContain(`model=${JSON.stringify(selected)}`);
@@ -3092,7 +3098,13 @@ describe("CLI", () => {
             ],
             capture().stream,
             missingModel.stream,
-            dependencies({ environment: { CODEX_HOME: home } }),
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
           ),
         ).toBe(2);
         expect(missingModel.text()).toContain(
@@ -3199,7 +3211,12 @@ describe("CLI", () => {
             capture().stream,
             stderr.stream,
             dependencies({
-              environment: { CODEX_HOME: home },
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+                SYNTHETIC_FILE_PROVIDER_KEY: "synthetic-file-provider-key",
+              },
               onConfig: (config) => {
                 selected = config;
               },

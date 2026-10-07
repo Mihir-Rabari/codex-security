@@ -70,7 +70,10 @@ test.each(
       { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
       {
         environment,
-        prepareRuntime: async () => preparedRuntime(runtimeHome),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(runtimeHome),
+          deepScanConfigPath: join(runtimeHome, "deep-scan-config.toml"),
+        }),
         resolvePluginPython: async () => python,
         runWorkbench: async (_runtime, args, input) => command(args, input),
         createCodex: throwing("Synthetic stop after registration"),
