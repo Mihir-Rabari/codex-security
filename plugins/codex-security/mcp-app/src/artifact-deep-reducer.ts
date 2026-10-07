@@ -159,7 +159,8 @@ export async function readDeepReductionSources(
             }
           }),
         );
-        normalizeSavedScanCoverage([result]);
+        const normalizedCurrent = structuredClone(result);
+        normalizeSavedScanCoverage([normalizedCurrent]);
         for (const { input } of archived) {
           for (const surface of input.coverage.surfaces as JsonObject[]) {
             if (surface.id !== undefined) continue;
@@ -177,9 +178,9 @@ export async function readDeepReductionSources(
                 ),
             );
             if (currentIndex !== -1)
-              surface.id = (result.coverage.surfaces as JsonObject[])[
-                currentIndex
-              ]!.id;
+              surface.id = (
+                normalizedCurrent.coverage.surfaces as JsonObject[]
+              )[currentIndex]!.id;
           }
         }
         normalizeSavedScanCoverage([
