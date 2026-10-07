@@ -4192,7 +4192,9 @@ describe("patch publication integrity", () => {
     expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
       "fixed\n",
     );
-    expect(git("diff", "--cached", "--name-only")).toBe("other.ts");
+    expect(git("diff", "--cached", "--name-only")).toBe(
+      failure === "checkout staged" ? "other.ts\nsrc/finding-1.ts" : "other.ts",
+    );
     if (
       failure === "commit" ||
       (failure.startsWith("checkout") && failure !== "checkout commit")
@@ -4201,7 +4203,10 @@ describe("patch publication integrity", () => {
         failure === "checkout detached" ? "" : "main",
       );
       expect(git("rev-parse", "HEAD")).toBe(base);
-      expect(git("write-tree")).toBe(index);
+      if (failure === "checkout staged") {
+        expect(git("show", ":other.ts")).toBe("staged work");
+        expect(git("show", ":src/finding-1.ts")).toBe("fixed");
+      } else expect(git("write-tree")).toBe(index);
       expect(outcome.stderr).not.toContain("Could not restore");
       expect(
         git(
