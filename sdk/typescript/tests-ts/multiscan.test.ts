@@ -2403,6 +2403,9 @@ test.each(["sha1", "sha256"])(
       const result = await runMultiscan(options(paths, client(run)));
       expect(result.failed).toBe(0);
       expect(run).toHaveBeenCalledTimes(1);
+      expect(process.env["GIT_DEFAULT_HASH"]).toBe(
+        objectFormat === "sha1" ? "sha256" : "sha1",
+      );
     } finally {
       if (previous === undefined) delete process.env["GIT_DEFAULT_HASH"];
       else process.env["GIT_DEFAULT_HASH"] = previous;

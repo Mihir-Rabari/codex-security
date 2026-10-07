@@ -1083,6 +1083,8 @@ async function checkoutRevision(
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_DEFAULT_HASH"] =
+    task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     environment,
@@ -1108,11 +1110,7 @@ async function checkoutRevision(
     );
     return result.stdout.trim();
   };
-  await git(
-    "init",
-    "--quiet",
-    `--object-format=${task.revision.length === 64 ? "sha256" : "sha1"}`,
-  );
+  await git("init", "--quiet");
   await git(
     "fetch",
     "--quiet",
