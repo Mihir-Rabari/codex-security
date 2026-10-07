@@ -471,12 +471,14 @@ describe("patch change tracking", () => {
           "init-delete",
           "deinit",
           "deinit-dirty",
+          "deinit-commit",
         ].map((operation) => ({ recursive, scope, operation })),
       ),
     ),
   )(
     "reports submodule content changes for $operation from $scope: recursive=$recursive",
     async ({ recursive, scope, operation }) => {
+      const commitChange = operation.endsWith("-commit");
       const root = await fixtures.create("synthetic-submodule-state-");
       const origin = await fixtures.create("synthetic-submodule-origin-");
       const leaf = recursive
@@ -488,7 +490,7 @@ describe("patch change tracking", () => {
         git("config", "user.name", "Synthetic User");
         git("config", "user.email", "synthetic@example.test");
         await writeFile(join(directory, "app.ts"), "baseline\n");
-        if (operation === "init-commit") {
+        if (commitChange) {
           await writeFile(join(directory, "gone.ts"), "remove\n");
           await writeFile(join(directory, "unchanged.ts"), "unchanged\n");
         }
@@ -540,8 +542,8 @@ describe("patch change tracking", () => {
       }
       await writeFile(join(root, "unrelated.txt"), "staged local content\n");
       git("add", "unrelated.txt");
-      const index = await readFile(join(root, ".git/index"));
-      const staged = git("diff", "--cached");
+      let index = await readFile(join(root, ".git/index"));
+      let staged = git("diff", "--cached");
       const head = git("rev-parse", "HEAD");
       const onCodex = mock(
         async (
@@ -562,6 +564,7 @@ describe("patch change tracking", () => {
               `${prefix}/unchanged.ts`,
             );
             expect(artifact.changedFiles).toContain(`${prefix}/gone.ts`);
+            expect(artifact.changedFiles).toContain(`${prefix}/added.ts`);
             const verification = await fixtures.create(
               "initialized-risk-apply-",
             );
@@ -597,14 +600,20 @@ describe("patch change tracking", () => {
                 "utf8",
               ),
             ).toBe("unchanged\n");
+            expect(
+              await readAppliedText(join(verification, prefix, "added.ts")),
+            ).toBe("added\n");
+            expect(await readFile(join(root, ".git/index"))).toEqual(index);
             output.stdout.write(patchRiskAssessment().report);
             return 0;
           }
           if (operation.startsWith("init")) initialize();
-          if (operation === "init-commit") {
+          if (commitChange) {
             await writeFile(join(nested, "app.ts"), "fixed\n");
             await rm(join(nested, "gone.ts"));
+            await writeFile(join(nested, "added.ts"), "added\n");
             const child = repositoryGit(nested);
+            child("add", ".");
             child(
               "-c",
               "user.name=Synthetic User",
@@ -620,6 +629,21 @@ describe("patch change tracking", () => {
           if (operation === "init-new")
             await writeFile(join(nested, "new.ts"), "new fix\n");
           if (operation === "init-delete") await rm(join(nested, "app.ts"));
+          if (operation === "deinit-commit") {
+            if (recursive)
+              repositoryGit(join(root, "vendor"))(
+                "-c",
+                "user.name=Synthetic User",
+                "-c",
+                "user.email=synthetic@example.test",
+                "commit",
+                "-am",
+                "Synthetic recursive update",
+              );
+            git("add", "vendor");
+            index = await readFile(join(root, ".git/index"));
+            staged = git("diff", "--cached");
+          }
           if (operation.startsWith("deinit"))
             git("submodule", "deinit", "-f", "--all");
           output?.stdout.write("Prepared dependencies and checked the result.");
@@ -630,7 +654,7 @@ describe("patch change tracking", () => {
         [
           "patch",
           "Synthetic issue",
-          ...(operation === "init-commit" ? ["--assess-patch-risk"] : []),
+          ...(commitChange ? ["--assess-patch-risk"] : []),
           "--json",
         ],
         {
@@ -645,17 +669,23 @@ describe("patch change tracking", () => {
         applied: !clean,
         files: clean
           ? []
-          : operation === "init-commit"
-            ? [prefix, `${prefix}/app.ts`, `${prefix}/gone.ts`]
+          : commitChange
+            ? [
+                ...(operation === "deinit-commit" && recursive
+                  ? ["vendor"]
+                  : []),
+                prefix,
+                `${prefix}/added.ts`,
+                `${prefix}/app.ts`,
+                `${prefix}/gone.ts`,
+              ]
             : operation === "init-new"
               ? [`${prefix}/new.ts`]
               : operation === "deinit-dirty"
                 ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
                 : [`${prefix}/app.ts`],
       });
-      expect(onCodex).toHaveBeenCalledTimes(
-        operation === "init-commit" ? 2 : 1,
-      );
+      expect(onCodex).toHaveBeenCalledTimes(commitChange ? 2 : 1);
       expect(await readFile(join(root, ".git/index"))).toEqual(index);
       expect(git("diff", "--cached")).toBe(staged);
       expect(git("rev-parse", "HEAD")).toBe(head);

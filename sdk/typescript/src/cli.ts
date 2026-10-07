@@ -7644,7 +7644,7 @@ interface GitPatchState {
     string,
     {
       commit: string;
-      initialized: boolean;
+      gitDirectory?: string;
       committed: Map<string, string> | null;
       committedTree?: string;
     }
@@ -7724,9 +7724,9 @@ async function changedPatchFiles(
     for (const [directory, previous] of base.gitlinks) {
       const current = head.gitlinks.get(directory);
       if (current === undefined) continue;
-      if (!previous.initialized && current.initialized)
+      if (!previous.gitDirectory && current.gitDirectory)
         await hydrate(base, head, directory, previous.commit, before);
-      if (!current.initialized && previous.initialized)
+      if (!current.gitDirectory && previous.gitDirectory)
         await hydrate(head, base, directory, current.commit, after);
     }
     for (const path of new Set([...before.keys(), ...after.keys()])) {
@@ -7790,11 +7790,10 @@ async function patchTreeEntries(
 
 async function retainPatchTrees(
   repository: string,
-  checkout: string,
+  source: string[],
   trees: string[],
   dependencies: CliDependencies,
 ): Promise<void> {
-  if (checkout === repository) return;
   const objects = await dependencies.runRepositoryCommand(
     "git",
     ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
@@ -7805,7 +7804,7 @@ async function retainPatchTrees(
   await mkdir(pack, { recursive: true });
   await dependencies.runRepositoryCommand(
     "git",
-    ["-C", checkout, "pack-objects", "--revs", join(pack, "pack")],
+    [...source, "pack-objects", "--revs", join(pack, "pack")],
     repository,
     {
       environment: NESTED_PATCH_GIT_ENVIRONMENT,
@@ -7826,20 +7825,19 @@ async function patchGitlinkTree(
     if (gitlink?.commit === commit && gitlink.committedTree !== undefined)
       return gitlink.committedTree;
   }
-  if (
-    !state.gitlinks.get(directory)?.initialized &&
-    !other.gitlinks.get(directory)?.initialized
-  )
-    return undefined;
-  const checkout = join(state.root, directory);
+  const gitDirectory =
+    state.gitlinks.get(directory)?.gitDirectory ??
+    other.gitlinks.get(directory)?.gitDirectory;
+  if (gitDirectory === undefined) return undefined;
+  const source = ["--git-dir", gitDirectory, "--work-tree", state.root];
   const tree = await dependencies.runRepositoryCommand(
     "git",
-    ["-C", checkout, "rev-parse", "--revs-only", `${commit}^{tree}`],
+    [...source, "rev-parse", "--revs-only", `${commit}^{tree}`],
     state.root,
     { environment: NESTED_PATCH_GIT_ENVIRONMENT },
   );
   if (!tree) return undefined;
-  await retainPatchTrees(state.root, checkout, [tree], dependencies);
+  await retainPatchTrees(state.root, source, [tree], dependencies);
   return tree;
 }
 
@@ -7860,8 +7858,13 @@ async function snapshotGitPatchState(
   ): Promise<void> => {
     const checkout = join(repository, directory);
     trees.set(directory, snapshot);
-    if (retainTrees)
-      await retainPatchTrees(repository, checkout, [snapshot], dependencies);
+    if (retainTrees && directory)
+      await retainPatchTrees(
+        repository,
+        ["-C", checkout],
+        [snapshot],
+        dependencies,
+      );
     const entries = await patchTreeEntries(
       repository,
       checkout,
@@ -7875,7 +7878,7 @@ async function snapshotGitPatchState(
         const nested = join(checkout, path);
         const gitlink = {
           commit: entry.split(" ")[2]!,
-          initialized: false,
+          gitDirectory: undefined as string | undefined,
           committed: null as Map<string, string> | null,
           committedTree: undefined as string | undefined,
         };
@@ -7894,7 +7897,14 @@ async function snapshotGitPatchState(
               "Nested Git checkout resolves to an ancestor worktree.",
             );
         }
-        gitlink.initialized = true;
+        gitlink.gitDirectory = (
+          await dependencies.runRepositoryCommand(
+            "git",
+            ["-C", nested, "rev-parse", "--absolute-git-dir"],
+            repository,
+            { trim: false, environment: NESTED_PATCH_GIT_ENVIRONMENT },
+          )
+        ).replace(/\n$/u, "");
         const committedTree = await dependencies.runRepositoryCommand(
           "git",
           [
@@ -7918,7 +7928,7 @@ async function snapshotGitPatchState(
           if (retainTrees)
             await retainPatchTrees(
               repository,
-              nested,
+              ["-C", nested],
               [committedTree],
               dependencies,
             );
@@ -8119,7 +8129,7 @@ async function assessPatchRisk(
               await visit(
                 fullPath,
                 nested,
-                working && current?.initialized === true,
+                working && current?.gitDirectory !== undefined,
               );
             continue;
           }
@@ -8301,7 +8311,10 @@ async function snapshotPatchTree(
             : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined },
       },
     );
-    await run(["update-index", "-z", "--index-info"], entries);
+    await run(
+      ["update-index", "-z", "--index-info"],
+      entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+    );
     await run(["--literal-pathspecs", "add", "--all"]);
     return await run(["write-tree"]);
   } finally {

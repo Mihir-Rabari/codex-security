@@ -10,6 +10,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -3351,6 +3352,64 @@ describe("patch publication integrity", () => {
       files: ["fix.ts"],
     });
   });
+
+  test.each(["saved", "supplied"])(
+    "patches an unrelated file with an unresolved index in %s mode",
+    async (mode) => {
+      const { directory, git } = await createPublicationRepository(fixtures);
+      const conflictPath = join(directory, "conflict [literal].txt");
+      await writeFile(conflictPath, "baseline\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic conflict baseline");
+      git("switch", "-c", "other");
+      await writeFile(conflictPath, "theirs\n");
+      git("commit", "-am", "Synthetic other change");
+      git("switch", "main");
+      await writeFile(conflictPath, "ours\n");
+      git("commit", "-am", "Synthetic main change");
+      expect(() => git("merge", "other")).toThrow();
+      const unmerged = git("ls-files", "--unmerged", "-z");
+      expect(unmerged).not.toBe("");
+      const indexPath = join(directory, ".git/index");
+      const index = await readFile(indexPath);
+      const indexMode = (await stat(indexPath)).mode;
+      const conflict = await readFile(conflictPath);
+      const conflictMode = (await stat(conflictPath)).mode;
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          ...(mode === "saved" ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            modelCalls++;
+            expect(await readFile(indexPath)).toEqual(index);
+            expect(await readFile(conflictPath)).toEqual(conflict);
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            if (mode === "saved") completePatches(args, output);
+            else output?.stdout.write("Fixed and checked.");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+      expect(git("ls-files", "--unmerged", "-z")).toBe(unmerged);
+      expect(await readFile(indexPath)).toEqual(index);
+      expect((await stat(indexPath)).mode).toBe(indexMode);
+      expect(await readFile(conflictPath)).toEqual(conflict);
+      expect((await stat(conflictPath)).mode).toBe(conflictMode);
+    },
+  );
 
   test.each(["unborn", "nested"])(
     "detects local patches in %s Git repositories",
