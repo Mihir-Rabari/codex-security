@@ -3,6 +3,7 @@ import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
 import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
+import { scanModelConfiguration, type JsonObject } from "../config.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
 const sameSchema = z.object({
@@ -125,14 +126,25 @@ function screeningToolSchema(neighborCount: number): object {
 }
 
 export class CodexDeduplicationReviewer implements DeduplicationReviewer {
-  constructor(private readonly runner: Pick<CodexReviewRunner, "run">) {}
+  constructor(
+    private readonly runner: Pick<CodexReviewRunner, "run">,
+    private readonly configuration: JsonObject = {},
+  ) {}
+
+  private settings(model: string, effort: string) {
+    const selected = scanModelConfiguration({
+      model,
+      model_reasoning_effort: effort,
+      ...this.configuration,
+    });
+    return { model: selected.model, effort: selected.reasoningEffort };
+  }
 
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
       findingIds: findings.map((finding) => finding.findingId),
-      model: "gpt-5.6-luna",
-      effort: "xhigh",
+      ...this.settings("gpt-5.6-luna", "xhigh"),
       prompt: screeningPrompt(findings),
       schema: screeningToolSchema(findings.length - 1),
       validate: (value) => validateScreening(value, findings),
@@ -143,8 +155,7 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
     return await this.runner.run({
       stage: "pair-review",
       findingIds: findings.map((finding) => finding.findingId),
-      model: "gpt-5.6-sol",
-      effort: "high",
+      ...this.settings("gpt-5.6-sol", "high"),
       prompt: pairReviewPrompt(findings),
       schema: {
         type: "object",

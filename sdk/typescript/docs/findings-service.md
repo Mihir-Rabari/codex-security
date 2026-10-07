@@ -26,7 +26,9 @@ For direct embedding/storage integrations, `OpenAiFindingEmbedder` accepts a
 static key or `() => string | Promise<string>` as its first argument. It calls
 the callback before each HTTP batch; the caller handles token acquisition.
 Pass `fetch` as the second argument and the full endpoint URL as the third.
-The saved-scan deduplication APIs use environment credentials.
+By default, the saved-scan deduplication APIs use environment credentials. A
+custom SDK `embedding` binding can supply an adapter with its own credentials,
+including an `OpenAiFindingEmbedder` with a renewable key callback.
 
 Custom publication, explicit remote deduplication, Cloud publication, the
 plugin MCP server, and Codex app-server are unchanged.
@@ -138,6 +140,35 @@ const result = await deduplicateScan("scan_example_001", {
 console.log(result.duplicateGroups);
 ```
 
+For a different embedding provider or model, both saved-scan SDK methods accept
+an `embedding` binding. Reuse the `FindingEmbedder` interface: return one
+`{ model, vector }` per input finding, in input order. The adapter owns its
+credentials, tokenization, chunking, and provider request format.
+
+```typescript
+import { deduplicateScan, type FindingEmbedder } from "@openai/codex-security";
+
+async function dedupeWithEmbeddings(scanId: string, embedder: FindingEmbedder) {
+  return await deduplicateScan(scanId, {
+    embedding: {
+      embedder,
+      model: "example-embedding-model",
+      dimensions: 384,
+      cacheNamespace: "example-provider:document-v1",
+    },
+  });
+}
+```
+
+Choose a stable namespace identifying the actual vector space and preprocessing
+version, including any provider or model revision that changes the vectors.
+Changing the namespace, model, or dimensions refreshes cached vectors. Do not
+put credentials in the namespace. The database keeps one vector per finding;
+switching spaces replaces it, and concurrent runs with different spaces may
+need a retry. `embedding` cannot be combined with `findingsUrl`, whose service
+owns embedding preparation. Without a binding, the existing OpenAI adapter and
+endpoint setting apply.
+
 For a sealed scan directory outside local history, supply the checkout:
 
 ```typescript
@@ -179,10 +210,14 @@ exits successfully after saving the other accepted groups.
 
 ### Reviews, concurrency, and failures
 
-Deduplication retrieves all candidate neighborhoods, screens them with
-`gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
-`gpt-5.6-sol` at `high`. Accepted pairs form groups only when no reviewed
-`DISTINCT` decision or refusal contradicts the group.
+By default, deduplication retrieves all candidate neighborhoods, screens them
+with `gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
+`gpt-5.6-sol` at `high`. The host's Codex `model` and `model_reasoning_effort`
+settings override these defaults for both stages. Provider selection uses the
+existing Codex configuration; embedding configuration is separate. Screening
+and pair-review permissions stay attached to their stages regardless of model name.
+Accepted pairs form groups only when no reviewed `DISTINCT` decision or refusal
+contradicts the group.
 
 The default concurrency is 8. Set `--concurrency N` or SDK `concurrency: N` to
 change it; use 1 for serial execution.
@@ -280,7 +315,8 @@ Without an override, the CLI uses its default state directory. Back up the
 entire state directory with no scans or deduplication running. Existing
 append-only migrations retain finding identities and scan history.
 
-New embeddings require `OPENAI_API_KEY` or `CODEX_API_KEY`;
+With the default built-in adapter, new embeddings require `OPENAI_API_KEY` or
+`CODEX_API_KEY`;
 `OPENAI_API_KEY` takes precedence. ChatGPT login alone is insufficient.
 `CODEX_SECURITY_EMBEDDINGS_URL` selects a
 full embeddings endpoint URL (default `https://api.openai.com/v1/embeddings`).

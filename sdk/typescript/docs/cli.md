@@ -491,7 +491,9 @@ without substituting another model or effort.
 The flags also work with bulk/component scans, policy, validation, patching,
 verification, owner suggestions, severity classification, and scan matching.
 Matching and severity classification default to Codex's configured model and
-`medium` effort. `dedupe` has separate screening and review models.
+`medium` effort. `dedupe` has separate default screening and review models;
+the host's Codex model and effort settings override those defaults for both
+stages.
 
 `codex-security dedupe --scan SCAN_ID --json` prepares embeddings and deduplicates
 directly in local SQLite. An optional `--findings-url URL` selects an existing

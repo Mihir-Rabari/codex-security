@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
-const [scenario, transcript, checkout] = process.argv.slice(2);
+const [scenario, transcript, checkout, stage = "pair-review"] =
+  process.argv.slice(2);
 const turnFailures = {
   "policy-turn-code": {
     message: "Request blocked.",
@@ -103,7 +104,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     assert.equal(message.params.ephemeral, true);
     assert.equal(message.params.permissions, "codex_security_review");
-    assert.equal(message.params.approvalPolicy, "on-request");
+    assert.equal(
+      message.params.approvalPolicy,
+      stage === "screening" ? "never" : "on-request",
+    );
+    if (stage === "screening") {
+      assert.equal(message.params.config.features.multi_agent, false);
+      assert.equal(message.params.config.features.multi_agent_v2, false);
+    }
     assert.equal(message.params.approvalsReviewer, "auto_review");
     assert.equal(message.params.config.mcp_servers.synthetic.enabled, false);
     assert.deepEqual(
@@ -158,7 +166,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     }
     if (scenario === "exit") process.exit(1);
-    if (scenario === "invalid-json") {
+    if (scenario === "configured-model") {
+      const decision = { decision: "DISTINCT", rationale: "Independent fixes" };
+      submit(
+        "valid",
+        stage === "screening"
+          ? { decisions: { "pair-1": decision } }
+          : decision,
+      );
+    } else if (scenario === "invalid-json") {
       process.stdout.write("Synthetic private response data\n");
     } else if (
       scenario === "invalid-submission" ||

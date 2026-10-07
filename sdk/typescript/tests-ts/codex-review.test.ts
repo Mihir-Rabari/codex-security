@@ -17,9 +17,103 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { retryDelay, waitForRetry } from "../src/deduplication/retry.js";
 import { isReviewRefusal } from "../src/deduplication/refusal.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
+import { readCodexHomeConfig } from "../src/auth.js";
+import { CodexDeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
+);
+
+test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
+  "dedupe respects %s configuration and keeps review policy attached to stage",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    const config = {
+      mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      ...(selection === "defaults"
+        ? {}
+        : {
+            model:
+              selection === "luna-model"
+                ? "gpt-5.6-luna"
+                : "synthetic-review-model",
+            model_reasoning_effort: "medium",
+          }),
+      ...(selection === "legacy-profile"
+        ? {
+            profile: "review",
+            profiles: {
+              review: { model: "gpt-5.6-luna", model_reasoning_effort: "low" },
+            },
+          }
+        : {}),
+    };
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify(config),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+    };
+    const findings = [f.document.findings[0]!, f.document.findings[0]!];
+    for (const stage of ["screening", "pair-review"] as const) {
+      const transcript = join(f.root, `${stage}.jsonl`);
+      const runner = new CodexReviewRunner(
+        environment,
+        (_command, _args, options) =>
+          spawn(
+            process.execPath,
+            [fixture, "configured-model", transcript, f.repository, stage],
+            options,
+          ),
+        undefined,
+        f.repository,
+      );
+      const reviewer = new CodexDeduplicationReviewer(
+        runner,
+        await readCodexHomeConfig(environment),
+      );
+      if (selection === "legacy-profile") {
+        await expect(reviewer.screen(findings)).rejects.toThrow(
+          "legacy `profile =",
+        );
+        expect(existsSync(transcript)).toBe(false);
+        break;
+      }
+      if (stage === "screening") await reviewer.screen(findings);
+      else await reviewer.reviewPair(findings);
+      const messages = parseJsonLines<{
+        method?: string;
+        params?: Record<string, unknown>;
+      }>(await readFile(transcript, "utf8"));
+      const model =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "gpt-5.6-luna"
+            : "gpt-5.6-sol"
+          : selection === "luna-model"
+            ? "gpt-5.6-luna"
+            : "synthetic-review-model";
+      const effort =
+        selection === "defaults"
+          ? stage === "screening"
+            ? "xhigh"
+            : "high"
+          : "medium";
+      expect(
+        messages.find((m) => m.method === "thread/start")?.params,
+      ).toMatchObject({
+        model,
+        approvalPolicy: stage === "screening" ? "never" : "on-request",
+      });
+      expect(
+        messages.find((m) => m.method === "turn/start")?.params,
+      ).toMatchObject({ model, effort });
+    }
+  },
 );
 
 const failureReasons: Record<string, string> = {
