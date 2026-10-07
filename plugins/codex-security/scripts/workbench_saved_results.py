@@ -2451,7 +2451,7 @@ def preserve_scan_results_locked(
         **db.workbench_completion_binding(scan, scan["completed_at"], existing),
         "status": outcome,
     }
-    if recovery_source_digests is not None:
+    if recovery_source_digests is not None and not pending_recovery:
         model_source.clear()
     try:
         documents = merge_saved_results(
