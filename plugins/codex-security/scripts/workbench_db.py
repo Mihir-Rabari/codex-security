@@ -1925,7 +1925,14 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
             != (args.status, close_reason, note)
         )
         for triaged_occurrence in triaged_occurrences:
-            if changed:
+            if (
+                changed
+                or connection.execute(
+                    "SELECT 1 FROM finding_triage WHERE occurrence_id = ?",
+                    (triaged_occurrence["id"],),
+                ).fetchone()
+                is None
+            ):
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (

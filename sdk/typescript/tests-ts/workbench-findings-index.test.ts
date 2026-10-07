@@ -12,7 +12,7 @@ const findingsIndexProbe = [
   "connection.row_factory = sqlite3.Row",
   "connection.executescript('''",
   "CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT NOT NULL, display_name TEXT NOT NULL);",
-  "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT);",
+  "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, mode TEXT NOT NULL DEFAULT 'standard');",
   "CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, severity TEXT, created_at TEXT, title TEXT, summary TEXT);",
   "CREATE TABLE finding_triage (occurrence_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT, close_reason TEXT);",
   "CREATE TABLE finding_decisions (id TEXT, occurrence_id TEXT, status TEXT, close_reason TEXT, note TEXT, created_at TEXT, decision_sequence INTEGER NOT NULL, scan_sequence INTEGER);",

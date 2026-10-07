@@ -1116,6 +1116,7 @@ def compare_scans(
     comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
+    previous_triage = finding_triage(connection, before)
     current_triage = finding_triage(connection, after)
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
@@ -1173,8 +1174,9 @@ def compare_scans(
             status = (
                 "reopened"
                 if any(
-                    row["triage_status"] == "closed"
-                    and row["close_reason"] in {"already_fixed", "false_positive"}
+                    previous_triage[row["id"]]["status"] == "closed"
+                    and previous_triage[row["id"]].get("closeReason")
+                    in {"already_fixed", "false_positive"}
                     for row in previous_rows
                 )
                 and any(current_triage[row["id"]]["status"] == "open" for row in current_rows)

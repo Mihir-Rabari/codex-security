@@ -313,6 +313,22 @@ def _indexed_active_findings(
         deterministic=True,
     )
     query = settings.get("query", "")
+    if (
+        settings.get("repository") is not None
+        or settings.get("target_ids") is not None
+        or settings.get("target_paths") is not None
+    ):
+        # Apply the same ownership checks to linked history, while retaining the
+        # requested checkout's presentation rows below, including linked uncertainty.
+        for _ in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=allowed_scan_ids,
+            uncertain_scans=uncertain_scans,
+            include_resolved=True,
+            through_scan_sequence=settings.get("through_scan_sequence"),
+        ):
+            pass
     active = {
         row["occurrence_id"]: row
         for row in _active_findings(
@@ -323,28 +339,10 @@ def _indexed_active_findings(
             **settings,
         )
     }
-    history_scan_ids = allowed_scan_ids
-    if (
-        settings.get("repository") is not None
-        or settings.get("target_ids") is not None
-        or settings.get("target_paths") is not None
-    ):
-        history_scan_ids = set()
-        # Apply the same ownership checks to linked history, while retaining the
-        # requested checkout's presentation rows below.
-        for _ in _active_findings(
-            connection,
-            read_coverage,
-            allowed_scan_ids=history_scan_ids,
-            uncertain_scans=uncertain_scans,
-            include_resolved=True,
-            through_scan_sequence=settings.get("through_scan_sequence"),
-        ):
-            pass
     combined = []
     for row in _indexed_findings(
         connection,
-        history_scan_ids,
+        allowed_scan_ids,
         allow_cross_target_matches=True,
     ):
         matched_by_target: dict[str, list[dict[str, Any]]] = {}
@@ -549,7 +547,7 @@ def _active_findings(
                 for scan_id in uncertain_scans.get(occurrence_id, ())
             }
             identity = (occurrence["indexed_target_id"], occurrence["finding_id"])
-            if group is not None:
+            if group is not None and scans_with_uncertainty:
                 related_scans_by_finding.setdefault(identity, set()).update(group["known_scan_ids"])
             if scans_with_uncertainty:
                 uncertain_by_finding.setdefault(identity, set()).update(scans_with_uncertainty)
