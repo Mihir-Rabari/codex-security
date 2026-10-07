@@ -2001,6 +2001,7 @@ def merge_saved_results(
             if (
                 isinstance(finding, dict)
                 and valid_finding(finding)
+                and finding["provenance"].get("candidateReopened") is not True
                 and (key := finding_candidate_key(finding, owner)) is not None
             ):
                 outcomes.append((relative, key[0], key[1], "reported"))

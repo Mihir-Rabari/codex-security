@@ -424,6 +424,16 @@ function retainSourceFindings(
     if (association !== undefined) {
       const previous = structuredClone(finding);
       provenance.candidateId = association.candidateId;
+      if (
+        result.unresolvedCandidates?.some(
+          (candidate) =>
+            candidate.candidateId === association.candidateId &&
+            candidate.sourceWorkerId === association.owner,
+        )
+      )
+        provenance.candidateReopened = true;
+      else if (provenance.candidateReopened === true)
+        delete provenance.candidateReopened;
       if (association.owner !== undefined)
         provenance.sourceWorkerId = association.owner;
       else if (owner !== undefined) {

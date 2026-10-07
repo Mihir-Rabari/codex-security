@@ -3437,3 +3437,77 @@ def test_stopped_parent_validates_terminal_before_removing_saved_gap(
     saved = json.loads((scan_dir / "coverage.json").read_text())
     assert (pending in saved["deferred"]) is not valid_label
     assert any(row.get("id") == "other-review" for row in saved["deferred"])
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("reopened", [False, True])
+@pytest.mark.parametrize("decision", ["pending", "rejected"])
+def test_stopped_deep_preserves_published_candidate_state(
+    tmp_path: Path, reopened: bool, decision: str
+) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(candidateId="review-candidate", candidateReopened=reopened)
+    candidate = {
+        "id": "review-candidate",
+        "candidateId": "review-candidate",
+        "reason": "New evidence requires further review.",
+    }
+    coverage = saved_coverage(deferred=[candidate])
+    if decision == "rejected":
+        coverage["surfaces"] = [
+            {
+                "id": "review-decision",
+                "candidateId": candidate["candidateId"],
+                "label": "Reviewed candidate",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ]
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(
+        json.dumps(
+            {
+                "manifest": {"scan": {"complete": False}},
+                "findings": {"findings": [finding]},
+                "coverage": coverage,
+            }
+        )
+    )
+    run_workbench(state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    originals = {file: file.read_bytes() for file in (scan_dir / "checkpoints").glob("*.json")}
+    fail_deep_scan(state_dir, codex_home, scan_id)
+    expected_pending = reopened and decision == "pending"
+
+    def assert_candidate_state() -> None:
+        scan = get_scan(state_dir, scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == int(expected_pending)
+        saved_coverage = json.loads((scan_dir / "coverage.json").read_text())
+        assert (
+            any(
+                item.get("candidateId") == candidate["candidateId"]
+                for item in saved_coverage["deferred"]
+            )
+            is expected_pending
+        )
+        if expected_pending:
+            saved_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+            assert len(saved_findings) == 1
+            assert saved_findings[0]["provenance"]["candidateReopened"] is True
+        assert all(file.read_bytes() == original for file, original in originals.items())
+
+    assert_candidate_state()
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
+    run_workbench(
+        state_dir,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    assert_candidate_state()
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
