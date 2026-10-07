@@ -106,7 +106,9 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     coverage = json.loads(parent.read_text())
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(not newer_parent)
@@ -229,8 +231,8 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage_path = scan.scan_dir / "coverage.json"
@@ -256,7 +258,9 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     assert all(surface in coverage["surfaces"] for surface in projected)
     assert result.read_bytes() == original
     published = coverage_path.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
     late = write_checkpoint(
         result.parent / "checkpoints",
@@ -267,7 +271,9 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         },
     )
     original_late = late.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
     assert result.read_bytes() == original
     assert late.read_bytes() == original_late
@@ -330,7 +336,9 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     surface = next(
         item for item in coverage["surfaces"] if item["label"] == "Prior unfinished review"
@@ -418,7 +426,9 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         item.get("reason") == "accepted source needs proof." for item in coverage["deferred"]
     )
     published = coverage_path.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
     late = write_checkpoint(
         accepted.parent / "checkpoints",
@@ -429,8 +439,8 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         },
     )
     originals[late] = late.read_bytes()
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     assert coverage_path.read_bytes() == published
@@ -641,8 +651,8 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -698,8 +708,8 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -807,8 +817,8 @@ def test_rejected_retry_preserves_original_finding_history(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     assert recovered["findingCount"] == 0
@@ -823,7 +833,9 @@ def test_rejected_retry_preserves_original_finding_history(
             assert "previousFindings" not in item
     assert all(path.read_bytes() == original for path, original in originals.items())
     published = (scan.scan_dir / "coverage.json").read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
 
 
@@ -957,8 +969,8 @@ def test_stopped_recovery_keeps_current_parent_projection(
             },
         )
         original_sources[late] = late.read_bytes()
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -981,7 +993,9 @@ def test_stopped_recovery_keeps_current_parent_projection(
     assert all(path.read_bytes() == original for path, original in original_sources.items())
     assert all(path.read_bytes() == original for path, original in frozen_sources.items())
     published = (scan.scan_dir / "coverage.json").read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
 
 
@@ -1094,8 +1108,8 @@ def test_accepted_worker_missing_completeness_keeps_valid_findings(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -1167,15 +1181,17 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage_path = scan.scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
     assert coverage["surfaces"] == [projected]
     published = coverage_path.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
     assert all(path.read_bytes() == original for path, original in originals.items())
 
@@ -1271,8 +1287,8 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -1372,7 +1388,9 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     coverage = json.loads(parent_coverage.read_text())
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(other_worker)
@@ -1387,7 +1405,9 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
     )
     assert all(path.read_bytes() == value for path, value in originals.items())
     published = parent_coverage.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert parent_coverage.read_bytes() == published
 
 
@@ -1504,7 +1524,9 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     coverage = json.loads(coverage_path.read_text())
     if parent_review != "changed-later":
         assert not any(row.get("reason") == task["reason"] for row in coverage["deferred"])
@@ -1520,7 +1542,9 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     assert len(findings) == int(disposition == "reported")
     assert all(path.read_bytes() == value for path, value in originals.items())
     published = coverage_path.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
 
 
@@ -1727,7 +1751,9 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     coverage = json.loads(coverage_path.read_text())
     pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
     assert len(pending) == int(
@@ -1769,7 +1795,9 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             }
     assert all(path.read_bytes() == content for path, content in originals.items())
     published = coverage_path.read_bytes()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert coverage_path.read_bytes() == published
 
 
