@@ -26,7 +26,12 @@ update_digest_field = cast(
 )
 
 
-@pytest.fixture(params=[False, True], ids=["emulated", "native"])
+@pytest.fixture(
+    params=[
+        pytest.param(False, id="emulated"),
+        pytest.param(True, id="native", marks=pytest.mark.native_windows),
+    ]
+)
 def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     import workbench_target
 
@@ -273,6 +278,7 @@ def assert_reviewed_change(
     assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
 
 
+@pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows path casing")
 def test_native_reviewed_patch_preserves_indexed_junction_spelling(tmp_path: Path) -> None:
     source = tmp_path / "source"

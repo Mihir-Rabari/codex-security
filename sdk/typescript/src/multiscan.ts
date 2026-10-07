@@ -856,18 +856,10 @@ async function ensureManifest(
     {
       version: 1,
       tasks,
-      ...(options.scanPrompt === undefined
-        ? {}
-        : { scanPrompt: options.scanPrompt }),
-      ...(options.validationPrompt === undefined
-        ? {}
-        : { validationPrompt: options.validationPrompt }),
-      ...(options.postScanPrompt === undefined
-        ? {}
-        : { postScanPrompt: options.postScanPrompt }),
-      ...(options.maxCostUsd === undefined
-        ? {}
-        : { maxCostUsd: options.maxCostUsd }),
+      scanPrompt: options.scanPrompt,
+      validationPrompt: options.validationPrompt,
+      postScanPrompt: options.postScanPrompt,
+      maxCostUsd: options.maxCostUsd,
       ...(options.scanOptionsByMode === undefined
         ? {}
         : {
@@ -1119,7 +1111,7 @@ async function checkoutRevision(
   await git(
     "init",
     "--quiet",
-    ...(task.revision.length === 64 ? ["--object-format=sha256"] : []),
+    `--object-format=${task.revision.length === 64 ? "sha256" : "sha1"}`,
   );
   await git(
     "fetch",
