@@ -141,6 +141,7 @@ import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
@@ -8106,6 +8107,7 @@ async function executeScan(
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
   let runningCost: Readonly<ScanCost> | null = null;
+  let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -8327,9 +8329,13 @@ async function executeScan(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
       }
-      if (runningCost !== null) {
-        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
-        if (showCost) details.push(`Cost: ${formatScanCost(runningCost)}`);
+      const tokens =
+        runningCost !== null
+          ? formatScanCostTokens(runningCost)
+          : formatTokenUsage(runningUsage);
+      if (tokens !== null) details.push(`Tokens: ${tokens}`);
+      if (showCost && runningCost !== null) {
+        details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
@@ -8367,7 +8373,20 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
-      onUsage: (usage) => dashboard?.setUsage(usage),
+      onUsage: async (usage) => {
+        runningUsage = usage;
+        if (dashboard !== null) {
+          dashboard.setUsage(usage);
+          return;
+        }
+        const priorCost = runningCost;
+        // The tracker queues usage before cost; let the paired cost update render once.
+        await Promise.resolve();
+        if (runningCost !== priorCost) return;
+        progress?.stopTimer();
+        progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
+        progress?.startTimer(runningMessage());
+      },
       onCost: (cost, limit = maxCostUsd) => {
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);

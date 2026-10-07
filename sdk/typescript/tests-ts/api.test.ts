@@ -4073,8 +4073,9 @@ describe("CodexSecurity orchestration", () => {
     );
     try {
       const result = await client.run(repository, {
-        onUsage: (usage) => {
+        onUsage: async (usage) => {
           usages.push(usage);
+          await Promise.resolve();
           throw new Error("synthetic usage observer");
         },
         onObserverError: (observer) => observerErrors.push(observer),
