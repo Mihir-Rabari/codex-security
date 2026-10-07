@@ -18,9 +18,11 @@ from workbench_test_support import (
     BUDGET_COST,
     SCRIPT,
     begin_thread_deep_scan,
+    claim_handoff,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    deliver_handoff,
     empty_target_scan,
     initialize_git_repository,
     request_remediation,
@@ -833,29 +835,21 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert not (scan_dir / "events.jsonl").exists()
 
     claim_token = str(uuid.uuid4())
-    claimed = run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claimed = claim_handoff(state_dir, scan_id, claim_token)
     assert claimed["results"]["handoffClaimedAt"] is not None
     assert claimed["results"]["handoffClaimToken"] == claim_token
     released = run_workbench(
         state_dir, "release-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
     )
     assert released["results"]["handoffClaimedAt"] is None
-    claimed_again = run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claimed_again = claim_handoff(state_dir, scan_id, claim_token)
     assert claimed_again["results"]["handoffClaimedAt"] is not None
-    delivered = run_workbench(
-        state_dir, "mark-handoff-delivered", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    delivered = deliver_handoff(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimedAt"] is None
 
-    updated = run_workbench(
+    updated = update_progress(
         state_dir,
-        "update-progress",
-        "--scan-id",
         scan_id,
         "--phase",
         "validation",
@@ -950,16 +944,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
         "summary": "Legacy containment details remain visible.",
     }
 
-    run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        "closed",
-        "--close-reason",
-        "already_fixed",
-    )
+    triage_finding(state_dir, occurrence_id, "closed", "--close-reason", "already_fixed")
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE finding_occurrences SET details_json = '{}' WHERE id = ?",

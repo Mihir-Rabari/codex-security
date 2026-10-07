@@ -14,8 +14,10 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    attach_continuation,
     begin_thread_deep_scan,
     claim_deep_scan_dedup,
+    claim_handoff,
     commit_deep_scan_dedup,
     create_saved_workspace,
     create_workspace,
@@ -2202,10 +2204,8 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
+    create_workspace(
         state_dir,
-        "create-workspace",
-        "--workspace-id",
         workspace_id,
         "--thread-id",
         "thread-owner",
@@ -2215,18 +2215,8 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         "deep",
         environment=deep_environment(codex_home),
     )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-        environment=deep_environment(codex_home),
+    save_workspace(
+        state_dir, workspace_id, str(target), ".", "deep", environment=deep_environment(codex_home)
     )
     started = run_workbench(
         state_dir,
@@ -2239,25 +2229,12 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
     )
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "thread-continuation",
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
+    attached = attach_continuation(state_dir, scan_id, claim_token, "thread-continuation")
     assert attached["results"]["continuationThreadId"] == "thread-continuation"
 
-    wrong_owner = run_workbench(
+    wrong_owner = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-owner",
         "--scan-id",
         scan_id,
@@ -2266,10 +2243,8 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
     )
     assert "owning Codex thread" in str(wrong_owner["stderr"])
 
-    begun = run_workbench(
+    begun = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "thread-continuation",
         "--scan-id",
         scan_id,
@@ -2353,20 +2328,15 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
             "--claim-token",
             stale_token,
         )
-    run_workbench(
+    claim_handoff(
         state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
         scan_id,
-        "--claim-token",
         replacement_token,
         *(("--take-over-stale",) if handoff_action == "takeover" else ()),
     )
 
-    stale_thread = run_workbench(
+    stale_thread = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "stale-deep-continuation",
         "--scan-id",
         scan_id,
@@ -2375,10 +2345,8 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         environment=deep_environment(codex_home),
         check=False,
     )
-    original_thread = run_workbench(
+    original_thread = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "workspace-thread",
         "--scan-id",
         scan_id,
@@ -2387,10 +2355,8 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         environment=deep_environment(codex_home),
         check=False,
     )
-    tokenless_original_thread = run_workbench(
+    tokenless_original_thread = begin_thread_deep_scan(
         state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "workspace-thread",
         "--scan-id",
         scan_id,
@@ -2413,20 +2379,9 @@ def test_stale_deep_continuation_cannot_begin_after_handoff_transfer(
         ).fetchone()
         assert (owner, coordinator_count) == (None, 0)
 
-    run_workbench(
+    attach_continuation(state_dir, scan_id, replacement_token, "replacement-deep-continuation")
+    begun = begin_thread_deep_scan(
         state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement_token,
-        "--thread-id",
-        "replacement-deep-continuation",
-    )
-    begun = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--thread-id",
         "replacement-deep-continuation",
         "--scan-id",
         scan_id,

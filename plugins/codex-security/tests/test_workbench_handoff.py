@@ -7,8 +7,14 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    attach_continuation,
+    claim_handoff,
     create_saved_workspace,
+    create_workspace,
+    deliver_handoff,
     run_workbench,
+    save_workspace,
+    update_progress,
 )
 
 
@@ -23,24 +29,8 @@ def test_running_scan_context_is_owned_by_attached_continuation(tmp_path: Path, 
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-    )
-    run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        continuation_thread_id,
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
+    attach_continuation(state_dir, scan_id, claim_token, continuation_thread_id)
 
     updated_context = "Prioritize password-reset token validation."
     updated = run_workbench(
@@ -104,21 +94,12 @@ def test_workbench_serializes_concurrent_handoff_delivery(tmp_path: Path) -> Non
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
-                lambda _: run_workbench(
-                    state_dir,
-                    "mark-handoff-delivered",
-                    "--scan-id",
-                    scan_id,
-                    "--claim-token",
-                    claim_token,
-                ),
+                lambda _: deliver_handoff(state_dir, scan_id, claim_token),
                 range(2),
             )
         )
@@ -144,41 +125,14 @@ def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -
     target = tmp_path / "target"
     target.mkdir()
     workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "deep",
-    )
+    create_workspace(state_dir, workspace_id, "--target-path", str(target))
+    save_workspace(state_dir, workspace_id, str(target), ".", "deep")
     started = run_workbench(state_dir, "start-scan", "--workspace-id", workspace_id)
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-    )
+    delivered = deliver_handoff(state_dir, scan_id, claim_token)
 
     assert delivered["results"]["progress"]["phaseProgress"] == {
         "completed": 0,
@@ -211,30 +165,9 @@ def test_workbench_upgrade_keeps_preexisting_delivered_continuation_writable(
     pending_scan_id = str(pending_scan["results"]["scanId"])
     delivered_token = str(uuid.uuid4())
     pending_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
-        delivered_scan_id,
-        "--claim-token",
-        delivered_token,
-    )
-    run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        delivered_scan_id,
-        "--claim-token",
-        delivered_token,
-    )
-    run_workbench(
-        state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
-        pending_scan_id,
-        "--claim-token",
-        pending_token,
-    )
+    claim_handoff(state_dir, delivered_scan_id, delivered_token)
+    deliver_handoff(state_dir, delivered_scan_id, delivered_token)
+    claim_handoff(state_dir, pending_scan_id, pending_token)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("DELETE FROM schema_migrations WHERE version = 18")
 
@@ -247,14 +180,7 @@ def test_workbench_upgrade_keeps_preexisting_delivered_continuation_writable(
         assert connection.execute(
             "SELECT handoff_claim_token FROM scans WHERE id = ?", (pending_scan_id,)
         ).fetchone() == (pending_token,)
-    updated = run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        delivered_scan_id,
-        "--phase",
-        "discovery",
-    )
+    updated = update_progress(state_dir, delivered_scan_id, "--phase", "discovery")
     assert updated["scan"]["progress"]["phase"] == "discovery"
 
 
@@ -269,14 +195,7 @@ def test_workbench_handoff_claim_is_owned_by_one_token(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=2) as executor:
         claims = list(
             executor.map(
-                lambda token: run_workbench(
-                    state_dir,
-                    "claim-handoff-delivery",
-                    "--scan-id",
-                    scan_id,
-                    "--claim-token",
-                    token,
-                ),
+                lambda token: claim_handoff(state_dir, scan_id, token),
                 tokens,
             )
         )
@@ -293,15 +212,7 @@ def test_workbench_handoff_claim_is_owned_by_one_token(tmp_path: Path) -> None:
         non_owner,
     )
     assert wrong_release["results"]["handoffClaimToken"] == owner
-    wrong_delivery = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        non_owner,
-        check=False,
-    )
+    wrong_delivery = deliver_handoff(state_dir, scan_id, non_owner, check=False)
     assert "delivery could not be recorded" in str(wrong_delivery["stderr"])
 
 
@@ -314,48 +225,21 @@ def test_workbench_handoff_claim_only_allows_stale_takeover(tmp_path: Path) -> N
     scan_id = str(started["results"]["scanId"])
     owner = str(uuid.uuid4())
     replacement = str(uuid.uuid4())
-    run_workbench(state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", owner)
-    run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        owner,
-        "--thread-id",
-        "stale-continuation",
-    )
-    live = run_workbench(
-        state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement,
-        "--take-over-stale",
-    )
+    claim_handoff(state_dir, scan_id, owner)
+    attach_continuation(state_dir, scan_id, owner, "stale-continuation")
+    live = claim_handoff(state_dir, scan_id, replacement, "--take-over-stale")
     assert live["results"]["handoffClaimToken"] == owner
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET handoff_claimed_at = ? WHERE id = ?",
             ("2000-01-01T00:00:00Z", scan_id),
         )
-    stale = run_workbench(
-        state_dir,
-        "claim-handoff-delivery",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement,
-        "--take-over-stale",
-    )
+    stale = claim_handoff(state_dir, scan_id, replacement, "--take-over-stale")
     assert stale["results"]["handoffClaimToken"] == replacement
     assert stale["results"]["continuationThreadId"] is None
     for claim_token in (None, owner):
-        rejected_update = run_workbench(
+        rejected_update = update_progress(
             state_dir,
-            "update-progress",
-            "--scan-id",
             scan_id,
             "--phase",
             "discovery",
@@ -363,35 +247,11 @@ def test_workbench_handoff_claim_only_allows_stale_takeover(tmp_path: Path) -> N
             check=False,
         )
         assert "owned by another continuation" in str(rejected_update["stderr"])
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement,
-        "--thread-id",
-        "replacement-continuation",
-    )
+    attached = attach_continuation(state_dir, scan_id, replacement, "replacement-continuation")
     assert attached["results"]["continuationThreadId"] == "replacement-continuation"
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        replacement,
-    )
+    delivered = deliver_handoff(state_dir, scan_id, replacement)
     assert delivered["results"]["handoffClaimToken"] == replacement
-    superseded_delivery = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        owner,
-        check=False,
-    )
+    superseded_delivery = deliver_handoff(state_dir, scan_id, owner, check=False)
     assert "owned by another continuation" in str(superseded_delivery["stderr"])
 
 
@@ -405,69 +265,26 @@ def test_workbench_attaches_one_continuation_thread_to_claimed_scan(
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
 
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
-    )
+    attached = attach_continuation(state_dir, scan_id, claim_token, "continuation-thread")
     assert attached["results"]["continuationThreadId"] == "continuation-thread"
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
+    delivered = deliver_handoff(
+        state_dir, scan_id, claim_token, "--thread-id", "continuation-thread"
     )
     assert delivered["results"]["handoffStatus"] == "delivered"
 
-    replayed = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
-    )
+    replayed = attach_continuation(state_dir, scan_id, claim_token, "continuation-thread")
     assert replayed["results"]["continuationThreadId"] == "continuation-thread"
 
-    wrong_token = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        str(uuid.uuid4()),
-        "--thread-id",
-        "continuation-thread",
-        check=False,
+    wrong_token = attach_continuation(
+        state_dir, scan_id, str(uuid.uuid4()), "continuation-thread", check=False
     )
     assert "claim token" in str(wrong_token["stderr"])
 
-    different_thread = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "different-thread",
-        check=False,
+    different_thread = attach_continuation(
+        state_dir, scan_id, claim_token, "different-thread", check=False
     )
     assert "another continuation" in str(different_thread["stderr"])
 
@@ -482,19 +299,8 @@ def test_workbench_allows_attached_continuation_thread_to_cancel_scan(
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
-    run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "continuation-thread",
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
+    attach_continuation(state_dir, scan_id, claim_token, "continuation-thread")
 
     canceled = run_workbench(
         state_dir,
@@ -519,19 +325,8 @@ def test_workbench_releases_attached_continuation_for_a_fresh_handoff(
     scan_id = str(started["results"]["scanId"])
     first_token = str(uuid.uuid4())
     second_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", first_token
-    )
-    run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        first_token,
-        "--thread-id",
-        "failed-continuation",
-    )
+    claim_handoff(state_dir, scan_id, first_token)
+    attach_continuation(state_dir, scan_id, first_token, "failed-continuation")
 
     released = run_workbench(
         state_dir,
@@ -544,19 +339,8 @@ def test_workbench_releases_attached_continuation_for_a_fresh_handoff(
     assert released["results"]["handoffClaimToken"] is None
     assert released["results"]["continuationThreadId"] is None
 
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", second_token
-    )
-    attached = run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        second_token,
-        "--thread-id",
-        "replacement-continuation",
-    )
+    claim_handoff(state_dir, scan_id, second_token)
+    attached = attach_continuation(state_dir, scan_id, second_token, "replacement-continuation")
 
     assert attached["results"]["continuationThreadId"] == "replacement-continuation"
 
@@ -579,19 +363,8 @@ def test_released_pending_handoff_rejects_tokenless_mutations(
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
-    run_workbench(
-        state_dir,
-        "attach-scan-continuation-thread",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "released-continuation",
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
+    attach_continuation(state_dir, scan_id, claim_token, "released-continuation")
     run_workbench(
         state_dir, "release-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
     )

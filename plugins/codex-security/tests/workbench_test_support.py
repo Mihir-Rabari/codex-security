@@ -799,6 +799,64 @@ class ScanFixtureTestCase(TestCase):
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
 
 
+def claim_handoff(
+    state_dir: Path,
+    scan_id: str,
+    claim_token: str,
+    *args: str,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "claim-handoff-delivery",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        claim_token,
+        *args,
+    )
+
+
+def attach_continuation(
+    state_dir: Path,
+    scan_id: str,
+    claim_token: str,
+    thread_id: str,
+    *args: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "attach-scan-continuation-thread",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        claim_token,
+        "--thread-id",
+        thread_id,
+        *args,
+        check=check,
+    )
+
+
+def deliver_handoff(
+    state_dir: Path,
+    scan_id: str,
+    claim_token: str,
+    *args: str,
+    check: bool = True,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "mark-handoff-delivered",
+        "--scan-id",
+        scan_id,
+        "--claim-token",
+        claim_token,
+        *args,
+        check=check,
+    )
+
+
 def get_deep_scan(
     state_dir: Path,
     scan_id: str,

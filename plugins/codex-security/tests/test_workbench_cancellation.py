@@ -4,7 +4,9 @@ import uuid
 from pathlib import Path
 
 from workbench_test_support import (
+    claim_handoff,
     create_saved_workspace,
+    deliver_handoff,
     run_workbench,
     start_delivered_scan,
     write_completed_contract,
@@ -26,9 +28,7 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     )
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
     failed = run_workbench(
         state_dir,
         "fail-scan",
@@ -42,13 +42,9 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     assert failed["scan"]["progress"]["status"] == "failed"
     assert failed["scan"]["failureMessage"] == "Repository checkout became unavailable."
 
-    delivered = run_workbench(
-        state_dir, "mark-handoff-delivered", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    delivered = deliver_handoff(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
-    replayed = run_workbench(
-        state_dir, "mark-handoff-delivered", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    replayed = deliver_handoff(state_dir, scan_id, claim_token)
     assert replayed["results"]["handoffStatus"] == "delivered"
 
 
@@ -61,9 +57,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    claimed = run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claimed = claim_handoff(state_dir, scan_id, claim_token)
     assert claimed["results"]["handoffClaimToken"] == claim_token
 
     wrong_thread = run_workbench(
@@ -104,16 +98,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
         )
         assert rejected["returncode"] != 0
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        thread_id,
-    )
+    delivered = deliver_handoff(state_dir, scan_id, claim_token, "--thread-id", thread_id)
     assert delivered["results"]["progress"]["status"] == "canceled"
     assert delivered["results"]["handoffStatus"] == "delivered"
 
@@ -149,47 +134,20 @@ def test_workbench_rejects_unconfirmed_cross_thread_handoff_delivery(tmp_path: P
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = str(uuid.uuid4())
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
 
-    wrong_thread = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "thread-handoff-other",
-        check=False,
+    wrong_thread = deliver_handoff(
+        state_dir, scan_id, claim_token, "--thread-id", "thread-handoff-other", check=False
     )
     assert wrong_thread["returncode"] != 0
     assert "owning Codex thread" in str(wrong_thread["stderr"])
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        thread_id,
-    )
+    delivered = deliver_handoff(state_dir, scan_id, claim_token, "--thread-id", thread_id)
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimToken"] == claim_token
 
-    wrong_replay = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        str(uuid.uuid4()),
-        "--thread-id",
-        thread_id,
-        check=False,
+    wrong_replay = deliver_handoff(
+        state_dir, scan_id, str(uuid.uuid4()), "--thread-id", thread_id, check=False
     )
     assert wrong_replay["returncode"] != 0
     assert "owned by another continuation" in str(wrong_replay["stderr"])
@@ -203,19 +161,10 @@ def test_workbench_allows_user_confirmed_recovery_in_another_thread(tmp_path: Pa
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
     claim_token = f"recovery_{uuid.uuid4()}"
-    run_workbench(
-        state_dir, "claim-handoff-delivery", "--scan-id", scan_id, "--claim-token", claim_token
-    )
+    claim_handoff(state_dir, scan_id, claim_token)
 
-    delivered = run_workbench(
-        state_dir,
-        "mark-handoff-delivered",
-        "--scan-id",
-        scan_id,
-        "--claim-token",
-        claim_token,
-        "--thread-id",
-        "thread-recovery-confirmed",
+    delivered = deliver_handoff(
+        state_dir, scan_id, claim_token, "--thread-id", "thread-recovery-confirmed"
     )
 
     assert delivered["results"]["handoffStatus"] == "delivered"
