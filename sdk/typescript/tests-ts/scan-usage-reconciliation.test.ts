@@ -106,7 +106,7 @@ describe("scan usage reconciliation", () => {
     }
   });
 
-  test("waits for attribution and retains uncertainty until missing attempt usage arrives", async () => {
+  test("retains known usage before attribution and uncertainty until missing attempt usage arrives", async () => {
     const home = await mkdtemp(join(tmpdir(), "usage-delayed-"));
     const tracker = new ScanCostTracker({
       codexHome: home,
@@ -144,7 +144,7 @@ describe("scan usage reconciliation", () => {
       );
       tracker.start("worker");
       tracker.recordUsage({ input_tokens: 20, output_tokens: 0 });
-      expect((await tracker.refresh()).cost).toBeNull();
+      expect((await tracker.refresh()).cost).toMatchObject({ inputTokens: 20 });
       attribution = {
         formatVersion: 1,
         executionThreadIds: ["worker", "failed-attempt"],
