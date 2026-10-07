@@ -2629,7 +2629,8 @@ def merge_saved_results(
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)
-    for surface in coverage.get("surfaces", []):
+    surfaces = coverage.get("surfaces", [])
+    for surface in surfaces if isinstance(surfaces, list) else []:
         if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
             surface["provenance"].pop("scanReceiptRefs", None)
     return manifest, {"findings": findings}, coverage
