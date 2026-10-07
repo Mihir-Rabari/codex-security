@@ -1533,6 +1533,7 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not track scan activity: ${errorMessage(error)}`);
       };
+      const validationThreadIds: string[] = [];
       const selectedCodexCommand = () => this.#codexCommand();
       const nativeSessionConfig = {
         get command() {
@@ -1560,7 +1561,13 @@ export class CodexSecurity {
                 return await (
                   this.#dependencies.resolveScanSessionPaths ??
                   resolveScanSessionPaths
-                )(scan.options, scan.id, threadId, nativeSessionConfig);
+                )(
+                  scan.options,
+                  scan.id,
+                  threadId,
+                  nativeSessionConfig,
+                  validationThreadIds,
+                );
               },
         onActivity:
           options.onActivity === undefined
@@ -2118,6 +2125,8 @@ export class CodexSecurity {
                       "The custom validation turn did not complete.",
                   );
                 budgetAbortController.abort();
+                if (turn.threadId !== null)
+                  validationThreadIds.push(turn.threadId);
                 tracker.recordUsage(turn.usage, turn.threadId);
                 await tracker.refresh().catch(reportTrackingError);
                 checkOpen();

@@ -1561,6 +1561,7 @@ export async function resolveScanSessionPaths(
   scanId: string | null,
   rootThreadId: string,
   nativeConfig?: NativeSessionConfig,
+  additionalRootThreadIds: readonly string[] = [],
 ): Promise<ReadonlyMap<string, string>> {
   const source = [
     "import json, os, sqlite3, sys",
@@ -1579,6 +1580,7 @@ export async function resolveScanSessionPaths(
     "        roots = usage._scan_root_thread_ids(connection, scan, sys.argv[3])",
     "    finally:",
     "        connection.close()",
+    "roots.extend(json.loads(sys.argv[4]))",
     "database = usage._codex_state_database()",
     "if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
     "warnings = set()",
@@ -1614,6 +1616,7 @@ export async function resolveScanSessionPaths(
         join(options.pluginRoot, "scripts"),
         scanId ?? "",
         rootThreadId,
+        JSON.stringify(additionalRootThreadIds),
       ],
       {
         env: pluginHelperEnvironment(options.environment),
