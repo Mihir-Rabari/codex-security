@@ -65,8 +65,10 @@ def recover_candidate_receipts(
         return parent
     # Receipt recovery must precede resolution of the candidate's saved proof gaps.
     if source is not None:
-        directory = scan_dir / Path(source).parent
-        scan_dir = directory.parent if directory.name == "checkpoints" else directory
+        directory = Path(source).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        scan_dir = scan_dir / directory
     parent = copy.deepcopy(parent)
     if source is not None:
         coverage = parent["coverage"]
@@ -108,7 +110,8 @@ def recover_candidate_receipts(
                     )
                     invalid = True
                     continue
-                recovered.append(ref)
+                # Publication validates and seals receipts relative to the parent scan.
+                recovered.append((directory / ref).as_posix())
             row["receiptRefs"] = recovered
             if invalid:
                 row["disposition"] = "needs_follow_up"

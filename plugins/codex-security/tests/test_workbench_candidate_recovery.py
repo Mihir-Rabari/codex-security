@@ -21,6 +21,8 @@ from test_workbench_standard_deep_results import (
     generic_review_recovery as generic_review_recovery,
 )
 from workbench_test_support import (
+    get_scan,
+    preserve_scan_results,
     replay_saved_results,
     run_workbench,
     saved_discovery_worker,
@@ -1095,3 +1097,80 @@ def test_worker_receipt_recovery_retains_complete_evidence_archives(
             assert retained["reason"] == "Authored gap"
             assert current_candidate in retained["originalCandidates"]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("receipt", ["binary", "empty", "missing", "partial"])
+def test_stopped_worker_receipts_survive_parent_publication_and_replay(
+    tmp_path: Path, archived: bool, receipt: str
+) -> None:
+    from finalize_scan_contract import finalize_scan
+
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    draft = json.loads(result_path.read_text())
+    output = result_path.parent
+    if archived:
+        output = output / "attempts" / "attempt-01"
+        output.mkdir(parents=True)
+        result_path.unlink()
+        result_path = output / "result.json"
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_workers SET attempt = 2, result_manifest_path = NULL WHERE id = ?",
+                (worker_id,),
+            )
+    contents = b"" if receipt == "empty" else bytes([0, 255, 128, 10, 65])
+    ref = "artifacts/review.bin"
+    (output / "artifacts").mkdir()
+    if receipt != "missing":
+        (output / ref).write_bytes(contents)
+    # The same name at the parent must not become the worker's proof.
+    if receipt == "missing":
+        (scan_dir / ref).write_bytes(b"Unrelated parent receipt")
+    draft["complete"] = True
+    draft["coverage"] = {
+        "completeness": "complete",
+        "surfaces": [
+            {
+                "id": "decision",
+                "label": "Reviewed candidate",
+                "candidateId": "candidate",
+                "disposition": "rejected",
+                "receiptRefs": [ref, "artifacts/missing.txt"] if receipt == "partial" else [ref],
+            }
+        ],
+        "explicitExclusions": [],
+        "deferred": [],
+    }
+    result_path.write_text(json.dumps(draft))
+    originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    environment = {"CODEX_HOME": str(codex_home)}
+    run_workbench(
+        state_dir,
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Synthetic interruption.",
+        environment=environment,
+    )
+    expected = int(receipt in {"missing", "partial"})
+    for replay in (False, True):
+        if replay:
+            preserve_scan_results(
+                state_dir, scan_id, "standard-worker-thread", environment=environment
+            )
+        scan = get_scan(state_dir, scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == expected
+        _, _, coverage = finalize_scan(scan_dir, expected_coverage_mode="deep_repository")
+        pending = [row for row in coverage["deferred"] if row.get("candidateId")]
+        assert len(pending) == expected
+        surface = next(row for row in coverage["surfaces"] if row.get("candidateId") == "candidate")
+        assert surface["disposition"] == ("needs_follow_up" if expected else "rejected")
+        if receipt != "missing":
+            assert surface["receiptRefs"] == [(output / ref).relative_to(scan_dir).as_posix()]
+            assert (scan_dir / surface["receiptRefs"][0]).read_bytes() == contents
+        report = (scan_dir / "report.md").read_text()
+        assert f"Unresolved candidates | {expected}" in report
+        assert all(path.read_bytes() == value for path, value in originals.items())

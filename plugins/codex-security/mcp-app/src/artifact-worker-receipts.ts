@@ -35,7 +35,7 @@ export async function recoverWorkerCandidateReceipts(
           throw new Error("Worker candidate receipt must be under artifacts/.");
         contents = await readArtifactBytes(
           source,
-          ref.split("/"),
+          ref.split("/").filter((part) => part !== "" && part !== "."),
           "Worker candidate receipt",
         );
       } catch (error) {

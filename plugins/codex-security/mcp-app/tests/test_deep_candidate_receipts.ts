@@ -449,3 +449,68 @@ for (const mode of ["current", "previous", "merged"]) {
     });
   }
 }
+
+for (const archived of [false, true]) {
+  for (const ref of [
+    "artifacts/review.txt",
+    "artifacts/./review.txt",
+    "artifacts//review.txt",
+  ]) {
+    test(`candidate receipt path aliases remain resolved: archived=${archived}, ref=${ref}`, async () => {
+      const f = await fixture();
+      try {
+        const contents = Buffer.from([0, 255, 10, 65]);
+        await mkdir(path.join(f.output, "artifacts"));
+        await writeFile(path.join(f.output, "artifacts/review.txt"), contents);
+        await recordCodexSecurityWorkerScanDraft(
+          f.worker,
+          workerDraft([], {
+            coverage: {
+              completeness: "complete",
+              surfaces: [
+                {
+                  id: "decision",
+                  label: "Reviewed candidate",
+                  candidateId: "candidate",
+                  disposition: "rejected",
+                  receiptRefs: [ref],
+                },
+              ],
+              explicitExclusions: [],
+              deferred: [],
+            },
+          }),
+        );
+        const source = archived
+          ? path.join(f.workerRoot, "attempts", "attempt-01")
+          : f.output;
+        if (archived) await archiveDirectory(f.output, source);
+        const original = await readFile(path.join(source, "result.json"));
+        if (archived)
+          await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+        await recordCodexSecurityDeepReduction(f.reducer, {
+          scanId,
+          findings: [],
+        });
+        const published = deepReductionScanDraft(
+          await readJson(path.join(f.reducerRoot, "result.json")),
+        );
+        assert.equal(
+          unresolvedCandidates(published.coverage, published.findings).length,
+          0,
+        );
+        assert.equal(published.coverage.completeness, "complete");
+        assert.deepEqual(
+          await readFile(path.join(source, "result.json")),
+          original,
+        );
+        assert.deepEqual(
+          await readFile(path.join(source, "artifacts/review.txt")),
+          contents,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
