@@ -2410,6 +2410,10 @@ def _require_current_deep_publication(
     # Generation-one runs predate host publication metadata. Keep their existing
     # draft path; adopted coordinators must carry their generation and selection.
     if publication is None:
+        if draft["manifest"]["scan"].get("complete") is False:
+            raise SystemExit(
+                "Deep Scan is terminal; incomplete progress cannot replace its publication."
+            )
         return
 
     # Match the durable reducer sequence used by coordinator recovery.
