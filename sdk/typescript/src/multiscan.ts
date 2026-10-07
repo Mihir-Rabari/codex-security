@@ -423,11 +423,6 @@ async function runCampaign(
             });
           }
         }
-        if (resumed.checkout === checkout) {
-          await rm(checkout, { recursive: true, force: true }).catch(
-            () => undefined,
-          );
-        }
         const failureSeverity =
           options.scanOptionsByMode?.[task.mode]?.failureSeverity;
         policyFailed ||=

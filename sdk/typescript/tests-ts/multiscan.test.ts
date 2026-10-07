@@ -3460,6 +3460,67 @@ test("qualified campaign keeps a recorded checkout while rejecting a failed seal
   expect(recoverScan).toHaveBeenCalledTimes(1);
 });
 
+test.each(["checkouts", "recovery-checkouts"] as const)(
+  "completed reuse preserves the retained %s checkout when its source is unavailable",
+  async (layout) => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retained-reuse-source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope
+repo,${source.path},${source.revision},src
+`,
+    );
+    const campaign = options(paths, client(rejecting("Interrupted scan")), {
+      maxAttempts: 1,
+    });
+    await runMultiscan(campaign);
+    const dir = join(paths.output, "artifacts", "repo", "attempt-1");
+    await mkdir(dir, { recursive: true });
+    const checkout = join(
+      paths.output,
+      layout,
+      "repo",
+      ...(layout === "recovery-checkouts" ? ["attempt-1"] : []),
+    );
+    await mkdir(dirname(checkout), { recursive: true });
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const marker = join(checkout, "retained.txt");
+    await writeFile(marker, "Preserved interrupted checkout data.\n");
+    const identity = await lstat(checkout);
+    const recoverScan = mock((scanDir: string) =>
+      completedScan(scanDir, "complete", checkout),
+    );
+    const runs = mock(completeRun);
+    expect(
+      await runMultiscan({
+        ...campaign,
+        createSecurity: () => client(runs),
+        recoverScan,
+      }),
+    ).toMatchObject({ completed: 1, failed: 0 });
+    await rename(
+      source.path,
+      join(paths.root, "temporarily-unavailable-source"),
+    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expect(
+        await runMultiscan({ ...campaign, createSecurity: () => client(runs) }),
+      ).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+      const retained = await lstat(checkout);
+      expect([retained.dev, retained.ino]).toEqual([
+        identity.dev,
+        identity.ino,
+      ]);
+      expect(await readFile(marker, "utf8")).toBe(
+        "Preserved interrupted checkout data.\n",
+      );
+    }
+    expect(runs).toHaveBeenCalledTimes(0);
+    expect(recoverScan).toHaveBeenCalledTimes(1);
+  },
+);
+
 test("qualified campaign replays warnings only from accepted saved attempts", async () => {
   const paths = await fixture();
   const source = await repository(paths.root, "saved-warning-source");
