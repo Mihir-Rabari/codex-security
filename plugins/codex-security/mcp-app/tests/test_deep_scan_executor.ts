@@ -2190,8 +2190,12 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
             );
             assert.deepEqual(
-              parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
-                .permissions,
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
+                    .permissions,
+                ),
+              ),
               { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
             );
             const invocation = await readJson(workerLaunch.markerPath);
