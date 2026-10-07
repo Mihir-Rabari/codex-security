@@ -5427,7 +5427,10 @@ export async function main(
             files:
               options.assessPatchRisk || options.createPr
                 ? files.map((file) =>
-                    relative(repository, resolve(gitRepository, file))
+                    relative(
+                      commandContext!.directory,
+                      resolve(gitRepository, file),
+                    )
                       .split(sep)
                       .join("/"),
                   )
