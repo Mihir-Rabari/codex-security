@@ -1,3 +1,10 @@
+import {
+  mergedCodexConfig,
+  EXTERNAL_CODEX_PROVIDERS,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import { rejecting } from "./support/errors.js";
 import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -7,12 +14,6 @@ import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
-import {
-  mergedCodexConfig,
-  EXTERNAL_CODEX_PROVIDERS,
-  resolveCodexProfile,
-  type JsonObject,
-} from "../src/config.js";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
@@ -23,100 +24,27 @@ import {
 } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { rejecting } from "./support/errors.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
 describe("CodexSecurity orchestration", () => {
-  test.each(["openrouter", "fireworks"] as const)(
-    "saves generated %s settings when a file profile supplies only a model",
-    async (provider) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const home = join(root, "home");
-      const runtimeHome = join(root, "runtime");
-      const scanDir = join(root, "scan");
-      for (const path of [repository, home, runtimeHome, scanDir])
-        await mkdir(path, { mode: 0o700 });
-      await writeFile(
-        join(home, "review.config.toml"),
-        'model="synthetic-model"\n',
-      );
-      let savedRecipe: JsonObject | undefined;
-      const client = new TestClient(
-        {
-          pluginPath: PLUGIN_ROOT,
-          codexOverrides: {
-            profile: "review",
-            model_provider: provider,
-            model_providers: {
-              [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-            },
-          },
-        },
-        {
-          environment: {
-            CODEX_HOME: home,
-            [EXTERNAL_CODEX_PROVIDERS[provider].env_key]:
-              "synthetic-provider-key",
-          },
-          resolvePluginPython: async () => "/managed/python",
-          prepareRuntime: async () => preparedRuntime(runtimeHome),
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (_runtime, args, input) => {
-            if (args[0] === "register-cli-scan")
-              savedRecipe = JSON.parse(input!).recipe as JsonObject;
-            return mockWorkbench(args, input);
-          },
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              runStreamed: rejecting(
-                "synthetic generated provider scan started",
-              ),
-            }),
-          }),
-        },
-      );
-      try {
-        await expect(client.run(repository)).rejects.toThrow(
-          "synthetic generated provider scan started",
-        );
-        const config = savedRecipe!["config"] as JsonObject;
-        expect(config["profile"]).toBe("review");
-        const replay = resolveCodexProfile(
-          await mergedCodexConfig({ codexOverrides: config }, home),
-        );
-        expect(replay["model_provider"]).toBe(provider);
-        expect(replay["model_providers"]).toEqual({
-          [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
-        });
-      } finally {
-        await client.close();
-      }
-    },
-  );
-
   test.each([
     "direct",
     "profile",
-    "profile-partial",
-    "native-profile",
-    "native-openrouter",
-    "native-fireworks",
+    "profile-providers",
+    "profile-providers-ambient",
+    "profile-inherited-cwd",
+    "profile-overridden-cwd",
+    "profile-strict",
   ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
       const profile = selection !== "direct";
-      const nativeProfile = selection.startsWith("native-");
-      const providerName =
-        selection === "native-openrouter"
-          ? "openrouter"
-          : selection === "native-fireworks"
-            ? "fireworks"
-            : "synthetic.provider";
+      const profileProviders = profile && selection !== "profile";
+      const inheritedCwd = selection === "profile-inherited-cwd";
+      const overriddenCwd = selection === "profile-overridden-cwd";
+      const strict = selection === "profile-strict";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -134,91 +62,74 @@ describe("CodexSecurity orchestration", () => {
         refresh_interval_ms: 1000,
         ...(profile ? { cwd: "helpers" } : {}),
       };
-      const providerConfig = {
+      const definition = {
         name: "Synthetic",
         base_url: "https://provider.example/v1",
         wire_api: "responses",
         auth,
       };
-      if (nativeProfile) {
-        await writeFile(
-          join(home, "compact.md"),
-          "Synthetic compact prompt.\n",
-        );
-        await writeFile(
-          join(home, "review.config.toml"),
-          stringify({
-            model: "native-model",
-            model_reasoning_effort: "high",
-            model_reasoning_summary: "concise",
-            experimental_compact_prompt_file: "compact.md",
-            model_catalog_json: "models.json",
-            agents: {
-              reviewer: {
-                config_file: "agents/reviewer.toml",
-                description: "Synthetic reviewer",
-              },
-            },
-            model_provider: providerName,
-            features: { shell_tool: false, unified_exec: false },
-            model_providers: { [providerName]: providerConfig },
-          }),
-        );
-      }
-      const overrides = {
-        ...(nativeProfile
-          ? { profile: "review" }
-          : profile
-            ? {
-                profile: "review",
-                profiles: {
-                  review: {
-                    model_provider: providerName,
-                    features: { shell_tool: false, unified_exec: false },
-                    ...(selection === "profile-partial"
-                      ? {
-                          model_providers: {
-                            [providerName]: {
-                              auth: { refresh_interval_ms: 2000 },
-                            },
-                          },
-                        }
-                      : {}),
-                  },
-                },
-              }
-            : { model_provider: providerName }),
-        ...(nativeProfile
-          ? {}
-          : { model_providers: { [providerName]: providerConfig } }),
+      const rootDefinition = {
+        ...definition,
+        auth: {
+          ...auth,
+          ...(inheritedCwd || overriddenCwd ? { cwd: "root-helpers" } : {}),
+        },
       };
-      let captured: CodexOptions | undefined;
-      let savedRecipe: JsonObject | undefined;
+      const selectedDefinition =
+        inheritedCwd || overriddenCwd
+          ? {
+              auth: {
+                command: "./selected-auth",
+                ...(overriddenCwd ? { cwd: "selected-helpers" } : {}),
+              },
+            }
+          : definition;
+      const overrides = {
+        ...(strict ? { approval_policy: "never" } : {}),
+        ...(profile
+          ? {
+              profile: "review",
+              profiles: {
+                review: {
+                  model_provider: "synthetic.provider",
+                  service_tier: "fast",
+                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(profileProviders
+                    ? {
+                        model_providers: {
+                          "synthetic.provider": selectedDefinition,
+                        },
+                      }
+                    : {}),
+                },
+              },
+            }
+          : { model_provider: "synthetic.provider" }),
+        ...(!profileProviders || inheritedCwd || overriddenCwd
+          ? { model_providers: { "synthetic.provider": rootDefinition } }
+          : {}),
+      };
+      const originalOverrides = structuredClone(overrides);
+      let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
         {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
             CODEX_SECURITY_STATE_DIR: state,
-            ...(profile
+            ...(selection === "profile" ||
+            selection === "profile-providers-ambient"
               ? {
                   OPENAI_API_KEY: "synthetic-ambient-key",
                   CODEX_API_KEY: "synthetic-other-key",
                 }
               : {}),
           },
-          runWorkbench: async (_runtime, args, input) => {
-            if (args[0] === "register-cli-scan") {
-              savedRecipe = JSON.parse(input!).recipe as JsonObject;
-            }
-            return mockWorkbench(args, input);
-          },
           resolvePluginPython: async () => "/managed/python",
-          ...(profile && !nativeProfile
+          ...(profile
             ? {
                 prepareRuntime: async () => ({
                   ...preparedRuntime(runtimeHome),
-                  configPath: join(root, "scan-preflight.toml"),
                   credentialsAvailable: false,
                 }),
               }
@@ -230,7 +141,30 @@ describe("CodexSecurity orchestration", () => {
             return {
               startThread: () => ({
                 id: null,
-                runStreamed: rejecting("synthetic command-auth scan started"),
+                async runStreamed() {
+                  if (!profile) {
+                    const preflightConfig = parseToml(
+                      await readFile(
+                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                        "utf8",
+                      ),
+                    );
+                    expect(preflightConfig["model_provider"]).toBe(
+                      "synthetic.provider",
+                    );
+                    expect(preflightConfig["model_providers"]).toBeUndefined();
+                    if (process.platform !== "win32") {
+                      expect(
+                        (
+                          await stat(
+                            options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                          )
+                        ).mode & 0o777,
+                      ).toBe(0o600);
+                    }
+                  }
+                  throw new Error("synthetic command-auth scan started");
+                },
               }),
             };
           },
@@ -243,90 +177,64 @@ describe("CodexSecurity orchestration", () => {
           verified: false,
         });
         expect(JSON.stringify(preflight)).not.toContain("synthetic-auth");
-        if (nativeProfile) {
-          expect(preflight).toMatchObject({
-            model: "native-model",
-            reasoningEffort: "high",
-            modelProvider: providerName,
-          });
-        }
         await expect(client.run(repository)).rejects.toThrow(
           "synthetic command-auth scan started",
         );
-        expect(savedRecipe).toBeDefined();
-        const savedConfig = savedRecipe!["config"] as JsonObject;
-        expect(JSON.stringify(savedConfig)).not.toContain("synthetic-auth");
-        if (nativeProfile) {
-          expect(savedConfig["profile"]).toBe("review");
-          const replay = resolveCodexProfile(
-            await mergedCodexConfig({ codexOverrides: savedConfig }, home),
-          );
-          expect(replay["model_providers"]).toEqual({
-            [providerName]: providerConfig,
-          });
-        }
-        if (profile) {
-          expect(captured?.config?.["features"]).toMatchObject({
-            shell_tool: false,
-            unified_exec: false,
-          });
-          const snapshot = parseToml(
-            await readFile(
-              captured!.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-              "utf8",
-            ),
-          );
-          expect(snapshot["features"]).toMatchObject({
-            shell_tool: false,
-            unified_exec: false,
-          });
-        }
         expect(captured?.apiKey).toBeUndefined();
         expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
-          ...providerConfig,
+          ...definition,
           auth: {
             ...auth,
-            cwd: profile ? join(home, "helpers") : home,
-            ...(selection === "profile-partial"
-              ? { refresh_interval_ms: 2000 }
+            ...(inheritedCwd || overriddenCwd
+              ? { command: "./selected-auth" }
               : {}),
+            cwd: !profile
+              ? home
+              : join(
+                  home,
+                  inheritedCwd
+                    ? "root-helpers"
+                    : overriddenCwd
+                      ? "selected-helpers"
+                      : "helpers",
+                ),
           },
         };
-        expect(parseToml(captured!.configOverrides![0]!)).toEqual({
-          model_providers: { [providerName]: provider },
+        expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
+          "model_providers",
+        );
+        expect(
+          parseToml(
+            await readFile(
+              join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          ),
+        ).toEqual({
+          model_providers: { "synthetic.provider": provider },
         });
-        expect(captured?.config).not.toHaveProperty("profile");
-        expect(captured?.config).not.toHaveProperty("profiles");
-        expect(captured?.config?.["model_provider"]).toBe(providerName);
-        if (nativeProfile) {
-          expect(captured?.config).toMatchObject({
-            model: "native-model",
-            model_reasoning_effort: "high",
-            model_reasoning_summary: "concise",
-            experimental_compact_prompt_file: join(home, "compact.md"),
-            model_catalog_json: join(home, "models.json"),
-            agents: {
-              reviewer: {
-                config_file: join(home, "agents/reviewer.toml"),
-                description: "Synthetic reviewer",
-              },
-            },
-          });
-        }
-        if (!profile || nativeProfile) {
+        if (profile) {
+          expect(captured?.config?.["profile"]).toBeUndefined();
+          expect(captured?.config?.["profiles"]).toBeUndefined();
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config?.["service_tier"]).toBe("fast");
+          if (strict)
+            expect(captured?.config?.["approval_policy"]).toBe("never");
+        } else {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
-          expect(saved).not.toHaveProperty("profile");
-          expect(saved).not.toHaveProperty("profiles");
-          expect(saved["model_providers"]).toEqual({
-            [providerName]: provider,
-          });
+          expect(saved["model_provider"]).toBeUndefined();
+          expect(saved["model_providers"]).toBeUndefined();
+          expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
+        expect(overrides).toEqual(originalOverrides);
       } finally {
         await client.close();
       }
@@ -413,7 +321,7 @@ describe("CodexSecurity orchestration", () => {
                         "plugins",
                         "codex-security",
                         "codex-home",
-                      )]: "read",
+                      )]: { ".": "deny" },
                     },
                   },
                 },
@@ -432,7 +340,7 @@ describe("CodexSecurity orchestration", () => {
                 allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
-                windows: { sandbox: "unelevated" },
+                windows: { sandbox: "elevated" },
                 mcp_servers: {
                   private: {
                     command: "echo",
@@ -837,4 +745,312 @@ process.exit(process.exitCode ?? 0);
       await client.close();
     }
   });
+  test.each(["openrouter", "fireworks"] as const)(
+    "saves generated %s settings when a file profile supplies only a model",
+    async (provider) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const home = join(root, "home");
+      const runtimeHome = join(root, "runtime");
+      const scanDir = join(root, "scan");
+      for (const path of [repository, home, runtimeHome, scanDir])
+        await mkdir(path, { mode: 0o700 });
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model="synthetic-model"\n',
+      );
+      let savedRecipe: JsonObject | undefined;
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            profile: "review",
+            model_provider: provider,
+            model_providers: {
+              [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+            },
+          },
+        },
+        {
+          environment: {
+            CODEX_HOME: home,
+            [EXTERNAL_CODEX_PROVIDERS[provider].env_key]:
+              "synthetic-provider-key",
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareRuntime: async () => preparedRuntime(runtimeHome),
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan")
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              runStreamed: rejecting(
+                "synthetic generated provider scan started",
+              ),
+            }),
+          }),
+        },
+      );
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic generated provider scan started",
+        );
+        const config = savedRecipe!["config"] as JsonObject;
+        expect(config["profile"]).toBe("review");
+        const replay = resolveCodexProfile(
+          await mergedCodexConfig({ codexOverrides: config }, home),
+        );
+        expect(replay["model_provider"]).toBe(provider);
+        expect(replay["model_providers"]).toEqual({
+          [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    "direct",
+    "profile",
+    "profile-partial",
+    "native-profile",
+    "native-openrouter",
+    "native-fireworks",
+  ])(
+    "preserves file-profile command authentication through private profiles (%s)",
+    async (selection) => {
+      const profile = selection !== "direct";
+      const nativeProfile = selection.startsWith("native-");
+      const providerName =
+        selection === "native-openrouter"
+          ? "openrouter"
+          : selection === "native-fireworks"
+            ? "fireworks"
+            : "synthetic.provider";
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const home = join(root, "model-home");
+      const state = join(root, "state");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(home);
+      await mkdir(scanDir, { mode: 0o700 });
+      const runtimeHome = join(state, "codex-home");
+      if (profile) await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
+      await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
+      const auth = {
+        command: "./synthetic-auth",
+        args: ["token"],
+        refresh_interval_ms: 1000,
+        ...(profile ? { cwd: "helpers" } : {}),
+      };
+      const providerConfig = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      if (nativeProfile) {
+        await writeFile(
+          join(home, "compact.md"),
+          "Synthetic compact prompt.\n",
+        );
+        await writeFile(
+          join(home, "review.config.toml"),
+          stringify({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: "compact.md",
+            model_catalog_json: "models.json",
+            agents: {
+              reviewer: {
+                config_file: "agents/reviewer.toml",
+                description: "Synthetic reviewer",
+              },
+            },
+            model_provider: providerName,
+            features: { shell_tool: false, unified_exec: false },
+            model_providers: { [providerName]: providerConfig },
+          }),
+        );
+      }
+      const overrides = {
+        ...(nativeProfile
+          ? { profile: "review" }
+          : profile
+            ? {
+                profile: "review",
+                profiles: {
+                  review: {
+                    model_provider: providerName,
+                    features: { shell_tool: false, unified_exec: false },
+                    ...(selection === "profile-partial"
+                      ? {
+                          model_providers: {
+                            [providerName]: {
+                              auth: { refresh_interval_ms: 2000 },
+                            },
+                          },
+                        }
+                      : {}),
+                  },
+                },
+              }
+            : { model_provider: providerName }),
+        ...(nativeProfile
+          ? {}
+          : { model_providers: { [providerName]: providerConfig } }),
+      };
+      let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
+      let savedRecipe: JsonObject | undefined;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+        {
+          environment: {
+            CODEX_HOME: relative(process.cwd(), home),
+            CODEX_SECURITY_STATE_DIR: state,
+            ...(profile
+              ? {
+                  OPENAI_API_KEY: "synthetic-ambient-key",
+                  CODEX_API_KEY: "synthetic-other-key",
+                }
+              : {}),
+          },
+          runWorkbench: async (_runtime, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              savedRecipe = JSON.parse(input!).recipe as JsonObject;
+            }
+            return mockWorkbench(args, input);
+          },
+          resolvePluginPython: async () => "/managed/python",
+          ...(profile && !nativeProfile
+            ? {
+                prepareRuntime: async () => ({
+                  ...preparedRuntime(runtimeHome),
+                  configPath: join(root, "scan-preflight.toml"),
+                  credentialsAvailable: false,
+                }),
+              }
+            : {}),
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            captured = options;
+            return {
+              startThread: () => ({
+                id: null,
+                runStreamed: rejecting("synthetic command-auth scan started"),
+              }),
+            };
+          },
+        },
+      );
+      try {
+        const preflight = await client.preflight(repository);
+        expect(preflight.authentication).toEqual({
+          method: "command",
+          verified: false,
+        });
+        expect(JSON.stringify(preflight)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(preflight).toMatchObject({
+            model: "native-model",
+            reasoningEffort: "high",
+            modelProvider: providerName,
+          });
+        }
+        await expect(client.run(repository)).rejects.toThrow(
+          "synthetic command-auth scan started",
+        );
+        expect(savedRecipe).toBeDefined();
+        const savedConfig = savedRecipe!["config"] as JsonObject;
+        expect(JSON.stringify(savedConfig)).not.toContain("synthetic-auth");
+        if (nativeProfile) {
+          expect(savedConfig["profile"]).toBe("review");
+          const replay = resolveCodexProfile(
+            await mergedCodexConfig({ codexOverrides: savedConfig }, home),
+          );
+          expect(replay["model_providers"]).toEqual({
+            [providerName]: providerConfig,
+          });
+        }
+        if (profile) {
+          expect(captured?.config?.["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+          const snapshot = parseToml(
+            await readFile(
+              captured!.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+              "utf8",
+            ),
+          );
+          expect(snapshot["features"]).toMatchObject({
+            shell_tool: false,
+            unified_exec: false,
+          });
+        }
+        expect(captured?.apiKey).toBeUndefined();
+        expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+        expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+        expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
+        const provider = {
+          ...providerConfig,
+          auth: {
+            ...auth,
+            cwd: profile ? join(home, "helpers") : home,
+            ...(selection === "profile-partial"
+              ? { refresh_interval_ms: 2000 }
+              : {}),
+          },
+        };
+        expect(
+          parseToml(
+            await readFile(
+              join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          ),
+        ).toEqual({
+          model_providers: { [providerName]: provider },
+        });
+        expect(captured?.config).not.toHaveProperty("profile");
+        expect(captured?.config).not.toHaveProperty("profiles");
+        expect(captured?.config?.["model_provider"]).toBe(providerName);
+        if (nativeProfile) {
+          expect(captured?.config).toMatchObject({
+            model: "native-model",
+            model_reasoning_effort: "high",
+            model_reasoning_summary: "concise",
+            experimental_compact_prompt_file: join(home, "compact.md"),
+            model_catalog_json: join(home, "models.json"),
+            agents: {
+              reviewer: {
+                config_file: join(home, "agents/reviewer.toml"),
+                description: "Synthetic reviewer",
+              },
+            },
+          });
+        }
+        if (!profile || nativeProfile) {
+          const saved = parseToml(
+            await readFile(join(runtimeHome, "config.toml"), "utf8"),
+          );
+          expect(saved).not.toHaveProperty("profile");
+          expect(saved).not.toHaveProperty("profiles");
+          expect(saved["model_providers"]).toBeUndefined();
+        }
+        expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 });
