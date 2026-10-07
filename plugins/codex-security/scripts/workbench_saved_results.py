@@ -2474,8 +2474,7 @@ def merge_saved_results(
                 # recovery and warnings rather than silently changing its contract.
                 continue
             for item in items:
-                # A selected terminal checkpoint replaces ordinary coverage, while
-                # candidate evidence and pending tasks retain their own reconciliation.
+                # Candidate evidence and pending tasks reconcile independently of ordinary coverage.
                 if (
                     selected_coverage_superseded
                     and field != "deferred"
@@ -2582,7 +2581,7 @@ def merge_saved_results(
                         or (worker_id, identity) in resolved
                     )
                     and (
-                        field == "deferred"
+                        (field == "deferred" and not isinstance(item.get("candidateId"), str))
                         or (
                             item.get("disposition") == "needs_follow_up"
                             and coverage_candidate_key(item, worker_id) not in diff_resolved

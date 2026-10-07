@@ -386,9 +386,10 @@ def preserve_budget_candidates(
                 "not_applicable",
             ):
                 surface["disposition"] = disposition
+            had_candidate = "candidate" in surface
             previous = surface.get("candidate")
             surface["candidate"] = {**retained_candidate, **candidate}
-            if isinstance(previous, dict):
+            if had_candidate:
                 archive_candidate_payloads(surface, [{"candidate": previous}])
             archive_candidate_payloads(surface, deferred)
         if disposition != "needs_follow_up":

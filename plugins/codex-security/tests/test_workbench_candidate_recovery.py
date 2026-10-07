@@ -753,3 +753,78 @@ def test_resolved_parent_archive_uses_valid_finding_before_malformed_sibling(
         pending["coverage"]["deferred"][0]["candidate"]
         in retained["provenance"]["originalCandidates"]
     )
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "reported"])
+@pytest.mark.parametrize(
+    "payload", ["candidate", "finding", "originalCandidates", "previousFindings"]
+)
+@pytest.mark.parametrize("parent_outcome", [False, True])
+def test_newer_outcome_archives_owned_gap(
+    tmp_path: Path, generic_review_recovery, outcome: str, payload: str, parent_outcome: bool
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    evidence = {
+        "title": "Original parent evidence",
+        "evidence": "Keep the authored diagnostic text.",
+    }
+    row = pending["coverage"]["deferred"][0]
+    row.update(
+        {
+            "candidateId": "review",
+            "sourceWorkerId": "worker",
+            payload: [evidence]
+            if payload in {"originalCandidates", "previousFindings"}
+            else evidence,
+        }
+    )
+    write_saved_parent(tmp_path, pending, 100)
+    output = tmp_path / "worker"
+    output.mkdir()
+    closed["coverage"].pop("resolvedDeferred")
+    closed["coverage"]["surfaces"] = [
+        {
+            "candidateId": "review",
+            "label": "Final review",
+            "disposition": outcome,
+            "receiptRefs": [],
+        }
+    ]
+    if outcome == "reported":
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding.setdefault("extensions", {})["candidateId"] = "review"
+        closed["findings"] = [finding]
+    if parent_outcome:
+        row.pop("sourceWorkerId")
+        closed["coverage"]["surfaces"][0]["sourceWorkerId"] = "worker"
+        for finding in closed["findings"]:
+            finding["provenance"]["sourceWorkerId"] = "worker"
+        (output / "result.json").write_text(json.dumps(pending))
+        os.utime(output / "result.json", ns=(100, 100))
+        write_saved_parent(tmp_path, closed, 200)
+    else:
+        (output / "result.json").write_text(json.dumps(closed))
+        os.utime(output / "result.json", ns=(200, 200))
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+
+    def contains(value):
+        return (
+            value == evidence
+            or (isinstance(value, list) and any(contains(child) for child in value))
+            or (isinstance(value, dict) and any(contains(child) for child in value.values()))
+        )
+
+    for result in (first, replay):
+        assert result is not None
+        assert not any(item.get("candidateId") == "review" for item in result[2]["deferred"])
+        assert contains(result[1] if outcome == "reported" else result[2])
