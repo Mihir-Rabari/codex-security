@@ -969,8 +969,17 @@ with ExitStack() as stack:
     elif scenario == "completion-order":
         add_target("first", "repository-current")
         add_target("second", "repository-current")
+        from finalize_scan_contract import _validate_date_time
+        precise = sys.argv[3] == "precise"
+        completions = {
+            "legacy-a": "2026-07-31t04:00:00.0000000002z" if precise else "2026-07-31t04:00:00z",
+            "legacy-b": "2026-07-31T05:00:00.0000000001+01:00" if precise else "2026-07-31T05:00:00+01:00",
+        }
         add_scan("legacy-b", "second", started="2026-07-31T01:00:00Z", created="2026-07-31T05:00:00+01:00")
         add_scan("legacy-a", "first", started="2026-07-31T02:00:00Z", created="2026-07-31T04:00:00Z")
+        for scan_id, completed_at in completions.items():
+            _validate_date_time(completed_at, "scan.completedAt")
+            connection.execute("UPDATE scans SET completed_at = ? WHERE id = ?", (completed_at, scan_id))
         add_scan("legacy-missing", "first", started="2026-07-31T03:00:00Z")
         connection.execute("UPDATE scans SET completed_at = NULL WHERE id = 'legacy-missing'")
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
@@ -1026,7 +1035,7 @@ with ExitStack() as stack:
                 "id": "sequenced", "completion_sequence": 1
             }),
             "sealedTimes": {row["id"]: row["completed_at"] for row in connection.execute(
-                "SELECT id, completed_at FROM scans WHERE id IN ('visible-first', 'visible-last')"
+                "SELECT id, completed_at FROM scans WHERE id IN ('legacy-a', 'legacy-b', 'visible-first', 'visible-last')"
             )},
         }))
     elif scenario == "persisted-alias":
@@ -1533,12 +1542,15 @@ with ExitStack() as stack:
         }))
 `;
 
-function run(scenario: string): Record<string, unknown> {
+function run(
+  scenario: string,
+  ...scenarioArgs: string[]
+): Record<string, unknown> {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   // Keep the Python fixture off the Windows command line.
   const execution = spawnSync(
     python,
-    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts"), scenario],
+    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts"), scenario, ...scenarioArgs],
     { input: probe, encoding: "utf8", timeout: 10_000 },
   );
   expect(execution.status, execution.error?.message ?? execution.stderr).toBe(
@@ -1754,39 +1766,49 @@ test("reuses established aliases and probes each saved target once per request",
   expect(result["changedStored"]).toBe("repository-previous");
 });
 
-test("orders completed history by database visibility across legacy and current writers", () => {
-  const result = run("completion-order");
+test.each(["tied", "precise"])(
+  "orders completed history by database visibility across legacy and current writers (%s)",
+  (precision) => {
+    const result = run("completion-order", precision);
+    const precise = precision === "precise";
 
-  expect(result["legacy"]).toEqual({
-    "visible-first": null,
-    "visible-last": null,
-    "legacy-missing": 1,
-    "legacy-a": 2,
-    "legacy-b": 3,
-  });
-  expect(result["legacyGenerationsNull"]).toBe(true);
-  expect(result["firstPredecessors"]).not.toContain("visible-last");
-  expect(result["lastPredecessors"]).toContain("visible-first");
-  expect(result["reciprocalPredecessors"]).not.toContain("visible-last");
-  expect(result["confirmed"]).toEqual({
-    "first-finding": false,
-    "last-finding": true,
-  });
-  expect(result["sequences"]).toEqual({
-    "legacy-missing": 1,
-    "legacy-a": 2,
-    "legacy-b": 3,
-    "visible-first": 4,
-    "visible-last": 5,
-    "inserted-complete": 6,
-  });
-  expect(result["idempotent"]).toBe(true);
-  expect(result["sequenceOutranksFallback"]).toBe(true);
-  expect(result["sealedTimes"]).toEqual({
-    "visible-first": "2026-08-01T04:00:00Z",
-    "visible-last": "2026-08-01T03:00:00Z",
-  });
-});
+    expect(result["legacy"]).toEqual({
+      "visible-first": null,
+      "visible-last": null,
+      "legacy-missing": 1,
+      "legacy-a": precise ? 3 : 2,
+      "legacy-b": precise ? 2 : 3,
+    });
+    expect(result["legacyGenerationsNull"]).toBe(true);
+    expect(result["firstPredecessors"]).not.toContain("visible-last");
+    expect(result["lastPredecessors"]).toContain("visible-first");
+    expect(result["reciprocalPredecessors"]).not.toContain("visible-last");
+    expect(result["confirmed"]).toEqual({
+      "first-finding": false,
+      "last-finding": true,
+    });
+    expect(result["sequences"]).toEqual({
+      "legacy-missing": 1,
+      "legacy-a": precise ? 3 : 2,
+      "legacy-b": precise ? 2 : 3,
+      "visible-first": 4,
+      "visible-last": 5,
+      "inserted-complete": 6,
+    });
+    expect(result["idempotent"]).toBe(true);
+    expect(result["sequenceOutranksFallback"]).toBe(true);
+    expect(result["sealedTimes"]).toEqual({
+      "legacy-a": precise
+        ? "2026-07-31t04:00:00.0000000002z"
+        : "2026-07-31t04:00:00z",
+      "legacy-b": precise
+        ? "2026-07-31T05:00:00.0000000001+01:00"
+        : "2026-07-31T05:00:00+01:00",
+      "visible-first": "2026-08-01T04:00:00Z",
+      "visible-last": "2026-08-01T03:00:00Z",
+    });
+  },
+);
 
 test("confirms findings against the latest selected scan without merging legacy groups", () => {
   expect(run("selected-latest")).toEqual({

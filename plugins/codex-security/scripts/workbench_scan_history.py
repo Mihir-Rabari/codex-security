@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from fractions import Fraction
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -343,7 +344,7 @@ def list_scans(
     return result
 
 
-def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int, str]:
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int | Fraction, str]:
     sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
     if sequence is not None:
         return (1, sequence, scan["id"])

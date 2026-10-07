@@ -1681,11 +1681,41 @@ def test_history_repair_rebinds_unscanned_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "timestamp", ["2026-07-01T00:00:00Z", "2026-07-01T00:00:00+00:00", "2026-06-30T19:00:00-05:00"]
+    "timestamp",
+    [
+        "2026-07-01T00:00:00Z",
+        "2026-07-01T00:00:00z",
+        "2026-07-01t00:00:00z",
+        "2026-07-01T00:00:00+00:00",
+        "2026-06-30T19:00:00-05:00",
+    ],
 )
 def test_history_timestamp_preserves_utc_completion_order(workbench_api, timestamp):
     target_state = sys.modules["workbench_target_state"]
     assert target_state._timestamp_ns(timestamp) == 1782864000000000000
+
+
+@pytest.mark.parametrize("digits", [7, 10, 40, 5000])
+def test_history_timestamp_preserves_fractional_order_and_ownership(workbench_api, digits):
+    target_state = sys.modules["workbench_target_state"]
+    history = sys.modules["workbench_scan_history"]
+    finalizer = sys.modules["finalize_scan_contract"]
+    fraction = "0" * (digits - 1)
+    earlier = f"1970-01-01T00:00:00.{fraction}1z"
+    later = f"1970-01-01T01:00:00.{fraction}2+01:00"
+    for timestamp in (earlier, later):
+        finalizer._validate_date_time(timestamp, "scan.completedAt")
+    for field in ("completed_at", "started_at"):
+        scans = [{"id": "b", field: earlier}, {"id": "a", field: later}]
+        assert sorted(scans, key=history._scan_completion_order) == scans
+    timestamp = target_state._timestamp_ns(earlier)
+    assert timestamp is not None
+    birth = 100 if digits == 7 else 0
+    assert birth <= timestamp < birth + 1
+    scan = {"started_at": earlier, "created_at": earlier}
+    for birth_time, expected in ((birth, True), (birth + 1, False)):
+        identity = target_state.GitRepositoryIdentity("repository", ".", "common", 1, 2, birth_time)
+        assert target_state._repository_predates_history(identity, [scan]) is expected
 
 
 @pytest.mark.parametrize("timestamp", [None, "invalid", "2026-07-01T00:00:00"])

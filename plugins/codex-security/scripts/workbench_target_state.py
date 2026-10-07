@@ -7,12 +7,15 @@ import ctypes
 import hashlib
 import os
 import platform
+import re
 import sqlite3
 import stat
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -713,10 +716,12 @@ def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[s
     return identities
 
 
-def _timestamp_ns(value: str) -> int | None:
+def _timestamp_ns(value: str) -> int | Fraction | None:
     try:
         normalized = (
-            value[:-1] + "+00:00" if isinstance(value, str) and value.endswith("Z") else value
+            value[:-1] + "+00:00"
+            if isinstance(value, str) and value.endswith(("Z", "z"))
+            else value
         )
         timestamp = datetime.fromisoformat(normalized)
     except (TypeError, ValueError):
@@ -724,7 +729,12 @@ def _timestamp_ns(value: str) -> int | None:
     if timestamp.tzinfo is None:
         return None
     delta = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
-    return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+    nanoseconds = (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+    # datetime truncates RFC 3339 fractions after six digits; sealed timestamps retain them.
+    remainder = re.search(r"\.\d{6}(\d+)(?:[Zz]|[+-]\d{2}:\d{2})$", value)
+    if remainder is not None:
+        return nanoseconds + Fraction(Decimal("0." + remainder[1])) * 1000
+    return nanoseconds
 
 
 def _repository_predates_history(
