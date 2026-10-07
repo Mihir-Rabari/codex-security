@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { fixtureSpawn } from "./support/codex-process.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
+import { modelResponseText } from "./support/model-response-text.js";
 import { once } from "node:events";
 import {
   copyFile,
@@ -107,12 +108,7 @@ function fakeCodex(response: unknown) {
         async run(prompt, turnOptions) {
           calls.prompt = prompt;
           calls.turnOptions = turnOptions;
-          return {
-            finalResponse:
-              typeof response === "string"
-                ? response
-                : JSON.stringify(response),
-          };
+          return { finalResponse: modelResponseText(response) };
         },
       };
     },

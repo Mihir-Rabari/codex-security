@@ -15,10 +15,12 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    fail_scan,
     initialize_git_repository,
     mark_deep_aggregate_ready,
     private_directory,
     run_workbench,
+    scan_command,
     start_delivered_scan,
     write_completed_contract,
 )
@@ -124,7 +126,6 @@ def _token_event(
     output_tokens: int,
     *,
     cached_input_tokens: int = 0,
-    reasoning_output_tokens: int = 0,
 ) -> dict[str, Any]:
     return _event(
         timestamp,
@@ -137,7 +138,7 @@ def _token_event(
                     "cached_input_tokens": cached_input_tokens,
                     "cache_write_input_tokens": 0,
                     "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning_output_tokens,
+                    "reasoning_output_tokens": 0,
                     "total_tokens": input_tokens + output_tokens,
                 }
             },
@@ -217,7 +218,6 @@ def _counts(
     input_tokens: int,
     cached_input_tokens: int,
     output_tokens: int,
-    reasoning_output_tokens: int = 0,
     *,
     cache_write_input_tokens: int = 0,
 ) -> dict[str, int]:
@@ -226,7 +226,7 @@ def _counts(
         "cachedInputTokens": cached_input_tokens,
         "cacheWriteInputTokens": cache_write_input_tokens,
         "outputTokens": output_tokens,
-        "reasoningOutputTokens": reasoning_output_tokens,
+        "reasoningOutputTokens": 0,
         "totalTokens": input_tokens + output_tokens,
     }
 
@@ -732,7 +732,6 @@ def test_native_completion_retains_measured_usage_with_sdk_cost(
     repeated = run_workbench(
         fixture.state_dir,
         "complete-scan",
-        "--scan-id",
         fixture.scan_id,
         environment=fixture.environment,
     )["scan"]
@@ -903,10 +902,9 @@ def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path
         [],
     )
     assert _complete_scan(fixture)["scan"]["usage"]["totalTokens"] == 16
-    extra_command = run_workbench(
+    extra_command = scan_command(
         fixture.state_dir,
         "get-scan-usage",
-        "--scan-id",
         fixture.scan_id,
         check=False,
         environment=fixture.environment,
@@ -923,14 +921,8 @@ def test_failed_scan_preserves_legacy_failure_behavior(tmp_path: Path) -> None:
         {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])},
         [],
     )
-    failed = run_workbench(
-        fixture.state_dir,
-        "fail-scan",
-        "--scan-id",
-        fixture.scan_id,
-        "--message",
-        "Fixture failure.",
-        environment=fixture.environment,
+    failed = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
     )["scan"]
     assert failed["progress"]["status"] == "failed"
     assert "usage" not in failed

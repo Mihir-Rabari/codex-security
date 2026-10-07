@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    replay_saved_results,
     saved_binding,
     saved_draft,
     write_checkpoint,
