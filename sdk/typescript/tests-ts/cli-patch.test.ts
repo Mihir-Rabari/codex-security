@@ -7967,7 +7967,7 @@ describe("patch change tracking", () => {
   );
 
   test.each([false, true])(
-    "publishes destination-only component renames with relative diff=%s",
+    "publishes destination-only component renames with relative diff=%j",
     async (relativeDiff) => {
       const { directory: root, git } = await publicationRepository();
       const directory = join(root, "package");
