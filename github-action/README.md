@@ -13,6 +13,8 @@ with access to the selected model. For Amazon Bedrock, see the separate
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
 Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
+The matching `action-vX.Y.Z` tag and distribution commit are listed in each
+product release after the CLI and Action have both passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
 ```yaml
@@ -265,9 +267,24 @@ Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
 SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
 audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the CLI version source. To upgrade, update that exact
-pin and regenerate `runtime/package-lock.json`, rebuild the bundles, and run
-validation. Verify report compatibility when adopting a new release.
+`runtime/package.json` is the installed CLI version source. Main keeps the last
+published CLI pin so its checks remain runnable while a release PR prepares the
+next product version. To upgrade that development pin, update it and regenerate
+`runtime/package-lock.json`, rebuild the bundles, and run validation.
+
+Releases use the product version from `sdk/typescript/package.json`. Before npm
+publication, the release workflow exercises the Action's compatibility suite
+against the packed CLI candidate. After publication and provenance verification,
+the Action release workflow starts from that exact CLI source commit, updates
+the runtime pin and integrity lock, rebuilds the bundles, and runs the Action
+checks against the published package. It creates a distribution commit and an
+immutable `action-vX.Y.Z` tag with the same version as `npm-vX.Y.Z`.
+
+The Action distribution commit differs from the CLI source commit because the
+registry integrity lock is finalized after publication. Release metadata records
+both commits, both tags, and the verified CLI integrity. A failed Action stage
+can be rerun without republishing npm. Existing version tags are never moved.
+See [the release process](../RELEASING.md) for the orchestration and recovery flow.
 
 <!-- prettier-ignore-start -->
 
