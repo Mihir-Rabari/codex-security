@@ -191,6 +191,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   executablePathForSpawn,
+  environmentWithGit,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
@@ -242,11 +243,15 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  gitMarkerRoot,
   normalizeRepository,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -1222,6 +1227,7 @@ interface CliDependencies {
     input?: string,
     signal?: AbortSignal,
     pythonPath?: string,
+    protectedRoot?: string,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1307,17 +1313,29 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath) => {
-    const environment = {
+  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
+    let environment: NodeJS.ProcessEnv = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
+    if (protectedRoot !== undefined) {
+      protectedRoot =
+        (await gitMarkerRoot(protectedRoot, signal, "outermost")) ??
+        protectedRoot;
+      const git = await inspectTrustedExecutable(
+        "git",
+        environment,
+        protectedRoot,
+      );
+      environment = environmentWithGit(git.environment, git);
+    }
     return await runWorkbench(
       {
         python: await resolvePluginPython({
           configuredPath: pythonPath,
           environment,
           signal,
+          protectedRoot,
         }),
         pluginRoot: await bundledPluginRoot(),
         environment,
@@ -8660,7 +8678,37 @@ async function executeScan(
             reason: "The scan target changed during execution.",
           };
         } else if (findings.length === 0) {
-          validation = { status: "complete", findings: 0 };
+          try {
+            const context = await dependencies.runWorkbench(
+              [
+                "get-scan",
+                "--scan-id",
+                result.manifest.scan.id,
+                "--check-target",
+              ],
+              undefined,
+              preparationAbortController.signal,
+              config.pythonPath,
+              repository,
+            );
+            const scan = context["scan"];
+            if (
+              !isJsonObject(scan) ||
+              scan["targetPath"] !== (await realpath(repository))
+            ) {
+              throw new CodexSecurityError(
+                "The recorded scan target does not match the validation repository.",
+              );
+            }
+            validation = { status: "complete", findings: 0 };
+          } catch (error) {
+            validationExitCode = 2;
+            const message = errorMessage(error);
+            validation = { status: "failed", findings: 0, message };
+            errorOutput.write(
+              `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
+            );
+          }
         } else {
           stopPresentation();
           try {

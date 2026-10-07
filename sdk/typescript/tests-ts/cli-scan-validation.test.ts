@@ -1,7 +1,14 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
+import {
+  codexFactory,
+  completedEvents,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { TestClient } from "./support/api-client.js";
@@ -73,3 +80,197 @@ describe("CLI scan validation preflight", () => {
     },
   );
 });
+
+for (const changed of ["unchanged", "content", "head"] as const)
+  test(`cached empty scan validation checks current target: ${changed}`, async () => {
+    const root = await temporaryDirectory("empty-cached-scan-", true);
+    const repository = join(root, "repository"),
+      scanDir = join(root, "scan"),
+      home = join(root, "codex");
+    await mkdir(repository);
+    await mkdir(home);
+    await mkdir(scanDir, { mode: 0o700 });
+    git(repository, "init", "-q", "-b", "main");
+    await writeFile(join(repository, "source.ts"), "export const value = 1;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "initial");
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-cached-scan-key",
+    };
+    const python = await resolvePluginPython({
+      environment,
+      protectedRoot: repository,
+    });
+    let scanId = "",
+      modelCalls = 0;
+    let registration:
+      | {
+          contract: { target: { allowedKinds: string[] } };
+          targetId: string;
+          targetRevision?: string;
+        }
+      | undefined;
+    let selectedWorkbench: Parameters<typeof runWorkbench>[0] | undefined;
+    const workbench = async (
+      options: Parameters<typeof runWorkbench>[0],
+      args: readonly string[],
+      input?: string,
+    ) => {
+      const answer = await runWorkbench(
+        {
+          ...options,
+          python,
+          environment: { ...options.environment, ...environment },
+        },
+        args,
+        input,
+      );
+      if (args[0] === "register-cli-scan") {
+        scanId = String(answer["scanId"]);
+        registration = answer as unknown as NonNullable<typeof registration>;
+        selectedWorkbench = {
+          ...options,
+          python,
+          environment: { ...options.environment, ...environment },
+        };
+      }
+      return answer;
+    };
+    const createSecurity = (
+      config: ConstructorParameters<typeof TestClient>[0],
+    ) =>
+      new TestClient(
+        { ...config, pythonPath: python, pluginPath: PLUGIN_ROOT },
+        {
+          environment,
+          prepareRuntime: async () => {
+            const r = preparedRuntime(home);
+            r.environment = environment;
+            r.plugin.version = JSON.parse(
+              await readFile(
+                join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+                "utf8",
+              ),
+            ).version;
+            return r;
+          },
+          prepareOutputDir: async () => scanDir,
+          resolvePluginPython: async () => python,
+          runWorkbench: workbench,
+          createCodex: codexFactory(async () => {
+            modelCalls++;
+            await copyCompletedScan(root);
+            const manifest = JSON.parse(
+              await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+            );
+            manifest.scan.id = scanId;
+            manifest.scan.target.kind =
+              registration!.contract.target.allowedKinds[0];
+            manifest.scan.target.targetId = registration!.targetId;
+            manifest.scan.target.revision = registration!.targetRevision;
+            manifest.scan.target.displayName = "repository";
+            delete manifest.scan.target.snapshotDigest;
+            delete manifest.scan.sealedAt;
+            delete manifest.scan.artifacts;
+            await writeFile(
+              join(scanDir, "scan-manifest.json"),
+              JSON.stringify(manifest),
+            );
+            const findings = JSON.parse(
+              await readFile(join(scanDir, "findings.json"), "utf8"),
+            );
+            findings.scanId = scanId;
+            findings.findings = [];
+            await writeFile(
+              join(scanDir, "findings.json"),
+              JSON.stringify(findings),
+            );
+            const coverage = JSON.parse(
+              await readFile(join(scanDir, "coverage.json"), "utf8"),
+            );
+            coverage.scanId = scanId;
+            coverage.surfaces = [];
+            await writeFile(
+              join(scanDir, "coverage.json"),
+              JSON.stringify(coverage),
+            );
+            return { events: completedEvents() };
+          }, "empty-cached-conversation"),
+        },
+      );
+    const cliDependencies = {
+      ...dependencies({ currentDirectory: root, environment }),
+      createSecurity,
+      runWorkbench: async (
+        args: readonly string[],
+        input?: string,
+        signal?: AbortSignal,
+        configuredPython?: string,
+        protectedRoot?: string,
+      ) => {
+        expect(configuredPython).toBe(python);
+        expect(protectedRoot).toBe(repository);
+        expect(selectedWorkbench).toBeDefined();
+        return runWorkbench({ ...selectedWorkbench!, signal }, args, input);
+      },
+    };
+    try {
+      const first = createCliTest(main);
+      const args = [
+        "scan",
+        repository,
+        "--python",
+        python,
+        "--plugin-path",
+        PLUGIN_ROOT,
+        "--workflow-id",
+        "empty-cached-workflow",
+        "--json",
+      ];
+      const initial = await first.runCli(args, cliDependencies);
+      expect(initial, first.stderr.text()).toBe(0);
+      expect(JSON.parse(first.stdout.text()).findings.findings).toEqual([]);
+      expect(modelCalls).toBe(1);
+      if (changed !== "unchanged")
+        await writeFile(
+          join(repository, "source.ts"),
+          "export const value = 2;\n",
+        );
+      if (changed === "head") git(repository, "commit", "-qam", "changed");
+      const recorded = await runWorkbench(selectedWorkbench!, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+        "--check-target",
+      ]).then(
+        () => "unchanged",
+        (e) => (e as Error).message,
+      );
+      expect(recorded === "unchanged").toBe(changed === "unchanged");
+      const second = createCliTest(main);
+      const result = await second.runCli(
+        [...args, "--validate"],
+        cliDependencies,
+      );
+
+      expect(modelCalls).toBe(1);
+      expect(result, second.stderr.text()).toBe(
+        changed === "unchanged" ? 0 : 2,
+      );
+      const reused = JSON.parse(second.stdout.text());
+      expect(reused.manifest.scan.id).toBe(scanId);
+      if (changed === "unchanged")
+        expect(reused.validation).toEqual({ status: "complete", findings: 0 });
+      else
+        expect(reused.validation).toMatchObject({
+          status: "failed",
+          findings: 0,
+          message: expect.stringContaining("changed"),
+        });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });

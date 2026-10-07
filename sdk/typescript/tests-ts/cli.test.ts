@@ -330,6 +330,7 @@ describe("CLI", () => {
   );
 
   test("skips standalone model calls when the scan has no findings", async () => {
+    const repository = await realpath(tmpdir());
     let validations = 0;
     const stdout = capture();
     expect(
@@ -338,7 +339,16 @@ describe("CLI", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          currentDirectory: await realpath(tmpdir()),
+          currentDirectory: repository,
+          onWorkbench: async (args) => {
+            expect(args).toEqual([
+              "get-scan",
+              "--scan-id",
+              "scan",
+              "--check-target",
+            ]);
+            return { scan: { targetPath: repository } };
+          },
           onValidate: async () => {
             validations += 1;
             throw new Error("No findings to validate");
