@@ -4727,11 +4727,17 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
         result["multi_agent_v2"] = sanitized;
       }
     }
+    const codeMode = value["code_mode"];
+    if (typeof codeMode === "boolean" || isRecord(codeMode)) {
+      result["code_mode"] = structuredClone(codeMode) as JsonObject[string];
+    }
     return result;
   };
   const copyWorkerSettings = (result: JsonObject, source: JsonObject): void => {
     for (const key of [
       "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
       "model_verbosity",
       "web_search",
     ]) {
@@ -4781,6 +4787,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
+    "code_mode",
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
     "shell_tool",

@@ -71,6 +71,30 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test("preserves resolved file-profile model files and tool exclusions", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model_catalog_json = "catalog.json"\nexperimental_compact_prompt_file = "compact.md"\n[features.code_mode]\nenabled = true\nexcluded_tool_namespaces = ["synthetic_tools"]\n',
+    );
+    const config = await mergedCodexConfig(
+      { codexOverrides: { profile: "review" } },
+      home,
+    );
+    const requested = {
+      model_catalog_json: join(home, "catalog.json"),
+      experimental_compact_prompt_file: join(home, "compact.md"),
+      features: {
+        code_mode: {
+          enabled: true,
+          excluded_tool_namespaces: ["synthetic_tools"],
+        },
+      },
+    };
+    expect(config).toMatchObject(requested);
+    expect(scanPreflightCodexConfig(config)).toMatchObject(requested);
+  });
+
   test.each([undefined, "low"])(
     "preserves resolved file-profile worker settings and explicit verbosity: %s",
     async (verbosity) => {

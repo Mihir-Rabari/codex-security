@@ -15,7 +15,11 @@ import {
   resolve,
   win32,
 } from "node:path";
-import { Codex, type CyberAccessProgram } from "@openai/codex-sdk";
+import {
+  Codex,
+  type CodexOptions,
+  type CyberAccessProgram,
+} from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -57,6 +61,7 @@ interface CodexSdkWorkerRuntimeSettings {
   serviceTier?: string;
   cyberAccessProgram?: CyberAccessProgram;
   features?: {
+    code_mode?: NonNullable<CodexOptions["config"]>[string];
     api_key_cyber_access_programs?: boolean;
     api_key_model_discovery?: boolean;
     shell_tool?: boolean;
@@ -502,16 +507,31 @@ async function workerRuntimeSettings(
     ...(typeof summary === "string" ? { reasoningSummary: summary } : {}),
     ...(typeof serviceTier === "string" ? { serviceTier } : {}),
   };
-  for (const key of [
+  const parentScanDirectory = environmentVariable(
+    environment,
+    "CODEX_SECURITY_SCAN_DIR",
+    process.platform,
+  );
+  const fileSettings = [
     "model_instructions_file",
-    "model_verbosity",
-    "web_search",
-  ]) {
+    "model_catalog_json",
+    "experimental_compact_prompt_file",
+  ];
+  for (const key of [...fileSettings, "model_verbosity", "web_search"]) {
     const value =
       isRecord(profile) && profile[key] !== undefined
         ? profile[key]
         : config[key];
-    if (typeof value === "string") (settings.configuration ??= {})[key] = value;
+    if (typeof value === "string") {
+      (settings.configuration ??= {})[key] =
+        fileSettings.includes(key) &&
+        parentScanDirectory &&
+        value.length > 0 &&
+        !isAbsolute(value) &&
+        !value.startsWith("~")
+          ? resolve(parentScanDirectory, value)
+          : value;
+    }
   }
   const security = config.codex_security;
   if (isRecord(security) && typeof security.cyber_access_program === "string") {
@@ -520,6 +540,17 @@ async function workerRuntimeSettings(
   }
   const features = config.features;
   const profileFeatures = isRecord(profile) ? profile.features : undefined;
+  const codeMode =
+    isRecord(profileFeatures) && profileFeatures.code_mode !== undefined
+      ? profileFeatures.code_mode
+      : isRecord(features)
+        ? features.code_mode
+        : undefined;
+  if (typeof codeMode === "boolean" || isRecord(codeMode)) {
+    (settings.features ??= {}).code_mode = structuredClone(
+      codeMode,
+    ) as NonNullable<CodexOptions["config"]>[string];
+  }
   if (isRecord(features) || isRecord(profileFeatures)) {
     for (const name of [
       "api_key_cyber_access_programs",

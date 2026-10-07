@@ -1696,6 +1696,14 @@ describe("CodexSecurity orchestration", () => {
           model_reasoning_summary: "auto",
           service_tier: "flex",
           model_instructions_file: join(root, "instructions-1.md"),
+          model_catalog_json: join(root, "catalog-1.json"),
+          experimental_compact_prompt_file: join(root, "compact-1.md"),
+          features: {
+            code_mode: {
+              enabled: true,
+              excluded_tool_namespaces: ["synthetic_first"],
+            },
+          },
           model_verbosity: "high",
           web_search: "disabled",
         },
@@ -1710,6 +1718,14 @@ describe("CodexSecurity orchestration", () => {
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: join(root, "instructions-2.md"),
+              model_catalog_json: join(root, "catalog-2.json"),
+              experimental_compact_prompt_file: join(root, "compact-2.md"),
+              features: {
+                code_mode: {
+                  enabled: false,
+                  excluded_tool_namespaces: ["synthetic_second"],
+                },
+              },
               model_verbosity: "low",
               web_search: "cached",
             },
@@ -1806,6 +1822,8 @@ describe("CodexSecurity orchestration", () => {
                   const requested = resolveCodexProfile(overrides);
                   for (const key of [
                     "model_instructions_file",
+                    "model_catalog_json",
+                    "experimental_compact_prompt_file",
                     "model_verbosity",
                     "web_search",
                   ]) {
@@ -1813,6 +1831,20 @@ describe("CodexSecurity orchestration", () => {
                       requested[key],
                     );
                   }
+                  expect(
+                    (
+                      resolveCodexProfile(config)["features"] as
+                        JsonObject | undefined
+                    )?.["code_mode"],
+                  ).toEqual(
+                    (requested["features"] as JsonObject | undefined)?.[
+                      "code_mode"
+                    ],
+                  );
+                  if (index === 1 || index === 2)
+                    expect(mcpEnvironment["CODEX_SECURITY_SCAN_DIR"]).toBe(
+                      scanDir,
+                    );
                   expect(mcpEnvironment["AWS_BEARER_TOKEN_BEDROCK"]).toBe(
                     "synthetic-bedrock-key",
                   );

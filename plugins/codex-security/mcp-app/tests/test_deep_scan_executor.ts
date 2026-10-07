@@ -1134,6 +1134,18 @@ async function testWorkerRuntimeSettings() {
       "concise",
       true,
     ],
+    [
+      'model_reasoning_summary = "concise"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      "concise",
+    ],
+    [
+      'model_reasoning_summary = "concise"\n[features.code_mode]\nenabled = true\nexcluded_tool_namespaces = ["synthetic_tools"]\n',
+      "concise",
+    ],
+    [
+      'model_reasoning_summary = "concise"\nmodel_instructions_file = "relative-instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      "concise",
+    ],
   ];
   const saved = [
     "PYTHON",
@@ -1144,6 +1156,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_CLI_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
@@ -1256,9 +1269,24 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
         {},
       ];
       const instructions = configuration.includes("model_instructions_file");
+      const relative = configuration.includes("relative-instructions.md");
+      const modelFiles = configuration.includes("model_catalog_json");
+      const codeMode = configuration.includes("[features.code_mode]");
+      const scanRoot = path.join(fixture.root, "parent-scan");
+      const workerDirectory = path.join(scanRoot, "artifacts");
+      await mkdir(workerDirectory, { recursive: true });
+      process.env.CODEX_SECURITY_SCAN_DIR = scanRoot;
+      await Promise.all(
+        settings.map(async (_, index) => {
+          await writeFile(
+            path.join(fixture.root, `instructions-${index}.md`),
+            `synthetic instructions ${index}`,
+          );
+        }),
+      );
       const scanConfigPaths = await Promise.all(
         settings.map(async (_, index) => {
-          if (!instructions) return configPath;
+          if (!instructions && !codeMode) return configPath;
           const selected = path.join(fixture.root, `scan-${index}.toml`);
           await writeFile(
             selected,
@@ -1269,6 +1297,25 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                   path.join(fixture.root, `instructions-${index}.md`),
                 ),
               )
+              .replace(
+                '"relative-instructions.md"',
+                JSON.stringify(`../instructions-${index}.md`),
+              )
+              .replace(
+                '"profile-catalog.json"',
+                JSON.stringify(
+                  path.join(fixture.root, `catalog-${index}.json`),
+                ),
+              )
+              .replace(
+                '"profile-compact.md"',
+                JSON.stringify(path.join(fixture.root, `compact-${index}.md`)),
+              )
+              .replace(
+                '["synthetic_tools"]',
+                JSON.stringify([`synthetic_tools_${index}`]),
+              )
+              .replace("enabled = true", `enabled = ${index % 2 === 0}`)
               .replace(
                 'model_verbosity = "high"',
                 `model_verbosity = ${JSON.stringify(index % 2 === 0 ? "high" : "low")}`,
@@ -1313,7 +1360,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               return executor.run({
                 kind,
                 promptPath,
-                workingDirectory: fixture.root,
+                workingDirectory: workerDirectory,
                 subagents: 0,
                 resumeThreadId,
                 artifactContext: {
@@ -1374,6 +1421,20 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
+            assertFlagPair(invocation.argv, "--cd", workerDirectory);
+            if (relative) {
+              const argument = (invocation.argv as string[]).find((value) =>
+                value.startsWith("model_instructions_file="),
+              );
+              assert.ok(argument);
+              const selected = JSON.parse(
+                argument.slice("model_instructions_file=".length),
+              );
+              assert.equal(
+                await readFile(path.resolve(workerDirectory, selected), "utf8"),
+                `synthetic instructions ${index}`,
+              );
+            }
             if (commandAuth) {
               assert.equal(
                 invocation.codexConfig,
@@ -1387,6 +1448,12 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
             );
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
+              model_catalog_json: modelFiles
+                ? path.join(fixture.root, `catalog-${index}.json`)
+                : undefined,
+              experimental_compact_prompt_file: modelFiles
+                ? path.join(fixture.root, `compact-${index}.md`)
+                : undefined,
               model_instructions_file: instructions
                 ? path.join(fixture.root, `instructions-${index}.md`)
                 : undefined,
@@ -1445,7 +1512,16 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
             );
             assertReadOnlyWorkerPolicy(invocation.argv);
-            assertWorkerSubagentPolicy(invocation.argv, 0);
+            assertWorkerSubagentPolicy(
+              invocation.argv,
+              0,
+              codeMode
+                ? {
+                    enabled: index % 2 === 0,
+                    excluded_tool_namespaces: [`synthetic_tools_${index}`],
+                  }
+                : undefined,
+            );
           }
           for (const launch of launches.filter(({ args }) =>
             args.includes("app-server"),
@@ -2465,17 +2541,19 @@ function workerPermissionProfileOverride(args: readonly string[]) {
 function assertWorkerSubagentPolicy(
   args: readonly string[],
   subagents: number,
+  codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
 ) {
   assertConfigOverrides(args, {
     "features.multi_agent_v2.enabled": false,
     "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
     "features.multi_agent": undefined,
-    "features.code_mode.excluded_tool_namespaces": undefined,
+    "features.code_mode.excluded_tool_namespaces":
+      codeMode?.excluded_tool_namespaces,
     ...(subagents === 0
       ? {
           "agents.max_threads": undefined,
           "features.enable_fanout": false,
-          "features.code_mode.enabled": undefined,
+          "features.code_mode.enabled": codeMode?.enabled,
         }
       : {
           "agents.max_threads": subagents,
@@ -2492,7 +2570,7 @@ function restoreEnv(name: string, value: string | undefined) {
 
 function assertConfigOverrides(
   args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
+  values: Record<string, string | string[] | number | boolean | undefined>,
 ) {
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined) {
