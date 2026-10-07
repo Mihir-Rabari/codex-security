@@ -906,6 +906,104 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
     assert all(path.read_bytes() == original for path, original in originals.items())
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("outcome", ["pending", "active", "accepted", "rejected"])
+@pytest.mark.parametrize("marked_checkpoint", [False, True])
+def test_stopped_diff_preserves_canonical_reopened_candidate_state(
+    tmp_path: Path, outcome: str, marked_checkpoint: bool
+) -> None:
+    state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
+    candidate_id = checkpoint["coverage"]["deferred"][0]["candidateId"]
+    finding = saved_candidate_finding(tmp_path, scan_id, candidate_id)
+    finding["provenance"]["candidateReopened"] = outcome != "active"
+    if marked_checkpoint:
+        finding["provenance"]["diffCandidateDecision"] = {"validation": {"disposition": "deferred"}}
+        checkpoint["findings"] = [finding]
+        write_checkpoint(scan_dir / "checkpoints", checkpoint)
+    ledger.unlink()
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage.update(surfaces=[], deferred=[coverage["deferred"][0]])
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+
+    def write_draft(findings: list[dict]) -> None:
+        staged.write_text(
+            json.dumps(
+                {
+                    "manifest": {"scan": {"complete": False}},
+                    "findings": {"findings": findings},
+                    "coverage": coverage,
+                }
+            )
+        )
+        run_workbench(
+            state_dir, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged)
+        )
+
+    write_draft([finding])
+    if outcome == "accepted":
+        finding = copy.deepcopy(finding)
+        finding["provenance"].pop("candidateReopened")
+        write_draft([finding])
+    elif outcome == "rejected":
+        coverage.update(
+            deferred=[],
+            surfaces=[
+                {
+                    "id": "current-decision",
+                    "candidateId": candidate_id,
+                    "label": "Current review decision",
+                    "disposition": "rejected",
+                    "notes": "Later review dismissed the candidate.",
+                    "receiptRefs": [],
+                }
+            ],
+        )
+        write_draft([])
+    originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
+
+    def assert_saved_state() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["candidates"]["unresolved"] == int(outcome == "pending")
+        saved_coverage = json.loads((scan_dir / "coverage.json").read_text())
+        saved_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+        if outcome == "pending":
+            pending = next(
+                row for row in saved_coverage["deferred"] if row.get("candidateId") == candidate_id
+            )
+            assert pending["candidate"] == checkpoint["coverage"]["deferred"][0]["candidate"]
+            assert pending["finding"]["title"] == finding["title"]
+            assert pending["finding"]["provenance"]["candidateReopened"] is True
+        elif outcome == "rejected":
+            terminal = next(
+                row for row in saved_coverage["surfaces"] if row.get("candidateId") == candidate_id
+            )
+            assert terminal["disposition"] == "rejected"
+            assert any(
+                previous["title"] == finding["title"] for previous in terminal["previousFindings"]
+            )
+        else:
+            assert len(saved_findings) == 1
+            assert saved_findings[0]["title"] == finding["title"]
+            assert saved_findings[0]["provenance"].get("candidateReopened") is not True
+        assert all(path.read_bytes() == original for path, original in originals.items())
+
+    assert_saved_state()
+    # Changes after the stop must not replace the frozen candidate decision.
+    ledger.write_text(
+        json.dumps(
+            {
+                "candidate_id": candidate_id,
+                "summary": "Later review",
+                "validation": {"disposition": "suppressed"},
+            }
+        )
+        + "\n"
+    )
+    run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
+    assert_saved_state()
+
+
 @pytest.mark.parametrize("ledger_state", ["missing", "malformed", "matching"])
 @pytest.mark.parametrize(
     "evidence_location",

@@ -810,7 +810,9 @@ def _stopped_diff_candidate_decisions(
     findings = [
         finding
         for finding in current_findings
-        if (key := finding_candidate_key(finding)) is not None and key[0] is None
+        if (key := finding_candidate_key(finding)) is not None
+        and key[0] is None
+        and finding["provenance"].get("candidateReopened") is not True
     ]
     authored = []
     generated = {}
@@ -845,6 +847,7 @@ def _stopped_diff_candidate_decisions(
         for finding in checkpoint_findings
         if (key := finding_candidate_key(finding)) is not None
         and key[0] is None
+        and finding["provenance"].get("candidateReopened") is not True
         and key[1] not in finding_ids | authored_ids
         and isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
         and not was_demoted(finding)
@@ -909,6 +912,7 @@ def _stopped_diff_candidate_decisions(
                 for finding in checkpoint_findings:
                     if (
                         finding_candidate_key(finding) == (None, candidate_id)
+                        and finding["provenance"].get("candidateReopened") is not True
                         and finding.get("provenance", {}).get("diffCandidateDecision")
                         == phase_snapshot
                         and finding not in findings
