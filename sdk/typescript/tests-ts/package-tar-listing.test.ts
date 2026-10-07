@@ -43,6 +43,7 @@ function packageTar({
   type = 0x30,
   compatibleLayout = false,
   rootDirectoryMode = 0o755,
+  directoryMode = 0o755,
   readmeMode = 0o644,
   mtime = 0,
   readmeSparse,
@@ -52,6 +53,7 @@ function packageTar({
   type?: number;
   compatibleLayout?: boolean;
   rootDirectoryMode?: number;
+  directoryMode?: number;
   readmeMode?: number;
   mtime?: number;
   readmeSparse?: "0.0" | "1.0";
@@ -143,7 +145,7 @@ function packageTar({
         tarRecord(Buffer.alloc(0), {
           name,
           type: 0x35,
-          mode: name === "package/" ? rootDirectoryMode : 0o755,
+          mode: name === "package/" ? rootDirectoryMode : directoryMode,
         }),
       ),
       ...records.flatMap((record) => [Buffer.alloc(512), record]),
@@ -258,6 +260,43 @@ describe("npm package tar listings", () => {
     },
   );
 
+  test("escapes terminal controls in unexpected archive path diagnostics", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-package-terminal-path-"));
+    try {
+      const archivePath = join(root, "unexpected-path.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(
+          Buffer.concat([
+            packageTar(),
+            tarRecord(Buffer.from("fixture"), {
+              name: "package/unexpected\u001b]52;c;synthetic\u0007\u009b",
+            }),
+          ]),
+        ),
+      );
+      const contractPath = join(root, "plugin contract.json");
+      writeFileSync(contractPath, JSON.stringify(pluginContract));
+      const result = spawnSync(
+        commandPath("node"),
+        [
+          fileURLToPath(
+            new URL("../scripts/check-package.mjs", import.meta.url),
+          ),
+          archivePath,
+          contractPath,
+        ],
+        { cwd: root, encoding: "utf8", timeout: 30_000, windowsHide: true },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("unexpected file: package/unexpected");
+      expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
+      expect(result.stderr).toContain("synthetic");
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   test("accepts equivalent bounded gzip representations", () => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
     try {
@@ -276,6 +315,12 @@ describe("npm package tar listings", () => {
           ),
         ],
         ["unreadable-readme", gzipSync(packageTar({ readmeMode: 0 }))],
+        [
+          "read-only-nested-directories",
+          gzipSync(
+            packageTar({ compatibleLayout: true, directoryMode: 0o555 }),
+          ),
+        ],
         ["posix-size-field", gzipSync(packageTar({ sizeTerminator: "\0" }))],
         [
           "compatible-tar-layout",

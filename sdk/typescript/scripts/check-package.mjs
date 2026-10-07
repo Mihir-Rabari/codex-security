@@ -141,7 +141,14 @@ function validatePackagePaths(entries) {
       unsafePath.test(file) ||
       file.includes("\\")
     ) {
-      throw new Error(`npm tarball contains an unexpected file: ${file}.`);
+      const displayPath = file.replace(
+        /[\u0000-\u001f\u007f-\u009f]/gu,
+        (character) =>
+          `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      );
+      throw new Error(
+        `npm tarball contains an unexpected file: ${displayPath}.`,
+      );
     }
   }
 }
@@ -228,6 +235,7 @@ function extractedArchiveFiles() {
         "-",
         "-C",
         extractionRoot,
+        ...logicalSizes.keys(),
       ]);
     } finally {
       privateExtractionDirectories(extractionRoot);
